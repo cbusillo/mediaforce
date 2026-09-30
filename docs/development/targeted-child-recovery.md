@@ -159,6 +159,15 @@ could leave a complete but unrecorded output (observed on 2026-09-19 and
 2026-09-20). A plain command-line encode is not watched. This can leave an output requiring operator review;
 existing output and failure checks still apply.
 
+When a running job's lease has expired, the controller ends its worker only
+after 10 minutes with no sign of life: no progress write, no heartbeat, and no
+recent start. Each size measured during the quality search writes progress, so
+a long search does not look silent. A worker ended this way retries as a stale
+lease, like a reclaimed job, instead of stopping for the owner. A worker whose
+job another attempt now owns, or that a reclaim has already scheduled to
+retry, leaves that state alone. A real outcome it reached, such as a quality
+conflict, is still recorded.
+
 Heartbeat database/path exceptions are logged and retried at the normal
 heartbeat interval; status and worker-ownership checks remain mandatory. This
 does not establish remote termination or make an expired lease safe to reclaim

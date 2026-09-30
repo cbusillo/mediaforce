@@ -419,6 +419,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             job = load_encode_job(connection, "job-live")
             assert job is not None
             job["started_at"] = (datetime.now(tz=UTC) - timedelta(hours=2)).isoformat(timespec="seconds")
+            job["heartbeat_at"] = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat(timespec="seconds")
             save_encode_job(connection, job)
             connection.commit()
 
@@ -430,6 +431,26 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(job["status"], "retry_backoff")
         self.assertEqual(job["last_failure_kind"], "stale_lease")
         controller.cancel.assert_called_once()
+        self.assertIsInstance(controller.cancel.call_args.args[0], encode_runtime.ReclaimCancelledError)
+
+    def test_stale_lease_reconciler_keeps_a_measuring_worker_whose_heartbeat_landed_late(self) -> None:
+        controller = Mock()
+        with open_db(self.config.paths.db_path) as connection:
+            self._running_job_with_expired_lease(connection, progress_age=timedelta(hours=1))
+            job = load_encode_job(connection, "job-live")
+            assert job is not None
+            job["started_at"] = (datetime.now(tz=UTC) - timedelta(hours=2)).isoformat(timespec="seconds")
+            job["heartbeat_at"] = (datetime.now(tz=UTC) - timedelta(minutes=2)).isoformat(timespec="seconds")
+            save_encode_job(connection, job)
+            connection.commit()
+
+            with patch.object(web_app, "_live_encode_job_controller", return_value=controller):
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-live")
+        assert job is not None
+        self.assertEqual(job["status"], "running")
+        controller.cancel.assert_not_called()
 
     def test_heartbeat_survives_an_unexpected_error_and_keeps_renewing(self) -> None:
         from mediaforce.web.runtime import encode_runtime
@@ -20024,6 +20045,78 @@ raise SystemExit(0)
             job = load_encode_job(connection, "job-late-cancel")
         assert job is not None
         self.assertEqual(job["status"], "completed")
+
+    def _run_job_ended_by_reclaim(self, job_id: str, *, reclaim_first: bool) -> tuple[dict[str, Any], int]:
+        source_path = self._create_source_file(f"{job_id}.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                f"manifest-{job_id}.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{job_id}.mkv"))}],
+            )
+            self._save_job(
+                connection,
+                job_id=job_id,
+                manifest_name=f"manifest-{job_id}.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=1,
+            )
+        controller = ManagedProcessController()
+        deps = web_app._encode_queue_runtime_deps()
+        deps.load_config = Mock(return_value=self.config)
+        deps.ensure_encode_host_ready = Mock(return_value=False)
+
+        def measure_until_reclaimed(*_args: Any, **_kwargs: Any) -> list[Any]:
+            if reclaim_first:
+                # The reconciler records the stale lease before the worker notices the cancel.
+                with open_db(self.config.paths.db_path) as reclaim_connection:
+                    reclaimed = load_encode_job(reclaim_connection, job_id)
+                    assert reclaimed is not None
+                    encode_runtime.transition_encode_job_failure(
+                        reclaim_connection,
+                        self.config,
+                        reclaimed,
+                        deps,
+                        failure_kind="stale_lease",
+                        error_message=encode_runtime.STALE_LEASE_RECLAIM_MESSAGE,
+                    )
+            controller.cancel(encode_runtime.ReclaimCancelledError(encode_runtime.STALE_LEASE_RECLAIM_MESSAGE))
+            controller.throw_if_cancelled()
+            return []
+
+        deps.encode_manifest_items = Mock(side_effect=measure_until_reclaimed)
+
+        with patch.object(
+                encode_runtime,
+                "transition_encode_job_failure",
+                wraps=encode_runtime.transition_encode_job_failure,
+        ) as failure_transition:
+            encode_runtime.run_encode_job(
+                config_path=self.config.paths.config_path,
+                job_id=job_id,
+                process_controller=controller,
+                deps=deps,
+            )
+
+        with open_db(self.config.paths.db_path) as connection:
+            job = load_encode_job(connection, job_id)
+        assert job is not None
+        return job, failure_transition.call_count
+
+    def test_run_encode_job_retries_a_worker_ended_by_the_lease_reclaim(self) -> None:
+        job, failure_transitions = self._run_job_ended_by_reclaim("job-reclaimed", reclaim_first=False)
+
+        self.assertEqual(job["status"], "retry_backoff")
+        self.assertEqual(job["last_failure_kind"], "stale_lease")
+        self.assertEqual(failure_transitions, 1)
+
+    def test_run_encode_job_keeps_the_reclaim_retry_it_lost_the_race_to(self) -> None:
+        job, failure_transitions = self._run_job_ended_by_reclaim("job-reclaimed-first", reclaim_first=True)
+
+        self.assertEqual(job["status"], "retry_backoff")
+        self.assertEqual(job["last_failure_kind"], "stale_lease")
+        self.assertEqual(failure_transitions, 1)
 
     def test_restart_recovery_prefers_schedule_requeue_after_deadline(self) -> None:
         source_path = self._create_source_file("episode-restart-deadline.mkv")

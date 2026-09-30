@@ -510,6 +510,21 @@ def encode_one_item(
             "provenance": observation_provenance(),
         }
 
+    def report_candidate_progress(completed: int, total: int) -> None:
+        # Each measured size is a sign of life, so a long search is not mistaken for a silent worker.
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "progress_state": "quality_search",
+                    "phase_label": f"Searching quality ({completed} of up to {total} sizes tried)",
+                    "fps": None,
+                    "speed": None,
+                    "eta_seconds": None,
+                    "elapsed_seconds": 0.0,
+                    "out_time_seconds": 0.0,
+                }
+            )
+
     def run_quality_search() -> Any:
         return search_quality(
             quality_source_path,
@@ -529,6 +544,7 @@ def encode_one_item(
             expected_search_signature_id=(
                 planned_quality_context.signature_id if planned_quality_context is not None else None
             ),
+            candidate_progress_callback=report_candidate_progress,
         )
 
     try:

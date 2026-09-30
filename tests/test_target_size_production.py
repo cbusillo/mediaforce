@@ -1161,6 +1161,36 @@ class TargetSizeProductionTests(unittest.TestCase):
             event_types = [event["event_type"] for event in self._events(connection, item_id)]
             self.assertIn("quality_search_web_poll", event_types)
 
+    def test_each_measured_size_is_reported_as_search_progress(self) -> None:
+        source_path = self._source_file("episode-search-progress.mkv")
+        staging_path = self._staging_path("episode-search-progress.mkv")
+        progress: list[dict[str, Any]] = []
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._trace(item, selected_crf=28.0),
+            )
+
+            self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_100_000],
+                measured_candidates=(2, 6),
+                progress_callback=progress.append,
+            )
+
+        search_updates = [update for update in progress if update.get("progress_state") == "quality_search"]
+        self.assertEqual(len(search_updates), 2)
+        self.assertIn("2 of up to 6", str(search_updates[-1]["phase_label"]))
+
     def test_retry_event_write_failure_does_not_abort_successful_encode(self) -> None:
         source_path = self._source_file("episode-retry-event-failure.mkv")
         staging_path = self._staging_path("episode-retry-event-failure.mkv")
@@ -1261,6 +1291,8 @@ class TargetSizeProductionTests(unittest.TestCase):
             warm_start_plan: QualityWarmStartPlan | None = None,
             search_results: list[QualitySearchResult | Exception] | None = None,
             search_call_kwargs: list[dict[str, Any]] | None = None,
+            measured_candidates: tuple[int, int] | None = None,
+            progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> tuple[list[Any], list[Any]]:
         sizes = list(output_sizes)
         queued_retry_samples = list(retry_samples or ([retry_sample] if retry_sample is not None else []))
@@ -1301,6 +1333,9 @@ class TargetSizeProductionTests(unittest.TestCase):
                 during_quality_search()
             if search_call_kwargs is not None:
                 search_call_kwargs.append(dict(kwargs))
+            if measured_candidates is not None:
+                report_candidate = cast(Callable[[int, int], None], kwargs["candidate_progress_callback"])
+                report_candidate(*measured_candidates)
             result = queued_quality_results.pop(0) if len(queued_quality_results) > 1 else queued_quality_results[0]
             if isinstance(result, Exception):
                 raise result
@@ -1348,6 +1383,7 @@ class TargetSizeProductionTests(unittest.TestCase):
                 0,
                 item,
                 overwrite=False,
+                progress_callback=progress_callback,
             )
             return list(command_mock.call_args_list), list(measure_mock.call_args_list)
 
