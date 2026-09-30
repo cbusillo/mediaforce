@@ -1246,8 +1246,18 @@ def _encode_job_outputs_completed_by_id(config: MediaforceConfig, job_id: str) -
         return current_job is not None and _encode_job_outputs_completed(connection, current_job)
 
 
-def _worker_may_write_terminal_state(job: Mapping[str, Any], worker_id: str, *, failure_kind: str | None) -> bool:
+def _worker_may_write_terminal_state(
+        job: Mapping[str, Any],
+        worker_id: str,
+        *,
+        claimed_attempt: int,
+        failure_kind: str | None,
+) -> bool:
     """A worker writes its outcome unless another attempt now owns the job or a reclaim already requeued it."""
+    # Each claim counts an attempt, and a queue thread reuses its worker id, so the attempt number is what
+    # tells this attempt from a newer one, whether that one is still running or already finished.
+    if int_value(job.get("attempt_count")) != claimed_attempt:
+        return False
     status = str(job.get("status") or "")
     if status == "running":
         return str(job.get("worker_id") or "") in {"", worker_id}
@@ -3227,6 +3237,7 @@ def run_encode_job(
 
     heartbeat_stop = threading.Event()
     worker_id = str(job.get("worker_id") or _encode_job_worker_id())
+    claimed_attempt = int_value(job.get("attempt_count"))
     heartbeat_thread = threading.Thread(
         target=encode_job_heartbeat_loop,
         kwargs={
@@ -3322,7 +3333,9 @@ def run_encode_job(
             connection.commit()
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             job = load_encode_job(connection, job_id)
-            if job is not None and not _worker_may_write_terminal_state(job, worker_id, failure_kind=failure_kind):
+            if job is not None and not _worker_may_write_terminal_state(
+                    job, worker_id, claimed_attempt=claimed_attempt, failure_kind=failure_kind,
+            ):
                 deps.logger.warning(
                     "Encode job %s is %s under %s; worker %s leaves its state as it is.",
                     job_id, job.get("status"), job.get("worker_id"), worker_id,

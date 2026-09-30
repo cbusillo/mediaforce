@@ -20109,17 +20109,33 @@ raise SystemExit(0)
         return job, failure_transition.call_count
 
     def test_run_encode_job_leaves_a_job_a_newer_attempt_now_runs(self) -> None:
-        source_path = self._create_source_file("job-taken-over.mkv")
+        # The same queue thread claims the retry, so only the attempt number tells the attempts apart.
+        job = self._run_worker_after_takeover("job-taken-over", {"attempt_count": 2})
+
+        self.assertEqual(job["status"], "running")
+        self.assertEqual(job["attempt_count"], 2)
+
+    def test_run_encode_job_leaves_the_outcome_a_newer_attempt_finished_with(self) -> None:
+        job = self._run_worker_after_takeover(
+            "job-finished-by-retry",
+            {"attempt_count": 2, "status": "completed", "worker_id": None, "lease_expires_at": None},
+        )
+
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["attempt_count"], 2)
+
+    def _run_worker_after_takeover(self, job_id: str, takeover: dict[str, Any]) -> dict[str, Any]:
+        source_path = self._create_source_file(f"{job_id}.mkv")
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="encoding")
             self._write_manifest(
-                "manifest-job-taken-over.json",
-                [{"library_item_id": item_id, "staging_path": str(self._staging_path("job-taken-over.mkv"))}],
+                f"manifest-{job_id}.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{job_id}.mkv"))}],
             )
             self._save_job(
                 connection,
-                job_id="job-taken-over",
-                manifest_name="manifest-job-taken-over.json",
+                job_id=job_id,
+                manifest_name=f"manifest-{job_id}.json",
                 host={"key": "local", "label": "Local", "mode": "local"},
                 status="running",
                 attempt_count=1,
@@ -20130,9 +20146,9 @@ raise SystemExit(0)
 
         def fail_after_a_newer_attempt_claims(*_args: Any, **_kwargs: Any) -> list[Any]:
             with open_db(self.config.paths.db_path) as claim_connection:
-                claimed = load_encode_job(claim_connection, "job-taken-over")
+                claimed = load_encode_job(claim_connection, job_id)
                 assert claimed is not None
-                claimed.update({"worker_id": "newer-worker", "attempt_count": 2})
+                claimed.update(takeover)
                 save_encode_job(claim_connection, claimed)
             raise RuntimeError("encoder exited after its job was handed on")
 
@@ -20140,17 +20156,15 @@ raise SystemExit(0)
 
         encode_runtime.run_encode_job(
             config_path=self.config.paths.config_path,
-            job_id="job-taken-over",
+            job_id=job_id,
             process_controller=ManagedProcessController(),
             deps=deps,
         )
 
         with open_db(self.config.paths.db_path) as connection:
-            job = load_encode_job(connection, "job-taken-over")
+            job = load_encode_job(connection, job_id)
         assert job is not None
-        self.assertEqual(job["status"], "running")
-        self.assertEqual(job["worker_id"], "newer-worker")
-        self.assertEqual(job["attempt_count"], 2)
+        return job
 
     def test_run_encode_job_retries_a_worker_ended_by_the_lease_reclaim(self) -> None:
         job, failure_transitions = self._run_job_ended_by_reclaim("job-reclaimed", reclaim_first=False)
