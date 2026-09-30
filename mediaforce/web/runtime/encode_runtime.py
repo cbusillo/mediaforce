@@ -367,9 +367,10 @@ def _renew_lease_for_live_worker(
     claimed = _claim_stale_encode_job(connection, job_id, deps, restart_recovery=False)
     if claimed is None:
         return True
+    # Only the lease moves: heartbeat_at stays the worker's own evidence, so a renewal never counts
+    # as a sign of life on the next check.
     claimed.update(
         {
-            "heartbeat_at": deps.now_iso(),
             "lease_expires_at": _encode_job_lease_expires_at(deps),
             "updated_at": deps.now_iso(),
         }
@@ -3316,6 +3317,10 @@ def run_encode_job(
         heartbeat_stop.set()
         heartbeat_thread.join()
         with open_db(config.paths.db_path) as connection:
+            # Hold the write lock from the ownership check to the write, so a retry claimed in between
+            # cannot be overwritten.
+            connection.commit()
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
             job = load_encode_job(connection, job_id)
             if job is not None and not _worker_may_write_terminal_state(job, worker_id, failure_kind=failure_kind):
                 deps.logger.warning(

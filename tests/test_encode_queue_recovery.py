@@ -440,7 +440,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             job = load_encode_job(connection, "job-live")
             assert job is not None
             job["started_at"] = (datetime.now(tz=UTC) - timedelta(hours=2)).isoformat(timespec="seconds")
-            job["heartbeat_at"] = (datetime.now(tz=UTC) - timedelta(minutes=2)).isoformat(timespec="seconds")
+            late_heartbeat = (datetime.now(tz=UTC) - timedelta(minutes=2)).isoformat(timespec="seconds")
+            job["heartbeat_at"] = late_heartbeat
             save_encode_job(connection, job)
             connection.commit()
 
@@ -451,6 +452,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         assert job is not None
         self.assertEqual(job["status"], "running")
         controller.cancel.assert_not_called()
+        # The renewal extends only the lease, so it cannot become the next check's sign of life.
+        self.assertEqual(job["heartbeat_at"], late_heartbeat)
+        self.assertGreater(str(job["lease_expires_at"]), "2026")
 
     def test_heartbeat_survives_an_unexpected_error_and_keeps_renewing(self) -> None:
         from mediaforce.web.runtime import encode_runtime
@@ -20103,6 +20107,50 @@ raise SystemExit(0)
             job = load_encode_job(connection, job_id)
         assert job is not None
         return job, failure_transition.call_count
+
+    def test_run_encode_job_leaves_a_job_a_newer_attempt_now_runs(self) -> None:
+        source_path = self._create_source_file("job-taken-over.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-job-taken-over.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path("job-taken-over.mkv"))}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-taken-over",
+                manifest_name="manifest-job-taken-over.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=1,
+            )
+        deps = web_app._encode_queue_runtime_deps()
+        deps.load_config = Mock(return_value=self.config)
+        deps.ensure_encode_host_ready = Mock(return_value=False)
+
+        def fail_after_a_newer_attempt_claims(*_args: Any, **_kwargs: Any) -> list[Any]:
+            with open_db(self.config.paths.db_path) as claim_connection:
+                claimed = load_encode_job(claim_connection, "job-taken-over")
+                assert claimed is not None
+                claimed.update({"worker_id": "newer-worker", "attempt_count": 2})
+                save_encode_job(claim_connection, claimed)
+            raise RuntimeError("encoder exited after its job was handed on")
+
+        deps.encode_manifest_items = Mock(side_effect=fail_after_a_newer_attempt_claims)
+
+        encode_runtime.run_encode_job(
+            config_path=self.config.paths.config_path,
+            job_id="job-taken-over",
+            process_controller=ManagedProcessController(),
+            deps=deps,
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            job = load_encode_job(connection, "job-taken-over")
+        assert job is not None
+        self.assertEqual(job["status"], "running")
+        self.assertEqual(job["worker_id"], "newer-worker")
+        self.assertEqual(job["attempt_count"], 2)
 
     def test_run_encode_job_retries_a_worker_ended_by_the_lease_reclaim(self) -> None:
         job, failure_transitions = self._run_job_ended_by_reclaim("job-reclaimed", reclaim_first=False)
