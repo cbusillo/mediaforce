@@ -519,19 +519,12 @@ def run_crf_search(
         cmd.extend(["--min-vmaf", str(metric_target)])
     else:
         cmd.extend(["--min-xpsnr", str(metric_target)])
-    try:
-        scoped_temp_dir = _scoped_quality_temp_dir(quality_temp_dir, host=host)
-    except OSError as exc:
-        raise QualityTempSetupError(_quality_temp_setup_error(quality_temp_dir, exc, host=host)) from exc
-    if scoped_temp_dir is not None:
-        cmd.extend(["--temp-dir", str(scoped_temp_dir)])
-
-    try:
-        result = _run_quality_command(cmd, process_controller=process_controller, host=host)
-    except Exception as exc:
-        _cleanup_after_failed_quality_command(exc, scoped_temp_dir, host=host)
-        raise
-    cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
+    result, cleanup_error = _run_scoped_quality_command(
+        cmd,
+        quality_temp_dir,
+        process_controller=process_controller,
+        host=host,
+    )
     if result.returncode != 0:
         details = result.stdout.strip()
         if result.stderr.strip():
@@ -617,19 +610,12 @@ def run_sample_encode(
         cmd.extend(["--svt", param])
     if metric == "xpsnr":
         cmd.append("--xpsnr")
-    try:
-        scoped_temp_dir = _scoped_quality_temp_dir(quality_temp_dir, host=host)
-    except OSError as exc:
-        raise QualityTempSetupError(_quality_temp_setup_error(quality_temp_dir, exc, host=host)) from exc
-    if scoped_temp_dir is not None:
-        cmd.extend(["--temp-dir", str(scoped_temp_dir)])
-
-    try:
-        result = _run_quality_command(cmd, process_controller=process_controller, host=host)
-    except Exception as exc:
-        _cleanup_after_failed_quality_command(exc, scoped_temp_dir, host=host)
-        raise
-    cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
+    result, cleanup_error = _run_scoped_quality_command(
+        cmd,
+        quality_temp_dir,
+        process_controller=process_controller,
+        host=host,
+    )
     if result.returncode != 0:
         details = result.stdout.strip()
         if result.stderr.strip():
@@ -864,6 +850,28 @@ def _cleanup_scoped_quality_temp_dir(scoped_temp_dir: Path | None, *, host: dict
     if result.stderr.strip():
         details = f"{details}\n{result.stderr.strip()}".strip()
     return details or f"Failed to remove remote quality temp dir {scoped_temp_dir}"
+
+
+def _run_scoped_quality_command(
+        cmd: list[str],
+        quality_temp_dir: Path | None,
+        *,
+        process_controller: ManagedProcessController | None,
+        host: dict[str, object] | None,
+) -> tuple[subprocess.CompletedProcess[str], str | None]:
+    try:
+        scoped_temp_dir = _scoped_quality_temp_dir(quality_temp_dir, host=host)
+    except OSError as exc:
+        raise QualityTempSetupError(_quality_temp_setup_error(quality_temp_dir, exc, host=host)) from exc
+    if scoped_temp_dir is not None:
+        cmd.extend(["--temp-dir", str(scoped_temp_dir)])
+
+    try:
+        result = _run_quality_command(cmd, process_controller=process_controller, host=host)
+    except Exception as exc:
+        _cleanup_after_failed_quality_command(exc, scoped_temp_dir, host=host)
+        raise
+    return result, _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
 
 
 def _cleanup_after_failed_quality_command(
