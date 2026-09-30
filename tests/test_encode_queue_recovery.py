@@ -23080,6 +23080,25 @@ raise SystemExit(0)
         )
         self.assertEqual(self._queued_manifest_item_ids(joined_jobs), [item_ids["Episode 2.mkv"]])
 
+    def test_accepted_episode_joins_a_season_override_run_queued_before_modes_were_recorded(self) -> None:
+        queue_config, item_ids, _calibration = self._accepted_episode_never_held(save_run=True)
+        with open_db(self.config.paths.db_path) as connection:
+            run = load_latest_encode_job(connection, "tv/show")
+        assert run is not None
+        manifest_path = Path(str(run["manifest_path"]))
+        manifest = json.loads(manifest_path.read_text())
+        manifest["selection"].pop("queue_mode")
+        manifest_path.write_text(json.dumps(manifest))
+
+        ambiguous_motion_runtime.accept_ambiguous_motion_action(
+            queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: "approval",
+        )
+
+        self.assertTrue(any(
+            item["selection_provenance"]["manual_override"] for item in manifest["items"]
+        ))
+        self.assertEqual(self._hold_rows()[item_ids["Episode 2.mkv"]]["mode"], "season_override")
+
     def test_accepted_episode_joins_the_newest_run_that_covers_it_not_the_show_latest(self) -> None:
         queue_config, item_ids, _calibration = self._accepted_episode_never_held(save_run=True)
         with open_db(self.config.paths.db_path) as connection:

@@ -25,11 +25,12 @@ from mediaforce.core.db_tables import item_events, library_items, production_hol
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, accept_cadence_as_is, cadence_as_is_eligible, \
     cadence_measurement_complete, reclassify_cadence_summary
 from mediaforce.library.evidence_state import sync_library_item_evidence_state
-from mediaforce.encoding.encode_queue import list_recent_encode_jobs_for_prefix
+from mediaforce.encoding.encode_queue import list_encode_runs_for_prefix
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.web.runtime.left_out_files import LeftOutFile
-from mediaforce.web.runtime.production_holds import HOLD_WAITING, MODE_FOLDER, MODE_OLDER_SEASONS, record_holds
+from mediaforce.web.runtime.production_holds import HOLD_WAITING, MODE_FOLDER, MODE_OLDER_SEASONS, MODE_SEASON_OVERRIDE, \
+    record_holds
 
 ACCEPTED_AS_IS_EVENT = "cadence_accepted_as_is"
 
@@ -184,7 +185,7 @@ def _hold_for_production(
         return 0
     runs = [
         run
-        for run in (_ProductionRun.from_job(job, current_approval) for job in list_recent_encode_jobs_for_prefix(
+        for run in (_ProductionRun.from_job(job, current_approval) for job in list_encode_runs_for_prefix(
             connection, show_prefix,
         ))
         if run is not None
@@ -219,10 +220,10 @@ class _ProductionRun:
         approval = current_approval(prefix) if prefix else None
         if approval is None:
             return None
-        selection = object_dict(_manifest(job).get("selection"))
+        manifest = _manifest(job)
+        selection = object_dict(manifest.get("selection"))
         older_seasons = object_dict(selection.get("lifecycle_override"))
-        # Runs queued before the mode was recorded: an older-season selection is the only other mode they show.
-        mode = str(selection.get("queue_mode") or (MODE_OLDER_SEASONS if older_seasons else MODE_FOLDER))
+        mode = str(selection.get("queue_mode") or _legacy_queue_mode(manifest, older_seasons=bool(older_seasons)))
         included = tuple(str(value) for value in object_list(older_seasons.get("included_season_prefixes")))
         return cls(prefix, mode, approval, included if older_seasons else None)
 
@@ -230,6 +231,19 @@ class _ProductionRun:
         if not path_matches_scope(rel_path, self.prefix):
             return False
         return self.included_seasons is None or any(path_matches_scope(rel_path, season) for season in self.included_seasons)
+
+
+def _legacy_queue_mode(manifest: Mapping[str, Any], *, older_seasons: bool) -> str:
+    """The mode of a run queued before its mode was recorded, read from what it selected."""
+    if older_seasons:
+        return MODE_OLDER_SEASONS
+    season_override = any(
+        provenance.get("override_applied") is True and provenance.get("manual_override") is True
+        for provenance in (
+            object_dict(object_dict(item).get("selection_provenance")) for item in object_list(manifest.get("items"))
+        )
+    )
+    return MODE_SEASON_OVERRIDE if season_override else MODE_FOLDER
 
 
 def _manifest(job: Mapping[str, Any]) -> dict[str, Any]:
