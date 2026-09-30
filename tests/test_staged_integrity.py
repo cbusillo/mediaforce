@@ -192,7 +192,7 @@ class StagedIntegrityTests(unittest.TestCase):
             item_id, stage = self._held_file(connection, "Busy.mkv")
             connection.execute(
                 encode_jobs.insert().values(
-                    job_id="active-run", prefix="tv/Show/Season 1", status="running", job_kind="folder", host_json="{}",
+                    job_id="active-run", prefix="tv/Show/Season 1", status="running", job_kind="shard", host_json="{}",
                     manifest_path=str(self.root / "runs" / "active.json"), item_count=1,
                     created_at=datetime.now(tz=UTC).isoformat(), updated_at=datetime.now(tz=UTC).isoformat(),
                 )
