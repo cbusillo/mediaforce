@@ -196,7 +196,7 @@ from mediaforce.web.runtime.folder_actions import production_approval_identity
 from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
-from mediaforce.web.runtime.encode_runtime import sync_encode_job_parent
+from mediaforce.web.runtime.encode_runtime import release_host_cooldowns, sync_encode_job_parent
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle, run_supervised_worker_loop
@@ -1040,7 +1040,19 @@ def create_app(
     def _prepare_host_action(host_key: str, remote_password: str | None = None) -> dict[str, Any]:
         nonlocal config
         result = prepare_remote_host_with_password(config, host_key, password=remote_password or None)
+        if result.ok:
+            _release_ready_host_cooldowns(host_key)
         return _host_action_result(result)
+
+    def _release_ready_host_cooldowns(host_key: str) -> None:
+        """A computer that just passed Prepare or Start takes work again instead of waiting out its cooldown."""
+        host = host_config_for_key(config, host_key)
+        if not host:
+            return
+        with open_db(config.paths.db_path) as connection:
+            released = release_host_cooldowns(connection, {"key": host_key, **host}, updated_at=_now_iso())
+        if released:
+            LOGGER.info("Released %s encode job cooldown(s) for %s after a successful readiness check.", released, host_key)
 
     def _start_host_action(host_key: str) -> dict[str, Any]:
         nonlocal config
@@ -1061,6 +1073,7 @@ def create_app(
             message = f"{label} accepted the start command and is reachable now."
         else:
             message = f"{label} is reachable now."
+        _release_ready_host_cooldowns(host_key)
         return _host_action_result(HostSetupResult(ok=True, message=message))
 
     def _reset_host_trust_action(host_key: str) -> dict[str, Any]:

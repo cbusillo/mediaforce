@@ -3466,7 +3466,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             encode_runtime._encode_failure_retries_after_attempt_cap(failure_kind, str(exc), job["host"])
         )
 
-    def _computer_setup_failure(self, connection: DBClient, name: str, *, attempt_count: int) -> dict[str, Any] | None:
+    def _computer_setup_failure(
+            self,
+            connection: DBClient,
+            name: str,
+            *,
+            attempt_count: int,
+            host_key: str = "remote-a",
+    ) -> dict[str, Any] | None:
         source_path = self._create_source_file(f"{name}.mkv")
         item_id = self._insert_library_item(connection, source_path, status="encoding")
         self._write_manifest(
@@ -3477,7 +3484,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             connection,
             job_id=f"job-{name}",
             manifest_name=f"manifest-{name}.json",
-            host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+            host={"key": host_key, "label": host_key.title(), "mode": "ssh"},
             status="running",
             attempt_count=attempt_count,
         )
@@ -3547,6 +3554,31 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         if encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD > 1:
             self.assertEqual(after_one, {})
         self.assertEqual([payload["key"] for payload in blocked.values()], ["remote-a"])
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_a_computer_that_passes_its_readiness_check_takes_work_again_at_once(self) -> None:
+        deps = web_app._encode_queue_runtime_deps()
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD):
+                self._computer_setup_failure(connection, f"episode-ready-a-{index}", attempt_count=1)
+            other = self._computer_setup_failure(connection, "episode-ready-b", attempt_count=1, host_key="remote-b")
+            before = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+
+            released = encode_runtime.release_host_cooldowns(
+                connection, {"key": "remote-a", "label": "Remote A"}, updated_at=web_app._now_iso(),
+            )
+            after = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+            first = load_encode_job(connection, "job-episode-ready-a-0")
+            still_cooling = load_encode_job(connection, "job-episode-ready-b")
+
+        self.assertEqual([payload["key"] for payload in before.values()], ["remote-a"])
+        self.assertEqual(released, encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD)
+        self.assertEqual(after, {})
+        assert first is not None and still_cooling is not None and other is not None
+        self.assertIsNone(first["host_cooldown_until"])
+        self.assertNotIn("failure_streak", first["last_host"])
+        self.assertEqual(first["status"], "retry_backoff")
+        self.assertEqual(still_cooling["host_cooldown_until"], other["host_cooldown_until"])
 
     def test_cleanup_on_a_share_that_stopped_answering_is_deferred_not_crashed(self) -> None:
         staging_path = self._staging_path("episode-dead-mount.mkv")
