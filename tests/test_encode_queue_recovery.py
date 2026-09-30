@@ -20134,6 +20134,43 @@ raise SystemExit(0)
         self.assertEqual(job["status"], "queued")
         self.assertIsNone(job["started_at"])
 
+    def test_schedule_close_of_an_older_claim_leaves_the_newer_claim_running(self) -> None:
+        source_path = self._create_source_file("job-schedule-newer-claim.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-job-schedule-newer-claim.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path("job-schedule-newer-claim.mkv"))}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-schedule-newer-claim",
+                manifest_name="manifest-job-schedule-newer-claim.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=2,
+            )
+            job = load_encode_job(connection, "job-schedule-newer-claim")
+            assert job is not None
+            job["started_at"] = "2026-09-30T12:00:00+00:00"
+            save_encode_job(connection, job)
+            connection.commit()
+
+            closed = encode_runtime.transition_encode_job_schedule_close(
+                connection,
+                self.config,
+                job,
+                web_app._encode_queue_runtime_deps(),
+                expected_worker_id=str(job["worker_id"]),
+                expected_started_at="2026-09-30T11:00:00+00:00",
+            )
+
+            current = load_encode_job(connection, "job-schedule-newer-claim")
+        assert current is not None
+        self.assertFalse(closed)
+        self.assertEqual(current["status"], "running")
+        self.assertEqual(current["attempt_count"], 2)
+
     def _run_worker_after_takeover(self, job_id: str, takeover: dict[str, Any]) -> dict[str, Any]:
         source_path = self._create_source_file(f"{job_id}.mkv")
         with open_db(self.config.paths.db_path) as connection:

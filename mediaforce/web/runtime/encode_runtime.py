@@ -1100,6 +1100,7 @@ def transition_encode_job_schedule_close(
         deps: EncodeQueueRuntimeDeps,
         *,
         expected_worker_id: str | None = None,
+        expected_started_at: str | None = None,
 ) -> bool:
     if str(job.get("status") or "") != "running" or bool(job.get("bypass_schedule")):
         return False
@@ -1116,6 +1117,10 @@ def transition_encode_job_schedule_close(
         connection.rollback()
         return False
     if expected_worker_id is not None and str(current_job.get("worker_id") or "") != expected_worker_id:
+        connection.rollback()
+        return False
+    # A queue thread reuses its worker id, so the claim's start time shows whether this is still its attempt.
+    if expected_started_at is not None and str(current_job.get("started_at") or "") != expected_started_at:
         connection.rollback()
         return False
     job = current_job
@@ -3357,6 +3362,7 @@ def run_encode_job(
                         job,
                         deps,
                         expected_worker_id=worker_id,
+                        expected_started_at=claimed_started_at,
                     )
                 elif final_status is not None:
                     last_host = object_dict(job.get("last_host"))
