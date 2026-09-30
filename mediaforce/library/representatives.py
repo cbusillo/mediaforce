@@ -15,7 +15,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.evidence import build_evidence_envelope, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import mapping_dict, object_dict, object_list
-from mediaforce.library.candidate_selection import encode_candidate_decisions, season_identity
+from mediaforce.library.candidate_selection import SEASON_PATTERN, encode_candidate_decisions, season_identity
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.planner import build_manifest_item
@@ -38,6 +38,7 @@ FINGERPRINT_DIMENSIONS = (
     "audio_complexity",
 )
 _UNKNOWN_PROFILE_VALUE = "unknown"
+_SUMMARY_GROUP_LIMIT = 6
 _PUBLIC_ITEM_FIELDS = (
     "library_item_id",
     "rel_path",
@@ -348,17 +349,30 @@ def select_representatives(
         selected,
         profile_dimensions=coverage_dimensions,
     )
+    # Only the primary is encoded and reviewed today; the other picks show what else would need a sample.
+    measured = [primary]
+    measured_source_ids = [candidate.source_id for candidate in measured]
+    unmeasured_source_ids = [candidate.source_id for candidate in selected[1:]]
+    measured_targets = {
+        target
+        for candidate in measured
+        for target in _profile_targets(candidate, coverage_dimensions)
+    }
     coverage = _coverage_payload(
         candidates,
-        selected,
-        assignments,
+        measured,
+        _representation_assignments(candidates, measured, profile_dimensions=coverage_dimensions),
         profile_counts,
         required_targets,
-        uncovered_targets,
+        required_targets - measured_targets,
         outlier_reasons,
         profile_dimensions=coverage_dimensions,
     )
+    untested_groups = _untested_groups(candidates, measured)
+    coverage["selected_item_count"] = len(selected)
+    coverage["untested_groups"] = untested_groups
     confidence = _confidence_payload(coverage)
+    coverage_summary = _coverage_summary(untested_groups, measured_count=len(measured), total_count=len(candidates))
     rationale = [
         _selection_rationale(
             candidate,
@@ -409,6 +423,8 @@ def select_representatives(
     evidence_result = {
         "primary_source_id": primary.source_id,
         "selected_source_ids": [candidate.source_id for candidate in selected],
+        "measured_source_ids": measured_source_ids,
+        "unmeasured_source_ids": unmeasured_source_ids,
         "population": population.to_payload(),
         "rationale": rationale,
         "coverage": coverage,
@@ -443,8 +459,11 @@ def select_representatives(
         "selection_id": evidence["evidence_id"],
         "primary_source_id": primary.source_id,
         "selected_items": selected_items,
+        "measured_source_ids": measured_source_ids,
+        "unmeasured_source_ids": unmeasured_source_ids,
         "population": population.to_payload(),
         "coverage": coverage,
+        "coverage_summary": coverage_summary,
         "outliers": outliers,
         "confidence": confidence,
         "evidence": evidence,
@@ -613,7 +632,7 @@ def _representation_distance(
 
 def _coverage_payload(
         candidates: Sequence[_Candidate],
-        selected: Sequence[_Candidate],
+        measured: Sequence[_Candidate],
         assignments: Mapping[str, Mapping[str, Any]],
         profile_counts: Mapping[str, Counter[str]],
         required_targets: set[tuple[str, str]],
@@ -622,21 +641,21 @@ def _coverage_payload(
         *,
         profile_dimensions: Sequence[str],
 ) -> dict[str, Any]:
-    selected_profiles = {
+    measured_profiles = {
         tuple(candidate.profile[dimension] for dimension in profile_dimensions)
-        for candidate in selected
+        for candidate in measured
     }
     exact_candidates = [
         candidate
         for candidate in candidates
-        if tuple(candidate.profile[dimension] for dimension in profile_dimensions) in selected_profiles
+        if tuple(candidate.profile[dimension] for dimension in profile_dimensions) in measured_profiles
     ]
     total_runtime = sum(candidate.duration_seconds or 0.0 for candidate in candidates)
     exact_runtime = sum(candidate.duration_seconds or 0.0 for candidate in exact_candidates)
     meaningful_covered = len(required_targets - uncovered_targets)
     dimensions: dict[str, Any] = {}
     for dimension in profile_dimensions:
-        covered_values = {candidate.profile[dimension] for candidate in selected}
+        covered_values = {candidate.profile[dimension] for candidate in measured}
         covered_item_count = sum(
             count
             for value, count in profile_counts[dimension].items()
@@ -668,7 +687,7 @@ def _coverage_payload(
     return {
         "candidate_item_count": len(candidates),
         "candidate_runtime_seconds": round(total_runtime, 3),
-        "selected_item_count": len(selected),
+        "measured_item_count": len(measured),
         "represented_item_count": sum(
             int(assignment["represented_item_count"])
             for assignment in assignments.values()
@@ -695,11 +714,13 @@ def _confidence_payload(coverage: Mapping[str, Any]) -> dict[str, Any]:
     known_fraction = float(coverage["known_fact_fraction"])
     candidate_count = int(coverage["candidate_item_count"])
     outlier_fraction = _fraction(int(coverage["outlier_item_count"]), candidate_count)
+    untested_group_count = len(object_list(coverage.get("untested_groups")))
     if (
             meaningful_fraction == 1.0
             and exact_fraction >= 0.80
             and known_fraction >= 0.75
             and outlier_fraction <= 0.10
+            and untested_group_count == 0
     ):
         level = "high"
     elif meaningful_fraction == 1.0 and exact_fraction >= 0.60 and known_fraction >= 0.50:
@@ -711,7 +732,81 @@ def _confidence_payload(coverage: Mapping[str, Any]) -> dict[str, Any]:
         "known_fact_fraction": known_fraction,
         "exact_profile_item_fraction": exact_fraction,
         "outlier_item_fraction": outlier_fraction,
+        "untested_group_count": untested_group_count,
     }
+
+
+def _untested_groups(
+        candidates: Sequence[_Candidate],
+        measured: Sequence[_Candidate],
+) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for kind, group_key, label in (
+            ("season", _season_group, _season_label),
+            ("video_format", _video_format_group, _video_format_label),
+            ("resolution", _resolution_group, str),
+    ):
+        tested_values = {group_key(candidate) for candidate in measured}
+        counts = Counter(
+            value
+            for candidate in candidates
+            if (value := group_key(candidate)) is not None and value not in tested_values
+        )
+        groups.extend(
+            {"kind": kind, "value": value, "label": label(value), "item_count": count}
+            for value, count in sorted(counts.items(), key=lambda entry: _group_sort_key(kind, entry[0]))
+        )
+    return groups
+
+
+def _season_group(candidate: _Candidate) -> str | None:
+    parts = candidate.rel_path.split("/")
+    if len(parts) < 4:
+        return None
+    folder = parts[2]
+    if folder.casefold() == "specials":
+        return "0"
+    match = SEASON_PATTERN.fullmatch(folder)
+    return str(int(match.group(1))) if match is not None else None
+
+
+def _season_label(value: str) -> str:
+    return "Specials" if value == "0" else f"Season {value}"
+
+
+def _video_format_group(candidate: _Candidate) -> str | None:
+    codec = candidate.profile["video_codec"]
+    return None if codec == _UNKNOWN_PROFILE_VALUE else codec
+
+
+def _video_format_label(value: str) -> str:
+    labels = {"h264": "H.264", "hevc": "HEVC", "mpeg2video": "MPEG-2", "vc1": "VC-1"}
+    return f"{labels.get(value, value.upper())} video"
+
+
+def _resolution_group(candidate: _Candidate) -> str | None:
+    resolution = candidate.profile["resolution"]
+    return None if resolution == _UNKNOWN_PROFILE_VALUE else resolution
+
+
+def _group_sort_key(kind: str, value: str) -> tuple[int, str]:
+    return (int(value), "") if kind == "season" else (0, value)
+
+
+def _coverage_summary(
+        untested_groups: Sequence[Mapping[str, Any]],
+        *,
+        measured_count: int,
+        total_count: int,
+) -> str:
+    tested = f"Tested {measured_count} of {total_count} {'file' if total_count == 1 else 'files'}."
+    if not untested_groups:
+        return f"{tested} No season, video format, or resolution here is untested."
+    labels = [str(group["label"]) for group in untested_groups]
+    shown = labels[:_SUMMARY_GROUP_LIMIT]
+    if len(labels) > len(shown):
+        shown.append(f"{len(labels) - len(shown)} more")
+    return f"{tested} Not yet tested: {', '.join(shown)}."
 
 
 def _selection_rationale(

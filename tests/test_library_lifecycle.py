@@ -589,6 +589,11 @@ class LibraryLifecycleTests(unittest.TestCase):
         self.assertEqual(payload["population"], {"basis": "production", "excluded_count": 6, "reason": None})
         self.assertEqual(payload["coverage"]["candidate_item_count"], 5)
         self.assertEqual(primary["representative_selection"]["population"], payload["population"])
+        self.assertEqual(payload["measured_source_ids"], [payload["primary_source_id"]])
+        self.assertIn("Not yet tested", payload["coverage_summary"])
+        self.assertNotIn("Season 8", payload["coverage_summary"])
+        self.assertNotIn("HEVC", payload["coverage_summary"])
+        self.assertNotEqual(payload["confidence"]["level"], "high")
 
     def test_held_season_alone_falls_back_to_every_file_with_a_reason(self) -> None:
         config = self._config()

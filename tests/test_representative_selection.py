@@ -9,6 +9,8 @@ from mediaforce.library.representatives import (
     TECHNICAL_PROFILE_DIMENSIONS,
     REPRESENTATIVE_SELECTION_TOOL,
     REPRESENTATIVE_SELECTION_TOOL_VERSION,
+    UNCHECKED_POPULATION,
+    RepresentativePopulation,
     evidence_sources,
     public_representative_item,
     select_representatives,
@@ -72,8 +74,17 @@ class RepresentativeSelectionTests(unittest.TestCase):
         }
         self.assertEqual(selected_profiles, {"short", "typical", "long"})
         self.assertEqual(selection.payload["coverage"]["selected_item_count"], 3)
+        selected_ids = [item["source_id"] for item in selection.payload["selected_items"]]
+        self.assertEqual(selection.payload["measured_source_ids"], selected_ids[:1])
+        self.assertEqual(selection.payload["unmeasured_source_ids"], selected_ids[1:])
+        self.assertEqual(selection.payload["coverage"]["measured_item_count"], 1)
         for dimension in ("video_codec", "resolution", "cadence", "audio_layout", "runtime"):
-            self.assertEqual(selection.payload["coverage"]["dimensions"][dimension]["item_fraction"], 1.0)
+            self.assertLess(selection.payload["coverage"]["dimensions"][dimension]["item_fraction"], 1.0)
+        self.assertEqual(
+            {(group["kind"], group["value"]) for group in selection.payload["coverage"]["untested_groups"]},
+            {("video_format", "hevc"), ("resolution", "720p")},
+        )
+        self.assertNotEqual(selection.payload["confidence"]["level"], "high")
         coverage_roles = [item["rationale"]["role"] for item in selection.payload["selected_items"]]
         self.assertEqual(coverage_roles.count("primary"), 1)
         self.assertEqual(coverage_roles.count("coverage"), 2)
@@ -244,7 +255,14 @@ class RepresentativeSelectionTests(unittest.TestCase):
             item["value"]
             for item in selection.payload["coverage"]["dimensions"]["gradient"]["uncovered_values"]
         }
-        self.assertNotIn("gradient_risk", gradient_values)
+        self.assertIn("gradient_risk", gradient_values)
+        hard_item = next(
+            item
+            for item in selection.payload["selected_items"]
+            if item["rel_path"] == "tv/Example/Season 1/Episode 03.mkv"
+        )
+        self.assertIn(hard_item["source_id"], selection.payload["unmeasured_source_ids"])
+        self.assertNotIn(hard_item["source_id"], selection.payload["measured_source_ids"])
         profile = next(
             item["technical_profile"]
             for item in selection.payload["selected_items"]
@@ -313,10 +331,55 @@ class RepresentativeSelectionTests(unittest.TestCase):
             "tv/Example/Season 1/Episode 03.mkv",
         )
 
+    def test_single_sample_names_untested_seasons_and_is_not_high_confidence(self) -> None:
+        items = [
+            self._item(season * 10 + episode, season=season)
+            for season in (1, 3, 4, 6, 7)
+            for episode in range(1, 4)
+        ]
+        population = RepresentativePopulation(basis="production", excluded_count=12)
+
+        selection = select_representatives(items, prefix="tv/Example", population=population)
+
+        payload = selection.payload
+        self.assertEqual(payload["population"], population.to_payload())
+        self.assertEqual(payload["evidence"]["result"]["population"], population.to_payload())
+        self.assertEqual(payload["measured_source_ids"], [payload["primary_source_id"]])
+        primary_season = selection.primary_item()["rel_path"].split("/")[2]
+        untested_seasons = {
+            group["label"]
+            for group in payload["coverage"]["untested_groups"]
+            if group["kind"] == "season"
+        }
+        self.assertEqual(
+            untested_seasons,
+            {f"Season {season}" for season in (1, 3, 4, 6, 7)} - {primary_season},
+        )
+        for season_label in untested_seasons:
+            self.assertIn(season_label, payload["coverage_summary"])
+        self.assertNotIn(primary_season, payload["coverage_summary"])
+        self.assertEqual(payload["coverage"]["meaningful_cluster_fraction"], 1.0)
+        self.assertNotEqual(payload["confidence"]["level"], "high")
+
+    def test_single_sample_of_uniform_season_keeps_high_confidence(self) -> None:
+        selection = select_representatives([self._item(index) for index in range(1, 6)], prefix="tv/Example/Season 1")
+
+        self.assertEqual(selection.payload["coverage"]["untested_groups"], [])
+        self.assertNotIn("Not yet tested", selection.payload["coverage_summary"])
+        self.assertEqual(selection.payload["confidence"]["level"], "high")
+
+    def test_selection_without_population_check_says_so(self) -> None:
+        selection = select_representatives([self._item(1)], prefix="tv/Example/Season 1")
+
+        self.assertEqual(selection.payload["population"], UNCHECKED_POPULATION.to_payload())
+        self.assertEqual(selection.payload["population"]["basis"], "all_items")
+        self.assertTrue(selection.payload["population"]["reason"])
+
     @staticmethod
     def _item(
             index: int,
             *,
+            season: int = 1,
             duration_seconds: float = 2700,
             source_size_bytes: int = 1_000_000_000,
             video_codec: str = "h264",
@@ -326,7 +389,7 @@ class RepresentativeSelectionTests(unittest.TestCase):
             channels: int = 6,
             media_traits: list[str] | None = None,
     ) -> dict[str, Any]:
-        rel_path = f"tv/Example/Season 1/Episode {index:02d}.mkv"
+        rel_path = f"tv/Example/Season {season}/Episode {index:02d}.mkv"
         return {
             "library_item_id": index,
             "source_path": f"/Volumes/private-media/{rel_path}",
