@@ -880,14 +880,14 @@ def aggregate_encode_parent_job(
 _UNFINISHED_REASON_LABELS = {
     "retrying": "trying again soon",
     "stopped": "stopped",
-    "quality_floor_size_conflict": "need more space to keep their quality",
+    "quality_floor_size_conflict": "waiting for your OK to use more space",
     "size_exception_declined": "kept as the original, your choice",
-    "final_size_target_miss": "came out a different size than the goal",
+    "final_size_target_miss": "didn't pass the final size check",
     "controller_database_busy": "hit a busy moment in Mediaforce",
-    "storage_io": "couldn't reach their media drive",
+    "storage_io": "had trouble reading or writing media",
     "host_unavailable": "computer unavailable",
     "ssh_transport": "couldn't connect to a computer",
-    "needs_review": "need a look",
+    "needs_review": "waiting for you to take a look",
 }
 # Queued files wait for the scheduler; group its sentences under short plain labels, first match
 # wins. Some waits only end when the owner acts, so they count as needing the owner. A reason that

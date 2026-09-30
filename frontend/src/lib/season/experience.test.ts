@@ -1259,13 +1259,13 @@ describe('season experience translation', () => {
 			...card,
 			workflow_state: { ...card.workflow_state, primary_lane: 'processing' },
 			review_badge_label: 'Needs attention',
-			review_badge_detail: "1 couldn't reach their media drive · 4 waiting for a scheduled time"
+			review_badge_detail: '1 had trouble reading or writing media · 4 waiting for a scheduled time'
 		} as FolderCard;
 
 		expect(librarySeasonState(working, dashboard)).toMatchObject({
 			key: 'making_season',
 			label: 'Compressing · needs you',
-			detail: "1 couldn't reach their media drive · 4 waiting for a scheduled time"
+			detail: '1 had trouble reading or writing media · 4 waiting for a scheduled time'
 		});
 	});
 
@@ -2736,14 +2736,14 @@ describe('encodeWaitingReasons', () => {
 			job([
 				{
 					reason: 'final_size_target_miss',
-					label: 'came out a different size than the goal',
+					label: "didn't pass the final size check",
 					count: 1,
 					needs_owner: true,
 					items: []
 				},
 				{
 					reason: 'storage_io',
-					label: "couldn't reach their media drive",
+					label: 'had trouble reading or writing media',
 					count: 2,
 					needs_owner: true,
 					items: []
@@ -2760,8 +2760,8 @@ describe('encodeWaitingReasons', () => {
 		);
 
 		expect(reasons.needsYou.map((group) => `${group.count} ${group.label}`)).toEqual([
-			'1 came out a different size than the goal',
-			"2 couldn't reach their media drive"
+			"1 didn't pass the final size check",
+			'2 had trouble reading or writing media'
 		]);
 		expect(reasons.waiting.map((group) => `${group.count} ${group.label}`)).toEqual([
 			'20 waiting for a scheduled time'
@@ -2786,7 +2786,7 @@ describe('encodeWaitingReasons', () => {
 			job([
 				{
 					reason: 'quality_floor_size_conflict',
-					label: 'need more space to keep their quality',
+					label: 'waiting for your OK to use more space',
 					count: 1,
 					needs_owner: true,
 					items: [],
