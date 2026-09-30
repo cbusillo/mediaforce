@@ -2290,7 +2290,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                     "progress_state": "encoding",
                     # A season still working while some of its files already need the owner.
                     "unfinished_breakdown": [
-                        {"reason": "quality_floor_size_conflict", "label": "size goal below quality floor",
+                        {"reason": "quality_floor_size_conflict", "label": "waiting for your OK to use more space",
                          "count": 1, "needs_owner": True, "owner_choice": False,
                          "items": ["tv/Encoding Show/Season 1/Episode 03.mkv"],
                          "size_questions": [
@@ -2298,15 +2298,15 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                               "rel_path": "tv/Encoding Show/Season 1/Episode 03.mkv",
                               "goal_bytes": 191_800_000, "smallest_quality_safe_bytes": 358_900_000},
                          ]},
-                        {"reason": "final_size_target_miss", "label": "outside size limit", "count": 1,
+                        {"reason": "final_size_target_miss", "label": "didn't pass the final size check", "count": 1,
                          "needs_owner": True, "items": ["tv/Encoding Show/Season 1/Episode 04.mkv"]},
-                        {"reason": "storage_io", "label": "storage error", "count": 1,
+                        {"reason": "storage_io", "label": "had trouble reading or writing media", "count": 1,
                          "needs_owner": True, "items": ["tv/Encoding Show/Season 1/Episode 06.mkv"]},
                         {"reason": "waiting_schedule", "label": "waiting for a scheduled time", "count": 5,
                          "needs_owner": False, "items": []},
-                        {"reason": "retrying", "label": "still retrying", "count": 1,
+                        {"reason": "retrying", "label": "trying again soon", "count": 1,
                          "needs_owner": False, "items": []},
-                        {"reason": "size_exception_declined", "label": "kept original, your choice",
+                        {"reason": "size_exception_declined", "label": "kept as the original, your choice",
                          "count": 1, "needs_owner": False, "owner_choice": True,
                          "items": ["tv/Encoding Show/Season 1/Episode 07.mkv"]},
                     ],
@@ -2326,7 +2326,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                         "summary": "Fixture encode missed the requested quality target.",
                     },
                     "unfinished_breakdown": [
-                        {"reason": "needs_review", "label": "need review", "count": 2,
+                        {"reason": "needs_review", "label": "waiting for you to take a look", "count": 2,
                          "needs_owner": True, "items": []},
                         {"reason": "stopped", "label": "stopped", "count": 1,
                          "needs_owner": True, "items": []},

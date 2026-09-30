@@ -20835,6 +20835,7 @@ raise SystemExit(0)
             ended = resync()
             ended_state = workflow_state_runtime._load_encode_job_state(connection, scope)
 
+        labels = encode_runtime._UNFINISHED_REASON_LABELS
         self.assertEqual(working["status"], "running")
         self.assertEqual(
             [
@@ -20842,9 +20843,9 @@ raise SystemExit(0)
                 for group in object_dict(working["progress"])["unfinished_breakdown"]
             ],
             [
-                ("outside size limit", 1, True),
+                (labels["final_size_target_miss"], 1, True),
                 ("longer than every work window", 1, True),
-                ("storage error", 1, True),
+                (labels["storage_io"], 1, True),
                 ("waiting for a scheduled time", 1, False),
             ],
         )
@@ -20854,8 +20855,8 @@ raise SystemExit(0)
                 "label": "Needs attention",
                 "tone": "warning",
                 "detail": (
-                    "1 outside size limit · 1 longer than every work window · 1 storage error · "
-                    "1 waiting for a scheduled time"
+                    f"1 {labels['final_size_target_miss']} · 1 longer than every work window · "
+                    f"1 {labels['storage_io']} · 1 waiting for a scheduled time"
                 ),
             },
         )
@@ -20863,8 +20864,8 @@ raise SystemExit(0)
             working_state,
             (
                 "processing",
-                "Encode job is running for tv/show. Needs you: 1 outside size limit · "
-                "1 longer than every work window · 1 storage error.",
+                f"Encode job is running for tv/show. Needs you: 1 {labels['final_size_target_miss']} · "
+                f"1 longer than every work window · 1 {labels['storage_io']}.",
             ),
         )
         # Recovery and retry still see the stored status; only the reading stays "working".
@@ -20873,14 +20874,18 @@ raise SystemExit(0)
             queued_left_state,
             (
                 "processing",
-                "Encode job is queued for tv/show. Needs you: 1 outside size limit · "
-                "1 longer than every work window · 1 storage error.",
+                f"Encode job is queued for tv/show. Needs you: 1 {labels['final_size_target_miss']} · "
+                f"1 longer than every work window · 1 {labels['storage_io']}.",
             ),
         )
         self.assertEqual(ended["status"], "needs_attention")
         self.assertEqual(
             ended_state,
-            ("attention", "Encode job is needs_attention for tv/show: 1 outside size limit · 1 storage error"),
+            (
+                "attention",
+                f"Encode job is needs_attention for tv/show: 1 {labels['final_size_target_miss']} · "
+                f"1 {labels['storage_io']}",
+            ),
         )
 
     def test_unfinished_breakdown_separates_waits_that_need_the_owner(self) -> None:

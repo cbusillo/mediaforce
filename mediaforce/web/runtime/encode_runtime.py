@@ -878,16 +878,16 @@ def aggregate_encode_parent_job(
 
 
 _UNFINISHED_REASON_LABELS = {
-    "retrying": "still retrying",
+    "retrying": "trying again soon",
     "stopped": "stopped",
-    "quality_floor_size_conflict": "size goal below quality floor",
-    "size_exception_declined": "kept original, your choice",
-    "final_size_target_miss": "outside size limit",
-    "controller_database_busy": "controller database busy",
-    "storage_io": "storage error",
+    "quality_floor_size_conflict": "waiting for your OK to use more space",
+    "size_exception_declined": "kept as the original, your choice",
+    "final_size_target_miss": "didn't pass the final size check",
+    "controller_database_busy": "hit a busy moment in Mediaforce",
+    "storage_io": "had trouble reading or writing media",
     "host_unavailable": "computer unavailable",
-    "ssh_transport": "connection failed",
-    "needs_review": "need review",
+    "ssh_transport": "couldn't connect to a computer",
+    "needs_review": "waiting for you to take a look",
 }
 # Queued files wait for the scheduler; group its sentences under short plain labels, first match
 # wins. Some waits only end when the owner acts, so they count as needing the owner. A reason that
