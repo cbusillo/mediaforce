@@ -452,12 +452,12 @@ describe('Ops workstation mapping', () => {
 					unfinished_breakdown: [
 						{
 							reason: 'quality_floor_size_conflict',
-							label: 'size goal below quality floor',
+							label: 'need more space to keep their quality',
 							count: 4,
 							items: []
 						},
 						{ reason: 'stopped', label: 'stopped', count: 4, items: [] },
-						{ reason: 'retrying', label: 'still retrying', count: 2, items: [] }
+						{ reason: 'retrying', label: 'trying again soon', count: 2, items: [] }
 					]
 				}
 			}
@@ -469,7 +469,7 @@ describe('Ops workstation mapping', () => {
 		);
 
 		expect(blocker?.detail).toBe(
-			'10 unfinished: 4 size goal below quality floor · 4 stopped · 2 still retrying'
+			'10 unfinished: 4 need more space to keep their quality · 4 stopped · 2 trying again soon'
 		);
 	});
 

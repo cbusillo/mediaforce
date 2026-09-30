@@ -1259,13 +1259,13 @@ describe('season experience translation', () => {
 			...card,
 			workflow_state: { ...card.workflow_state, primary_lane: 'processing' },
 			review_badge_label: 'Needs attention',
-			review_badge_detail: '1 storage error · 4 waiting for a scheduled time'
+			review_badge_detail: "1 couldn't reach their media drive · 4 waiting for a scheduled time"
 		} as FolderCard;
 
 		expect(librarySeasonState(working, dashboard)).toMatchObject({
 			key: 'making_season',
 			label: 'Compressing · needs you',
-			detail: '1 storage error · 4 waiting for a scheduled time'
+			detail: "1 couldn't reach their media drive · 4 waiting for a scheduled time"
 		});
 	});
 
@@ -2736,12 +2736,18 @@ describe('encodeWaitingReasons', () => {
 			job([
 				{
 					reason: 'final_size_target_miss',
-					label: 'outside size limit',
+					label: 'came out a different size than the goal',
 					count: 1,
 					needs_owner: true,
 					items: []
 				},
-				{ reason: 'storage_io', label: 'storage error', count: 2, needs_owner: true, items: [] },
+				{
+					reason: 'storage_io',
+					label: "couldn't reach their media drive",
+					count: 2,
+					needs_owner: true,
+					items: []
+				},
 				{
 					reason: 'waiting_schedule',
 					label: 'waiting for a scheduled time',
@@ -2749,13 +2755,13 @@ describe('encodeWaitingReasons', () => {
 					needs_owner: false,
 					items: []
 				},
-				{ reason: 'retrying', label: 'still retrying', count: 0, needs_owner: false, items: [] }
+				{ reason: 'retrying', label: 'trying again soon', count: 0, needs_owner: false, items: [] }
 			])
 		);
 
 		expect(reasons.needsYou.map((group) => `${group.count} ${group.label}`)).toEqual([
-			'1 outside size limit',
-			'2 storage error'
+			'1 came out a different size than the goal',
+			"2 couldn't reach their media drive"
 		]);
 		expect(reasons.waiting.map((group) => `${group.count} ${group.label}`)).toEqual([
 			'20 waiting for a scheduled time'
@@ -2767,7 +2773,7 @@ describe('encodeWaitingReasons', () => {
 		const reasons = encodeWaitingReasons(
 			job([
 				{ reason: 'stopped', label: 'stopped', count: 1, items: [] },
-				{ reason: 'retrying', label: 'still retrying', count: 1, items: [] }
+				{ reason: 'retrying', label: 'trying again soon', count: 1, items: [] }
 			])
 		);
 
@@ -2780,7 +2786,7 @@ describe('encodeWaitingReasons', () => {
 			job([
 				{
 					reason: 'quality_floor_size_conflict',
-					label: 'size goal below quality floor',
+					label: 'need more space to keep their quality',
 					count: 1,
 					needs_owner: true,
 					items: [],
@@ -2795,7 +2801,7 @@ describe('encodeWaitingReasons', () => {
 				},
 				{
 					reason: 'size_exception_declined',
-					label: 'kept original, your choice',
+					label: 'kept as the original, your choice',
 					count: 2,
 					needs_owner: false,
 					owner_choice: true,
@@ -2807,7 +2813,7 @@ describe('encodeWaitingReasons', () => {
 		expect(reasons.needsYou.map((group) => group.size_questions?.length)).toEqual([1]);
 		expect(reasons.waiting).toEqual([]);
 		expect(reasons.yourChoices.map((group) => `${group.count} ${group.label}`)).toEqual([
-			'2 kept original, your choice'
+			'2 kept as the original, your choice'
 		]);
 		expect(reasons.fileCount).toBe(3);
 	});
