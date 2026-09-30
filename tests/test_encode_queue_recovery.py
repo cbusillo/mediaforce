@@ -20124,6 +20124,16 @@ raise SystemExit(0)
         self.assertEqual(job["status"], "completed")
         self.assertEqual(job["attempt_count"], 2)
 
+    def test_run_encode_job_leaves_a_schedule_requeue_that_gave_the_attempt_back(self) -> None:
+        # A newer attempt was claimed and then requeued at schedule close, which returns its attempt.
+        job = self._run_worker_after_takeover(
+            "job-schedule-requeued",
+            {"status": "queued", "started_at": None, "worker_id": None, "lease_expires_at": None},
+        )
+
+        self.assertEqual(job["status"], "queued")
+        self.assertIsNone(job["started_at"])
+
     def _run_worker_after_takeover(self, job_id: str, takeover: dict[str, Any]) -> dict[str, Any]:
         source_path = self._create_source_file(f"{job_id}.mkv")
         with open_db(self.config.paths.db_path) as connection:

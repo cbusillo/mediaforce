@@ -1251,12 +1251,16 @@ def _worker_may_write_terminal_state(
         worker_id: str,
         *,
         claimed_attempt: int,
+        claimed_started_at: str,
         failure_kind: str | None,
 ) -> bool:
     """A worker writes its outcome unless another attempt now owns the job or a reclaim already requeued it."""
-    # Each claim counts an attempt, and a queue thread reuses its worker id, so the attempt number is what
-    # tells this attempt from a newer one, whether that one is still running or already finished.
-    if int_value(job.get("attempt_count")) != claimed_attempt:
+    # A queue thread reuses its worker id, and a schedule close gives an attempt back, so the attempt
+    # number and the claim's start time together tell this attempt from a newer one, running or finished.
+    if (
+            int_value(job.get("attempt_count")) != claimed_attempt
+            or str(job.get("started_at") or "") != claimed_started_at
+    ):
         return False
     status = str(job.get("status") or "")
     if status == "running":
@@ -3238,6 +3242,7 @@ def run_encode_job(
     heartbeat_stop = threading.Event()
     worker_id = str(job.get("worker_id") or _encode_job_worker_id())
     claimed_attempt = int_value(job.get("attempt_count"))
+    claimed_started_at = str(job.get("started_at") or "")
     heartbeat_thread = threading.Thread(
         target=encode_job_heartbeat_loop,
         kwargs={
@@ -3334,7 +3339,11 @@ def run_encode_job(
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             job = load_encode_job(connection, job_id)
             if job is not None and not _worker_may_write_terminal_state(
-                    job, worker_id, claimed_attempt=claimed_attempt, failure_kind=failure_kind,
+                    job,
+                    worker_id,
+                    claimed_attempt=claimed_attempt,
+                    claimed_started_at=claimed_started_at,
+                    failure_kind=failure_kind,
             ):
                 deps.logger.warning(
                     "Encode job %s is %s under %s; worker %s leaves its state as it is.",
