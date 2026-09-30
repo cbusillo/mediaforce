@@ -23003,6 +23003,36 @@ raise SystemExit(0)
                 update(library_items).where(library_items.c.id == item_id).values(cadence_summary_json=cleared_summary)
             )
 
+    def test_paused_background_work_still_admits_files_whose_evidence_is_current(self) -> None:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_ids["Episode 2.mkv"])
+                .values(cadence_summary_json=None)
+            )
+            set_background_work_paused(connection, is_paused=True)
+        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show/Season 1"))
+        saved_jobs: list[dict[str, Any]] = []
+
+        result = self._queue_show_folder(queue_config, saved_jobs, calibration=calibration)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self._queued_manifest_item_ids(saved_jobs), [item_ids["Episode 1.mkv"]])
+        self.assertEqual(
+            {entry["library_item_id"]: entry["code"] for entry in result["left_out"]},
+            {item_ids["Episode 2.mkv"]: "cadence_analysis_unavailable"},
+        )
+        self.assertEqual(set(self._hold_rows()), {item_ids["Episode 2.mkv"]})
+        with open_db(self.config.paths.db_path) as connection:
+            queued_evidence = connection.execute(
+                select(library_item_evidence_state.c.library_item_id).where(
+                    library_item_evidence_state.c.work_status.in_(("queued", "running")),
+                )
+            ).scalars().all()
+        self.assertEqual(queued_evidence, [])
+
     def test_queue_folder_records_a_hold_for_each_file_waiting_on_its_check(self) -> None:
         _config, item_ids, _calibration, _jobs = self._held_episode_fixture()
 
