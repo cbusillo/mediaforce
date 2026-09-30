@@ -110,10 +110,17 @@ whole SSH command. Stopping the local SSH client does not stop the run on the
 computer, so Mediaforce then runs a short stop step there. From one process
 listing it collects every process whose command line names the run's own
 scoped temp folder (`.mediaforce-ab-av1-<id>`, passed as an argument and
-matched as fixed text) plus all their descendants, stops them first politely
-and then forcibly, and reports success only when a fresh listing shows nothing
-naming the folder and none of the collected processes still running. A failed
-or empty process listing never counts as success.
+matched as a whole path, so `<folder>0` is not it) plus all their descendants,
+stops those processes first politely and then forcibly, and reports success
+only when a fresh listing shows nothing naming the folder and none of the
+collected processes still running. It never signals a whole process group,
+because nothing proves a group belongs only to this run. A failed or empty
+process listing never counts as success.
+
+ab-av1's ffmpeg children write into the folder, so their own command lines
+name it. A process that neither names the folder nor descends from one that
+does is not seen. Confirming that ab-av1's children behave this way is part of
+the owner-watched session on a real encode computer.
 
 - Shown stopped: the temp folder is removed as usual, and an encode records
   `remote_quality_timeout` and retries within its normal attempt limit. The
