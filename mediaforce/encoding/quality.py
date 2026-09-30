@@ -888,7 +888,7 @@ def _cleanup_scoped_quality_temp_dir(scoped_temp_dir: Path | None, *, host: dict
             return f"Failed to remove local quality temp dir {scoped_temp_dir}: {exc}"
         return None
     try:
-        cleanup_host = object_dict(host)
+        cleanup_host = dict(object_dict(host))
         cleanup_host.pop(SCHEDULE_CLOSE_DEADLINE_KEY, None)
         result = run_remote_command(
             cleanup_host,

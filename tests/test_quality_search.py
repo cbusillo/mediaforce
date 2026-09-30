@@ -7,6 +7,7 @@ from unittest.mock import ANY, Mock, patch
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
 from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY
 from mediaforce.encoding.quality import (
+    _cleanup_scoped_quality_temp_dir,
     CONTAINMENT_UNPROVEN_FAILURE_KIND,
     QualitySearchResult,
     QualitySearchWarmStart,
@@ -556,6 +557,19 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
                 temp_dir = next(cmd[2] for _, cmd, _ in calls if cmd[0] == "mkdir")
                 self.assertEqual(calls[-1][1], ["rm", "-rf", temp_dir])
                 self.assertNotIn(["sh", "-c"], [cmd[:2] for _, cmd, _ in calls])
+
+    def test_removing_the_remote_temp_folder_keeps_the_callers_schedule_deadline(self) -> None:
+        host = dict(self.HOST)
+        with patch(
+                "mediaforce.encoding.quality.run_remote_command",
+                return_value=subprocess.CompletedProcess(["ssh"], 0, "", ""),
+        ) as run_remote:
+            cleanup_error = _cleanup_scoped_quality_temp_dir(Path("/remote/quality/.mediaforce-ab-av1-x"), host=host)
+
+        self.assertIsNone(cleanup_error)
+        self.assertNotIn(SCHEDULE_CLOSE_DEADLINE_KEY, run_remote.call_args.args[0])
+        self.assertEqual(host, self.HOST)
+
 
 if __name__ == "__main__":
     unittest.main()
