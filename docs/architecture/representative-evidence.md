@@ -58,6 +58,13 @@ seasons, video formats, and resolutions no measured file shares, and
 any such group is untested. This adds information only; per-file quality checks
 and approval scope are unchanged.
 
+The season review decision shows the `coverage_summary` stored with the sample
+under review (`calibration.sample_item.representative_selection`), not the
+folder's current selection. Once production starts, the current selection
+describes only the files still left and may test a different file. Samples
+recorded before coverage was measured show no summary, and an exact-episode
+review never shows one.
+
 Coverage reports:
 
 - selected, measured, represented, and exact-profile item counts and runtime

@@ -32,6 +32,7 @@ from mediaforce.encoding.cadence import reclassify_cadence_summary
 from mediaforce.library.evidence_queue import start_evidence_work
 from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
 from mediaforce.library.planner import build_manifest_item
+from mediaforce.library.representatives import select_representatives
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.folder_tuning_advice import (
     calibration_draft_hash,
@@ -618,6 +619,7 @@ def _write_review_sample_state(
     accepted: bool = False,
     target_mode: str | None = None,
     target_megabytes: float | None = None,
+    untested_sibling: dict[str, Any] | None = None,
 ) -> None:
     row = rows_by_prefix[prefix]
     policy = json.loads(json.dumps(config.resolve_policy(row["rel_path"])))
@@ -662,6 +664,15 @@ def _write_review_sample_state(
     sample_item["resolved_policy"] = policy
     source_id = stable_source_id(sample_item)
     sample_item["representative_source_id"] = source_id
+    if untested_sibling is not None:
+        # Record the selection as it stood when the sample was chosen, with one file it did not test.
+        sibling_row: dict[str, Any] = {**row, "id": None, "library_item_id": None, **untested_sibling}
+        sibling_row["source_path"] = str(Path(str(row["source_path"])).with_name(str(sibling_row["file_name"])))
+        sibling_item = build_manifest_item(sibling_row, config)
+        selection = select_representatives([sample_item, sibling_item], prefix=prefix, policy=policy)
+        if selection.payload["primary_source_id"] != source_id:
+            raise RuntimeError(f"Fixture sample for {prefix} is not the tested file")
+        sample_item["representative_selection"] = selection.public_payload()
     evidence_ids = [
         str(sample_item["cadence_decision"]["evidence_id"]),
         str(sample_item["media_fingerprint_decision"]["evidence_id"]),
@@ -841,6 +852,14 @@ def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]])
         review_slug="web-smoke-review-ready",
         predicted_total_size_bytes=398_000_000,
         quality_score=96.2,
+        untested_sibling={
+            "rel_path": "tv/Review Ready/Season 1/Episode 02.mkv",
+            "file_name": "Episode 02.mkv",
+            "fingerprint": "fixture:tv/Review Ready/Season 1/Episode 02.mkv",
+            "video_codec": "hevc",
+            "width": 3840,
+            "height": 2160,
+        },
     )
     _write_review_sample_state(
         config,
@@ -2623,6 +2642,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/tv/Review%20Ready/Season%201",
                 "marker": "Review Ready",
                 "stageMarker": "Full screen",
+            },
+            {
+                "label": "Folder Studio sample-coverage fixture",
+                "route": "/folders/tv/Review%20Ready/Season%201",
+                "marker": "Review Ready",
+                "stageMarker": "Not yet tested: HEVC (H.265) video, 4K.",
             },
             {
                 "label": "Folder Studio exact-item review-ready fixture",

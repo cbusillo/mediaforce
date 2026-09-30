@@ -54,6 +54,7 @@ import {
 	reviewFeedbackIntent,
 	reviewFeedbackRequest,
 	reviewAdjustmentIntent,
+	reviewedSampleCoverage,
 	reviewSizeAdjustment,
 	scopedEncodeProgress,
 	seasonIdentity,
@@ -2196,6 +2197,50 @@ describe('season experience translation', () => {
 				})
 			)
 		).toEqual(request);
+	});
+
+	it('reads coverage from the selection stored with the reviewed sample', () => {
+		const summary = 'Tested 1 of 22 files. Not yet tested: Season 3, HEVC (H.265) video.';
+		expect(
+			reviewedSampleCoverage(
+				folder({
+					representative_selection: {
+						coverage_summary:
+							'Tested 1 of 1 file. No season, video format, or resolution here is untested.'
+					},
+					calibration: {
+						sample_item: {
+							representative_selection: {
+								coverage_summary: summary,
+								coverage: {
+									untested_groups: [
+										{ kind: 'season', value: '3', label: 'Season 3', item_count: 6 },
+										{
+											kind: 'video_format',
+											value: 'hevc',
+											label: 'HEVC (H.265) video',
+											item_count: 4
+										}
+									]
+								}
+							}
+						}
+					}
+				})
+			)
+		).toEqual({ summary, hasUntestedGroups: true });
+	});
+
+	it('shows no coverage for a sample recorded before coverage was measured', () => {
+		expect(
+			reviewedSampleCoverage(
+				folder({
+					calibration: {
+						sample_item: { representative_selection: { confidence: { level: 'low' } } }
+					}
+				})
+			)
+		).toBeNull();
 	});
 
 	it('uses the frozen calibration intent for completed test interpretation', () => {

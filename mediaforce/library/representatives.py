@@ -744,7 +744,7 @@ def _untested_groups(
     for kind, group_key, label in (
             ("season", _season_group, _season_label),
             ("video_format", _video_format_group, _video_format_label),
-            ("resolution", _resolution_group, str),
+            ("resolution", _resolution_group, _resolution_label),
     ):
         tested_values = {group_key(candidate) for candidate in measured}
         counts = Counter(
@@ -780,13 +780,17 @@ def _video_format_group(candidate: _Candidate) -> str | None:
 
 
 def _video_format_label(value: str) -> str:
-    labels = {"h264": "H.264", "hevc": "HEVC", "mpeg2video": "MPEG-2", "vc1": "VC-1"}
+    labels = {"h264": "H.264", "hevc": "HEVC (H.265)", "mpeg2video": "MPEG-2", "vc1": "VC-1"}
     return f"{labels.get(value, value.upper())} video"
 
 
 def _resolution_group(candidate: _Candidate) -> str | None:
     resolution = candidate.profile["resolution"]
     return None if resolution == _UNKNOWN_PROFILE_VALUE else resolution
+
+
+def _resolution_label(value: str) -> str:
+    return "4K" if value == "2160p" else value
 
 
 def _group_sort_key(kind: str, value: str) -> tuple[int, str]:
