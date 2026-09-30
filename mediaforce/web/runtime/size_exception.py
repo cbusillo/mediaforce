@@ -16,7 +16,8 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.encode_queue import load_encode_job, save_encode_job
-from mediaforce.web.runtime.encode_runtime import apply_quality_floor_size_exception, size_exception_question
+from mediaforce.web.runtime.encode_runtime import apply_quality_floor_size_exception, restore_manifest_item, \
+    size_exception_question
 from mediaforce.web.runtime.folder_actions import active_encode_library_item_ids
 
 SyncParentFn = Callable[[DBClient, dict[str, Any]], Any]
@@ -33,15 +34,21 @@ def decide_size_exception(
         sync_parent: SyncParentFn,
 ) -> dict[str, Any]:
     connection.exec_driver_sql("BEGIN IMMEDIATE")
+    restore: list[Callable[[], None]] = []
     try:
-        result = _decide(connection, job_id, allow=allow, now_iso=now_iso, sync_parent=sync_parent)
+        result = _decide(
+            connection, job_id, allow=allow, now_iso=now_iso, sync_parent=sync_parent, on_rollback=restore.append,
+        )
+        if result["ok"]:
+            connection.commit()
+            return result
     except Exception:
         connection.rollback()
+        # The answer was not recorded, so the file's manifest item must not keep the exception either.
+        for undo in restore:
+            undo()
         raise
-    if result["ok"]:
-        connection.commit()
-    else:
-        connection.rollback()
+    connection.rollback()
     return result
 
 
@@ -52,6 +59,7 @@ def _decide(
         allow: bool,
         now_iso: Callable[[], str],
         sync_parent: SyncParentFn,
+        on_rollback: Callable[[Callable[[], None]], None],
 ) -> dict[str, Any]:
     child = load_encode_job(connection, str(job_id or "").strip())
     question = size_exception_question(child) if child is not None else None
@@ -59,15 +67,26 @@ def _decide(
         return {"ok": False, "message": NOT_WAITING_MESSAGE}
     progress = dict(object_dict(child.get("progress")))
     analysis = dict(object_dict(progress.get("failure_analysis")))
-    library_item_id = _library_item_id(child, int_value(analysis.get("manifest_index")))
+    manifest_path = Path(str(child.get("manifest_path") or ""))
+    index = int_value(analysis.get("manifest_index"))
+    original_item = _manifest_item(manifest_path, index)
+    library_item_id = int_value(original_item.get("library_item_id"))
     name = Path(question["rel_path"]).name
     if allow:
-        active_item_ids = active_encode_library_item_ids(connection, str(child.get("prefix") or ""))
+        # The file's own folder run is still active while its siblings encode; only its active parts count.
+        active_item_ids = active_encode_library_item_ids(
+            connection,
+            str(child.get("prefix") or ""),
+            exclude_job_ids={str(child.get("parent_job_id") or "")} - {""},
+        )
         if active_item_ids is None or library_item_id in active_item_ids:
             return {
                 "ok": False,
                 "message": f"{name} is already queued again, so this answer would make it twice.",
             }
+        if not original_item:
+            return {"ok": False, "message": NOT_WAITING_MESSAGE}
+        on_rollback(lambda: restore_manifest_item(manifest_path, index, original_item))
         if not apply_quality_floor_size_exception(child, analysis, owner_approved=True):
             return {
                 "ok": False,
@@ -128,12 +147,12 @@ def _decide(
     }
 
 
-def _library_item_id(job: dict[str, Any], index: int) -> int:
+def _manifest_item(manifest_path: Path, index: int) -> dict[str, Any]:
     try:
-        manifest = json.loads(Path(str(job.get("manifest_path") or "")).read_text())
+        manifest = json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError):
-        return 0
+        return {}
     items = object_list(object_dict(manifest).get("items"))
     if not 0 <= index < len(items):
-        return 0
-    return int_value(object_dict(items[index]).get("library_item_id"))
+        return {}
+    return object_dict(items[index])

@@ -2431,6 +2431,71 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(analysis["owner_size_decision"]["answer"], "allow")
         self.assertEqual(len(events), 1)
 
+    def _floor_conflict_shard_under_running_folder(self, connection: DBClient, name: str) -> dict[str, Any]:
+        child, _manifest_path = self._quality_floor_conflict_job(connection, name, best_reachable_bytes=400_000_000)
+        assert child is not None
+        parent = {
+            **child,
+            "job_id": f"folder-{name}",
+            "job_kind": "folder",
+            "parent_job_id": None,
+            "status": "running",
+            "manifest_indexes": None,
+            "progress": {},
+            "error": None,
+            "finished_at": None,
+        }
+        save_encode_job(connection, parent)
+        child = {**child, "job_kind": "shard", "parent_job_id": parent["job_id"], "manifest_indexes": [0]}
+        save_encode_job(connection, child)
+        connection.commit()
+        return child
+
+    def test_allowing_a_larger_size_is_not_blocked_by_its_own_running_folder(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._floor_conflict_shard_under_running_folder(connection, "floor-under-folder")
+            result = self._decide_size(connection, "job-floor-under-folder", allow=True)
+            updated = load_encode_job(connection, "job-floor-under-folder")
+
+        self.assertTrue(result["ok"], result)
+        assert updated is not None
+        self.assertEqual(updated["status"], "queued")
+
+    def test_allowing_a_larger_size_refuses_a_file_another_active_part_holds(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            child = self._floor_conflict_shard_under_running_folder(connection, "floor-held")
+            save_encode_job(connection, {**child, "job_id": "job-floor-held-again", "status": "queued"})
+            connection.commit()
+            result = self._decide_size(connection, "job-floor-held", allow=True)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("already queued again", result["message"])
+
+    def test_a_failed_allow_puts_the_file_manifest_item_back(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            _updated, manifest_path = self._quality_floor_conflict_job(
+                connection, "floor-allow-fails", best_reachable_bytes=400_000_000,
+            )
+            before = json.loads(manifest_path.read_text())["items"][0]
+
+            def failing_sync(_connection: DBClient, _child: dict[str, Any]) -> None:
+                raise RuntimeError("parent sync failed")
+
+            with self.assertRaises(RuntimeError):
+                decide_size_exception(
+                    connection,
+                    "job-floor-allow-fails",
+                    allow=True,
+                    now_iso=lambda: "2026-09-29T23:00:00+00:00",
+                    sync_parent=failing_sync,
+                )
+            updated = load_encode_job(connection, "job-floor-allow-fails")
+
+        self.assertEqual(json.loads(manifest_path.read_text())["items"][0], before)
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertIsNotNone(encode_runtime.size_exception_question(updated))
+
     def test_owner_keeping_the_original_leaves_the_file_listed_and_unchanged(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             _updated, manifest_path = self._quality_floor_conflict_job(

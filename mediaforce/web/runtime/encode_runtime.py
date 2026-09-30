@@ -1895,6 +1895,14 @@ def _quality_policy_retry_caps_by_index(
     return {indexes[0]: proposed_cap} if proposed_cap > 0 else {}
 
 
+def restore_manifest_item(manifest_path: Path, index: int, item: dict[str, Any]) -> None:
+    """Put one manifest item back as it was, leaving every sibling's later updates in place."""
+    with _locked_manifest_file(manifest_path):
+        manifest = json.loads(manifest_path.read_text())
+        manifest["items"][index] = item
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
 @contextmanager
 def _locked_manifest_file(manifest_path: Path) -> Iterator[None]:
     lock_path = manifest_path.with_suffix(f"{manifest_path.suffix}.lock")
