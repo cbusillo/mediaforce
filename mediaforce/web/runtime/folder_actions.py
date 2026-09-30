@@ -951,10 +951,12 @@ def queue_folder_encode_action(
                 )
                 for item_id in sorted(set(final_size_miss_indexes.values()))
             )
+        selection = object_dict(manifest.get("selection"))
+        # Files accepted later can join this run under the same mode; see ambiguous_motion.
+        selection["queue_mode"] = hold_mode
         if production_approval_contract is not None:
-            selection = object_dict(manifest.get("selection"))
             selection["production_approval_contract"] = production_approval_contract
-            manifest["selection"] = selection
+        manifest["selection"] = selection
         if older_season_selection is not None and older_season_cadence_partition is not None:
             manifest_item_ids = {
                 int(item.get("library_item_id") or 0)

@@ -1949,7 +1949,9 @@ def create_app(
         blocker = production_action_blocker(config, normalized_prefix)
         if blocker is not None:
             return blocker
-        return accept_ambiguous_motion_action(config, normalized_prefix, now_iso=_now_iso())
+        return accept_ambiguous_motion_action(
+            config, normalized_prefix, now_iso=_now_iso(), current_approval=_held_files_current_approval,
+        )
 
     def _approve_measured_encode_recovery_action(
             normalized_prefix: str,

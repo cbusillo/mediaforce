@@ -22989,7 +22989,10 @@ raise SystemExit(0)
             ).to_payload()
 
         accepted = ambiguous_motion_runtime.accept_ambiguous_motion_action(
-            queue_config, "tv/show", now_iso=web_app._now_iso(),
+            queue_config,
+            "tv/show",
+            now_iso=web_app._now_iso(),
+            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
         )
         joined_jobs: list[dict[str, Any]] = []
         production_holds_runtime.join_cleared_held_files(
@@ -23023,6 +23026,147 @@ raise SystemExit(0)
         self.assertTrue(joined_manifest["items"][0]["cadence_decision"]["owner_accepted_as_is"])
         self.assertEqual(set(self._hold_rows()), {item_ids["Episode 3.mkv"]})
 
+    def _accepted_episode_never_held(self, *, save_run: bool) -> tuple[MediaforceConfig, dict[str, int], dict[str, Any]]:
+        """Season 1 queued once with Episode 2 left out for its motion pattern, but no hold kept for it."""
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv")
+            base = json.loads(str(connection.execute(
+                select(library_items.c.cadence_summary_json).where(library_items.c.id == item_ids["Episode 1.mkv"])
+            ).scalar_one()))
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_ids["Episode 2.mkv"])
+                .values(cadence_summary_json=json.dumps(
+                    self._measured_cadence(base, progressive=450, undetermined=153), separators=(",", ":"),
+                ))
+            )
+        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show/Season 1"))
+        first_jobs: list[dict[str, Any]] = []
+        self._queue_show_folder(queue_config, first_jobs, calibration=calibration)
+        with open_db(self.config.paths.db_path) as connection:
+            if save_run:
+                save_encode_job(connection, {
+                    **next(job for job in first_jobs if job["job_kind"] == "folder"), "status": "completed",
+                })
+            connection.execute(delete(production_holds))
+        return queue_config, item_ids, calibration
+
+    def test_accepted_episode_no_run_held_joins_production_without_queueing_the_show_again(self) -> None:
+        queue_config, item_ids, calibration = self._accepted_episode_never_held(save_run=True)
+        approval = production_holds_runtime.approval_identity(calibration, None)
+
+        accepted = ambiguous_motion_runtime.accept_ambiguous_motion_action(
+            queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: approval,
+        )
+        holds = self._hold_rows()
+        joined_jobs: list[dict[str, Any]] = []
+        production_holds_runtime.join_cleared_held_files(
+            lambda: open_db(self.config.paths.db_path),
+            current_approval=lambda _prefix: approval,
+            queue_held_files=lambda group: self._queue_show_folder(
+                queue_config, joined_jobs, calibration=calibration, only_library_item_ids=group.library_item_ids,
+            ),
+            now_iso=web_app._now_iso,
+        )
+
+        self.assertEqual(accepted["accepted_count"], 1)
+        self.assertIn("It joins production once nothing else is encoding in the show.", accepted["message"])
+        hold = holds[item_ids["Episode 2.mkv"]]
+        self.assertEqual(
+            (hold["prefix"], hold["mode"], hold["approval_identity"], hold["status"]),
+            # The run was queued with the season override, so the file joins it the same way.
+            ("tv/show/Season 1", "season_override", approval, "waiting"),
+        )
+        self.assertEqual(self._queued_manifest_item_ids(joined_jobs), [item_ids["Episode 2.mkv"]])
+
+    def test_accepted_episode_joins_a_season_override_run_queued_before_modes_were_recorded(self) -> None:
+        queue_config, item_ids, _calibration = self._accepted_episode_never_held(save_run=True)
+        with open_db(self.config.paths.db_path) as connection:
+            run = load_latest_encode_job(connection, "tv/show")
+        assert run is not None
+        manifest_path = Path(str(run["manifest_path"]))
+        manifest = json.loads(manifest_path.read_text())
+        manifest["selection"].pop("queue_mode")
+        manifest_path.write_text(json.dumps(manifest))
+
+        ambiguous_motion_runtime.accept_ambiguous_motion_action(
+            queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: "approval",
+        )
+
+        self.assertTrue(any(
+            item["selection_provenance"]["manual_override"] for item in manifest["items"]
+        ))
+        self.assertEqual(self._hold_rows()[item_ids["Episode 2.mkv"]]["mode"], "season_override")
+
+    def test_accepted_episode_joins_the_newest_run_that_covers_it_not_the_show_latest(self) -> None:
+        queue_config, item_ids, _calibration = self._accepted_episode_never_held(save_run=True)
+        with open_db(self.config.paths.db_path) as connection:
+            season_1_run = load_latest_encode_job(connection, "tv/show")
+            assert season_1_run is not None
+            save_encode_job(connection, {
+                **season_1_run,
+                "job_id": "season-2-run",
+                "prefix": "tv/show/Season 2",
+                "created_at": "2999-01-01T00:00:00+00:00",
+            })
+
+        accepted = ambiguous_motion_runtime.accept_ambiguous_motion_action(
+            queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: "approval",
+        )
+
+        self.assertIn("It joins production once nothing else is encoding", accepted["message"])
+        self.assertEqual(self._hold_rows()[item_ids["Episode 2.mkv"]]["prefix"], "tv/show/Season 1")
+
+    def test_accepted_episode_joins_an_older_seasons_run_only_for_a_season_it_included(self) -> None:
+        for season, expected_mode in (("tv/show/Season 1", "older_seasons"), ("tv/show/Season 2", None)):
+            with self.subTest(season=season):
+                queue_config, item_ids, _calibration = self._accepted_episode_never_held(save_run=True)
+                with open_db(self.config.paths.db_path) as connection:
+                    run = load_latest_encode_job(connection, "tv/show")
+                    connection.execute(delete(encode_jobs))
+                assert run is not None
+                manifest_path = Path(str(run["manifest_path"]))
+                manifest = json.loads(manifest_path.read_text())
+                manifest["selection"]["lifecycle_override"] = {
+                    "mode": "older_seasons", "included_season_prefixes": [season],
+                }
+                # A run queued before its mode was recorded shows older seasons only through this selection.
+                manifest["selection"].pop("queue_mode", None)
+                manifest_path.write_text(json.dumps(manifest))
+                with open_db(self.config.paths.db_path) as connection:
+                    save_encode_job(connection, run)
+
+                ambiguous_motion_runtime.accept_ambiguous_motion_action(
+                    queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: "approval",
+                )
+                holds = self._hold_rows()
+
+                self.assertEqual(
+                    holds[item_ids["Episode 2.mkv"]]["mode"] if expected_mode else holds,
+                    expected_mode or {},
+                )
+                with open_db(self.config.paths.db_path) as connection:
+                    connection.execute(delete(production_holds))
+                    connection.execute(delete(encode_jobs))
+                    connection.execute(delete(library_items))
+
+    def _assert_accepted_episode_waits_for_the_next_queue(self, *, save_run: bool, approval: str | None) -> None:
+        queue_config, _item_ids, _calibration = self._accepted_episode_never_held(save_run=save_run)
+
+        accepted = ambiguous_motion_runtime.accept_ambiguous_motion_action(
+            queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: approval,
+        )
+
+        self.assertIn("It joins production the next time you queue the show", accepted["message"])
+        self.assertEqual(self._hold_rows(), {})
+
+    def test_accepted_episode_with_no_run_says_it_joins_at_the_next_queue(self) -> None:
+        self._assert_accepted_episode_waits_for_the_next_queue(save_run=False, approval="any-approval")
+
+    def test_accepted_episode_whose_run_lost_its_approval_says_it_joins_at_the_next_queue(self) -> None:
+        self._assert_accepted_episode_waits_for_the_next_queue(save_run=True, approval=None)
+
     def test_show_offers_the_as_is_decision_before_stored_evidence_is_refreshed(self) -> None:
         queue_config = self._complete_queue_config()
         with open_db(self.config.paths.db_path) as connection:
@@ -23050,7 +23194,7 @@ raise SystemExit(0)
 
         with self.assertRaises(HTTPException) as raised:
             ambiguous_motion_runtime.accept_ambiguous_motion_action(
-                queue_config, "tv/show/Season 1", now_iso=web_app._now_iso(),
+                queue_config, "tv/show/Season 1", now_iso=web_app._now_iso(), current_approval=lambda _prefix: None,
             )
 
         self.assertEqual(raised.exception.status_code, 400)
