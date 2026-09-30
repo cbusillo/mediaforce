@@ -2232,7 +2232,7 @@ def release_host_cooldowns(connection: DBClient, host: Mapping[str, Any], *, upd
     if not _host_identity_tokens(identity):
         return 0
     rows = connection.execute(
-        select(encode_jobs.c.job_id, encode_jobs.c.last_host_json)
+        select(encode_jobs.c.job_id, encode_jobs.c.last_host_json, encode_jobs.c.host_cooldown_until)
         .where(encode_jobs.c.host_cooldown_until.is_not(None))
     ).mappings().fetchall()
     released = 0
@@ -2241,16 +2241,21 @@ def release_host_cooldowns(connection: DBClient, host: Mapping[str, Any], *, upd
         if not _host_identity_matches(last_host, identity):
             continue
         last_host.pop("failure_streak", None)
-        connection.execute(
+        # Only the cooldown that was read is released: a failure a worker records meanwhile stays.
+        result = connection.execute(
             update(encode_jobs)
-            .where(encode_jobs.c.job_id == row["job_id"])
+            .where(
+                encode_jobs.c.job_id == row["job_id"],
+                encode_jobs.c.host_cooldown_until == row["host_cooldown_until"],
+                encode_jobs.c.last_host_json == row["last_host_json"],
+            )
             .values(
                 host_cooldown_until=None,
                 last_host_json=json.dumps(persisted_encode_host_payload(last_host), sort_keys=True),
                 updated_at=updated_at,
             )
         )
-        released += 1
+        released += result.rowcount
     return released
 
 

@@ -3580,6 +3580,33 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(first["status"], "retry_backoff")
         self.assertEqual(still_cooling["host_cooldown_until"], other["host_cooldown_until"])
 
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_releasing_a_computer_keeps_a_failure_recorded_after_it_was_read(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._computer_setup_failure(connection, "episode-ready-race", attempt_count=1)
+            real_execute = connection.execute
+            raced: list[bool] = []
+
+            def execute_with_fresh_failure(statement: Any, *args: Any, **kwargs: Any) -> Any:
+                if getattr(statement, "is_update", False) and not raced:
+                    raced.append(True)
+                    real_execute(
+                        update(encode_jobs)
+                        .where(encode_jobs.c.job_id == "job-episode-ready-race")
+                        .values(host_cooldown_until="2999-01-01T00:00:00+00:00")
+                    )
+                return real_execute(statement, *args, **kwargs)
+
+            with patch.object(connection, "execute", side_effect=execute_with_fresh_failure):
+                released = encode_runtime.release_host_cooldowns(
+                    connection, {"key": "remote-a"}, updated_at=web_app._now_iso(),
+                )
+            job = load_encode_job(connection, "job-episode-ready-race")
+
+        self.assertEqual(released, 0)
+        assert job is not None
+        self.assertEqual(job["host_cooldown_until"], "2999-01-01T00:00:00+00:00")
+
     def test_cleanup_on_a_share_that_stopped_answering_is_deferred_not_crashed(self) -> None:
         staging_path = self._staging_path("episode-dead-mount.mkv")
 
