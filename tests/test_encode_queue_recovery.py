@@ -3606,6 +3606,95 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         assert host_payload is not None, waiting_reason
         self.assertEqual(host_payload["key"], "mounted-b")
 
+    def _remote_quality_timeout_failure(
+            self,
+            connection: DBClient,
+            name: str,
+            *,
+            attempt_count: int,
+    ) -> tuple[dict[str, Any], str]:
+        source_path = self._create_source_file(f"{name}.mkv")
+        item_id = self._insert_library_item(connection, source_path, status="encoding")
+        self._write_manifest(
+            f"manifest-{name}.json",
+            [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
+        )
+        self._save_job(
+            connection,
+            job_id=f"job-{name}",
+            manifest_name=f"manifest-{name}.json",
+            host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+            status="running",
+            attempt_count=attempt_count,
+        )
+        job = load_encode_job(connection, f"job-{name}")
+        assert job is not None
+        exc = encoding_quality.RemoteQualityTimeoutError(
+            phase="crf_search",
+            timeout_seconds=encoding_quality.REMOTE_QUALITY_TIMEOUT_SECONDS,
+            host_key="remote-a",
+            host_label="Remote A",
+        )
+        web_app._transition_encode_job_failure(
+            connection,
+            self.config,
+            job,
+            failure_kind=encode_runtime._classify_encode_failure(exc, job),
+            error_message=encoding_quality.quality_error_message(exc),
+        )
+        updated = load_encode_job(connection, f"job-{name}")
+        assert updated is not None
+        return updated, str(exc)
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_remote_quality_timeout_retries_that_file_away_from_the_computer_that_may_still_run_it(self) -> None:
+        deps = web_app._encode_queue_runtime_deps()
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD):
+                updated, plain_message = self._remote_quality_timeout_failure(
+                    connection, f"episode-quality-timeout-{index}", attempt_count=1,
+                )
+            blocked = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertEqual(updated["last_failure_kind"], encoding_quality.RemoteQualityTimeoutError.failure_kind)
+        self.assertEqual(updated["error"], f"{plain_message} {encode_runtime.REMOTE_QUALITY_TIMEOUT_RETRY_NOTE}")
+        self.assertIsNotNone(updated["host_cooldown_until"])
+        self.assertEqual(updated["last_host"]["key"], "remote-a")
+        # Other files may still use that computer; only this file stays off it for a while.
+        self.assertEqual(blocked, {})
+
+        def host(key: str, priority: int) -> dict[str, Any]:
+            return {
+                "key": key, "host": key, "label": key.title(), "mode": "ssh", "media_access": "mounted",
+                "priority": priority, "capabilities": ["encode_queue"], "available": True, "probe_available": True,
+                "active_encode_count": 0, "max_parallel_encodes": 1, "queue_active": True,
+            }
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._host_runtime_rows", return_value=[host("remote-a", 90), host("mounted-b", 70)],
+        ):
+            host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, updated)
+
+        assert host_payload is not None, waiting_reason
+        self.assertEqual(host_payload["key"], "mounted-b")
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_remote_quality_timeout_at_the_attempt_cap_goes_to_the_owner_in_plain_words(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated, plain_message = self._remote_quality_timeout_failure(
+                connection,
+                "episode-quality-timeout-last",
+                attempt_count=web_app._encode_queue_runtime_deps().encode_job_max_attempts,
+            )
+
+        failure_kind = encoding_quality.RemoteQualityTimeoutError.failure_kind
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
+        self.assertEqual(updated["error"], f"{plain_message} {encode_runtime.REMOTE_QUALITY_TIMEOUT_EXHAUSTED_NOTE}")
+        reason, label, needs_owner = encode_runtime._unfinished_child_reason(updated)
+        self.assertEqual((reason, label, needs_owner), (failure_kind, encode_runtime._UNFINISHED_REASON_LABELS[failure_kind], True))
+
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_a_computer_that_passes_its_readiness_check_takes_work_again_at_once(self) -> None:
         deps = web_app._encode_queue_runtime_deps()
