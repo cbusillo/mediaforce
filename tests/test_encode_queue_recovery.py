@@ -13147,6 +13147,76 @@ raise SystemExit(0)
                 validation["checks"],
             )
 
+    def _validate_with_prediction(
+            self,
+            name: str,
+            *,
+            staged_bytes: int,
+            stored_validation: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        source_path = self._create_source_file(f"{name}.mkv")
+        staging_path = self._staging_path(f"{name}.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_bytes(b"x" * staged_bytes)
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        staged_probe = ProbeSummary(
+            duration_seconds=60.0, video_codec="av1", video_bitrate=900000, width=1920, height=1080,
+            pix_fmt="yuv420p10le", audio_track_count=1, subtitle_track_count=0, english_audio_count=1,
+            english_subtitle_count=0, default_audio_language="eng", default_subtitle_language=None,
+            audio_summary_json="[]", subtitle_summary_json="[]",
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(validation_json=json.dumps(stored_validation))
+            )
+            item = {"library_item_id": item_id, "source_size_bytes": 10_000, "duration_seconds": 60.0, "subtitle_summary": []}
+            with patch("mediaforce.execution.probe_media", return_value=staged_probe):
+                validation = execution.validate_one_item(connection, self.config, item)
+                again = execution.validate_one_item(connection, self.config, item)
+        return validation, again
+
+    def test_validation_holds_a_file_far_smaller_than_its_sample_predicted(self) -> None:
+        trace = {"target_size_trace": {"selected_candidate": {"predicted_whole_episode_bytes": 1_000}}}
+        threshold = staging_runtime.FAR_BELOW_PREDICTION_RATIO
+        held, held_again = self._validate_with_prediction(
+            "far-below", staged_bytes=int(1_000 * threshold) - 1, stored_validation=trace,
+        )
+        fine, _ = self._validate_with_prediction(
+            "near-prediction", staged_bytes=int(1_000 * threshold), stored_validation=trace,
+        )
+
+        self.assertFalse(held["passed"])
+        self.assertIn({"passed": False, "message": staging_runtime.FAR_BELOW_PREDICTION_CHECK}, held["checks"])
+        self.assertEqual(held["size_prediction"]["predicted_bytes"], 1_000)
+        self.assertTrue(held["size_prediction"]["held"])
+        # The first check replaced the stored trace; the prediction still carries into the next check.
+        self.assertTrue(held_again["size_prediction"]["held"])
+        self.assertTrue(fine["passed"], fine["checks"])
+        self.assertFalse(fine["size_prediction"]["held"])
+
+    def test_validation_compares_a_retry_with_its_calibrated_prediction(self) -> None:
+        trace = {"target_size_trace": {"selected_candidate": {
+            "predicted_whole_episode_bytes": 2_000, "calibrated_predicted_whole_episode_bytes": 1_000,
+        }}}
+
+        validation, _ = self._validate_with_prediction("retry-calibrated", staged_bytes=800, stored_validation=trace)
+
+        self.assertEqual(validation["size_prediction"]["source"], "calibrated")
+        self.assertFalse(validation["size_prediction"]["held"])
+
+    def test_validation_lets_through_a_file_the_owner_kept(self) -> None:
+        kept = {"size_prediction": {"predicted_bytes": 1_000, "source": "sample", "owner_kept_at": "2026-09-30T12:00:00+00:00"}}
+
+        validation, _ = self._validate_with_prediction("owner-kept", staged_bytes=300, stored_validation=kept)
+
+        self.assertTrue(validation["passed"], validation["checks"])
+        self.assertFalse(validation["size_prediction"]["held"])
+        self.assertEqual(validation["size_prediction"]["owner_kept_at"], "2026-09-30T12:00:00+00:00")
+
     def test_validate_one_item_accepts_under_target_result_for_perceptual_floor(self) -> None:
         source_path = self._create_source_file("episode-under-target-accepted.mkv")
         staging_path = self._staging_path("episode-under-target-accepted.mkv")

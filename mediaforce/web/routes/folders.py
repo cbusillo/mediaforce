@@ -45,6 +45,7 @@ def register_folder_routes(
         checked_output_preview_payload: Callable[[str], dict[str, Any]] | None = None,
         checked_output_preview_stream_action: Callable[[str, str | None], Response] | None = None,
         accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
+        decide_size_held_action: Callable[[str, int, bool], dict[str, Any]] | None = None,
 ) -> None:
     staged_integrity_payload = folder_staged_integrity_payload or (lambda _prefix, _offset, _limit: {})
     preview_payload = checked_output_preview_payload or (
@@ -193,6 +194,19 @@ def register_folder_routes(
             str(body.get("scope_membership_token", "")),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    if decide_size_held_action is not None:
+        decide_size_held = decide_size_held_action
+
+        @app.post("/api/folders/{prefix:path}/size-held-decision")
+        async def api_folder_size_held_decision(prefix: str, request: Request) -> JSONResponse:
+            body = await _request_body(request)
+            item_id = body.get("library_item_id")
+            keep = body.get("keep")
+            if isinstance(item_id, bool) or not isinstance(item_id, int) or item_id <= 0 or not isinstance(keep, bool):
+                raise HTTPException(status_code=400, detail="Name one file and whether to keep it.")
+            result = await run_in_threadpool(decide_size_held, prefix.strip("/"), item_id, keep)
+            return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/save-profile")
     async def api_folder_save_profile(prefix: str, request: Request) -> JSONResponse:

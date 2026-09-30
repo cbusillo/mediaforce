@@ -1488,6 +1488,7 @@ def validate_folder_outputs_action(
         load_folder_staged_items_fn: LoadFolderStagedItemsFn,
         validate_manifest_items_fn: ValidateManifestItemsFn,
         validate_scope_action: ValidateScopeActionFn | None = None,
+        only_library_item_ids: Collection[int] | None = None,
 ) -> ActionPayload:
     production_blocker = production_action_blocker(config, normalized_prefix)
     if production_blocker is not None:
@@ -1513,6 +1514,9 @@ def validate_folder_outputs_action(
             normalized_prefix,
             statuses={"encoded"},
         )
+        if only_library_item_ids is not None:
+            only_ids = {int(item_id) for item_id in only_library_item_ids}
+            items = [item for item in items if int_value(item.get("library_item_id")) in only_ids]
         busy_count = sum(1 for item in items if int_value(item.get("library_item_id")) in active_item_ids)
         items = [item for item in items if int_value(item.get("library_item_id")) not in active_item_ids]
         if not items:

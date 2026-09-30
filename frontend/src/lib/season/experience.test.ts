@@ -59,6 +59,7 @@ import {
 	seasonIdentity,
 	seasonEpisodeNavigationUnavailable,
 	seasonPromotionIntegrity,
+	sizeHeldRecords,
 	seasonEpisodeOptions,
 	sampleSearchTechnicalDetail,
 	stagedEpisodeLinks,
@@ -2830,5 +2831,31 @@ describe('encodeWaitingReasons', () => {
 			yourChoices: [],
 			fileCount: 0
 		});
+	});
+});
+
+describe('sizeHeldRecords', () => {
+	const record = (overrides: Record<string, unknown>) => ({
+		disposition: 'size_held',
+		item_id: 7,
+		rel_path: 'tv/Show/Season 1/Small.mkv',
+		staging_path: '/staging/Small.mkv',
+		code: 'staged_integrity_size_held',
+		next_action: 'keep_or_remake_output',
+		detail: 'The finished file is far smaller than its sample predicted and waits for the owner.',
+		size_prediction: { predicted_bytes: 262_000_000, actual_bytes: 172_000_000, ratio: 0.656 },
+		...overrides
+	});
+
+	it('asks only about files held for their size that the owner can act on', () => {
+		const integrity = {
+			records: [
+				record({}),
+				record({ item_id: 8, disposition: 'validation_failed', size_prediction: undefined }),
+				record({ item_id: null })
+			]
+		} as unknown as Parameters<typeof sizeHeldRecords>[0];
+
+		expect(sizeHeldRecords(integrity).map((held) => held.item_id)).toEqual([7]);
 	});
 });

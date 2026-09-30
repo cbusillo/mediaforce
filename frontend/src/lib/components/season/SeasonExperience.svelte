@@ -7,6 +7,7 @@
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import SeasonIntegrityPanel from '$lib/components/season/SeasonIntegrityPanel.svelte';
 	import WaitingReasons from '$lib/components/season/WaitingReasons.svelte';
+	import SizeHeldQuestions from '$lib/components/season/SizeHeldQuestions.svelte';
 	import TargetDefaultEvidence from '$lib/components/TargetDefaultEvidence.svelte';
 	import StateBadge from '$lib/components/workstation/StateBadge.svelte';
 	import type {
@@ -71,6 +72,7 @@
 		seasonNumberLabel,
 		seasonEpisodeNavigationUnavailable,
 		seasonPromotionIntegrity,
+		sizeHeldRecords,
 		seasonEpisodeOptions,
 		stagedEpisodeLinks,
 		shouldPrioritizeScopeActivity,
@@ -1103,6 +1105,20 @@
 
 	function episodeFileName(relPath: string): string {
 		return relPath.split('/').at(-1) ?? relPath;
+	}
+
+	async function decideSizeHeld(libraryItemId: number, keep: boolean) {
+		const fallback = 'We couldn’t record that decision about this file.';
+		await runAction('deciding', fallback, async () => {
+			const response = ensureOk(
+				await postJson<ActionResponse>(endpoint('size-held-decision'), {
+					library_item_id: libraryItemId,
+					keep
+				}),
+				fallback
+			);
+			actionMessage = response.message || '';
+		});
 	}
 
 	async function decideSize(jobId: string, allow: boolean) {
@@ -2978,6 +2994,11 @@
 						{/each}
 					</div>
 				{/if}
+				<SizeHeldQuestions
+					records={sizeHeldRecords(promotionIntegrity)}
+					busy={actionPhase !== 'idle'}
+					onDecision={decideSizeHeld}
+				/>
 				{#if stagedAccessBlocked && storageRecoveryHost}
 					<button
 						class="primary-button"
@@ -3034,7 +3055,12 @@
 						? 'The current original moves to the cleanup folder so it can be recovered later.'
 						: 'The current originals move to the cleanup folder so they can be recovered later.'}
 				</p>
-				<SeasonIntegrityPanel integrity={promotionIntegrity} tone="ready" />
+				<SeasonIntegrityPanel
+					integrity={promotionIntegrity}
+					tone="ready"
+					busy={actionPhase !== 'idle'}
+					onSizeHeldDecision={decideSizeHeld}
+				/>
 				<button class="primary-button" type="button" onclick={finishSeason}>
 					{promotionIntegrity.readyCount === 1
 						? 'Replace the original episode'
@@ -3053,7 +3079,12 @@
 					folder until an episode is ready.
 				</p>
 				{#if promotionIntegrity.available}
-					<SeasonIntegrityPanel integrity={promotionIntegrity} tone="blocked" />
+					<SeasonIntegrityPanel
+						integrity={promotionIntegrity}
+						tone="blocked"
+						busy={actionPhase !== 'idle'}
+						onSizeHeldDecision={decideSizeHeld}
+					/>
 				{:else if promotionIntegrity.error}
 					<div class="integrity-loading integrity-loading--error" role="alert">
 						<strong

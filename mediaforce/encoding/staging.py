@@ -56,6 +56,10 @@ class PromotionWaiting(RuntimeError):
 class PromotionRestoreError(RuntimeError):
     """A failed promotion could not put its files back, so an original may be out of place."""
 PRIOR_REPAIR_RECONCILE_MTIME_SLACK_SECONDS = 300
+# A finished file below this share of the size its sample predicted waits for the owner instead of being
+# published (owner decision on #633: 70%). Across 516 production encodes, one file fell below it.
+FAR_BELOW_PREDICTION_RATIO = 0.70
+FAR_BELOW_PREDICTION_CHECK = "staged file is not far smaller than its sample predicted"
 
 
 def _retry_transient_file_busy(operation: Callable[[], Any]) -> Any:
@@ -152,6 +156,42 @@ def _float_or_none(value: str) -> float | None:
         return float(value)
     except ValueError:
         return None
+
+
+def staged_size_prediction(stored_validation: dict[str, Any], staged_size_bytes: int) -> dict[str, Any] | None:
+    """How the finished file compares with the size its selected sample predicted, or None without one.
+
+    The prediction comes from the encode's target-size trace, the calibrated one after a final-size retry,
+    and is carried forward on every later check along with the owner's decision to keep the file.
+    """
+    carried = object_dict(stored_validation.get("size_prediction"))
+    predicted_bytes = int_value(carried.get("predicted_bytes"))
+    source = str(carried.get("source") or "")
+    if predicted_bytes <= 0:
+        selected = object_dict(object_dict(stored_validation.get("target_size_trace")).get("selected_candidate"))
+        calibrated_bytes = int_value(selected.get("calibrated_predicted_whole_episode_bytes"))
+        predicted_bytes = calibrated_bytes or int_value(selected.get("predicted_whole_episode_bytes"))
+        source = "calibrated" if calibrated_bytes > 0 else "sample"
+    if predicted_bytes <= 0 or staged_size_bytes <= 0:
+        return None
+    ratio = staged_size_bytes / predicted_bytes
+    owner_kept_at = str(carried.get("owner_kept_at") or "") or None
+    return {
+        "predicted_bytes": predicted_bytes,
+        "source": source,
+        "actual_bytes": staged_size_bytes,
+        "ratio": round(ratio, 4),
+        "threshold": FAR_BELOW_PREDICTION_RATIO,
+        "owner_kept_at": owner_kept_at,
+        "held": ratio < FAR_BELOW_PREDICTION_RATIO and owner_kept_at is None,
+    }
+
+
+def _stored_validation(row: Any) -> dict[str, Any]:
+    try:
+        return object_dict(json.loads(str(row.get("validation_json") or "{}")))
+    except json.JSONDecodeError:
+        return {}
 
 
 def validate_one_item(
@@ -273,6 +313,11 @@ def validate_one_item(
             accepted_under_target or final_lower_bound_bytes <= staged_size_bytes <= final_upper_bound_bytes,
             "staged file satisfies the approved final size contract",
         )
+
+    size_prediction = staged_size_prediction(_stored_validation(row), staged_size_bytes)
+    if size_prediction is not None:
+        validation["size_prediction"] = size_prediction
+        check(validation, not size_prediction["held"], FAR_BELOW_PREDICTION_CHECK)
 
     if source_duration_seconds > 0:
         check(validation, staged_duration_seconds > 0, "staged file duration is readable")

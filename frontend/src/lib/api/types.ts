@@ -1716,6 +1716,7 @@ export type StagedIntegrityDisposition =
 	| 'tracked'
 	| 'unvalidated'
 	| 'validation_failed'
+	| 'size_held'
 	| 'missing'
 	| 'drifted'
 	| 'orphaned'
@@ -1738,6 +1739,14 @@ export interface StagedIntegrityRecord {
 	code: string;
 	next_action: string;
 	detail: string;
+	/** Present when the file is held for coming out far smaller than its sample predicted. */
+	size_prediction?: StagedSizePrediction;
+}
+
+export interface StagedSizePrediction {
+	predicted_bytes: number;
+	actual_bytes: number;
+	ratio: number;
 }
 
 export interface StagedIntegrityPayload {

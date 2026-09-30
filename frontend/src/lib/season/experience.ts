@@ -83,6 +83,10 @@ const INTEGRITY_COPY: Record<StagedIntegrityDisposition, { label: string; nextAc
 		label: 'Check failed',
 		nextAction: 'Inspect the failed file and compress a clean replacement.'
 	},
+	size_held: {
+		label: 'Much smaller than expected',
+		nextAction: 'Keep it, or make it again.'
+	},
 	missing: {
 		label: 'Compressed file missing',
 		nextAction: 'Compress this episode again.'
@@ -157,6 +161,14 @@ export function stagedIntegrityDispositionCopy(disposition: StagedIntegrityDispo
 			label: 'Needs attention',
 			nextAction: 'Inspect this staged file before finishing the season.'
 		}
+	);
+}
+
+/** Files held for coming out far smaller than their sample predicted; each asks the owner to keep it or make it again. */
+export function sizeHeldRecords(integrity: SeasonPromotionIntegrity): StagedIntegrityRecord[] {
+	return integrity.records.filter(
+		(record) =>
+			record.disposition === 'size_held' && record.item_id !== null && record.size_prediction
 	);
 }
 

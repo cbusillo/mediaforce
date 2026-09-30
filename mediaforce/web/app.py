@@ -191,6 +191,7 @@ from mediaforce.web.routes.queues import (
 )
 from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_child_recovery
 from mediaforce.web.runtime.size_exception import decide_size_exception
+from mediaforce.web.runtime.size_held import decide_size_held_file
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
 from mediaforce.web.runtime.folder_actions import production_approval_identity
 from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
@@ -2014,6 +2015,45 @@ def create_app(
             ),
         )
 
+    def _decide_size_held_action(normalized_prefix: str, library_item_id: int, keep: bool) -> ActionPayload:
+        blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
+
+        def validate_items(prefix: str, item_ids: Collection[int]) -> ActionPayload:
+            return validate_folder_outputs_action(
+                config,
+                prefix,
+                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+                load_folder_staged_items_fn=_load_folder_staged_items,
+                validate_manifest_items_fn=validate_manifest_items,
+                only_library_item_ids=item_ids,
+            )
+
+        def queue_items(prefix: str, mode: str, item_ids: Collection[int]) -> ActionPayload:
+            try:
+                return _queue_encode_action(
+                    prefix,
+                    "Made again after the owner looked at a file far smaller than predicted.",
+                    False,
+                    override_policy_holds=mode == HOLD_MODE_SEASON_OVERRIDE,
+                    override_older_seasons=mode == HOLD_MODE_OLDER_SEASONS,
+                    older_seasons_confirmed=mode == HOLD_MODE_OLDER_SEASONS,
+                    only_library_item_ids=tuple(item_ids),
+                )
+            except HTTPException as exc:
+                return {"ok": False, "message": str(exc.detail)}
+
+        return decide_size_held_file(
+            config,
+            normalized_prefix,
+            library_item_id,
+            keep=keep,
+            now_iso=_now_iso,
+            validate_items=validate_items,
+            queue_items=queue_items,
+        )
+
     def _promote_folder_outputs_action(
             normalized_prefix: str,
             scope_membership_token: str = "",
@@ -2255,6 +2295,7 @@ def create_app(
         queue_older_seasons_encode_action=_queue_older_seasons_encode_action,
         validate_folder_outputs_action=_validate_folder_outputs_action,
         promote_folder_outputs_action=_promote_folder_outputs_action,
+        decide_size_held_action=_decide_size_held_action,
         save_profile_action=_save_profile_action,
     )
     register_child_recovery_routes(app, recover_children_action=_recover_children_action)
