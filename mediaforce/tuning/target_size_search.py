@@ -2099,10 +2099,18 @@ def _candidate_matches_size_intent(
 ) -> bool:
     if candidate.within_sample_band:
         return True
-    return bool(
-        compression_intent.accepts_under_target_result
-        and candidate.predicted_whole_episode_bytes is not None
-        and 0 < candidate.predicted_whole_episode_bytes <= upper_bound_bytes
+    if candidate.predicted_whole_episode_bytes is None or not (
+            0 < candidate.predicted_whole_episode_bytes <= upper_bound_bytes
+    ):
+        return False
+    if compression_intent.accepts_under_target_result:
+        return True
+    # A size goal is a budget: under `balanced`, a sample below the goal that already meets the quality
+    # target is what the final check keeps, so measuring more only to climb back toward the goal wastes work.
+    return (
+        not compression_intent.requires_confirmation
+        and compression_intent.level == "balanced"
+        and 0 < candidate.metric_target <= candidate.metric_score
     )
 
 

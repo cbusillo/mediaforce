@@ -30,7 +30,10 @@ class TargetSizeSearchTests(unittest.TestCase):
         for level, confirmed, score, accepted in (
                 ("perceptual_floor", True, 90.0, True),
                 ("transparent", True, 90.0, True),
-                ("balanced", True, 90.0, False),
+                # Balanced keeps an under-goal sample once it meets the quality target, as the final check does.
+                ("balanced", True, 90.0, True),
+                ("balanced", True, 82.0, False),
+                ("balanced", False, 90.0, False),
                 ("reference", True, 90.0, False),
                 ("perceptual_floor", False, 90.0, False),
                 ("perceptual_floor", True, 79.0, False),
