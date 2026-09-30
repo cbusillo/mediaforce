@@ -18,8 +18,8 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.helpers import resolve_item_source_path
-from mediaforce.encoding.quality import default_local_quality_temp_root, quality_error_message, \
-    resolve_local_quality_temp_root
+from mediaforce.encoding.quality import RemoteQualityTimeoutError, default_local_quality_temp_root, \
+    quality_error_message, resolve_local_quality_temp_root
 from mediaforce.encoding.video_filters import build_video_filter, planned_output_dimensions
 from mediaforce.hosts.config import host_media_access_for_host, host_targets_current_machine
 from mediaforce.remote import execution_mode_for_host
@@ -608,6 +608,26 @@ def run_calibration_job(
                     "result": {
                         "target_size_status": exc.status,
                         "target_size_trace": exc.trace,
+                    },
+                },
+            )
+    except RemoteQualityTimeoutError as exc:
+        terminal_status = "failed"
+        with open_db(config.paths.db_path) as connection:
+            deps.save_job_state(
+                connection,
+                config,
+                prefix,
+                {
+                    **job,
+                    "job_id": job_id,
+                    "status": "failed",
+                    "finished_at": deps.now_iso(),
+                    "error": quality_error_message(exc),
+                    "result": {
+                        "failure_kind": exc.failure_kind,
+                        "failure_message": str(exc),
+                        "host_key": exc.host_key,
                     },
                 },
             )

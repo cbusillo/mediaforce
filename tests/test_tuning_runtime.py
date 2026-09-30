@@ -50,6 +50,7 @@ from mediaforce.core.db_tables import tuning_sessions
 from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.type_defs import object_dict
+from mediaforce.encoding.quality import REMOTE_QUALITY_TIMEOUT_SECONDS, RemoteQualityTimeoutError
 from mediaforce.execution import resolve_stream_budget_ledger
 from mediaforce.hosts.types import HostReadinessError, HostStatus
 from mediaforce.tuning.tuning_memory import (
@@ -9161,7 +9162,6 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
     def test_run_calibration_job_preserves_failed_target_search_evidence(self) -> None:
-        saved_payloads: list[dict[str, object]] = []
         trace = {
             "schema_version": 1,
             "status": "quality_conflict",
@@ -9175,6 +9175,37 @@ class TuningRuntimeTests(unittest.TestCase):
             "curve": {"shape": "monotonic", "candidate_count": 3, "max_candidates": 6},
         }
 
+        failed = self._run_calibration_job_with_failing_quality_search(
+            TargetSizeSearchError(
+                "No candidate met both the target band and quality floor.",
+                status="quality_conflict",
+                trace=trace,
+            )
+        )
+
+        self.assertEqual(
+            failed["result"],
+            {"target_size_status": "quality_conflict", "target_size_trace": trace},
+        )
+
+    def test_run_calibration_job_records_a_remote_quality_timeout_in_plain_words(self) -> None:
+        timeout = RemoteQualityTimeoutError(
+            phase="sample_encode",
+            timeout_seconds=REMOTE_QUALITY_TIMEOUT_SECONDS,
+            host_key="remote-a",
+            host_label="Remote A",
+        )
+
+        failed = self._run_calibration_job_with_failing_quality_search(timeout)
+
+        self.assertEqual(failed["error"], str(timeout))
+        self.assertEqual(
+            failed["result"],
+            {"failure_kind": timeout.failure_kind, "failure_message": str(timeout), "host_key": "remote-a"},
+        )
+
+    def _run_calibration_job_with_failing_quality_search(self, quality_error: Exception) -> dict[str, object]:
+        saved_payloads: list[dict[str, object]] = []
         deps = CalibrationRunDeps(
             now_iso=lambda: "2026-04-11T00:00:00+00:00",
             ensure_sample_host_ready=lambda _config, host_data: _ready_calibration_host(host_data),
@@ -9198,13 +9229,7 @@ class TuningRuntimeTests(unittest.TestCase):
             summarize_calibration_result=lambda payload: payload,
             calibration_mode_for_action=lambda _action: "sample",
             effective_video_preset=lambda *_args, **_kwargs: 4,
-            search_quality_for_source=lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                TargetSizeSearchError(
-                    "No candidate met both the target band and quality floor.",
-                    status="quality_conflict",
-                    trace=trace,
-                )
-            ),
+            search_quality_for_source=lambda *_args, **_kwargs: (_ for _ in ()).throw(quality_error),
             run_sample_encode=lambda *_args, **_kwargs: None,
             detect_video_crop=lambda *_args, **_kwargs: None,
             recommend_review_timestamps=lambda *_args, **_kwargs: [],
@@ -9244,11 +9269,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 deps=deps,
             )
 
-        failed = next(payload for payload in saved_payloads if payload.get("status") == "failed")
-        self.assertEqual(
-            failed["result"],
-            {"target_size_status": "quality_conflict", "target_size_trace": trace},
-        )
+        return next(payload for payload in saved_payloads if payload.get("status") == "failed")
 
     def test_run_calibration_job_uses_saved_job_sample_item_before_reselecting(self) -> None:
         saved_statuses: list[str] = []
