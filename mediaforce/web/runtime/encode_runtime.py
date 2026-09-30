@@ -206,7 +206,7 @@ def reconcile_encode_jobs(
         failure_message = (
             "Encode queue job was interrupted by a web process restart."
             if restart_recovery
-            else "Encode queue job stopped heartbeating and was reclaimed for retry."
+            else STALE_LEASE_RECLAIM_MESSAGE
         )
         payload = _claim_stale_encode_job(
             connection,
@@ -330,6 +330,11 @@ def reconcile_encode_jobs(
 
 
 LIVE_WORKER_PROGRESS_GRACE = timedelta(minutes=10)
+STALE_LEASE_RECLAIM_MESSAGE = "Encode queue job stopped heartbeating and was reclaimed for retry."
+
+
+class ReclaimCancelledError(ProcessCancelledError):
+    """The lease reclaim ended this worker; the job retries instead of stopping for the owner."""
 
 
 def _renew_lease_for_live_worker(
@@ -346,20 +351,26 @@ def _renew_lease_for_live_worker(
         return False
     progress_at = deps.parse_iso(object_dict(payload.get("progress")).get("updated_at"))
     started_at = deps.parse_iso(payload.get("started_at"))
-    last_sign_of_life = max((value for value in (progress_at, started_at) if value is not None), default=None)
+    # A heartbeat that landed late still proves the worker is alive; only a long silence ends it.
+    heartbeat_at = deps.parse_iso(payload.get("heartbeat_at"))
+    last_sign_of_life = max(
+        (value for value in (progress_at, started_at, heartbeat_at) if value is not None),
+        default=None,
+    )
     if last_sign_of_life is None or now - last_sign_of_life > LIVE_WORKER_PROGRESS_GRACE:
         deps.logger.error(
             "Encode job %s lost its lease and its worker has been silent since %s; ending its encoder before reclaim.",
             job_id, last_sign_of_life,
         )
-        controller.cancel()
+        controller.cancel(ReclaimCancelledError(STALE_LEASE_RECLAIM_MESSAGE))
         return False
     claimed = _claim_stale_encode_job(connection, job_id, deps, restart_recovery=False)
     if claimed is None:
         return True
+    # Only the lease moves: heartbeat_at stays the worker's own evidence, so a renewal never counts
+    # as a sign of life on the next check.
     claimed.update(
         {
-            "heartbeat_at": deps.now_iso(),
             "lease_expires_at": _encode_job_lease_expires_at(deps),
             "updated_at": deps.now_iso(),
         }
@@ -1089,6 +1100,7 @@ def transition_encode_job_schedule_close(
         deps: EncodeQueueRuntimeDeps,
         *,
         expected_worker_id: str | None = None,
+        expected_started_at: str | None = None,
 ) -> bool:
     if str(job.get("status") or "") != "running" or bool(job.get("bypass_schedule")):
         return False
@@ -1105,6 +1117,10 @@ def transition_encode_job_schedule_close(
         connection.rollback()
         return False
     if expected_worker_id is not None and str(current_job.get("worker_id") or "") != expected_worker_id:
+        connection.rollback()
+        return False
+    # A queue thread reuses its worker id, so the claim's start time shows whether this is still its attempt.
+    if expected_started_at is not None and str(current_job.get("started_at") or "") != expected_started_at:
         connection.rollback()
         return False
     job = current_job
@@ -1227,6 +1243,36 @@ def _encode_job_outputs_completed(connection: DBClient, job: dict[str, Any]) -> 
         ) and not staging_path.exists():
             return False
     return True
+
+
+def _encode_job_outputs_completed_by_id(config: MediaforceConfig, job_id: str) -> bool:
+    with open_db(config.paths.db_path) as connection:
+        current_job = load_encode_job(connection, job_id)
+        return current_job is not None and _encode_job_outputs_completed(connection, current_job)
+
+
+def _worker_may_write_terminal_state(
+        job: Mapping[str, Any],
+        worker_id: str,
+        *,
+        claimed_attempt: int,
+        claimed_started_at: str,
+        failure_kind: str | None,
+) -> bool:
+    """A worker writes its outcome unless another attempt now owns the job or a reclaim already requeued it."""
+    # A queue thread reuses its worker id, and a schedule close gives an attempt back, so the attempt
+    # number and the claim's start time together tell this attempt from a newer one, running or finished.
+    if (
+            int_value(job.get("attempt_count")) != claimed_attempt
+            or str(job.get("started_at") or "") != claimed_started_at
+    ):
+        return False
+    status = str(job.get("status") or "")
+    if status == "running":
+        return str(job.get("worker_id") or "") in {"", worker_id}
+    # The reclaim has already recorded this stale lease and scheduled the retry; recording it twice
+    # would spend a second attempt.
+    return failure_kind != "stale_lease"
 
 
 def transition_encode_job_failure(
@@ -3200,6 +3246,8 @@ def run_encode_job(
 
     heartbeat_stop = threading.Event()
     worker_id = str(job.get("worker_id") or _encode_job_worker_id())
+    claimed_attempt = int_value(job.get("attempt_count"))
+    claimed_started_at = str(job.get("started_at") or "")
     heartbeat_thread = threading.Thread(
         target=encode_job_heartbeat_loop,
         kwargs={
@@ -3260,14 +3308,15 @@ def run_encode_job(
     except ScheduleWindowClosedError:
         schedule_interrupted = True
         error = SCHEDULE_CLOSE_ERROR_MESSAGE
+    except ReclaimCancelledError:
+        if _encode_job_outputs_completed_by_id(config, job_id):
+            final_status = "completed"
+            error = None
+        else:
+            failure_kind = "stale_lease"
+            error = STALE_LEASE_RECLAIM_MESSAGE
     except ProcessCancelledError:
-        with open_db(config.paths.db_path) as completion_connection:
-            current_job = load_encode_job(completion_connection, job_id)
-            outputs_completed = (
-                current_job is not None
-                and _encode_job_outputs_completed(completion_connection, current_job)
-            )
-        if outputs_completed:
+        if _encode_job_outputs_completed_by_id(config, job_id):
             final_status = "completed"
             error = None
         else:
@@ -3289,8 +3338,23 @@ def run_encode_job(
         heartbeat_stop.set()
         heartbeat_thread.join()
         with open_db(config.paths.db_path) as connection:
+            # Hold the write lock from the ownership check to the write, so a retry claimed in between
+            # cannot be overwritten.
+            connection.commit()
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
             job = load_encode_job(connection, job_id)
-            if job is not None:
+            if job is not None and not _worker_may_write_terminal_state(
+                    job,
+                    worker_id,
+                    claimed_attempt=claimed_attempt,
+                    claimed_started_at=claimed_started_at,
+                    failure_kind=failure_kind,
+            ):
+                deps.logger.warning(
+                    "Encode job %s is %s under %s; worker %s leaves its state as it is.",
+                    job_id, job.get("status"), job.get("worker_id"), worker_id,
+                )
+            elif job is not None:
                 if schedule_interrupted:
                     transition_encode_job_schedule_close(
                         connection,
@@ -3298,6 +3362,7 @@ def run_encode_job(
                         job,
                         deps,
                         expected_worker_id=worker_id,
+                        expected_started_at=claimed_started_at,
                     )
                 elif final_status is not None:
                     last_host = object_dict(job.get("last_host"))
