@@ -25,7 +25,7 @@ from mediaforce.core.db_tables import item_events, library_items, production_hol
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, accept_cadence_as_is, cadence_as_is_eligible, \
     cadence_measurement_complete, reclassify_cadence_summary
 from mediaforce.library.evidence_state import sync_library_item_evidence_state
-from mediaforce.encoding.encode_queue import load_latest_encode_job
+from mediaforce.encoding.encode_queue import list_recent_encode_jobs_for_prefix
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.web.runtime.left_out_files import LeftOutFile
@@ -168,10 +168,11 @@ def _hold_for_production(
         current_approval: Callable[[str], str | None],
         now_iso: str,
 ) -> int:
-    """Hold each accepted file no run holds yet under the show's latest approved run; return how many were not.
+    """Hold each accepted file no run holds yet under the newest approved run covering it; return how many were not.
 
     A run covers a file when the file is inside its scope and, for an older-seasons run, in a season that run
-    included. The hold carries the approval that scope has now, so the sweep only queues the file under it.
+    included. The hold carries the run's mode and the approval its scope has now, so the sweep only queues
+    the file the same way under that approval.
     """
     held_ids = set(
         connection.execute(
@@ -181,28 +182,54 @@ def _hold_for_production(
     unheld = [row for row in rows if int(row["id"]) not in held_ids]
     if not unheld:
         return 0
-    run = load_latest_encode_job(connection, show_prefix)
-    run_prefix = str((run or {}).get("prefix") or "").strip()
-    approval = current_approval(run_prefix) if run_prefix else None
-    if run is None or approval is None:
-        return len(unheld)
-    older_seasons = object_dict(object_dict(_manifest(run).get("selection")).get("lifecycle_override"))
-    included_seasons = [str(value) for value in object_list(older_seasons.get("included_season_prefixes"))]
-    covered = [
-        row
-        for row in unheld
-        if path_matches_scope(str(row["rel_path"]), run_prefix)
-        and (not older_seasons or any(path_matches_scope(str(row["rel_path"]), season) for season in included_seasons))
+    runs = [
+        run
+        for run in (_ProductionRun.from_job(job, current_approval) for job in list_recent_encode_jobs_for_prefix(
+            connection, show_prefix,
+        ))
+        if run is not None
     ]
-    record_holds(
-        connection,
-        prefix=run_prefix,
-        mode=MODE_OLDER_SEASONS if older_seasons else MODE_FOLDER,
-        approval=approval,
-        files=[LeftOutFile(int(row["id"]), str(row["rel_path"]), "cadence_unresolved", "") for row in covered],
-        now_iso=now_iso,
-    )
-    return len(unheld) - len(covered)
+    not_covered = 0
+    for row in unheld:
+        run = next((run for run in runs if run.covers(str(row["rel_path"]))), None)
+        if run is None:
+            not_covered += 1
+            continue
+        record_holds(
+            connection,
+            prefix=run.prefix,
+            mode=run.mode,
+            approval=run.approval,
+            files=[LeftOutFile(int(row["id"]), str(row["rel_path"]), "cadence_unresolved", "")],
+            now_iso=now_iso,
+        )
+    return not_covered
+
+
+@dataclass(frozen=True, slots=True)
+class _ProductionRun:
+    prefix: str
+    mode: str
+    approval: str
+    included_seasons: tuple[str, ...] | None
+
+    @classmethod
+    def from_job(cls, job: Mapping[str, Any], current_approval: Callable[[str], str | None]) -> "_ProductionRun | None":
+        prefix = str(job.get("prefix") or "").strip()
+        approval = current_approval(prefix) if prefix else None
+        if approval is None:
+            return None
+        selection = object_dict(_manifest(job).get("selection"))
+        older_seasons = object_dict(selection.get("lifecycle_override"))
+        # Runs queued before the mode was recorded: an older-season selection is the only other mode they show.
+        mode = str(selection.get("queue_mode") or (MODE_OLDER_SEASONS if older_seasons else MODE_FOLDER))
+        included = tuple(str(value) for value in object_list(older_seasons.get("included_season_prefixes")))
+        return cls(prefix, mode, approval, included if older_seasons else None)
+
+    def covers(self, rel_path: str) -> bool:
+        if not path_matches_scope(rel_path, self.prefix):
+            return False
+        return self.included_seasons is None or any(path_matches_scope(rel_path, season) for season in self.included_seasons)
 
 
 def _manifest(job: Mapping[str, Any]) -> dict[str, Any]:

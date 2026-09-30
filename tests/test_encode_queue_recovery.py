@@ -23075,9 +23075,29 @@ raise SystemExit(0)
         hold = holds[item_ids["Episode 2.mkv"]]
         self.assertEqual(
             (hold["prefix"], hold["mode"], hold["approval_identity"], hold["status"]),
-            ("tv/show/Season 1", "folder", approval, "waiting"),
+            # The run was queued with the season override, so the file joins it the same way.
+            ("tv/show/Season 1", "season_override", approval, "waiting"),
         )
         self.assertEqual(self._queued_manifest_item_ids(joined_jobs), [item_ids["Episode 2.mkv"]])
+
+    def test_accepted_episode_joins_the_newest_run_that_covers_it_not_the_show_latest(self) -> None:
+        queue_config, item_ids, _calibration = self._accepted_episode_never_held(save_run=True)
+        with open_db(self.config.paths.db_path) as connection:
+            season_1_run = load_latest_encode_job(connection, "tv/show")
+            assert season_1_run is not None
+            save_encode_job(connection, {
+                **season_1_run,
+                "job_id": "season-2-run",
+                "prefix": "tv/show/Season 2",
+                "created_at": "2999-01-01T00:00:00+00:00",
+            })
+
+        accepted = ambiguous_motion_runtime.accept_ambiguous_motion_action(
+            queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: "approval",
+        )
+
+        self.assertIn("It joins production once nothing else is encoding", accepted["message"])
+        self.assertEqual(self._hold_rows()[item_ids["Episode 2.mkv"]]["prefix"], "tv/show/Season 1")
 
     def test_accepted_episode_joins_an_older_seasons_run_only_for_a_season_it_included(self) -> None:
         for season, expected_mode in (("tv/show/Season 1", "older_seasons"), ("tv/show/Season 2", None)):
@@ -23092,6 +23112,8 @@ raise SystemExit(0)
                 manifest["selection"]["lifecycle_override"] = {
                     "mode": "older_seasons", "included_season_prefixes": [season],
                 }
+                # A run queued before its mode was recorded shows older seasons only through this selection.
+                manifest["selection"].pop("queue_mode", None)
                 manifest_path.write_text(json.dumps(manifest))
                 with open_db(self.config.paths.db_path) as connection:
                     save_encode_job(connection, run)
