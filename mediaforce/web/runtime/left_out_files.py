@@ -30,6 +30,10 @@ _SUMMARY_PHRASES: dict[str, tuple[str, str]] = {
         "missed the approved final size and needs a fresh goal",
         "missed the approved final size and need a fresh goal",
     ),
+    "settings_changed_since_queued": (
+        "waits for the new settings until the rest of the folder finishes",
+        "wait for the new settings until the rest of the folder finishes",
+    ),
     "movie_title_policy": ("is outside the movie title policy", "are outside the movie title policy"),
     "manifest_item_unknown": (
         "is not named in the folder's saved plan",

@@ -66,6 +66,7 @@ from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_pref
     save_encode_job, save_queue_state, summarize_encode_queue
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.library.folder_profiles import inspect_prefix
+from mediaforce.library.media_scopes import media_scope_from_prefix
 from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts import status_runtime as host_status_runtime
 from mediaforce.hosts.types import VMAF_MODEL_MISSING_ISSUE, is_vmaf_model_load_failure
@@ -3490,6 +3491,31 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             waiting_reason,
             f"Mediaforce cannot access {self.config.staging_root} on this computer. Mount the storage to continue.",
         )
+
+    def test_host_selection_names_every_storage_problem_not_only_the_first(self) -> None:
+        def host(key: str) -> dict[str, Any]:
+            return {
+                "key": key, "host": key, "label": key.title(), "mode": "ssh", "media_access": "mounted",
+                "priority": 90, "capabilities": ["encode_queue"], "available": True, "probe_available": True,
+                "active_encode_count": 0, "max_parallel_encodes": 1, "queue_active": True,
+            }
+
+        issues = {
+            "remote-a": "Remote A cannot reach its storage.",
+            "remote-b": "Remote B cannot reach its storage.",
+            "remote-c": "Remote A cannot reach its storage.",
+        }
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._host_runtime_rows",
+                return_value=[host("remote-a"), host("remote-b"), host("remote-c")],
+        ), patch(
+            "mediaforce.web.runtime.encode_runtime.controller_storage_admission_issue",
+            side_effect=lambda _config, candidate: issues[candidate["key"]],
+        ):
+            host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, {})
+
+        self.assertIsNone(host_payload)
+        self.assertEqual(waiting_reason, "Remote A cannot reach its storage. Remote B cannot reach its storage.")
 
     def test_host_selection_resumes_after_controller_recovery_without_requeue(self) -> None:
         host = {
@@ -20517,6 +20543,153 @@ raise SystemExit(0)
         self.assertEqual(progress["unfinished_breakdown"][0]["reason"], "quality_floor_size_conflict")
         self.assertEqual(progress["retrying_shard_count"], 1)
 
+    def test_working_folder_lists_every_waiting_reason_and_keeps_owner_files_visible(self) -> None:
+        impossible = (
+            "Estimated runtime 9h is longer than every configured host schedule window (longest 8h). "
+            "Widen a host window or use Bypass scheduler."
+        )
+        children = [
+            ("needs_attention", {"failure_analysis": {"kind": "final_size_target_miss"}}, "deterministic", None),
+            ("needs_attention", {}, "storage_io", None),
+            ("running", {}, None, None),
+            ("queued", {}, None, "Waiting for a host schedule window."),
+            ("queued", {}, None, impossible),
+            ("completed", {}, None, None),
+        ]
+        manifest_path = self._write_manifest(
+            "manifest-parent-waiting-reasons.json",
+            [
+                {"library_item_id": index + 1, "duration_seconds": 60.0, "source_size_bytes": 1000}
+                for index in range(len(children))
+            ],
+        )
+        now = web_app._now_iso()
+        base = {
+            "prefix": "tv/show", "manifest_path": str(manifest_path), "item_count": 1, "saved_profile_path": None,
+            "last_host": {}, "notes": "", "bypass_schedule": False, "attempt_count": 1, "process_pid": None,
+            "leased_at": None, "lease_expires_at": None, "heartbeat_at": None, "worker_id": None,
+            "retry_not_before": None, "terminal_reason": None, "last_failure_at": None,
+            "host_cooldown_until": None, "created_at": now, "started_at": now, "finished_at": None,
+            "updated_at": now, "host": {},
+        }
+        scope = media_scope_from_prefix("tv/show", match="descendants")
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(connection, {
+                **base, "job_id": "folder-waiting", "job_kind": "folder", "parent_job_id": None,
+                "status": "running", "manifest_indexes": None, "item_count": len(children), "error": None,
+                "last_failure_kind": None, "waiting_reason": None,
+            })
+            for index, (status, progress, failure_kind, waiting_reason) in enumerate(children):
+                save_encode_job(connection, {
+                    **base, "job_id": f"waiting-shard-{index}", "job_kind": "shard",
+                    "parent_job_id": "folder-waiting", "status": status, "manifest_indexes": [index],
+                    "error": "failed" if failure_kind else None, "last_failure_kind": failure_kind,
+                    "waiting_reason": waiting_reason, "progress": progress,
+                })
+
+            def resync() -> dict[str, Any]:
+                child = load_encode_job(connection, "waiting-shard-0")
+                assert child is not None
+                encode_runtime.sync_encode_job_parent(connection, child, web_app._encode_queue_runtime_deps())
+                stored = load_encode_job(connection, "folder-waiting")
+                assert stored is not None
+                return stored
+
+            working = resync()
+            badge = web_app._folder_needs_attention_badges(connection).get("tv/show")
+            working_state = workflow_state_runtime._load_encode_job_state(connection, scope)
+
+            def complete(*indexes: int) -> None:
+                for index in indexes:
+                    shard = load_encode_job(connection, f"waiting-shard-{index}")
+                    assert shard is not None
+                    save_encode_job(connection, {**shard, "status": "completed", "waiting_reason": None})
+
+            complete(2)
+            queued_left = resync()
+            queued_left_state = workflow_state_runtime._load_encode_job_state(connection, scope)
+            complete(3, 4)
+            ended = resync()
+            ended_state = workflow_state_runtime._load_encode_job_state(connection, scope)
+
+        self.assertEqual(working["status"], "running")
+        self.assertEqual(
+            [
+                (group["label"], group["count"], group["needs_owner"])
+                for group in object_dict(working["progress"])["unfinished_breakdown"]
+            ],
+            [
+                ("outside size limit", 1, True),
+                ("longer than every work window", 1, True),
+                ("storage error", 1, True),
+                ("waiting for a scheduled time", 1, False),
+            ],
+        )
+        self.assertEqual(
+            badge,
+            {
+                "label": "Needs attention",
+                "tone": "warning",
+                "detail": (
+                    "1 outside size limit · 1 longer than every work window · 1 storage error · "
+                    "1 waiting for a scheduled time"
+                ),
+            },
+        )
+        self.assertEqual(
+            working_state,
+            (
+                "processing",
+                "Encode job is running for tv/show. Needs you: 1 outside size limit · "
+                "1 longer than every work window · 1 storage error.",
+            ),
+        )
+        # Recovery and retry still see the stored status; only the reading stays "working".
+        self.assertEqual(queued_left["status"], "needs_attention")
+        self.assertEqual(
+            queued_left_state,
+            (
+                "processing",
+                "Encode job is queued for tv/show. Needs you: 1 outside size limit · "
+                "1 longer than every work window · 1 storage error.",
+            ),
+        )
+        self.assertEqual(ended["status"], "needs_attention")
+        self.assertEqual(
+            ended_state,
+            ("attention", "Encode job is needs_attention for tv/show: 1 outside size limit · 1 storage error"),
+        )
+
+    def test_unfinished_breakdown_separates_waits_that_need_the_owner(self) -> None:
+        waits = [
+            "Waiting for free-space reserve on /Volumes/Media: needs 40 GB free, 12 GB available.",
+            "Waiting for the active large encode job to release its free-space reserve.",
+            "Waiting for a measurable free-space reserve: cannot measure /Volumes/Media. Mount or repair it.",
+            "Waiting for complete free-space reserve inputs. Rebuild the production plan or rescan the folder.",
+            "Controller storage: Unexpected volume at /Volumes/Media. Reconnect storage with Finder or Prepare; "
+            "readiness checks continue.",
+            "Mediaforce cannot access /Volumes/Media/staging on this computer. Mount the storage to continue.",
+            "Encode host is warming up.",
+        ]
+        children = [
+            {"status": "queued", "waiting_reason": reason, "manifest_indexes": [index]}
+            for index, reason in enumerate(waits)
+        ]
+
+        breakdown = encode_runtime._unfinished_child_breakdown(children)
+
+        self.assertEqual(
+            [(group["label"], group["count"], group["needs_owner"]) for group in breakdown],
+            [
+                ("storage to reconnect", 2, True),
+                ("needs its plan rebuilt", 1, True),
+                ("storage to mount or repair", 1, True),
+                ("waiting for free space", 2, False),
+                ("Encode host is warming up.", 1, False),
+            ],
+        )
+
     def test_aggregate_encode_parent_job_stays_running_while_other_shards_need_attention(self) -> None:
         manifest_path = self._write_manifest(
             "manifest-parent-mixed-shards.json",
@@ -23731,6 +23904,245 @@ raise SystemExit(0)
         self.assertIsNone(cleared_child)
         self.assertEqual(requeued, [[1]])
 
+    def test_requeue_keeps_queued_and_backing_off_siblings_of_a_stopped_folder(self) -> None:
+        names = ["keep-a.mkv", "keep-b.mkv", "keep-c.mkv", "keep-d.mkv"]
+        sources = [self._create_source_file(name) for name in names]
+        staging = [self._staging_path(name) for name in names]
+        queued_partial = staging[2].with_name(f"{staging[2].stem}.partial{staging[2].suffix}")
+        queued_partial.parent.mkdir(parents=True, exist_ok=True)
+        queued_partial.write_text("still being made")
+        now = web_app._now_iso()
+
+        def job(job_id: str, **values: Any) -> dict[str, Any]:
+            return {
+                "job_id": job_id, "prefix": "tv/show", "job_kind": "shard", "parent_job_id": "stopped-parent",
+                "status": "queued", "manifest_path": str(manifest_path), "manifest_indexes": None,
+                "item_count": 1, "saved_profile_path": None, "host": {}, "last_host": {}, "notes": "",
+                "bypass_schedule": False, "attempt_count": 1, "process_pid": None, "error": None,
+                "leased_at": None, "lease_expires_at": None, "heartbeat_at": None, "worker_id": None,
+                "retry_not_before": None, "waiting_reason": None, "terminal_reason": None,
+                "last_failure_kind": None, "last_failure_at": None, "host_cooldown_until": None,
+                "created_at": now, "started_at": None, "finished_at": None, "updated_at": now, **values,
+            }
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = [self._insert_library_item(connection, source, status="encoding") for source in sources]
+            manifest_path = self._write_manifest(
+                "manifest-keep-siblings.json",
+                [
+                    {"library_item_id": item_id, "staging_path": str(path)}
+                    for item_id, path in zip(item_ids, staging)
+                ],
+            )
+            save_encode_job(connection, job(
+                "stopped-parent", job_kind="folder", parent_job_id=None, status="needs_attention", item_count=4,
+            ))
+            save_encode_job(connection, job(
+                "failed-transport", status="needs_attention", manifest_indexes=[0], attempt_count=3,
+                error="resource busy", last_failure_kind="ssh_transport", finished_at=now,
+            ))
+            save_encode_job(connection, job(
+                "missed-size", status="needs_attention", manifest_indexes=[1], attempt_count=2,
+                error="Final output size missed the approved target band: status=over_target",
+                last_failure_kind="deterministic", finished_at=now,
+                progress={"failure_analysis": {"kind": "final_size_target_miss", "manifest_indexes": [1]}},
+            ))
+            save_encode_job(connection, job(
+                "queued-sibling", manifest_indexes=[2], waiting_reason="Waiting for a host schedule window.",
+            ))
+            save_encode_job(connection, job(
+                "retrying-sibling", status="retry_backoff", manifest_indexes=[3], attempt_count=2,
+                retry_not_before=now, last_failure_kind="storage_io",
+            ))
+            before = {row["job_id"]: row for row in list_child_encode_jobs(connection, "stopped-parent")}
+
+        result = folder_actions_runtime.queue_folder_encode_action(
+            self.config,
+            "tv/show",
+            "",
+            False,
+            now_iso=web_app._now_iso,
+            load_job_state=self._noop_load_job_state,
+            load_calibration_state=self._accepted_calibration_state,
+            review_gate=self._accepted_review_gate,
+            upsert_override=self._noop_upsert_override,
+            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+            prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
+            save_encode_job=save_encode_job,
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            after = {row["job_id"]: row for row in list_child_encode_jobs(connection, "stopped-parent")}
+            parent = load_encode_job(connection, "stopped-parent")
+            statuses = [
+                self._library_item_value(connection, item_id, library_items.c.status)["status"]
+                for item_id in item_ids
+            ]
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["action"], "recovered")
+        self.assertEqual(result["recovered_item_count"], 1)
+        self.assertEqual(
+            [entry["code"] for entry in result["left_out"]],
+            ["final_size_recovery_contract_unchanged"],
+        )
+        self.assertIsNotNone(parent)
+        for sibling in ("queued-sibling", "retrying-sibling"):
+            self.assertEqual(
+                {key: after[sibling][key] for key in ("status", "attempt_count", "manifest_indexes")},
+                {key: before[sibling][key] for key in ("status", "attempt_count", "manifest_indexes")},
+            )
+        self.assertEqual(after["missed-size"]["status"], "needs_attention")
+        self.assertNotIn("failed-transport", after)
+        self.assertEqual(
+            sorted(tuple(row["manifest_indexes"]) for row in after.values() if row["status"] == "queued"),
+            [(0,), (2,)],
+        )
+        self.assertTrue(queued_partial.exists())
+        self.assertEqual(statuses, ["planned", "encoding", "encoding", "encoding"])
+
+    def test_requeue_refuses_to_plan_a_folder_again_while_older_parts_are_still_queued(self) -> None:
+        source = self._create_source_file("leftover.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="planned")
+            manifest_path = self._write_manifest(
+                "manifest-leftover.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path("leftover.mkv"))}],
+            )
+
+            def job(job_id: str, created_at: str, **values: Any) -> dict[str, Any]:
+                return {
+                    "job_id": job_id, "prefix": "tv/show", "job_kind": "folder", "parent_job_id": None,
+                    "status": "failed", "manifest_path": str(manifest_path), "manifest_indexes": None,
+                    "item_count": 1, "saved_profile_path": None, "host": {}, "last_host": {}, "notes": "",
+                    "bypass_schedule": False, "attempt_count": 1, "process_pid": None, "error": "failed",
+                    "leased_at": None, "lease_expires_at": None, "heartbeat_at": None, "worker_id": None,
+                    "retry_not_before": None, "waiting_reason": None, "terminal_reason": None,
+                    "last_failure_kind": None, "last_failure_at": None, "host_cooldown_until": None,
+                    "created_at": created_at, "started_at": None, "finished_at": None, "updated_at": created_at,
+                    **values,
+                }
+
+            save_encode_job(connection, job("older-folder", "2026-09-29T10:00:00+00:00"))
+            save_encode_job(connection, job(
+                "leftover-part", "2026-09-29T10:00:01+00:00", job_kind="shard", parent_job_id="older-folder",
+                status="queued", manifest_indexes=[0], error=None,
+            ))
+            save_encode_job(connection, job("newer-folder", "2026-09-29T11:00:00+00:00"))
+
+        result = folder_actions_runtime.queue_folder_encode_action(
+            self.config,
+            "tv/show",
+            "",
+            False,
+            now_iso=web_app._now_iso,
+            load_job_state=self._noop_load_job_state,
+            load_calibration_state=self._accepted_calibration_state,
+            review_gate=self._accepted_review_gate,
+            upsert_override=self._noop_upsert_override,
+            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+            prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
+            save_encode_job=save_encode_job,
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            remaining = {
+                job_id for job_id in ("older-folder", "leftover-part", "newer-folder")
+                if load_encode_job(connection, job_id) is not None
+            }
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "encode_already_active")
+        self.assertIn("1 file is still queued or being made", result["message"])
+        self.assertEqual(remaining, {"older-folder", "leftover-part", "newer-folder"})
+
+    def test_requeue_refuses_a_season_while_a_show_wide_encode_still_has_its_parts_queued(self) -> None:
+        source = self._create_source_file("Season 1/show-wide.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="planned")
+            manifest_path = self._write_manifest(
+                "manifest-show-wide.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path("Season 1/show-wide.mkv"))}],
+            )
+            now = "2026-09-29T12:00:00+00:00"
+            for job_id, job_kind, status, parent in (
+                    ("show-folder", "folder", "needs_attention", None),
+                    ("show-part", "shard", "queued", "show-folder"),
+            ):
+                save_encode_job(connection, {
+                    "job_id": job_id, "prefix": "tv/show", "job_kind": job_kind, "parent_job_id": parent,
+                    "status": status, "manifest_path": str(manifest_path),
+                    "manifest_indexes": [0] if job_kind == "shard" else None, "item_count": 1,
+                    "saved_profile_path": None, "host": {}, "last_host": {}, "notes": "", "bypass_schedule": False,
+                    "attempt_count": 1, "process_pid": None, "error": None, "leased_at": None,
+                    "lease_expires_at": None, "heartbeat_at": None, "worker_id": None, "retry_not_before": None,
+                    "waiting_reason": None, "terminal_reason": None, "last_failure_kind": None,
+                    "last_failure_at": None, "host_cooldown_until": None, "created_at": now, "started_at": None,
+                    "finished_at": None, "updated_at": now,
+                })
+
+        result = folder_actions_runtime.queue_folder_encode_action(
+            self.config,
+            "tv/show/Season 1",
+            "",
+            False,
+            now_iso=web_app._now_iso,
+            load_job_state=self._noop_load_job_state,
+            load_calibration_state=self._accepted_calibration_state,
+            review_gate=self._accepted_review_gate,
+            upsert_override=self._noop_upsert_override,
+            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+            prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
+            save_encode_job=save_encode_job,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            part = load_encode_job(connection, "show-part")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "encode_already_active")
+        self.assertIsNotNone(part)
+
+    def test_in_place_recovery_holds_files_whose_settings_changed_or_that_missed_their_size(self) -> None:
+        intent = {"size_goal": {"value_mb": 200.0}}
+        saved = {"schema_version": 1, "sample_job_id": "old", "policy_hash": "policy", "operator_intent": intent}
+        manifest_path = self._write_manifest(
+            "manifest-hold-fresh-plan.json",
+            [{"library_item_id": 11, "rel_path": "tv/show/a.mkv"}, {"library_item_id": 12, "rel_path": "tv/show/b.mkv"}],
+        )
+        manifest = json.loads(manifest_path.read_text())
+        manifest["selection"] = {"production_approval_contract": saved}
+        manifest_path.write_text(json.dumps(manifest))
+        folder = {"job_kind": "folder", "manifest_path": str(manifest_path)}
+        transport = {"job_id": "a", "manifest_indexes": [0], "progress": {}}
+        missed = {"job_id": "b", "manifest_indexes": [1], "progress": {"failure_analysis": {"kind": "final_size_target_miss"}}}
+        plan = ([transport, missed], [0, 1])
+
+        same_settings = folder_actions_runtime._hold_files_that_need_a_fresh_plan(
+            folder, plan, {**saved, "sample_job_id": "newer"},
+        )
+        changed_goal = folder_actions_runtime._hold_files_that_need_a_fresh_plan(
+            folder, plan, {**saved, "operator_intent": {"size_goal": {"value_mb": 300.0}}},
+        )
+
+        self.assertEqual(same_settings[0], ([transport], [0]))
+        self.assertEqual([file.code for file in same_settings[1]], ["final_size_recovery_contract_unchanged"])
+        legacy_folder = folder_actions_runtime._hold_files_that_need_a_fresh_plan(
+            {"job_kind": "folder", "manifest_path": str(self._write_manifest(
+                "manifest-hold-legacy.json", [{"library_item_id": 11}, {"library_item_id": 12}],
+            ))},
+            plan,
+            saved,
+        )
+        self.assertIsNone(legacy_folder[0])
+        self.assertIsNone(changed_goal[0])
+        self.assertEqual(
+            sorted(file.code for file in changed_goal[1]),
+            ["final_size_recovery_contract_unchanged", "settings_changed_since_queued"],
+        )
+
     def test_queue_folder_encode_recovers_failed_files_into_active_parent(self) -> None:
         source_a = self._create_source_file("recover-active-a.mkv")
         source_b = self._create_source_file("recover-active-b.mkv")
@@ -24242,6 +24654,37 @@ raise SystemExit(0)
         assert latest_job is not None
         self.assertEqual(latest_job["job_id"], "newer-terminal")
 
+    def test_clear_terminal_encode_jobs_for_prefix_never_removes_queued_or_running_work(self) -> None:
+        manifest_path = self._write_manifest("manifest-clear-active.json", [{"library_item_id": 1}])
+        now = "2026-09-29T12:00:00+00:00"
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, job_kind, status in (
+                    ("ended-folder", "folder", "needs_attention"),
+                    ("failed-part", "shard", "needs_attention"),
+                    ("queued-part", "shard", "queued"),
+                    ("retrying-part", "shard", "retry_backoff"),
+                    ("running-part", "shard", "running"),
+            ):
+                save_encode_job(connection, {
+                    "job_id": job_id, "prefix": "tv/show", "job_kind": job_kind,
+                    "parent_job_id": None if job_kind == "folder" else "ended-folder", "status": status,
+                    "manifest_path": str(manifest_path), "manifest_indexes": None if job_kind == "folder" else [0],
+                    "item_count": 1, "saved_profile_path": None, "host": {}, "last_host": {}, "notes": "",
+                    "bypass_schedule": False, "attempt_count": 1, "process_pid": None, "error": None,
+                    "leased_at": None, "lease_expires_at": None, "heartbeat_at": None, "worker_id": None,
+                    "retry_not_before": None, "waiting_reason": None, "terminal_reason": None,
+                    "last_failure_kind": None, "last_failure_at": None, "host_cooldown_until": None,
+                    "created_at": now, "started_at": None, "finished_at": None, "updated_at": now,
+                })
+
+            clear_terminal_encode_jobs_for_prefix(connection, "tv/show")
+            remaining = {
+                job_id for job_id in ("ended-folder", "failed-part", "queued-part", "retrying-part", "running-part")
+                if load_encode_job(connection, job_id) is not None
+            }
+
+        self.assertEqual(remaining, {"queued-part", "retrying-part", "running-part"})
+
     def test_clear_terminal_encode_jobs_for_prefix_preserves_completed_shards(self) -> None:
         shared_created_at = "2026-04-09T12:00:00+00:00"
         manifest_path = self._write_manifest("manifest-terminal-shards.json", [{"library_item_id": 1}])
@@ -24363,7 +24806,8 @@ raise SystemExit(0)
                 ).mappings().fetchall()
             }
 
-        self.assertEqual(remaining_job_ids, {"completed-shard"})
+        # Queued and running parts are never removed; the re-queue refuses while they exist instead.
+        self.assertEqual(remaining_job_ids, {"completed-shard", "queued-stale-shard", "running-stale-shard"})
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_queue_folder_encode_retry_resets_stale_encoding_items_before_manifest(self) -> None:

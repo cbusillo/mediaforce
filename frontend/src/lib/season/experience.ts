@@ -5,6 +5,7 @@ import type {
 	DashboardScanJob,
 	DashboardSummaryPayload,
 	EncodeQueueJob,
+	EncodeUnfinishedGroup,
 	FolderCard,
 	FolderPayload,
 	FolderStatusPayload,
@@ -1842,6 +1843,19 @@ export function approvalGuardFromMessage(
 	return null;
 }
 
+/** A working season still says so when some of its files already need the owner. */
+function libraryCompressingState(card: FolderCard): HumanSeasonState {
+	const needsYou = text(card.review_badge_label).toLowerCase().includes('attention');
+	return {
+		key: 'making_season',
+		label: needsYou ? 'Compressing · needs you' : 'Compressing the season',
+		detail:
+			(needsYou && text(card.review_badge_detail)) ||
+			'The smaller episodes are being compressed now.',
+		tone: 'active'
+	};
+}
+
 export function librarySeasonState(
 	card: FolderCard,
 	dashboard: DashboardSummaryPayload
@@ -1851,12 +1865,7 @@ export function librarySeasonState(
 	if (
 		[...encodeJobs.running, ...encodeJobs.queued].some((job) => matchesPrefix(job, card.prefix))
 	) {
-		return {
-			key: 'making_season',
-			label: 'Compressing the season',
-			detail: 'The smaller episodes are being compressed now.',
-			tone: 'active'
-		};
+		return libraryCompressingState(card);
 	}
 	if (sampleJobs.running.some((job) => matchesPrefix(job, card.prefix) && isRunningJob(job))) {
 		return {
@@ -1944,12 +1953,7 @@ export function librarySeasonState(
 		};
 	}
 	if (card.workflow_state?.primary_lane === 'processing') {
-		return {
-			key: 'making_season',
-			label: 'Compressing the season',
-			detail: 'The smaller episodes are being compressed now.',
-			tone: 'active'
-		};
+		return libraryCompressingState(card);
 	}
 	if (card.workflow_state?.primary_lane === 'mixed') {
 		return {
@@ -2000,6 +2004,34 @@ export function librarySeasonState(
 		detail: 'Choose a size, then compare one sample first.',
 		tone: 'quiet'
 	};
+}
+
+export interface WaitingReasons {
+	needsYou: EncodeUnfinishedGroup[];
+	waiting: EncodeUnfinishedGroup[];
+	fileCount: number;
+}
+
+/** Every reason a folder's files are not finished, split into what needs the owner and what is only waiting. */
+export function encodeWaitingReasons(job: EncodeQueueJob | null | undefined): WaitingReasons {
+	const groups = (job?.progress?.unfinished_breakdown ?? []).filter(
+		(group) => group.count > 0 && group.label.trim()
+	);
+	const needsOwner = (group: EncodeUnfinishedGroup) =>
+		group.needs_owner ?? !(group.reason === 'retrying' || group.reason.startsWith('waiting'));
+	return {
+		needsYou: groups.filter(needsOwner),
+		waiting: groups.filter((group) => !needsOwner(group)),
+		fileCount: groups.reduce((sum, group) => sum + group.count, 0)
+	};
+}
+
+/** Names the job a reason list belongs to when it is not the page's own scope. */
+export function waitingScopeName(jobPrefix: string): string {
+	const identity = seasonIdentity(jobPrefix);
+	return identity.showPrefix === jobPrefix.replace(/\/+$/, '')
+		? `all of ${identity.show}`
+		: `${identity.show} ${identity.season}`;
 }
 
 export function detailSeasonState(

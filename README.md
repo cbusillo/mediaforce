@@ -610,6 +610,14 @@ host is available again, and then requeues the same episode from the beginning.
 It does not resume a partial media stream or promote interrupted output.
 Deterministic encode and policy failures continue to stop for operator review.
 
+Starting a folder again while some of its episodes are still queued, retrying,
+or encoding never removes that work. Only the episodes that ended are retried,
+inside the same folder encode. An episode that missed its approved final size,
+or any ended episode when the approved settings changed after the folder was
+queued, waits and is planned again with the current settings once the rest of
+the folder has finished. A folder is never planned twice while any overlapping
+encode, such as a show-wide one, still has parts of it queued or running.
+
 For a blank remote Mac, first turn on Remote Login so SSH answers. Once that is
 reachable, the runtime settings UI can finish setup from the web surface: if
 the host only needs first-time trust, enter the remote account password once so
