@@ -1659,7 +1659,7 @@ def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, An
                 return False
             manifest["items"][index] = item
         try:
-            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+            _write_manifest(manifest_path, manifest)
         except OSError:
             return False
     return True
@@ -1785,7 +1785,7 @@ def apply_quality_floor_size_exception(
             return False
         manifest["items"][index] = item
         try:
-            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+            _write_manifest(manifest_path, manifest)
         except OSError:
             return False
     return True
@@ -1900,7 +1900,17 @@ def restore_manifest_item(manifest_path: Path, index: int, item: dict[str, Any])
     with _locked_manifest_file(manifest_path):
         manifest = json.loads(manifest_path.read_text())
         manifest["items"][index] = item
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        _write_manifest(manifest_path, manifest)
+
+
+def _write_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
+    """Replace the shared manifest whole, so a failed write never leaves siblings a truncated file."""
+    temp_path = manifest_path.with_name(f".{manifest_path.name}.{os.getpid()}.tmp")
+    try:
+        temp_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        os.replace(temp_path, manifest_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 @contextmanager

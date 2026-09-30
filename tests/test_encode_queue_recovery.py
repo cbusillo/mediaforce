@@ -2496,6 +2496,21 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(updated["status"], "needs_attention")
         self.assertIsNotNone(encode_runtime.size_exception_question(updated))
 
+    def test_a_failed_manifest_write_leaves_the_shared_manifest_whole(self) -> None:
+        manifest_path = self._write_manifest("manifest-atomic.json", [{"library_item_id": 1, "rel_path": "a.mkv"}])
+        before = manifest_path.read_text()
+        real_write_text = Path.write_text
+
+        def write_then_fail(path: Path, data: str, *args: Any, **kwargs: Any) -> int:
+            real_write_text(path, data[: len(data) // 2], *args, **kwargs)
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with patch.object(Path, "write_text", write_then_fail), self.assertRaises(OSError):
+            encode_runtime.restore_manifest_item(manifest_path, 0, {"library_item_id": 1, "rel_path": "b.mkv"})
+
+        self.assertEqual(manifest_path.read_text(), before)
+        self.assertEqual(sorted(path.name for path in manifest_path.parent.iterdir() if ".tmp" in path.name), [])
+
     def test_owner_keeping_the_original_leaves_the_file_listed_and_unchanged(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             _updated, manifest_path = self._quality_floor_conflict_job(

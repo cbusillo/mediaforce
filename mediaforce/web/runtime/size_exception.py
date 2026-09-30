@@ -43,10 +43,14 @@ def decide_size_exception(
             connection.commit()
             return result
     except Exception:
-        connection.rollback()
         # The answer was not recorded, so the file's manifest item must not keep the exception either.
-        for undo in restore:
-            undo()
+        # Put it back while this transaction still holds the write lock, so a later answer for the same
+        # file cannot land in between and be undone.
+        try:
+            for undo in restore:
+                undo()
+        finally:
+            connection.rollback()
         raise
     connection.rollback()
     return result
