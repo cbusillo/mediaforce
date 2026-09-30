@@ -94,7 +94,9 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   trustworthy sound metadata for the shared review comparison workspace. Verify
   the same persistent Original/Sample stage and explicit `Full screen` control
   on a review-ready Movie and Other fixture; the combined comparison remains a
-  separately labeled download.
+  separately labeled download. The season decision names what the sample did
+  not test (`Not yet tested: HEVC video, 2160p.`) from the selection stored
+  with that sample.
   An exact-item review-ready TV route also keeps `Current size`, `Estimated
   output`, and `Estimated space saved` in its decision facts, separate from the
   comparison clip byte labels. Risk guidance remains visible, but no empty

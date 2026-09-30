@@ -1668,6 +1668,7 @@ export interface FolderPayload {
 	pending: boolean;
 	summary?: FolderSummary;
 	sample_item?: RepresentativeSampleItemPayload;
+	representative_selection?: Record<string, unknown>;
 	item_plan?: Record<string, unknown>;
 	policy?: Record<string, unknown>;
 	hot_spots?: number[];

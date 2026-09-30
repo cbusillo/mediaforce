@@ -1764,6 +1764,26 @@ export function reviewSizeAdjustment(
 	};
 }
 
+export interface SampleCoverageView {
+	summary: string;
+	hasUntestedGroups: boolean;
+}
+
+/**
+ * Coverage recorded when the reviewed sample was chosen. The folder's current selection is not used:
+ * once production starts it describes the files still left, not the file under review.
+ */
+export function reviewedSampleCoverage(folder: FolderPayload): SampleCoverageView | null {
+	const calibration = record(folder.calibration);
+	const selection = record(record(calibration.sample_item).representative_selection);
+	const summary = text(selection.coverage_summary);
+	if (!summary) return null;
+	return {
+		summary,
+		hasUntestedGroups: records(record(selection.coverage).untested_groups).length > 0
+	};
+}
+
 export function calibrationAcceptsUnderTargetResult(folder: FolderPayload): boolean | null {
 	const calibration = record(folder.calibration);
 	const sampleItem = record(calibration.sample_item);

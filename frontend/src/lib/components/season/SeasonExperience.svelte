@@ -66,6 +66,7 @@
 		reviewFeedbackIntent,
 		reviewFeedbackRequest,
 		reviewAdjustmentIntent,
+		reviewedSampleCoverage,
 		reviewSizeAdjustment,
 		scopedEncodeProgress,
 		seasonIdentity,
@@ -190,6 +191,7 @@
 	const identity = $derived(seasonIdentity(folder.prefix));
 	const isSeriesScope = $derived(isSeriesPrefix(folder.prefix));
 	const isExactItemScope = $derived(folder.media_scope?.match === 'exact_item');
+	const sampleCoverage = $derived(isExactItemScope ? null : reviewedSampleCoverage(folder));
 	const exactEpisodeName = $derived(episodeLabel(folder.prefix));
 	const exactFilename = $derived(exactItemFilename(folder));
 	const seriesSeasonCount = $derived(Object.keys(folder.summary?.seasons ?? {}).length);
@@ -2607,6 +2609,17 @@
 								{approvalStart
 									? approvalStart.detail
 									: 'Nothing is compressed or queued until you choose a separate production action.'}
+							</p>
+						{/if}
+						{#if sampleCoverage}
+							<p
+								class="decision-coverage"
+								class:decision-coverage--gaps={sampleCoverage.hasUntestedGroups}
+							>
+								{sampleCoverage.summary}
+								{#if sampleCoverage.hasUntestedGroups}
+									Every file is still checked before it is published.
+								{/if}
 							</p>
 						{/if}
 					</div>
@@ -6071,6 +6084,21 @@
 		color: var(--mf-fg-secondary);
 		font-size: 12px;
 		margin-top: 3px;
+	}
+
+	.decision-coverage::before {
+		background: var(--mf-fg-tertiary);
+		border-radius: 50%;
+		content: '';
+		display: inline-block;
+		height: 6px;
+		margin-right: 6px;
+		vertical-align: 1px;
+		width: 6px;
+	}
+
+	.decision-coverage--gaps::before {
+		background: var(--mf-wait-fg);
 	}
 
 	.decision--target-miss {
