@@ -162,27 +162,74 @@ REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_MAX_CHARS = 500
 REMOTE_QUALITY_CLEANUP_TIMEOUT_SECONDS = 15
 REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS = 30
 REMOTE_QUALITY_CONTAINED_MARKER = "mediaforce-quality-run-stopped"
-# Stops every process on the computer whose command line names this run's scoped temp folder,
-# which is unique to the run, then prints the marker only when none is left. The folder comes in
-# as $1 and is matched as a fixed string. Processes in this script's own group (its shells and
-# command substitutions, whose arguments also name the folder) are never matched.
-REMOTE_QUALITY_CONTAINMENT_SCRIPT = (
-    'target=$1; [ -n "$target" ] || exit 2; '
-    "self_pgid=$(ps -o pgid= -p $$ | tr -d ' '); "
-    "matching() { ps -axo pid=,pgid=,command= | TARGET=\"$target\" awk -v self=\"$self_pgid\" "
-    "'$2 != self && index($0, ENVIRON[\"TARGET\"]) > 0 { print $1 \" \" $2 }'; }; "
-    "kill_tree() ( signal=$1; parent=$2; "
-    "for child in $(ps -axo pid=,ppid= | awk -v parent=\"$parent\" '$2 == parent { print $1 }'); "
-    'do kill_tree "$signal" "$child"; done; kill -"$signal" "$parent" 2>/dev/null || true; ); '
-    "stop_all() { matching | while read -r pid pgid; do "
-    'if [ "${pgid:-0}" -gt 1 ]; then kill -"$1" -"$pgid" 2>/dev/null || true; fi; kill_tree "$1" "$pid"; '
-    "done; }; "
-    "stop_all TERM; "
-    'waited=0; while [ -n "$(matching)" ] && [ "$waited" -lt 5 ]; do sleep 1; waited=$((waited + 1)); done; '
-    'if [ -n "$(matching)" ]; then stop_all KILL; sleep 1; fi; '
-    '[ -z "$(matching)" ] || exit 1; '
-    f"echo {REMOTE_QUALITY_CONTAINED_MARKER}"
-)
+# Stops what is left of one timed-out run on the computer. The run's scoped temp folder is unique to
+# it and comes in as $1, matched as fixed text. Before any signal it takes one process listing and
+# collects every process naming the folder plus all their descendants, so a child that does not name
+# the folder is still found after its parent dies. It prints the marker only when a fresh listing
+# shows nothing naming the folder and none of the collected processes is still there other than as
+# an exited zombie (a reused pid counts as alive, the safe side). Every listing fails
+# closed: a failed ps, or one that does not show this script itself, is never proof. Processes in
+# this script's own group (its shells, whose arguments also name the folder) are never collected.
+REMOTE_QUALITY_CONTAINMENT_SCRIPT = """target=$1
+[ -n "$target" ] || exit 2
+self=$$
+snapshot() {
+  listing=$(ps -axo pid=,ppid=,pgid=,stat=,command=) || return 1
+  printf '%s\\n' "$listing" | awk -v self="$self" '$1 == self { found = 1 } END { exit !found }' || return 1
+  printf '%s\\n' "$listing"
+}
+listing=$(snapshot) || exit 3
+own_group=$(printf '%s\\n' "$listing" | awk -v self="$self" '$1 == self { print $3 }')
+[ -n "$own_group" ] || exit 3
+collect() {
+  printf '%s\\n' "$1" | TARGET="$target" awk -v own="$own_group" '
+    $3 == own || $4 ~ /^Z/ { next }
+    { count++; pids[count] = $1; parent[$1] = $2; group[$1] = $3 }
+    index($0, ENVIRON["TARGET"]) > 0 { hit[$1] = 1 }
+    END {
+      do {
+        grew = 0
+        for (i = 1; i <= count; i++) {
+          if (!(pids[i] in hit) && (parent[pids[i]] in hit)) { hit[pids[i]] = 1; grew = 1 }
+        }
+      } while (grew)
+      for (pid in hit) print pid, group[pid]
+    }'
+}
+targets=$(collect "$listing")
+signal_all() {
+  printf '%s\\n' "$targets" | while read -r pid group; do
+    [ -n "$pid" ] || continue
+    if [ "$group" -gt 1 ] 2>/dev/null && [ "$group" != "$own_group" ]; then kill -"$1" -"$group" 2>/dev/null; fi
+    kill -"$1" "$pid" 2>/dev/null
+  done
+  return 0
+}
+settled() {
+  now=$(snapshot) || return 2
+  [ -z "$(collect "$now")" ] || return 1
+  printf '%s\\n' "$now" | TARGETS="$targets" awk '
+    BEGIN { lines = split(ENVIRON["TARGETS"], rows, "\\n"); for (i = 1; i <= lines; i++) { split(rows[i], f, " "); want[f[1]] = 1 } }
+    $4 !~ /^Z/ && ($1 in want) { alive = 1 }
+    END { exit alive }' || return 1
+  return 0
+}
+signal_all TERM
+waited=0
+while :; do
+  settled; state=$?
+  [ "$state" -eq 1 ] && [ "$waited" -lt 5 ] || break
+  sleep 1; waited=$((waited + 1))
+done
+if [ "$state" -eq 1 ]; then
+  listing=$(snapshot) || exit 3
+  targets=$(printf '%s\\n%s\\n' "$targets" "$(collect "$listing")")
+  signal_all KILL
+  sleep 1
+  settled; state=$?
+fi
+[ "$state" -eq 0 ] || exit $((state + 2))
+echo """ + REMOTE_QUALITY_CONTAINED_MARKER
 LOCAL_QUALITY_PATH_PREFIX = "/opt/homebrew/opt/ffmpeg-full/bin:/usr/local/opt/ffmpeg-full/bin"
 DEFAULT_LOCAL_QUALITY_TEMP_ROOT_NAME = "mediaforce-quality-temp"
 LEGACY_LOCAL_QUALITY_TEMP_ROOT_NAME = "quality-temp"

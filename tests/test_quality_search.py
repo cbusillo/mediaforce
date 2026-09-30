@@ -1,7 +1,16 @@
+import os
 import shlex
+import shutil
+import signal
 import subprocess
+import sys
+import tempfile
+import time
 import unittest
+import uuid
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import ANY, Mock, patch
 
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
@@ -415,6 +424,7 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
             failure: Exception | None,
             *,
             containment: subprocess.CompletedProcess[str] | Exception = CONTAINED,
+            cleanup: subprocess.CompletedProcess[str] | None = None,
             quality_temp_dir: Path | None = Path("/remote/quality-temp"),
     ) -> tuple[Exception, list[tuple[dict[str, object], list[str], int]]]:
         """Run one quality phase over SSH whose ab-av1 step raises ``failure``, or times out when it is None.
@@ -431,6 +441,8 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
                 if isinstance(containment, Exception):
                     raise containment
                 return containment
+            if cmd[0] == "rm" and cleanup is not None:
+                return cleanup
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         common = {
@@ -531,7 +543,7 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
 
         assert isinstance(exc, RemoteQualityTimeoutError)
         self.assertTrue(exc.remote_process_contained)
-        containment = next(shlex.split(script.splitlines()[-1]) for script in scripts if "index($0" in script)
+        containment = next(shlex.split(script.split("\n", 1)[1]) for script in scripts if "index($0" in script)
         self.assertEqual(containment[:4], ["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh"])
         self.assertEqual(Path(containment[4]).parent, temp_root)
         self.assertEqual(len(containment), 5)
@@ -569,6 +581,98 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
         self.assertIsNone(cleanup_error)
         self.assertNotIn(SCHEDULE_CLOSE_DEADLINE_KEY, run_remote.call_args.args[0])
         self.assertEqual(host, self.HOST)
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _wait_until(condition: Callable[[], bool], timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.05)
+    return condition()
+
+
+class RemoteQualityContainmentScriptTests(unittest.TestCase):
+    """Run the stop step in a real shell against processes this test starts; it needs no SSH."""
+
+    # Ignores the polite stop, so only the forced one ends it; it does not name the run's folder.
+    STUBBORN = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(300)"
+    # Names the run's folder in its arguments, starts a stubborn child in its own process group,
+    # and dies on the polite stop, so that child is re-parented before anything looks for it.
+    RUN = (
+        "import subprocess, sys, time; "
+        f"child = subprocess.Popen([sys.executable, '-c', {STUBBORN!r}], start_new_session=True); "
+        "print(child.pid, flush=True); time.sleep(300)"
+    )
+
+    def setUp(self) -> None:
+        self.folder = f"/remote/it's a \"quality\" $(temp)/.mediaforce-ab-av1-{uuid.uuid4().hex}"
+        self.started: list[int] = []
+
+    def tearDown(self) -> None:
+        for pid in self.started:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def _stop(self, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh", self.folder],
+            capture_output=True, text=True, start_new_session=True, env=env, timeout=60,
+        )
+
+    def _start(self, argv: list[str], **kwargs: Any) -> subprocess.Popen[str]:
+        process = subprocess.Popen(argv, start_new_session=True, text=True, **kwargs)
+        self.started.append(process.pid)
+        return process
+
+    def test_stops_the_run_and_its_descendants_and_leaves_other_folders_alone(self) -> None:
+        run = self._start([sys.executable, "-c", self.RUN, self.folder], stdout=subprocess.PIPE)
+        assert run.stdout is not None
+        child_pid = int(run.stdout.readline())
+        self.started.append(child_pid)
+        self.assertEqual(run.stdout.readline().strip(), "ready")
+        stubborn_run = self._start(["sh", "-c", "trap '' TERM; sleep 300", self.folder])
+        other_run = self._start(["sh", "-c", "sleep 300", f"{self.folder}0"])
+
+        result = self._stop()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(REMOTE_QUALITY_CONTAINED_MARKER, result.stdout.split())
+        run.wait(timeout=10)
+        stubborn_run.wait(timeout=10)
+        self.assertTrue(_wait_until(lambda: not _process_exists(child_pid)))
+        self.assertIsNone(other_run.poll())
+
+    def test_a_process_listing_that_fails_or_is_empty_is_never_proof(self) -> None:
+        real_ps = shutil.which("ps")
+        assert real_ps is not None
+        cases = {
+            "fails": "exit 1",
+            "is empty": "exit 0",
+            # The first listing works, so only the later check can catch it.
+            "fails when checked": f'[ -e "$0.used" ] && exit 1; touch "$0.used"; exec {real_ps} "$@"',
+            "is empty when checked": f'[ -e "$0.used" ] && exit 0; touch "$0.used"; exec {real_ps} "$@"',
+        }
+        for label, fake_ps in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as tools:
+                ps = Path(tools) / "ps"
+                ps.write_text(f"#!/bin/sh\n{fake_ps}\n")
+                ps.chmod(0o755)
+
+                result = self._stop({**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"})
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(REMOTE_QUALITY_CONTAINED_MARKER, result.stdout)
 
 
 if __name__ == "__main__":
