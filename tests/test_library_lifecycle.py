@@ -14,6 +14,7 @@ from mediaforce.library.candidate_selection import (
     scope_lifecycle_payload,
     season_identity,
 )
+from mediaforce.library.representatives import load_representative_selection
 from mediaforce.library.run_manifests import build_run_manifest, create_folder_manifest, select_encode_candidates
 from mediaforce.library.workflow_state import EncodeEligibility, build_folder_workflow_state, derive_item_workflow_state
 from mediaforce.web.routes.folders import _request_flag
@@ -573,6 +574,50 @@ class LibraryLifecycleTests(unittest.TestCase):
         self.assertEqual(state.counts["held"], 1)
         self.assertEqual(state.blockers, [])
 
+    def test_sample_comes_from_seasons_production_covers(self) -> None:
+        config = self._config()
+        with open_db(config.paths.db_path) as connection:
+            self._insert_house_seasons(connection)
+
+            selection = load_representative_selection(connection, config, "tv/House", now=NOW)
+
+        self.assertIsNotNone(selection)
+        payload = selection.public_payload()
+        primary = selection.primary_item()
+        self.assertNotIn("/Season 8/", primary["rel_path"])
+        self.assertEqual(primary["video_codec"], "h264")
+        self.assertEqual(payload["population"], {"basis": "production", "excluded_count": 6, "reason": None})
+        self.assertEqual(payload["coverage"]["candidate_item_count"], 5)
+        self.assertEqual(primary["representative_selection"]["population"], payload["population"])
+
+    def test_held_season_alone_falls_back_to_every_file_with_a_reason(self) -> None:
+        config = self._config()
+        with open_db(config.paths.db_path) as connection:
+            self._insert_house_seasons(connection)
+
+            held = load_representative_selection(connection, config, "tv/House/Season 8", now=NOW)
+            released = load_representative_selection(connection, config, "tv/House/Season 3", now=NOW)
+
+        self.assertIsNotNone(held)
+        self.assertEqual(held.payload["population"]["basis"], "all_items")
+        self.assertEqual(held.payload["population"]["excluded_count"], 0)
+        self.assertTrue(held.payload["population"]["reason"])
+        self.assertIn("/Season 8/", held.primary_item()["rel_path"])
+        self.assertIsNotNone(released)
+        self.assertEqual(released.payload["population"]["basis"], "production")
+
+    def _insert_house_seasons(self, connection: DBClient) -> None:
+        for season in (1, 3, 4, 6, 7):
+            self._insert_item(connection, f"tv/House/Season {season}/Episode 01.mkv", age_days=100)
+        for episode in range(1, 7):
+            self._insert_item(
+                connection,
+                f"tv/House/Season 8/Episode {episode:02d}.mkv",
+                age_days=100,
+                video_codec="hevc",
+            )
+        self._insert_series_metadata(connection, "tv/House", status="Returning Series", in_production=True)
+
     def _config(self, *, mode: str | None = None) -> MediaforceConfig:
         with DEFAULT_CONFIG_PATH.open("rb") as handle:
             raw = copy.deepcopy(tomllib.load(handle))
@@ -601,7 +646,14 @@ class LibraryLifecycleTests(unittest.TestCase):
         )
         return MediaforceConfig(raw=raw, paths=paths)
 
-    def _insert_item(self, connection: DBClient, rel_path: str, *, age_days: int) -> int:
+    def _insert_item(
+            self,
+            connection: DBClient,
+            rel_path: str,
+            *,
+            age_days: int,
+            video_codec: str = "h264",
+    ) -> int:
         timestamp = NOW - timedelta(days=age_days)
         timestamp_text = timestamp.isoformat(timespec="seconds")
         source_path = self.root / "source" / rel_path
@@ -617,7 +669,7 @@ class LibraryLifecycleTests(unittest.TestCase):
                 mtime_ns=int(timestamp.timestamp() * 1_000_000_000),
                 fingerprint=f"fingerprint-{rel_path}",
                 duration_seconds=2_700.0,
-                video_codec="h264",
+                video_codec=video_codec,
                 audio_track_count=1,
                 subtitle_track_count=1,
                 english_audio_count=1,

@@ -4,8 +4,9 @@ import math
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from statistics import median, quantiles
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 
@@ -14,13 +15,14 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.evidence import build_evidence_envelope, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import mapping_dict, object_dict, object_list
+from mediaforce.library.candidate_selection import encode_candidate_decisions, season_identity
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.planner import build_manifest_item
 
 REPRESENTATIVE_SELECTION_TOOL = "mediaforce.representative_selection"
 REPRESENTATIVE_SELECTION_TOOL_VERSION = "1"
-REPRESENTATIVE_SELECTION_POLICY_VERSION = 2
+REPRESENTATIVE_SELECTION_POLICY_VERSION = 3
 MEANINGFUL_CLUSTER_FRACTION = 0.20
 
 _PREFERRED_SAMPLE_STATUSES = frozenset({"discovered", "planned", "validated", "encoded"})
@@ -63,6 +65,27 @@ _OPTIONAL_TECHNICAL_FIELDS = (
     "frame_cadence_class",
     "frame_rate_class",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class RepresentativePopulation:
+    basis: Literal["production", "all_items"]
+    excluded_count: int = 0
+    reason: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "basis": self.basis,
+            "excluded_count": self.excluded_count,
+            "reason": self.reason,
+        }
+
+
+UNCHECKED_POPULATION = RepresentativePopulation(
+    basis="all_items",
+    reason="Whether these files are in production was not checked.",
+)
+_NO_PRODUCTION_FILES_REASON = "No file here is ready for production yet, so the sample is chosen from every file."
 
 
 @dataclass(slots=True)
@@ -120,14 +143,17 @@ def load_representative_selection(
         connection: DBClient,
         config: MediaforceConfig,
         prefix: str,
+        *,
+        now: datetime | None = None,
 ) -> RepresentativeSelection | None:
-    scope, items = load_representative_candidates(connection, config, prefix)
+    scope, items, population = load_representative_candidates(connection, config, prefix, now=now)
     if not items:
         return None
     return select_representatives(
         items,
         prefix=scope.prefix,
         policy=config.resolve_policy(scope.prefix),
+        population=population,
     )
 
 
@@ -135,8 +161,10 @@ def load_representative_candidates(
         connection: DBClient,
         config: MediaforceConfig,
         prefix: str,
-) -> tuple[MediaScope, list[dict[str, Any]]]:
-    scope, candidate_rows = load_representative_candidate_rows(connection, config, prefix)
+        *,
+        now: datetime | None = None,
+) -> tuple[MediaScope, list[dict[str, Any]], RepresentativePopulation]:
+    scope, candidate_rows, population = load_representative_population(connection, config, prefix, now=now)
     items: list[dict[str, Any]] = []
     for row in candidate_rows:
         row_payload = mapping_dict(row)
@@ -145,10 +173,40 @@ def load_representative_candidates(
             if row_payload.get(field) not in (None, ""):
                 item[field] = row_payload[field]
         items.append(item)
-    return scope, items
+    return scope, items, population
 
 
 def load_representative_candidate_rows(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> tuple[MediaScope, list[Mapping[str, Any]]]:
+    scope, rows, _population = load_representative_population(connection, config, prefix)
+    return scope, rows
+
+
+def load_representative_population(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+        *,
+        now: datetime | None = None,
+) -> tuple[MediaScope, list[Mapping[str, Any]], RepresentativePopulation]:
+    """Return the files a sample may come from: those production would encode, else every file."""
+    scope, rows = _scope_candidate_rows(connection, config, prefix)
+    if not rows:
+        return scope, [], RepresentativePopulation(basis="all_items", reason=_NO_PRODUCTION_FILES_REASON)
+    eligible_item_ids = _production_eligible_item_ids(connection, config, scope, rows, now=now)
+    production_rows = [row for row in rows if int(row["id"]) in eligible_item_ids]
+    if not production_rows:
+        return scope, rows, RepresentativePopulation(basis="all_items", reason=_NO_PRODUCTION_FILES_REASON)
+    return scope, production_rows, RepresentativePopulation(
+        basis="production",
+        excluded_count=len(rows) - len(production_rows),
+    )
+
+
+def _scope_candidate_rows(
         connection: DBClient,
         config: MediaforceConfig,
         prefix: str,
@@ -181,6 +239,40 @@ def load_representative_candidate_rows(
     return scope, preferred_rows or list(rows)
 
 
+def _production_eligible_item_ids(
+        connection: DBClient,
+        config: MediaforceConfig,
+        scope: MediaScope,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        now: datetime | None,
+) -> set[int]:
+    decisions = encode_candidate_decisions(
+        connection,
+        config,
+        prefixes=_decision_prefixes(config, scope, rows),
+        now=now,
+    )
+    return {decision.item_id for decision in decisions if decision.eligible}
+
+
+def _decision_prefixes(
+        config: MediaforceConfig,
+        scope: MediaScope,
+        rows: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    # A season or episode is judged against its whole show (which season is current), so asking
+    # for the show keeps the lookup to that show instead of the whole library.
+    if scope.domain != "tv" or scope.kind in {"library_root", "tv_series"}:
+        return [scope.prefix]
+    series_prefixes = {
+        season.series_prefix
+        for row in rows
+        if (season := season_identity(dict(row), library_types=config.library_type_map)) is not None
+    }
+    return list(series_prefixes) if len(series_prefixes) == 1 else [scope.prefix]
+
+
 def select_representatives(
         items: Sequence[Mapping[str, Any]],
         *,
@@ -188,6 +280,7 @@ def select_representatives(
         policy: Mapping[str, Any] | None = None,
         tool_version: str = REPRESENTATIVE_SELECTION_TOOL_VERSION,
         fingerprint_dimensions: Iterable[str] | None = None,
+        population: RepresentativePopulation = UNCHECKED_POPULATION,
 ) -> RepresentativeSelection:
     if not items:
         raise ValueError("At least one representative candidate is required")
@@ -316,6 +409,7 @@ def select_representatives(
     evidence_result = {
         "primary_source_id": primary.source_id,
         "selected_source_ids": [candidate.source_id for candidate in selected],
+        "population": population.to_payload(),
         "rationale": rationale,
         "coverage": coverage,
         "outliers": outliers,
@@ -349,6 +443,7 @@ def select_representatives(
         "selection_id": evidence["evidence_id"],
         "primary_source_id": primary.source_id,
         "selected_items": selected_items,
+        "population": population.to_payload(),
         "coverage": coverage,
         "outliers": outliers,
         "confidence": confidence,
