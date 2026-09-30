@@ -361,6 +361,15 @@ class RepresentativeSelectionTests(unittest.TestCase):
         self.assertEqual(payload["coverage"]["meaningful_cluster_fraction"], 1.0)
         self.assertNotEqual(payload["confidence"]["level"], "high")
 
+    def test_untested_format_and_resolution_read_in_familiar_words(self) -> None:
+        items = [self._item(index) for index in range(1, 9)]
+        items.append(self._item(9, video_codec="hevc", width=3840, height=2160))
+
+        selection = select_representatives(items, prefix="tv/Example/Season 1")
+
+        self.assertEqual(selection.primary_item()["video_codec"], "h264")
+        self.assertIn("Not yet tested: HEVC (H.265) video, 4K.", selection.payload["coverage_summary"])
+
     def test_single_sample_of_uniform_season_keeps_high_confidence(self) -> None:
         selection = select_representatives([self._item(index) for index in range(1, 6)], prefix="tv/Example/Season 1")
 

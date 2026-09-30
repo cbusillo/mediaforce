@@ -2647,7 +2647,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio sample-coverage fixture",
                 "route": "/folders/tv/Review%20Ready/Season%201",
                 "marker": "Review Ready",
-                "stageMarker": "Not yet tested: HEVC video, 2160p.",
+                "stageMarker": "Not yet tested: HEVC (H.265) video, 4K.",
             },
             {
                 "label": "Folder Studio exact-item review-ready fixture",

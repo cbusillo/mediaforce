@@ -95,7 +95,7 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   the same persistent Original/Sample stage and explicit `Full screen` control
   on a review-ready Movie and Other fixture; the combined comparison remains a
   separately labeled download. The season decision names what the sample did
-  not test (`Not yet tested: HEVC video, 2160p.`) from the selection stored
+  not test (`Not yet tested: HEVC (H.265) video, 4K.`) from the selection stored
   with that sample.
   An exact-item review-ready TV route also keeps `Current size`, `Estimated
   output`, and `Estimated space saved` in its decision facts, separate from the

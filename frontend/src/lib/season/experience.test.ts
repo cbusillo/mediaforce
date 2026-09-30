@@ -2200,7 +2200,7 @@ describe('season experience translation', () => {
 	});
 
 	it('reads coverage from the selection stored with the reviewed sample', () => {
-		const summary = 'Tested 1 of 22 files. Not yet tested: Season 3, HEVC video.';
+		const summary = 'Tested 1 of 22 files. Not yet tested: Season 3, HEVC (H.265) video.';
 		expect(
 			reviewedSampleCoverage(
 				folder({
@@ -2215,7 +2215,12 @@ describe('season experience translation', () => {
 								coverage: {
 									untested_groups: [
 										{ kind: 'season', value: '3', label: 'Season 3', item_count: 6 },
-										{ kind: 'video_format', value: 'hevc', label: 'HEVC video', item_count: 4 }
+										{
+											kind: 'video_format',
+											value: 'hevc',
+											label: 'HEVC (H.265) video',
+											item_count: 4
+										}
 									]
 								}
 							}
