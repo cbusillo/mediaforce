@@ -218,11 +218,13 @@ def project_candidates(
         prefixes or [],
         library_types=library_types,
     )
+    # A TV season or episode needs its whole show loaded to know which season is current; a movie,
+    # an Other group, or a whole show needs only its own rows.
     query_scopes = (
         resolved_scopes
         if resolved_scopes
         and all(
-            scope.domain == "other" or scope.kind == "tv_series"
+            scope.domain in {"other", "movie"} or scope.kind == "tv_series"
             for scope in resolved_scopes
         )
         else []

@@ -16,6 +16,7 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig, with_folder_po
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, staged_artifacts
 from mediaforce.encoding.free_space import ReservePreflight
+from mediaforce.library import candidate_selection
 from mediaforce.library.candidate_selection import candidate_rank_key, project_candidates, workflow_eligibility
 from mediaforce.library.media_scopes import ScopeDomain, media_group_scope_for_rel_path, resolve_media_scope
 from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
@@ -163,6 +164,26 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(selection)
         self.assertEqual(selection.primary_item()["library_item_id"], feature_id)
         self.assertEqual(selection.public_payload()["coverage"]["candidate_item_count"], 1)
+
+    def test_representative_selection_projects_only_the_requested_movie(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            feature_id = self._insert_item(connection, "films/Example/Example.mkv")
+            self._insert_item(connection, "films/Sibling/Sibling.mkv")
+            load_rows = candidate_selection._load_rows
+            projected_paths: set[str] = set()
+
+            def recording_load_rows(*args: object, **kwargs: object) -> list[dict[str, object]]:
+                rows = load_rows(*args, **kwargs)
+                projected_paths.update(str(row["rel_path"]) for row in rows)
+                return rows
+
+            with patch.object(candidate_selection, "_load_rows", side_effect=recording_load_rows):
+                selection = load_representative_selection(connection, self.config, "films/Example")
+
+        self.assertIsNotNone(selection)
+        self.assertEqual(selection.primary_item()["library_item_id"], feature_id)
+        self.assertEqual(selection.public_payload()["population"]["basis"], "production")
+        self.assertEqual(projected_paths, {"films/Example/Example.mkv"})
 
     def test_movie_ranking_can_prefer_largest_or_oldest_plex_item(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
