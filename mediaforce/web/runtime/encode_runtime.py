@@ -1290,9 +1290,11 @@ def transition_encode_job_failure(
                 "retry_not_before": retry_not_before,
                 "waiting_reason": retry_reason,
                 "terminal_reason": None,
+                # A file that did not fit a computer's scratch folder tries another computer next. Only this
+                # job avoids it: the global block counts host-related failures, and a smaller file may still fit.
                 "host_cooldown_until": (
                     (now + timedelta(seconds=deps.encode_host_cooldown_seconds)).isoformat(timespec="seconds")
-                    if host_related and assigned_host
+                    if (host_related or failure_kind == "host_scratch") and assigned_host
                     else None
                 ),
                 "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state="retry_backoff"),

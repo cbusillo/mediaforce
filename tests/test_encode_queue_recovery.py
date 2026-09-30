@@ -3556,6 +3556,57 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual([payload["key"] for payload in blocked.values()], ["remote-a"])
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_scratch_failure_sends_that_file_to_another_computer_without_blocking_the_computer(self) -> None:
+        deps = web_app._encode_queue_runtime_deps()
+        source_path = self._create_source_file("episode-scratch-full.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-scratch-full.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path("episode-scratch-full.mkv"))}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-scratch-full",
+                manifest_name="manifest-scratch-full.json",
+                host={"key": "staged-a", "label": "Staged A", "mode": "ssh"},
+                status="running",
+                attempt_count=1,
+            )
+            job = load_encode_job(connection, "job-scratch-full")
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="host_scratch",
+                error_message="The encode host scratch folder has 3 GiB free; this file needs about 9 GiB.",
+            )
+            updated = load_encode_job(connection, "job-scratch-full")
+            blocked = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertIsNotNone(updated["host_cooldown_until"])
+        self.assertEqual(updated["last_host"]["key"], "staged-a")
+        self.assertEqual(blocked, {})
+
+        def host(key: str, priority: int) -> dict[str, Any]:
+            return {
+                "key": key, "host": key, "label": key.title(), "mode": "ssh", "media_access": "mounted",
+                "priority": priority, "capabilities": ["encode_queue"], "available": True, "probe_available": True,
+                "active_encode_count": 0, "max_parallel_encodes": 1, "queue_active": True,
+            }
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._host_runtime_rows", return_value=[host("staged-a", 90), host("mounted-b", 70)],
+        ):
+            host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, updated)
+
+        assert host_payload is not None, waiting_reason
+        self.assertEqual(host_payload["key"], "mounted-b")
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_a_computer_that_passes_its_readiness_check_takes_work_again_at_once(self) -> None:
         deps = web_app._encode_queue_runtime_deps()
         with open_db(self.config.paths.db_path) as connection:
