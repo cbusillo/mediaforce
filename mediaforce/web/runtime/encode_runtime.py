@@ -560,6 +560,9 @@ def _remove_stale_staging_path(
         result = _remove_path(path)
         _prune_empty_quality_temp_dir(path.parent)
         return result
+    except PermissionError as exc:
+        # Access was refused outright; waiting would not change that.
+        return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANUP_FAILED, detail=f"{path}: {exc}")
     except OSError as exc:
         # A share that dropped mid-encode fails the existence check itself (TimeoutError, errno 60).
         # Nothing was removed; the existing backoff tries again once the storage answers.
@@ -1320,7 +1323,13 @@ def transition_encode_job_failure(
             "retry_not_before": None,
             "waiting_reason": None,
             "terminal_reason": terminal_reason,
-            "host_cooldown_until": None,
+            # A computer that failed an episode's last attempt still cools down and counts toward blocking it,
+            # so it does not go on to fail the next episode's last attempt too.
+            "host_cooldown_until": (
+                (now + timedelta(seconds=deps.encode_host_cooldown_seconds)).isoformat(timespec="seconds")
+                if host_related and assigned_host
+                else None
+            ),
             "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state="needs_attention"),
         }
     )

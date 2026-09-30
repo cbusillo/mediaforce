@@ -3517,6 +3517,20 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(updated["status"], "needs_attention")
         self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
         self.assertEqual(updated["last_failure_kind"], "host_configuration")
+        # The computer still cools down, so it counts toward blocking it for the next episode.
+        self.assertIsNotNone(updated["host_cooldown_until"])
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_last_attempt_setup_failures_still_block_that_computer(self) -> None:
+        deps = web_app._encode_queue_runtime_deps()
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD):
+                self._computer_setup_failure(
+                    connection, f"episode-setup-last-{index}", attempt_count=deps.encode_job_max_attempts,
+                )
+            blocked = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+
+        self.assertEqual([payload["key"] for payload in blocked.values()], ["remote-a"])
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_repeated_computer_setup_failures_block_that_computer_for_everyone(self) -> None:
@@ -3541,6 +3555,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             result = encode_runtime._remove_stale_staging_path(staging_path, host={"key": "local", "mode": "local"})
 
         self.assertEqual(result.outcome, encode_runtime._StagingPathCleanupOutcome.CLEANUP_DEFERRED)
+
+    def test_cleanup_refused_by_permissions_fails_instead_of_waiting_forever(self) -> None:
+        staging_path = self._staging_path("episode-no-access.mkv")
+
+        with patch.object(Path, "exists", side_effect=PermissionError(13, "Permission denied")):
+            result = encode_runtime._remove_stale_staging_path(staging_path, host={"key": "local", "mode": "local"})
+
+        self.assertEqual(result.outcome, encode_runtime._StagingPathCleanupOutcome.CLEANUP_FAILED)
 
     def test_containment_failure_is_not_retried_from_embedded_ssh_markers(self) -> None:
         host = {"key": "remote-a", "label": "Remote A", "mode": "ssh"}
