@@ -44,8 +44,9 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, EncodeDurationSample, \
     estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples
 from mediaforce.encoding.free_space import CapacityCache, encode_reserve_preflight, large_job_requires_serialization
-from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
-    analyze_quality_policy_failure, quality_error_message
+from mediaforce.encoding.quality import REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, QualitySearchError, \
+    QualityTempCleanupError, QualityTempSetupError, RemoteQualityTimeoutError, analyze_quality_policy_failure, \
+    quality_error_message
 from mediaforce.encoding.staged_host import StagedScratchError
 from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.cadence import CadenceResolutionError
@@ -135,6 +136,8 @@ UNKNOWN_ENCODE_FAILURE_EXHAUSTED_MESSAGE = (
     "The error details are saved with this job."
 )
 UNKNOWN_FAILURE_DETAIL_MAX_CHARS = 4000
+REMOTE_QUALITY_TIMEOUT_RETRY_NOTE = "It will be tried again."
+REMOTE_QUALITY_TIMEOUT_EXHAUSTED_NOTE = "It kept running too long, so this file needs you."
 # Failures a retry cannot change: a measured result, a plan or evidence contract, or a finished
 # output kept for review (a retry's cleanup would delete it).
 CERTAIN_ENCODE_FAILURES: tuple[type[Exception], ...] = (
@@ -898,6 +901,7 @@ _UNFINISHED_REASON_LABELS = {
     "storage_io": "had trouble reading or writing media",
     "host_unavailable": "computer unavailable",
     "ssh_transport": "couldn't connect to a computer",
+    REMOTE_QUALITY_TIMEOUT_FAILURE_KIND: "measuring quality ran too long on a computer",
     "needs_review": "waiting for you to take a look",
 }
 # Queued files wait for the scheduler; group its sentences under short plain labels, first match
@@ -1254,6 +1258,8 @@ def transition_encode_job_failure(
     # An unrecognised error is often a raw tool log: the owner sees a plain summary, and the
     # raw text stays on the job for diagnosis.
     owner_error = UNKNOWN_ENCODE_FAILURE_MESSAGE if failure_kind == "unknown" else error_message
+    if failure_kind == REMOTE_QUALITY_TIMEOUT_FAILURE_KIND:
+        owner_error = f"{error_message} {REMOTE_QUALITY_TIMEOUT_RETRY_NOTE}"
     job.update(
         {
             "process_pid": None,
@@ -1318,6 +1324,8 @@ def transition_encode_job_failure(
     terminal_reason = "max_attempts_exhausted" if retryable else failure_kind
     if failure_kind == "unknown":
         job["error"] = UNKNOWN_ENCODE_FAILURE_EXHAUSTED_MESSAGE
+    elif failure_kind == REMOTE_QUALITY_TIMEOUT_FAILURE_KIND:
+        job["error"] = f"{error_message} {REMOTE_QUALITY_TIMEOUT_EXHAUSTED_NOTE}"
     job.update(
         {
             "status": "needs_attention",
@@ -3532,6 +3540,7 @@ def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_pay
         "ssh_transport",
         "unreadable_output",
         "host_scratch",
+        REMOTE_QUALITY_TIMEOUT_FAILURE_KIND,
         "storage_io",
         "controller_database_busy",
         "unknown",
@@ -3568,6 +3577,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         "host_configuration": "a setup problem on that computer",
         "unreadable_output": "unreadable encoder output",
         "host_scratch": "scratch folder problem on the computer",
+        REMOTE_QUALITY_TIMEOUT_FAILURE_KIND: "a quality check that ran too long on a computer",
         "storage_io": "media storage read or write error",
         "controller_database_busy": "controller database contention",
         "unknown": "an error Mediaforce does not recognise",
@@ -3746,7 +3756,7 @@ def _encode_retry_artifact_cleanup_error_message(
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
     message = str(exc).lower()
     host_payload = object_dict(job.get("host"))
-    if isinstance(exc, HostReadinessError):
+    if isinstance(exc, HostReadinessError | RemoteQualityTimeoutError):
         return exc.failure_kind
     if isinstance(exc, ProcessDeadlineEnforcementError):
         return "containment_unproven"

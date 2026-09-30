@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from collections.abc import Mapping
@@ -14,6 +15,7 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
 from mediaforce.core.evidence import stable_json_hash
+from mediaforce.encoding.quality import REMOTE_QUALITY_TIMEOUT_SECONDS, RemoteQualityTimeoutError
 from mediaforce.encoding.staging import HEADER_ONLY_OUTPUT_MAX_BYTES, partial_output_path
 from mediaforce.web.runtime.child_recovery import (
     DATABASE_IDENTITY_ERROR,
@@ -26,6 +28,13 @@ from mediaforce.web.runtime.encode_runtime import sync_encode_job_parent
 NOW = "2026-09-09T12:00:00+00:00"
 RECOVERED_AT = "2026-09-09T12:05:00+00:00"
 APPROVAL = {"policy_hash": "approved-policy", "target": "production"}
+
+
+def _remote_command_timeout(script: str) -> subprocess.TimeoutExpired:
+    return subprocess.TimeoutExpired(
+        ["ssh", "-o", "BatchMode=yes", "encoder@example.invalid", "sh", "-lc", f"export PATH=/opt/bin:$PATH\n{script}"],
+        REMOTE_QUALITY_TIMEOUT_SECONDS,
+    )
 
 
 class ChildRecoveryTests(unittest.TestCase):
@@ -481,12 +490,34 @@ class ChildRecoveryTests(unittest.TestCase):
             preview = self._preview(connection, ["child-0"])
             self.assertEqual(preview["child_ids"], ["child-0"])
 
+    def test_children_whose_remote_quality_run_ran_out_of_time_recover(self) -> None:
+        timeout = RemoteQualityTimeoutError(
+            phase="crf_search",
+            timeout_seconds=REMOTE_QUALITY_TIMEOUT_SECONDS,
+            host_key="remote-a",
+            host_label="Remote A",
+            remote_process_contained=True,
+        )
+        # Recorded before this failure had its own kind: the raw timeout of the whole SSH command.
+        legacy_error = str(_remote_command_timeout("ab-av1 crf-search -i '/media/Episode 002.mkv' --min-vmaf 95"))
+        with open_db(self.config.paths.db_path) as connection:
+            self._seed(
+                connection,
+                count=2,
+                failure_kinds=[timeout.failure_kind, "deterministic"],
+                errors=[str(timeout), legacy_error],
+                parent_status="needs_attention",
+            )
+            preview = self._preview(connection, ["child-0", "child-1"])
+            self.assertEqual(preview["child_ids"], ["child-0", "child-1"])
+
     def test_other_deterministic_failures_and_foreign_probe_paths_stay_ineligible(self) -> None:
         foreign_probe = "Command '['/opt/homebrew/bin/ffprobe', '/elsewhere/Episode.mkv']' returned non-zero exit status 1."
         cases = (
             "Final output size missed the approved target band: status=over_target",
             DATABASE_IDENTITY_ERROR + " (wrapped)",
             foreign_probe,
+            str(_remote_command_timeout("ffmpeg -i '/media/Episode 002.mkv' out.mkv")),
         )
         for error in cases:
             with self.subTest(error=error), open_db(self.config.paths.db_path) as connection:

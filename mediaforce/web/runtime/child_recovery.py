@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import stat as stat_module
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from mediaforce.core.db_tables import (
 )
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.encode_queue import list_child_encode_jobs, save_encode_job
+from mediaforce.encoding.quality import REMOTE_QUALITY_TIMEOUT_FAILURE_KIND
 from mediaforce.encoding.staging import HEADER_ONLY_OUTPUT_MAX_BYTES, partial_output_path
 from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
 
@@ -43,6 +45,12 @@ ACTIVE_PARENT_STATUSES = frozenset({"queued", "retry_backoff", "running"})
 RECOVERABLE_PARENT_STATUSES = ACTIVE_PARENT_STATUSES | frozenset({"needs_attention"})
 ELIGIBLE_CHILD_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
 DATABASE_IDENTITY_ERROR = "Mediaforce database identity changed during connection"
+# The raw timeout an SSH quality run raised before it had its own failure kind: the whole ssh argv,
+# with the ab-av1 script inside it, then Python's "timed out after N seconds".
+LEGACY_REMOTE_QUALITY_TIMEOUT_RE = re.compile(
+    r"^Command '\['ssh', .*ab-av1 (?:crf-search|sample-encode)\b.*\]' timed out after \d+(?:\.\d+)? seconds",
+    re.DOTALL,
+)
 MAX_CHILDREN = 100
 MAX_RECEIPTS = 8
 
@@ -491,6 +499,9 @@ def _recoverable_failure_class(child: Mapping[str, Any]) -> str | None:
     if failure_kind == "unknown":
         # An unrecognised error used up its automatic retries; nothing showed it was certain to fail again.
         return failure_kind
+    if failure_kind == REMOTE_QUALITY_TIMEOUT_FAILURE_KIND:
+        # A quality run on another computer ran out of time and was stopped; it measured nothing about the item.
+        return failure_kind
     if failure_kind != "deterministic":
         return None
     error = str(child.get("error") or "")
@@ -508,6 +519,9 @@ def _recoverable_failure_class(child: Mapping[str, Any]) -> str | None:
         return "database_identity"
     if error.startswith("Command '[") and "ffprobe" in error and "returned non-zero exit status" in error:
         return "unreadable_staged_output"
+    if LEGACY_REMOTE_QUALITY_TIMEOUT_RE.search(error):
+        # Recorded before a remote quality run that ran out of time had its own failure kind.
+        return REMOTE_QUALITY_TIMEOUT_FAILURE_KIND
     return None
 
 

@@ -12,10 +12,10 @@ schedule and reserve admission.
 First restore the failed host's storage/readiness or keep it excluded from
 admission. This recovery API does not implement host isolation or prove remote
 process termination. Only unleased terminal shards are eligible. Do not use it
-to work around a quality failure, timeout, containment failure or an unverified
-completed output.
+to work around a quality failure, a timeout other than the remote quality one
+below, a containment failure or an unverified completed output.
 
-Five classes are recoverable:
+Recoverable classes include:
 
 - `host_configuration`.
 - `unreadable_output`: the encode removed its own header-only output and used
@@ -31,6 +31,14 @@ Five classes are recoverable:
   `header_only_output`, and apply requeues the child as `retry_backoff` so the
   queue's ordinary retry cleanup removes it before the encode starts. A larger
   unreadable output still blocks and follows the retained-output rules below.
+- `remote_quality_timeout`: a quality measurement over SSH ran past its time
+  limit, was shown stopped on that computer, and the automatic retries ran out
+  (#596). It measured nothing about the item. A `deterministic` child whose
+  error is the raw timeout of a remote `ab-av1 crf-search` or `sample-encode`
+  SSH command, recorded before this kind existed, is recovered the same way.
+  Nothing showed that legacy run stopped, so check that the computer is idle
+  before recovering it. A timeout whose run was not shown stopped is
+  `containment_unproven` and is not recoverable here.
 
 Every other `deterministic` failure, including a final-size miss, stays
 ineligible. Host isolation and retained-output reconciliation remain
@@ -93,6 +101,43 @@ staged output is at most 64 KiB and cannot be probed, the encode removes that
 output and fails with the retryable kind `unreadable_output`, so the queue
 retries within its normal attempt limit. A larger unreadable output is kept and
 ends `needs_attention`, because it may be repairable.
+
+## Remote quality runs that run too long
+
+A quality measurement over SSH that passes its time limit raises
+`RemoteQualityTimeoutError` instead of the raw timeout, whose text named the
+whole SSH command. Stopping the local SSH client does not stop the run on the
+computer, so Mediaforce then runs a short stop step there. From one process
+listing it collects every process whose command line names the run's own
+scoped temp folder (`.mediaforce-ab-av1-<id>`, passed as an argument and
+matched as a whole path, so `<folder>0` is not it) plus all their descendants,
+stops those processes first politely and then forcibly, and reports success
+only when a fresh listing shows nothing naming the folder and none of the
+collected processes still running. Listings are full width, so a long
+command line keeps the folder. Each collected process is kept as its pid and
+full command line, and is signalled only while that pid still shows that
+command line; a pid that now shows another command was reused and counts as
+gone. It never signals a whole process group, because nothing proves a group
+belongs only to this run. A failed or empty process listing, or a failed
+check of it, never counts as success.
+
+ab-av1's ffmpeg children write into the folder, so their own command lines
+name it. A process that neither names the folder nor descends from one that
+does is not seen. Confirming that ab-av1's children behave this way is part of
+the owner-watched session on a real encode computer.
+
+- Shown stopped: the temp folder is removed as usual, and an encode records
+  `remote_quality_timeout` and retries within its normal attempt limit. The
+  owner sees which computer, that the run was stopped, and that it will be
+  tried again. If the folder cannot be removed, the owner is told so in one
+  plain sentence; the raw detail stays on the error as a diagnostic.
+- Not shown stopped (the step failed, timed out, found survivors, or the run
+  had no scoped temp folder): the temp folder is kept, and an encode records
+  `containment_unproven` and waits for the owner, with a plain instruction to
+  check that computer is idle and then try the file again.
+
+A sample job records the same kind, message and whether the run was stopped in
+its result, without retrying on its own.
 
 ## Progress and heartbeat failures
 

@@ -114,8 +114,169 @@ class QualityTempSetupError(RuntimeError):
     pass
 
 
+REMOTE_QUALITY_TIMEOUT_FAILURE_KIND = "remote_quality_timeout"
+CONTAINMENT_UNPROVEN_FAILURE_KIND = "containment_unproven"
+
+
+class RemoteQualityTimeoutError(RuntimeError):
+    """A quality run on another computer outlasted its time limit.
+
+    ``remote_process_contained`` says whether every process of that run was shown stopped on
+    that computer. Until it is, the run may still be using its temp folder and the computer.
+    """
+
+    def __init__(
+            self,
+            *,
+            phase: str,
+            timeout_seconds: float,
+            host_key: str,
+            host_label: str,
+            remote_process_contained: bool,
+            output_tail: str | None = None,
+    ) -> None:
+        outcome = (
+            "that run was stopped."
+            if remote_process_contained
+            else "the run on that computer was not confirmed stopped. "
+                 "Check that computer is idle, then try this file again."
+        )
+        super().__init__(
+            f"Measuring quality on {host_label} ran past {_plain_duration(timeout_seconds)} without a result; "
+            f"{outcome}"
+        )
+        self.remote_process_contained = remote_process_contained
+        self.failure_kind = (
+            REMOTE_QUALITY_TIMEOUT_FAILURE_KIND if remote_process_contained else CONTAINMENT_UNPROVEN_FAILURE_KIND
+        )
+        self.phase = phase
+        self.timeout_seconds = timeout_seconds
+        self.host_key = host_key
+        self.host_label = host_label
+        self.output_tail = output_tail
+        self.temp_cleanup_error: str | None = None
+
+    def note_temp_files_left(self, cleanup_error: str) -> None:
+        """Tell the owner in plain words; the raw detail names paths and SSH, so it stays a diagnostic."""
+        self.temp_cleanup_error = cleanup_error
+        self.add_note(f"{QUALITY_CLEANUP_NOTE_PREFIX}{cleanup_error}")
+        self.args = (f"{self.args[0]} {REMOTE_QUALITY_TEMP_FILES_LEFT_NOTE}",)
+
+
 REMOTE_QUALITY_TIMEOUT_SECONDS = 2 * 60 * 60
+REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_LINES = 5
+REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_MAX_CHARS = 500
 REMOTE_QUALITY_CLEANUP_TIMEOUT_SECONDS = 15
+REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS = 30
+REMOTE_QUALITY_CONTAINED_MARKER = "mediaforce-quality-run-stopped"
+REMOTE_QUALITY_TEMP_FILES_LEFT_NOTE = "Its temporary files could not be removed; they will be cleaned up later."
+# Stops what is left of one timed-out run on the computer. The run's scoped temp folder is unique to
+# it and comes in as $1. A command line names it only as a whole path: fixed text that starts the
+# command or follows whitespace, "=" or a quote, and ends it or is followed by "/", whitespace or a
+# quote, so "<folder>0" or "<folder>-x" is someone else's. Listings are full width (-ww, COLUMNS
+# unset) so the folder at the end of a long command line is never cut off.
+#
+# Before any signal it takes one listing and collects every process naming the folder plus all
+# their descendants, so a child that does not name the folder is still found after its parent
+# dies. Each is kept as its pid and full command line, and is signalled only while a fresh listing
+# still shows that pid with that command line; a pid now showing another command was reused and
+# counts as gone. Only those processes are signalled, never their process groups: nothing proves a
+# group belongs only to this run. ab-av1's ffmpeg children write into the folder, so their own
+# command lines name it. A process that neither names the folder nor descends from one that does
+# is not seen; confirming ab-av1's children behave this way is part of the owner-watched host
+# session.
+#
+# It prints the marker only when a fresh listing shows nothing naming the folder and none of the
+# collected processes still running (an exited zombie is not running). Every step fails closed: a
+# failed ps, a listing that does not show this script itself, or a failed awk is never proof.
+# Processes in this script's own group (its shells, whose arguments also name the folder) are
+# never collected.
+REMOTE_QUALITY_CONTAINMENT_SCRIPT = """target=$1
+[ -n "$target" ] || exit 2
+unset COLUMNS
+self=$$
+command_of='function command_of(line) {
+  sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]*/, "", line)
+  return line
+}'
+snapshot() {
+  listing=$(ps -axww -o pid=,ppid=,pgid=,stat=,command=) || return 1
+  printf '%s\\n' "$listing" | awk -v self="$self" '$1 == self { found = 1 } END { exit !found }' || return 1
+  printf '%s\\n' "$listing"
+}
+collect() {
+  printf '%s\\n' "$1" | TARGET="$target" awk -v own="$own_group" "$command_of"'
+    function names_folder(line, folder,   rest, offset, at, before, after) {
+      rest = line; offset = 0
+      while ((at = index(rest, folder)) > 0) {
+        before = offset + at > 1 ? substr(line, offset + at - 1, 1) : ""
+        after = substr(rest, at + length(folder), 1)
+        if ((before == "" || before ~ /[[:space:]=\\042\\047]/) && (after == "" || after ~ /[[:space:]\\/\\042\\047]/)) return 1
+        offset += at; rest = substr(rest, at + 1)
+      }
+      return 0
+    }
+    $3 == own || $4 ~ /^Z/ { next }
+    { count++; pids[count] = $1; parent[$1] = $2; command[$1] = command_of($0) }
+    names_folder(command[$1], ENVIRON["TARGET"]) { hit[$1] = 1 }
+    END {
+      do {
+        grew = 0
+        for (i = 1; i <= count; i++) {
+          if (!(pids[i] in hit) && (parent[pids[i]] in hit)) { hit[pids[i]] = 1; grew = 1 }
+        }
+      } while (grew)
+      for (pid in hit) print pid, command[pid]
+    }'
+}
+still_running() {
+  printf '%s\\n' "$1" | TARGETS="$targets" awk "$command_of"'
+    BEGIN {
+      rows = split(ENVIRON["TARGETS"], lines, "\\n")
+      for (i = 1; i <= rows; i++) {
+        at = index(lines[i], " ")
+        if (at > 0) want[substr(lines[i], 1, at - 1)] = substr(lines[i], at + 1)
+      }
+    }
+    $4 !~ /^Z/ && ($1 in want) && command_of($0) == want[$1] { print $1 }'
+}
+signal_all() {
+  now=$(snapshot) || return 1
+  running=$(still_running "$now") || return 1
+  for pid in $running; do
+    kill -"$1" "$pid" 2>/dev/null
+  done
+  return 0
+}
+settled() {
+  now=$(snapshot) || return 2
+  fresh=$(collect "$now") || return 2
+  [ -z "$fresh" ] || return 1
+  running=$(still_running "$now") || return 2
+  [ -z "$running" ] || return 1
+  return 0
+}
+listing=$(snapshot) || exit 3
+own_group=$(printf '%s\\n' "$listing" | awk -v self="$self" '$1 == self { print $3 }') || exit 3
+[ -n "$own_group" ] || exit 3
+targets=$(collect "$listing") || exit 3
+signal_all TERM || exit 3
+waited=0
+while :; do
+  settled; state=$?
+  [ "$state" -eq 1 ] && [ "$waited" -lt 5 ] || break
+  sleep 1; waited=$((waited + 1))
+done
+if [ "$state" -eq 1 ]; then
+  listing=$(snapshot) || exit 3
+  fresh=$(collect "$listing") || exit 3
+  targets=$(printf '%s\\n%s\\n' "$targets" "$fresh")
+  signal_all KILL || exit 3
+  sleep 1
+  settled; state=$?
+fi
+[ "$state" -eq 0 ] || exit $((state + 2))
+echo """ + REMOTE_QUALITY_CONTAINED_MARKER
 LOCAL_QUALITY_PATH_PREFIX = "/opt/homebrew/opt/ffmpeg-full/bin:/usr/local/opt/ffmpeg-full/bin"
 DEFAULT_LOCAL_QUALITY_TEMP_ROOT_NAME = "mediaforce-quality-temp"
 LEGACY_LOCAL_QUALITY_TEMP_ROOT_NAME = "quality-temp"
@@ -487,21 +648,12 @@ def run_crf_search(
         cmd.extend(["--min-vmaf", str(metric_target)])
     else:
         cmd.extend(["--min-xpsnr", str(metric_target)])
-    try:
-        scoped_temp_dir = _scoped_quality_temp_dir(quality_temp_dir, host=host)
-    except OSError as exc:
-        raise QualityTempSetupError(_quality_temp_setup_error(quality_temp_dir, exc, host=host)) from exc
-    if scoped_temp_dir is not None:
-        cmd.extend(["--temp-dir", str(scoped_temp_dir)])
-
-    try:
-        result = _run_quality_command(cmd, process_controller=process_controller, host=host)
-    except Exception as exc:
-        cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
-        if cleanup_error is not None:
-            _attach_quality_cleanup_detail(exc, cleanup_error)
-        raise
-    cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
+    result, cleanup_error = _run_scoped_quality_command(
+        cmd,
+        quality_temp_dir,
+        process_controller=process_controller,
+        host=host,
+    )
     if result.returncode != 0:
         details = result.stdout.strip()
         if result.stderr.strip():
@@ -587,21 +739,12 @@ def run_sample_encode(
         cmd.extend(["--svt", param])
     if metric == "xpsnr":
         cmd.append("--xpsnr")
-    try:
-        scoped_temp_dir = _scoped_quality_temp_dir(quality_temp_dir, host=host)
-    except OSError as exc:
-        raise QualityTempSetupError(_quality_temp_setup_error(quality_temp_dir, exc, host=host)) from exc
-    if scoped_temp_dir is not None:
-        cmd.extend(["--temp-dir", str(scoped_temp_dir)])
-
-    try:
-        result = _run_quality_command(cmd, process_controller=process_controller, host=host)
-    except Exception as exc:
-        cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
-        if cleanup_error is not None:
-            _attach_quality_cleanup_detail(exc, cleanup_error)
-        raise
-    cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
+    result, cleanup_error = _run_scoped_quality_command(
+        cmd,
+        quality_temp_dir,
+        process_controller=process_controller,
+        host=host,
+    )
     if result.returncode != 0:
         details = result.stdout.strip()
         if result.stderr.strip():
@@ -739,12 +882,81 @@ def _run_quality_command(
             if mkdir_result.stderr.strip():
                 details = f"{details}\n{mkdir_result.stderr.strip()}".strip()
             raise QualityTempSetupError(details or f"Failed to prepare remote temp dir: {temp_dir}")
-    return run_remote_command(
-        object_dict(host),
-        cmd,
-        REMOTE_QUALITY_TIMEOUT_SECONDS,
-        process_controller=process_controller,
-    )
+    try:
+        return run_remote_command(
+            object_dict(host),
+            cmd,
+            REMOTE_QUALITY_TIMEOUT_SECONDS,
+            process_controller=process_controller,
+        )
+    except subprocess.TimeoutExpired as exc:
+        host_payload = object_dict(host)
+        host_key = str(host_payload.get("key") or host_payload.get("host") or "").strip()
+        output_tail = _remote_quality_output_tail(exc.stdout, exc.stderr)
+        # The raw timeout names the whole SSH command and its PATH setup; the owner gets plain words.
+        error = RemoteQualityTimeoutError(
+            phase=_quality_phase(cmd),
+            timeout_seconds=exc.timeout,
+            host_key=host_key,
+            host_label=str(host_payload.get("label") or "").strip() or host_key or "another computer",
+            remote_process_contained=_stop_timed_out_remote_quality_run(host_payload, temp_dir),
+            output_tail=output_tail,
+        )
+        if output_tail is not None:
+            error.add_note(f"Last output from that computer:\n{output_tail}")
+        raise error from None
+
+
+def _stop_timed_out_remote_quality_run(host: dict[str, object], scoped_temp_dir: str | None) -> bool:
+    """Stop what is left of a timed-out run on that computer; True only once nothing of it is left.
+
+    Stopping the local SSH client does not stop the run on the computer. Without its scoped temp
+    folder there is nothing that names only this run, so it cannot be shown stopped.
+    """
+    if scoped_temp_dir is None:
+        return False
+    containment_host = dict(host)
+    containment_host.pop(SCHEDULE_CLOSE_DEADLINE_KEY, None)
+    try:
+        result = run_remote_command(
+            containment_host,
+            ["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh", scoped_temp_dir],
+            REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS,
+        )
+    except Exception:  # noqa: BLE001 - any failure here leaves the run unproven, which is the safe answer.
+        return False
+    return result.returncode == 0 and REMOTE_QUALITY_CONTAINED_MARKER in result.stdout.split()
+
+
+def _quality_phase(cmd: list[str]) -> str:
+    subcommand = cmd[1] if len(cmd) > 1 else ""
+    return subcommand.replace("-", "_") or "quality"
+
+
+def _remote_quality_output_tail(*outputs: str | bytes | None) -> str | None:
+    """The last few lines the remote run printed, without the PATH setup that started it."""
+    lines: list[str] = []
+    for output in outputs:
+        if output is None:
+            continue
+        text = output.decode(errors="replace") if isinstance(output, bytes) else output
+        lines.extend(
+            line.strip()
+            for line in re.split(r"[\r\n]+", text)
+            if line.strip() and not line.strip().startswith("export PATH=")
+        )
+    if not lines:
+        return None
+    return "\n".join(lines[-REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_LINES:])[-REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_MAX_CHARS:]
+
+
+def _plain_duration(seconds: float) -> str:
+    whole_seconds = int(seconds)
+    for unit_seconds, unit in ((3600, "hour"), (60, "minute")):
+        if whole_seconds >= unit_seconds and whole_seconds % unit_seconds == 0:
+            count = whole_seconds // unit_seconds
+            return f"{count} {unit}{'' if count == 1 else 's'}"
+    return f"{whole_seconds} second{'' if whole_seconds == 1 else 's'}"
 
 
 def _scoped_quality_temp_dir(quality_temp_dir: Path | None, *, host: dict[str, object] | None) -> Path | None:
@@ -770,7 +982,7 @@ def _cleanup_scoped_quality_temp_dir(scoped_temp_dir: Path | None, *, host: dict
             return f"Failed to remove local quality temp dir {scoped_temp_dir}: {exc}"
         return None
     try:
-        cleanup_host = object_dict(host)
+        cleanup_host = dict(object_dict(host))
         cleanup_host.pop(SCHEDULE_CLOSE_DEADLINE_KEY, None)
         result = run_remote_command(
             cleanup_host,
@@ -789,6 +1001,46 @@ def _cleanup_scoped_quality_temp_dir(scoped_temp_dir: Path | None, *, host: dict
     if result.stderr.strip():
         details = f"{details}\n{result.stderr.strip()}".strip()
     return details or f"Failed to remove remote quality temp dir {scoped_temp_dir}"
+
+
+def _run_scoped_quality_command(
+        cmd: list[str],
+        quality_temp_dir: Path | None,
+        *,
+        process_controller: ManagedProcessController | None,
+        host: dict[str, object] | None,
+) -> tuple[subprocess.CompletedProcess[str], str | None]:
+    try:
+        scoped_temp_dir = _scoped_quality_temp_dir(quality_temp_dir, host=host)
+    except OSError as exc:
+        raise QualityTempSetupError(_quality_temp_setup_error(quality_temp_dir, exc, host=host)) from exc
+    if scoped_temp_dir is not None:
+        cmd.extend(["--temp-dir", str(scoped_temp_dir)])
+
+    try:
+        result = _run_quality_command(cmd, process_controller=process_controller, host=host)
+    except Exception as exc:
+        _cleanup_after_failed_quality_command(exc, scoped_temp_dir, host=host)
+        raise
+    return result, _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
+
+
+def _cleanup_after_failed_quality_command(
+        exc: Exception,
+        scoped_temp_dir: Path | None,
+        *,
+        host: dict[str, object] | None,
+) -> None:
+    if isinstance(exc, RemoteQualityTimeoutError) and not exc.remote_process_contained:
+        # The run on that computer may still be writing there; the periodic sweeps remove it later.
+        return
+    cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
+    if cleanup_error is None:
+        return
+    if isinstance(exc, RemoteQualityTimeoutError):
+        exc.note_temp_files_left(cleanup_error)
+        return
+    _attach_quality_cleanup_detail(exc, cleanup_error)
 
 
 def _attach_quality_cleanup_detail(exc: Exception, cleanup_error: str) -> None:
