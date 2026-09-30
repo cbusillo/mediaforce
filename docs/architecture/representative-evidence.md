@@ -10,11 +10,21 @@
 - `mediaforce/web/app.py::_sample_item` remains a thin compatibility wrapper for
   calibration and test patch points.
 
-## Selection policy v1
+## Selection policy
 
-The selector considers preferred runnable catalog states first and falls back
-to all matching catalog items only when none are runnable. Input order is not a
-selection signal.
+The sample population is the files production would encode: the existing
+candidate decisions (`encode_candidate_decisions`) must mark a file eligible,
+so held seasons, browse-only libraries, excluded extras, and files already
+encoded are left out. A season or episode is judged against its whole show,
+because which season is current depends on its siblings. When no file is
+eligible, the selector falls back to every matching catalog item (preferring
+runnable states) and says so. The payload records this as
+`population: {basis: "production" | "all_items", excluded_count, reason}`.
+Input order is not a selection signal.
+
+The folder page caches a selection for up to a minute, keyed by database,
+prefix, and config file times, so an eligibility change such as a season hold
+releasing shows up within that minute or when the folder cache is reset.
 
 The primary representative is the non-outlier candidate nearest the dominant
 video codec, resolution tier, measured cadence class, audio layout, runtime
@@ -39,9 +49,18 @@ Media fingerprint dimensions are consumed only from measured
 `unknown`; selection must not infer dark scenes, grain, animation, era, genre,
 or cleanup policy from paths, names, or categories.
 
+Only the primary is encoded and reviewed, so the payload separates
+`measured_source_ids` (the primary) from `unmeasured_source_ids` (the other
+coverage picks). Coverage and confidence describe the measured files against
+the population, not the whole selected set. `coverage.untested_groups` lists
+seasons, video formats, and resolutions no measured file shares, and
+`coverage_summary` names them in plain words. Confidence is never `high` while
+any such group is untested. This adds information only; per-file quality checks
+and approval scope are unchanged.
+
 Coverage reports:
 
-- selected, represented, and exact-profile item counts and runtime
+- selected, measured, represented, and exact-profile item counts and runtime
 - per-dimension covered and uncovered values
 - meaningful-cluster coverage
 - numeric outliers
@@ -50,6 +69,8 @@ Coverage reports:
 
 Changing the representative-selection policy is versioned. Policy v2 adds
 measured fingerprint coverage dimensions to the earlier technical profile.
+Policy v3 limits the population to production-eligible files and measures
+coverage from the sampled file only.
 
 Changing the threshold, clustering, tie breakers, or coverage semantics
 requires a representative-selection tool or policy version bump.
