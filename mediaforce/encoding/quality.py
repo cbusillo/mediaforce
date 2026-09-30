@@ -171,32 +171,41 @@ REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS = 30
 REMOTE_QUALITY_CONTAINED_MARKER = "mediaforce-quality-run-stopped"
 REMOTE_QUALITY_TEMP_FILES_LEFT_NOTE = "Its temporary files could not be removed; they will be cleaned up later."
 # Stops what is left of one timed-out run on the computer. The run's scoped temp folder is unique to
-# it and comes in as $1. A command line names it only as a whole path: fixed text that starts the line
-# or follows whitespace, "=" or a quote, and ends the line or is followed by "/", whitespace or a
-# quote, so "<folder>0" or "<folder>-x" is someone else's. Before any signal it takes one process
-# listing and collects every process naming the folder plus all their descendants, so a child that
-# does not name the folder is still found after its parent dies. Only those processes are signalled,
-# never their process groups: nothing proves a group belongs only to this run. ab-av1's ffmpeg
-# children write into the folder, so their own command lines name it. A process that neither names
-# the folder nor descends from one that does is not seen; confirming ab-av1's children behave this
-# way is part of the owner-watched host session. It prints the marker only when a fresh listing
-# shows nothing naming the folder and none of the collected processes is still there other than as
-# an exited zombie (a reused pid counts as alive, the safe side). Every listing fails closed: a
-# failed ps, or one that does not show this script itself, is never proof. Processes in this
-# script's own group (its shells, whose arguments also name the folder) are never collected.
+# it and comes in as $1. A command line names it only as a whole path: fixed text that starts the
+# command or follows whitespace, "=" or a quote, and ends it or is followed by "/", whitespace or a
+# quote, so "<folder>0" or "<folder>-x" is someone else's. Listings are full width (-ww, COLUMNS
+# unset) so the folder at the end of a long command line is never cut off.
+#
+# Before any signal it takes one listing and collects every process naming the folder plus all
+# their descendants, so a child that does not name the folder is still found after its parent
+# dies. Each is kept as its pid and full command line, and is signalled only while a fresh listing
+# still shows that pid with that command line; a pid now showing another command was reused and
+# counts as gone. Only those processes are signalled, never their process groups: nothing proves a
+# group belongs only to this run. ab-av1's ffmpeg children write into the folder, so their own
+# command lines name it. A process that neither names the folder nor descends from one that does
+# is not seen; confirming ab-av1's children behave this way is part of the owner-watched host
+# session.
+#
+# It prints the marker only when a fresh listing shows nothing naming the folder and none of the
+# collected processes still running (an exited zombie is not running). Every step fails closed: a
+# failed ps, a listing that does not show this script itself, or a failed awk is never proof.
+# Processes in this script's own group (its shells, whose arguments also name the folder) are
+# never collected.
 REMOTE_QUALITY_CONTAINMENT_SCRIPT = """target=$1
 [ -n "$target" ] || exit 2
+unset COLUMNS
 self=$$
+command_of='function command_of(line) {
+  sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]*/, "", line)
+  return line
+}'
 snapshot() {
-  listing=$(ps -axo pid=,ppid=,pgid=,stat=,command=) || return 1
+  listing=$(ps -axww -o pid=,ppid=,pgid=,stat=,command=) || return 1
   printf '%s\\n' "$listing" | awk -v self="$self" '$1 == self { found = 1 } END { exit !found }' || return 1
   printf '%s\\n' "$listing"
 }
-listing=$(snapshot) || exit 3
-own_group=$(printf '%s\\n' "$listing" | awk -v self="$self" '$1 == self { print $3 }')
-[ -n "$own_group" ] || exit 3
 collect() {
-  printf '%s\\n' "$1" | TARGET="$target" awk -v own="$own_group" '
+  printf '%s\\n' "$1" | TARGET="$target" awk -v own="$own_group" "$command_of"'
     function names_folder(line, folder,   rest, offset, at, before, after) {
       rest = line; offset = 0
       while ((at = index(rest, folder)) > 0) {
@@ -208,8 +217,8 @@ collect() {
       return 0
     }
     $3 == own || $4 ~ /^Z/ { next }
-    { count++; pids[count] = $1; parent[$1] = $2 }
-    names_folder($0, ENVIRON["TARGET"]) { hit[$1] = 1 }
+    { count++; pids[count] = $1; parent[$1] = $2; command[$1] = command_of($0) }
+    names_folder(command[$1], ENVIRON["TARGET"]) { hit[$1] = 1 }
     END {
       do {
         grew = 0
@@ -217,26 +226,41 @@ collect() {
           if (!(pids[i] in hit) && (parent[pids[i]] in hit)) { hit[pids[i]] = 1; grew = 1 }
         }
       } while (grew)
-      for (pid in hit) print pid
+      for (pid in hit) print pid, command[pid]
     }'
 }
-targets=$(collect "$listing")
+still_running() {
+  printf '%s\\n' "$1" | TARGETS="$targets" awk "$command_of"'
+    BEGIN {
+      rows = split(ENVIRON["TARGETS"], lines, "\\n")
+      for (i = 1; i <= rows; i++) {
+        at = index(lines[i], " ")
+        if (at > 0) want[substr(lines[i], 1, at - 1)] = substr(lines[i], at + 1)
+      }
+    }
+    $4 !~ /^Z/ && ($1 in want) && command_of($0) == want[$1] { print $1 }'
+}
 signal_all() {
-  for pid in $targets; do
+  now=$(snapshot) || return 1
+  running=$(still_running "$now") || return 1
+  for pid in $running; do
     kill -"$1" "$pid" 2>/dev/null
   done
   return 0
 }
 settled() {
   now=$(snapshot) || return 2
-  [ -z "$(collect "$now")" ] || return 1
-  printf '%s\\n' "$now" | TARGETS="$targets" awk '
-    BEGIN { count = split(ENVIRON["TARGETS"], pids); for (i = 1; i <= count; i++) want[pids[i]] = 1 }
-    $4 !~ /^Z/ && ($1 in want) { alive = 1 }
-    END { exit alive }' || return 1
+  fresh=$(collect "$now") || return 2
+  [ -z "$fresh" ] || return 1
+  running=$(still_running "$now") || return 2
+  [ -z "$running" ] || return 1
   return 0
 }
-signal_all TERM
+listing=$(snapshot) || exit 3
+own_group=$(printf '%s\\n' "$listing" | awk -v self="$self" '$1 == self { print $3 }') || exit 3
+[ -n "$own_group" ] || exit 3
+targets=$(collect "$listing") || exit 3
+signal_all TERM || exit 3
 waited=0
 while :; do
   settled; state=$?
@@ -245,8 +269,9 @@ while :; do
 done
 if [ "$state" -eq 1 ]; then
   listing=$(snapshot) || exit 3
-  targets=$(printf '%s\\n%s\\n' "$targets" "$(collect "$listing")")
-  signal_all KILL
+  fresh=$(collect "$listing") || exit 3
+  targets=$(printf '%s\\n%s\\n' "$targets" "$fresh")
+  signal_all KILL || exit 3
   sleep 1
   settled; state=$?
 fi

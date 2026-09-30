@@ -691,27 +691,85 @@ class RemoteQualityContainmentScriptTests(unittest.TestCase):
             except ProcessLookupError:
                 pass
 
-    def test_a_process_listing_that_fails_or_is_empty_is_never_proof(self) -> None:
-        real_ps = shutil.which("ps")
-        assert real_ps is not None
-        cases = {
-            "fails": "exit 1",
-            "is empty": "exit 0",
-            # The first listing works, so only the later check can catch it.
-            "fails when checked": f'[ -e "$0.used" ] && exit 1; touch "$0.used"; exec {real_ps} "$@"',
-            "is empty when checked": f'[ -e "$0.used" ] && exit 0; touch "$0.used"; exec {real_ps} "$@"',
-        }
-        for label, fake_ps in cases.items():
-            with self.subTest(label), tempfile.TemporaryDirectory() as tools:
-                ps = Path(tools) / "ps"
-                ps.write_text(f"#!/bin/sh\n{fake_ps}\n")
-                ps.chmod(0o755)
+    def _fake_tool_env(self, name: str, body: str, **extra: str) -> dict[str, str]:
+        """An environment whose PATH finds only this stand-in for ``name``, running ``body``, first."""
+        tools = Path(tempfile.mkdtemp(dir=self.ready_dir))
+        tool = tools / name
+        tool.write_text(f"#!/bin/sh\n{body}\n")
+        tool.chmod(0o755)
+        return {**os.environ, **extra, "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"}
 
-                result = self._stop({**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"})
+    def test_a_failed_or_empty_listing_or_a_failed_check_is_never_proof(self) -> None:
+        real_ps, real_awk = shutil.which("ps"), shutil.which("awk")
+        assert real_ps is not None and real_awk is not None
+        # The first use works where it says "when checked", so only a later check can catch it.
+        once = '[ -e "$0.used" ] && {fail}; touch "$0.used"'
+        collecting = '*names_folder*'
+        checking_running = '*ENVIRON\\[\\"TARGETS\\"\\]*'
+        cases = {
+            "the listing fails": ("ps", "exit 1"),
+            "the listing is empty": ("ps", "exit 0"),
+            "the listing fails when checked": ("ps", f'{once.format(fail="exit 1")}; exec {real_ps} "$@"'),
+            "the listing is empty when checked": ("ps", f'{once.format(fail="exit 0")}; exec {real_ps} "$@"'),
+            "collecting fails": ("awk", f'case "$*" in {collecting}) exit 2;; esac; exec {real_awk} "$@"'),
+            "collecting fails when checked": (
+                "awk", f'case "$*" in {collecting}) {once.format(fail="exit 2")};; esac; exec {real_awk} "$@"',
+            ),
+            "checking what still runs fails": (
+                "awk", f'case "$*" in {checking_running}) exit 2;; esac; exec {real_awk} "$@"',
+            ),
+        }
+        for label, (tool, body) in cases.items():
+            with self.subTest(label):
+                result = self._stop(self._fake_tool_env(tool, body))
 
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn(REMOTE_QUALITY_CONTAINED_MARKER, result.stdout)
 
+    def test_a_reused_pid_is_not_signalled_and_counts_as_gone(self) -> None:
+        real_ps = shutil.which("ps")
+        assert real_ps is not None
+        unrelated_ready = self._start(
+            "unrelated", [sys.executable, "-c", "import pathlib, sys, time; pathlib.Path(sys.argv[1]).touch(); time.sleep(300)"],
+        )
+        self.assertTrue(_wait_until(unrelated_ready.exists), "fixture never became ready")
+        unrelated = self.started[0]
+        # The first listing shows that pid running this run's command; every later one shows the
+        # unrelated process that now has the pid.
+        env = self._fake_tool_env(
+            "ps",
+            f'listing=$({real_ps} "$@") || exit 1; [ -e "$0.used" ] && {{ printf "%s\\n" "$listing"; exit 0; }}; '
+            'touch "$0.used"; printf "%s\\n" "$listing" | awk \'$1 == ENVIRON["REUSED_PID"] '
+            '{ print $1, $2, $3, $4, "ab-av1 crf-search --temp-dir " ENVIRON["RUN_FOLDER"]; next } { print }\'',
+            REUSED_PID=str(unrelated.pid),
+            RUN_FOLDER=self.folder,
+        )
+
+        result = self._stop(env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(REMOTE_QUALITY_CONTAINED_MARKER, result.stdout.split())
+        self.assertIsNone(unrelated.poll())
+
+    def test_a_narrow_terminal_width_does_not_hide_the_folder(self) -> None:
+        real_ps = shutil.which("ps")
+        assert real_ps is not None
+        run_ready = self._start("run", ["sh", "-c", self.SHELL_BYSTANDER, "sh", self.folder])
+        self.assertTrue(_wait_until(run_ready.exists), "fixture never became ready")
+        run = self.started[0]
+        # Like procps, the stand-in cuts each line to COLUMNS unless asked for full width.
+        env = self._fake_tool_env(
+            "ps",
+            f'case " $* " in *" -axww "*) exec {real_ps} "$@";; esac; '
+            f'{real_ps} "$@" | cut -c "1-${{COLUMNS:-100000}}"',
+            COLUMNS="20",
+        )
+
+        result = self._stop(env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(REMOTE_QUALITY_CONTAINED_MARKER, result.stdout.split())
+        self.assertTrue(_wait_until(lambda: _process_stopped(run.pid)))
 
 if __name__ == "__main__":
     unittest.main()

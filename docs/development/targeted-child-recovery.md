@@ -113,9 +113,13 @@ scoped temp folder (`.mediaforce-ab-av1-<id>`, passed as an argument and
 matched as a whole path, so `<folder>0` is not it) plus all their descendants,
 stops those processes first politely and then forcibly, and reports success
 only when a fresh listing shows nothing naming the folder and none of the
-collected processes still running. It never signals a whole process group,
-because nothing proves a group belongs only to this run. A failed or empty
-process listing never counts as success.
+collected processes still running. Listings are full width, so a long
+command line keeps the folder. Each collected process is kept as its pid and
+full command line, and is signalled only while that pid still shows that
+command line; a pid that now shows another command was reused and counts as
+gone. It never signals a whole process group, because nothing proves a group
+belongs only to this run. A failed or empty process listing, or a failed
+check of it, never counts as success.
 
 ab-av1's ffmpeg children write into the folder, so their own command lines
 name it. A process that neither names the folder nor descends from one that
