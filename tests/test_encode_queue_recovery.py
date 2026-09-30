@@ -3721,6 +3721,23 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(still_cooling["host_cooldown_until"], other["host_cooldown_until"])
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_a_computer_passing_readiness_keeps_a_file_off_it_whose_quality_run_may_still_be_going(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            timed_out, _ = self._remote_quality_timeout_failure(connection, "episode-ready-timeout", attempt_count=1)
+            self._computer_setup_failure(connection, "episode-ready-setup", attempt_count=1)
+
+            released = encode_runtime.release_host_cooldowns(
+                connection, {"key": "remote-a", "label": "Remote A"}, updated_at=web_app._now_iso(),
+            )
+            still_cooling = load_encode_job(connection, "job-episode-ready-timeout")
+            setup = load_encode_job(connection, "job-episode-ready-setup")
+
+        self.assertEqual(released, 1)
+        assert still_cooling is not None and setup is not None
+        self.assertEqual(still_cooling["host_cooldown_until"], timed_out["host_cooldown_until"])
+        self.assertIsNone(setup["host_cooldown_until"])
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_releasing_a_computer_keeps_a_failure_recorded_after_it_was_read(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._computer_setup_failure(connection, "episode-ready-race", attempt_count=1)

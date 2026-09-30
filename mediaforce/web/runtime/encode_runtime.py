@@ -2241,17 +2241,26 @@ def release_host_cooldowns(connection: DBClient, host: Mapping[str, Any], *, upd
     """A computer that just passed an explicit readiness check takes work again at once.
 
     Its cooldowns and failure streak on every job are cleared, so neither the jobs it failed nor the
-    global host block keep it out until the cooldown would have run out. Returns how many jobs changed.
+    global host block keep it out until the cooldown would have run out. A job whose quality run there
+    ran out of time keeps its cooldown: passing readiness does not show that run has stopped. Returns
+    how many jobs changed.
     """
     identity = dict(host)
     if not _host_identity_tokens(identity):
         return 0
     rows = connection.execute(
-        select(encode_jobs.c.job_id, encode_jobs.c.last_host_json, encode_jobs.c.host_cooldown_until)
+        select(
+            encode_jobs.c.job_id,
+            encode_jobs.c.last_host_json,
+            encode_jobs.c.host_cooldown_until,
+            encode_jobs.c.last_failure_kind,
+        )
         .where(encode_jobs.c.host_cooldown_until.is_not(None))
     ).mappings().fetchall()
     released = 0
     for row in rows:
+        if row["last_failure_kind"] == RemoteQualityTimeoutError.failure_kind:
+            continue
         last_host = _load_quarantine_host_payload(row["last_host_json"])
         if not _host_identity_matches(last_host, identity):
             continue
