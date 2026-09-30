@@ -3451,7 +3451,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "host_unavailable")
         self.assertTrue(encode_runtime._encode_failure_is_retryable("host_unavailable", str(exc), job["host"]))
 
-    def test_mount_configuration_failure_is_not_retryable(self) -> None:
+    def test_mount_configuration_failure_retries_the_episode_but_not_past_its_attempts(self) -> None:
         job = {"host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"}}
         exc = remote.HostReadinessError(
             "Mediaforce could not identify the SMB share.",
@@ -3460,7 +3460,109 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         failure_kind = encode_runtime._classify_encode_failure(exc, job)
         self.assertEqual(failure_kind, "host_configuration")
-        self.assertFalse(encode_runtime._encode_failure_is_retryable(failure_kind, str(exc), job["host"]))
+        self.assertTrue(encode_runtime._encode_failure_is_retryable(failure_kind, str(exc), job["host"]))
+        self.assertTrue(encode_runtime._encode_failure_is_host_related(failure_kind, str(exc), job["host"]))
+        self.assertFalse(
+            encode_runtime._encode_failure_retries_after_attempt_cap(failure_kind, str(exc), job["host"])
+        )
+
+    def _computer_setup_failure(self, connection: DBClient, name: str, *, attempt_count: int) -> dict[str, Any] | None:
+        source_path = self._create_source_file(f"{name}.mkv")
+        item_id = self._insert_library_item(connection, source_path, status="encoding")
+        self._write_manifest(
+            f"manifest-{name}.json",
+            [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
+        )
+        self._save_job(
+            connection,
+            job_id=f"job-{name}",
+            manifest_name=f"manifest-{name}.json",
+            host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+            status="running",
+            attempt_count=attempt_count,
+        )
+        job = load_encode_job(connection, f"job-{name}")
+        assert job is not None
+        web_app._transition_encode_job_failure(
+            connection,
+            self.config,
+            job,
+            failure_kind="host_configuration",
+            error_message="Remote A could not connect the media share with Finder.",
+        )
+        return load_encode_job(connection, f"job-{name}")
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_computer_setup_failure_returns_the_episode_and_cools_that_computer_down(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated = self._computer_setup_failure(connection, "episode-setup-retry", attempt_count=1)
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertIsNone(updated["terminal_reason"])
+        self.assertIn("a setup problem on that computer", str(updated["waiting_reason"]))
+        self.assertIsNotNone(updated["host_cooldown_until"])
+        self.assertEqual(updated["last_host"]["key"], "remote-a")
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_computer_setup_failure_at_the_attempt_cap_goes_to_the_owner(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated = self._computer_setup_failure(
+                connection,
+                "episode-setup-exhausted",
+                attempt_count=web_app._encode_queue_runtime_deps().encode_job_max_attempts,
+            )
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
+        self.assertEqual(updated["last_failure_kind"], "host_configuration")
+        # The computer still cools down, so it counts toward blocking it for the next episode.
+        self.assertIsNotNone(updated["host_cooldown_until"])
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_last_attempt_setup_failures_still_block_that_computer(self) -> None:
+        deps = web_app._encode_queue_runtime_deps()
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD):
+                self._computer_setup_failure(
+                    connection, f"episode-setup-last-{index}", attempt_count=deps.encode_job_max_attempts,
+                )
+            blocked = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+
+        self.assertEqual([payload["key"] for payload in blocked.values()], ["remote-a"])
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_repeated_computer_setup_failures_block_that_computer_for_everyone(self) -> None:
+        deps = web_app._encode_queue_runtime_deps()
+        with open_db(self.config.paths.db_path) as connection:
+            self._computer_setup_failure(connection, "episode-setup-first", attempt_count=1)
+            after_one = encode_runtime._globally_backed_off_encode_hosts(
+                connection, deps, now=datetime.now(tz=UTC),
+            )
+            for index in range(1, encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD):
+                self._computer_setup_failure(connection, f"episode-setup-{index}", attempt_count=1)
+            blocked = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+
+        if encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD > 1:
+            self.assertEqual(after_one, {})
+        self.assertEqual([payload["key"] for payload in blocked.values()], ["remote-a"])
+
+    def test_cleanup_on_a_share_that_stopped_answering_is_deferred_not_crashed(self) -> None:
+        staging_path = self._staging_path("episode-dead-mount.mkv")
+
+        with patch.object(Path, "exists", side_effect=TimeoutError(60, "Operation timed out")):
+            result = encode_runtime._remove_stale_staging_path(staging_path, host={"key": "local", "mode": "local"})
+
+        self.assertEqual(result.outcome, encode_runtime._StagingPathCleanupOutcome.CLEANUP_DEFERRED)
+
+    def test_cleanup_refused_by_permissions_fails_instead_of_waiting_forever(self) -> None:
+        staging_path = self._staging_path("episode-no-access.mkv")
+
+        with patch.object(Path, "exists", side_effect=PermissionError(13, "Permission denied")):
+            result = encode_runtime._remove_stale_staging_path(staging_path, host={"key": "local", "mode": "local"})
+
+        self.assertEqual(result.outcome, encode_runtime._StagingPathCleanupOutcome.CLEANUP_FAILED)
 
     def test_containment_failure_is_not_retried_from_embedded_ssh_markers(self) -> None:
         host = {"key": "remote-a", "label": "Remote A", "mode": "ssh"}
