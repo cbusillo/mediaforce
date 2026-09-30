@@ -2009,19 +2009,23 @@ export function librarySeasonState(
 export interface WaitingReasons {
 	needsYou: EncodeUnfinishedGroup[];
 	waiting: EncodeUnfinishedGroup[];
+	/** Files the owner already answered for, such as keeping an original. */
+	yourChoices: EncodeUnfinishedGroup[];
 	fileCount: number;
 }
 
-/** Every reason a folder's files are not finished, split into what needs the owner and what is only waiting. */
+/** Every reason a folder's files are not finished: what needs the owner, what is only waiting, and what they chose. */
 export function encodeWaitingReasons(job: EncodeQueueJob | null | undefined): WaitingReasons {
 	const groups = (job?.progress?.unfinished_breakdown ?? []).filter(
 		(group) => group.count > 0 && group.label.trim()
 	);
+	const open = groups.filter((group) => !group.owner_choice);
 	const needsOwner = (group: EncodeUnfinishedGroup) =>
 		group.needs_owner ?? !(group.reason === 'retrying' || group.reason.startsWith('waiting'));
 	return {
-		needsYou: groups.filter(needsOwner),
-		waiting: groups.filter((group) => !needsOwner(group)),
+		needsYou: open.filter(needsOwner),
+		waiting: open.filter((group) => !needsOwner(group)),
+		yourChoices: groups.filter((group) => group.owner_choice),
 		fileCount: groups.reduce((sum, group) => sum + group.count, 0)
 	};
 }

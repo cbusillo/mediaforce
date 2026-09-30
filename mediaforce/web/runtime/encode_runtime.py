@@ -987,7 +987,15 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
         reason, label, needs_owner = _unfinished_child_reason(child)
         group = groups.setdefault(
             reason,
-            {"reason": reason, "label": label, "count": 0, "needs_owner": needs_owner, "items": []},
+            {
+                "reason": reason,
+                "label": label,
+                "count": 0,
+                "needs_owner": needs_owner,
+                # The owner already answered for these files; they are listed, not waiting.
+                "owner_choice": reason == "size_exception_declined",
+                "items": [],
+            },
         )
         indexes = child.get("manifest_indexes")
         group["count"] += len(indexes) if isinstance(indexes, list) and indexes else max(

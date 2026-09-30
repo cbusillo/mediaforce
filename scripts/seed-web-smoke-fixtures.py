@@ -2290,6 +2290,14 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                     "progress_state": "encoding",
                     # A season still working while some of its files already need the owner.
                     "unfinished_breakdown": [
+                        {"reason": "quality_floor_size_conflict", "label": "size goal below quality floor",
+                         "count": 1, "needs_owner": True, "owner_choice": False,
+                         "items": ["tv/Encoding Show/Season 1/Episode 03.mkv"],
+                         "size_questions": [
+                             {"job_id": "web-smoke-encode-size-question",
+                              "rel_path": "tv/Encoding Show/Season 1/Episode 03.mkv",
+                              "goal_bytes": 191_800_000, "smallest_quality_safe_bytes": 358_900_000},
+                         ]},
                         {"reason": "final_size_target_miss", "label": "outside size limit", "count": 1,
                          "needs_owner": True, "items": ["tv/Encoding Show/Season 1/Episode 04.mkv"]},
                         {"reason": "storage_io", "label": "storage error", "count": 1,
@@ -2298,6 +2306,9 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                          "needs_owner": False, "items": []},
                         {"reason": "retrying", "label": "still retrying", "count": 1,
                          "needs_owner": False, "items": []},
+                        {"reason": "size_exception_declined", "label": "kept original, your choice",
+                         "count": 1, "needs_owner": False, "owner_choice": True,
+                         "items": ["tv/Encoding Show/Season 1/Episode 07.mkv"]},
                     ],
                 },
             ),

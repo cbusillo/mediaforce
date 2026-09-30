@@ -2775,12 +2775,54 @@ describe('encodeWaitingReasons', () => {
 		expect(reasons.waiting.map((group) => group.reason)).toEqual(['retrying']);
 	});
 
+	it('lists files the owner already answered for apart from what is waiting', () => {
+		const reasons = encodeWaitingReasons(
+			job([
+				{
+					reason: 'quality_floor_size_conflict',
+					label: 'size goal below quality floor',
+					count: 1,
+					needs_owner: true,
+					items: [],
+					size_questions: [
+						{
+							job_id: 'shard-1',
+							rel_path: 'tv/Show/Season 1/Show S01E01.mkv',
+							goal_bytes: 191_800_000,
+							smallest_quality_safe_bytes: 358_900_000
+						}
+					]
+				},
+				{
+					reason: 'size_exception_declined',
+					label: 'kept original, your choice',
+					count: 2,
+					needs_owner: false,
+					owner_choice: true,
+					items: []
+				}
+			])
+		);
+
+		expect(reasons.needsYou.map((group) => group.size_questions?.length)).toEqual([1]);
+		expect(reasons.waiting).toEqual([]);
+		expect(reasons.yourChoices.map((group) => `${group.count} ${group.label}`)).toEqual([
+			'2 kept original, your choice'
+		]);
+		expect(reasons.fileCount).toBe(3);
+	});
+
 	it('names the scope a borrowed reason list covers', () => {
 		expect(waitingScopeName('tv/Show')).toBe('all of Show');
 		expect(waitingScopeName('tv/Show/Season 2')).toBe('Show Season 2');
 	});
 
 	it('is empty without an encode job', () => {
-		expect(encodeWaitingReasons(null)).toEqual({ needsYou: [], waiting: [], fileCount: 0 });
+		expect(encodeWaitingReasons(null)).toEqual({
+			needsYou: [],
+			waiting: [],
+			yourChoices: [],
+			fileCount: 0
+		});
 	});
 });

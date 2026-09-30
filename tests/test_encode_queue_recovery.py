@@ -2447,10 +2447,11 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertNotIn("compression_escalation", manifest["items"][0])
         self.assertEqual(manifest["items"][0]["resolved_policy"]["video"]["target_size_bytes"], 200_000_000)
         self.assertIsNone(encode_runtime.size_exception_question(updated))
-        self.assertEqual(
-            encode_runtime._unfinished_child_reason(updated),
-            ("size_exception_declined", "kept original, your choice", False),
-        )
+        (group,) = encode_runtime._unfinished_child_breakdown([updated])
+        self.assertEqual(group["reason"], "size_exception_declined")
+        self.assertFalse(group["needs_owner"])
+        self.assertTrue(group["owner_choice"])
+        self.assertNotIn("size_questions", group)
         self.assertFalse(again["ok"])
 
     def test_size_decision_refuses_a_file_the_automatic_retry_or_goal_confirmation_owns(self) -> None:
