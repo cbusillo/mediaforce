@@ -287,7 +287,13 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
         item_id = self._prepare_cadence_item(config)
         process_evidence_queue_once(
             config_path=config.paths.config_path,
-            deps=self._deps(config, Mock(), host_rows=[_row(self.mini, available=False)]),
+            # Long enough that the immediate claim below can't land in the second the delay ends.
+            deps=self._deps(
+                config,
+                Mock(),
+                host_rows=[_row(self.mini, available=False)],
+                source_retry_delay_seconds=60,
+            ),
         )
 
         with open_db(config.paths.db_path) as connection:
@@ -544,14 +550,20 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
         return item_id
 
     @staticmethod
-    def _deps(config: MediaforceConfig, analyzer: object, *, host_rows: object) -> EvidenceWorkerDeps:
+    def _deps(
+            config: MediaforceConfig,
+            analyzer: object,
+            *,
+            host_rows: object,
+            source_retry_delay_seconds: int = 1,
+    ) -> EvidenceWorkerDeps:
         return EvidenceWorkerDeps(
             load_config=lambda _path: config,
             analyze_evidence=analyzer,  # type: ignore[arg-type]
             logger=Mock(),
             lease_seconds=5,
             heartbeat_seconds=0.05,
-            source_retry_delay_seconds=1,
+            source_retry_delay_seconds=source_retry_delay_seconds,
             evidence_host_rows=host_rows if callable(host_rows) else (lambda _config: host_rows),  # type: ignore[arg-type]
         )
 
