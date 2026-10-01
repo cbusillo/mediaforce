@@ -53,7 +53,7 @@ export function seasonStateHoldLabel(
 	return STATES_A_HOLD_EXPLAINS.has(state.key) ? seasonHoldLabel(season) : '';
 }
 
-/** The show page's badge for a season whose every episode is held. */
+/** The show page's badge for a season with all of its episodes held. */
 export function seasonRowHoldLabel(
 	season: SeasonLifecycleState | null | undefined,
 	state: { key: string }
