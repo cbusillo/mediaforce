@@ -1203,6 +1203,11 @@
 			padding: var(--mf-space-3) 0;
 		}
 
+		/* Every line of a cell sits beside its field name; the label column holds only the name. */
+		.backlog-table td > :global(*) {
+			grid-column: 2;
+		}
+
 		.backlog-table td::before {
 			color: var(--mf-fg-tertiary);
 			content: attr(data-label);
