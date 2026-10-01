@@ -7986,6 +7986,35 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 ),
             )
 
+            # An older run left Episode 06 waiting on the owner; the newer run doesn't include it.
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 1/Episode 06.mkv"),
+                rel_path=f"{season}/Episode 06.mkv",
+            )
+            older_manifest = self._write_manifest(
+                "season-episodes-older.json",
+                [{"rel_path": f"{season}/Episode 06.mkv", "duration_seconds": 60.0}],
+            )
+            save_encode_job(
+                connection,
+                job("older-run", status="needs_attention", manifest_path=str(older_manifest), created_at="2000-01-01T00:00:00+00:00"),
+            )
+            save_encode_job(
+                connection,
+                job(
+                    "older-run-e06",
+                    job_kind="shard",
+                    parent_job_id="older-run",
+                    status="needs_attention",
+                    manifest_path=str(older_manifest),
+                    manifest_indexes=[0],
+                    item_count=1,
+                    created_at="2000-01-01T00:00:00+00:00",
+                    progress={"failure_analysis": {"kind": "final_size_target_miss"}},
+                ),
+            )
+
         payload = folder_episodes_payload(self.config, season)
         show_payload = folder_episodes_payload(self.config, "tv/show")
 
@@ -7998,12 +8027,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             [
                 (f"{season}/Episode 04.mkv", "needs_you", "much smaller than expected; keep it or make it again", None),
                 (f"{season}/Episode 05.mkv", "needs_you", "waiting for you to take a look", None),
+                (f"{season}/Episode 06.mkv", "needs_you", "didn't pass the final size check", None),
                 (rel_paths[0], "compressing", None, 30),
                 (rel_paths[1], "waiting", "waiting for a free computer", None),
                 (rel_paths[2], "published", None, None),
             ],
         )
-        self.assertEqual(payload["episodes"][4]["bytes_saved"], 700_000_000)
+        self.assertEqual(payload["episodes"][5]["bytes_saved"], 700_000_000)
         self.assertFalse(show_payload["available"])
 
     def test_folder_delivery_badge_ignores_fully_promoted_folders(self) -> None:

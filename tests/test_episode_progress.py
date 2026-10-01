@@ -149,12 +149,14 @@ class SeasonEpisodeProgressTests(unittest.TestCase):
 
         self.assertEqual(episode["stage"], "compressing")
 
-    def test_a_finished_run_awaiting_its_check_reads_as_being_checked(self) -> None:
-        item = _item(1)
+    def test_a_finished_run_defers_to_the_files_own_state(self) -> None:
+        staged = _item(1, "ready_to_validate")
+        lost = _item(2, "blocked", blocker="Encoded item is missing its staged output.")
+        runs = {staged.rel_path: _run("completed"), lost.rel_path: _run("completed")}
 
-        [episode] = season_episode_progress([item], {item.rel_path: _run("completed")}, {})
+        episodes = season_episode_progress([staged, lost], runs, {})
 
-        self.assertEqual(episode["stage"], "checking")
+        self.assertEqual(_stages(episodes), {"Episode 01.mkv": "checking", "Episode 02.mkv": "needs_you"})
 
     def test_a_checked_file_waiting_on_the_owner_needs_them(self) -> None:
         held, failed, remade = _item(1, "ready_to_validate"), _item(2, "ready_to_validate"), _item(3, "ready_to_validate")

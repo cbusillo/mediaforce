@@ -14,7 +14,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.type_defs import float_value, int_value, object_dict
-from mediaforce.encoding.encode_queue import list_child_encode_jobs, load_latest_encode_job
+from mediaforce.encoding.encode_queue import list_child_encode_jobs, list_encode_runs_for_prefix
 from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
 from mediaforce.library.media_scopes import resolve_media_scope
 from mediaforce.library.staged_integrity import staged_validation_outcome
@@ -62,7 +62,7 @@ def folder_episodes_payload(config: MediaforceConfig, prefix: str) -> dict[str, 
         episodes = load_season_episode_progress(
             connection,
             workflow.items,
-            load_latest_encode_job(connection, scope.prefix),
+            list_encode_runs_for_prefix(connection, scope.prefix),
         )
     return {"prefix": scope.prefix, "available": True, "episodes": episodes}
 
@@ -70,18 +70,24 @@ def folder_episodes_payload(config: MediaforceConfig, prefix: str) -> dict[str, 
 def load_season_episode_progress(
         connection: DBClient,
         item_states: Iterable[ItemWorkflowState],
-        latest_job: Mapping[str, Any] | None,
+        runs_newest_first: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Each episode takes its own newest run, so re-running one file never hides another's question."""
     items = [item for item in item_states if item.state != "missing"]
     if not items:
         return []
-    runs = _runs_for(connection, latest_job)
+    wanted = {item.rel_path for item in items}
     run_by_rel_path: dict[str, dict[str, Any]] = {}
     manifest_items_cache: dict[Path, list[dict[str, Any]] | None] = {}
-    for run in runs:
-        for rel_path in encode_job_rel_paths(run, manifest_items_cache=manifest_items_cache) or _saved_rel_paths(run):
-            # A later run for the same file replaces an earlier one.
-            run_by_rel_path[rel_path] = run
+    for parent in runs_newest_first:
+        # Within one run, a file's later part (a retry) replaces its earlier one.
+        for run in reversed(_runs_for(connection, parent)):
+            rel_paths = encode_job_rel_paths(run, manifest_items_cache=manifest_items_cache) or _saved_rel_paths(run)
+            for rel_path in rel_paths:
+                if rel_path in wanted and rel_path not in run_by_rel_path:
+                    run_by_rel_path[rel_path] = run
+        if len(run_by_rel_path) == len(wanted):
+            break
     staged = _staged_rows(
         connection,
         [item.item_id for item in items if item.has_staged_output or item.state == "complete"],
@@ -165,7 +171,8 @@ def _episode(
         episode["detail"] = _VALIDATION_DETAILS[validation]
         episode["owner_action"] = "keep_or_remake" if validation == "size_held" else None
         return episode
-    if item.state in {"ready_to_validate", "ready_to_promote"} or (run is not None and run_status == "completed"):
+    # A finished run says nothing about now; the file's own state does.
+    if item.state in {"ready_to_validate", "ready_to_promote"}:
         episode["stage"] = "checking"
     elif item.state == "encoding":
         episode["stage"] = "compressing"
@@ -178,12 +185,10 @@ def _episode(
     return episode
 
 
-def _runs_for(connection: DBClient, latest_job: Mapping[str, Any] | None) -> list[dict[str, Any]]:
-    if latest_job is None:
-        return []
-    if str(latest_job.get("job_kind") or "single") == "folder":
-        return list_child_encode_jobs(connection, str(latest_job["job_id"]))
-    return [dict(latest_job)]
+def _runs_for(connection: DBClient, parent: Mapping[str, Any]) -> list[dict[str, Any]]:
+    if str(parent.get("job_kind") or "single") == "folder":
+        return list_child_encode_jobs(connection, str(parent["job_id"]))
+    return [dict(parent)]
 
 
 def _saved_rel_paths(run: Mapping[str, Any]) -> list[str]:
