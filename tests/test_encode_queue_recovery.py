@@ -15780,6 +15780,32 @@ raise SystemExit(0)
         self.assertEqual(browser_cmd[browser_cmd.index("-t") + 1], "8.000")
         self.assertEqual(browser_cmd[-1], "/tmp/preview.mp4")
 
+    def test_render_encoded_preview_clip_keeps_preview_timestamps_in_browser_proxy(self) -> None:
+        with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
+                "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
+        ), patch(
+            "mediaforce.review.run_command",
+            return_value=subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr=""),
+        ) as run_mock:
+            review._render_encoded_preview_clip(
+                source_path=Path("/tmp/input.mkv"),
+                output_path=Path("/tmp/preview.mp4"),
+                clip_time=37.5,
+                duration_seconds=8.0,
+                encoder="libsvtav1",
+                pixel_format="yuv420p10le",
+                preset=4,
+                crf=28.0,
+                svt_params=["tune=0"],
+            )
+
+        browser_cmd = run_mock.call_args_list[1].args[0]
+        # The source clip keeps the first frame's offset from the seek point, so the
+        # proxy must keep the production preview's offset too, or the two play a
+        # frame apart when the clip has no audio.
+        self.assertIn("-copyts", browser_cmd)
+        self.assertLess(browser_cmd.index("-copyts"), browser_cmd.index("-i"))
+
     def test_render_encoded_preview_clip_normalizes_copied_audio_for_browser_review(self) -> None:
         with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
                 "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
