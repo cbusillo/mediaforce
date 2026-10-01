@@ -24,6 +24,7 @@ from mediaforce.encoding.quality import (
     REMOTE_QUALITY_CONTAINED_MARKER,
     REMOTE_QUALITY_CONTAINMENT_SCRIPT,
     REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS,
+    REMOTE_QUALITY_SILENCE_TIMEOUT_SECONDS,
     REMOTE_QUALITY_TEMP_FILES_LEFT_NOTE,
     REMOTE_QUALITY_TIMEOUT_FAILURE_KIND,
     REMOTE_QUALITY_TIMEOUT_SECONDS,
@@ -102,6 +103,7 @@ class QualityToolchainIdentityTests(unittest.TestCase):
             command,
             REMOTE_QUALITY_TIMEOUT_SECONDS,
             process_controller=process_controller,
+            idle_timeout=REMOTE_QUALITY_SILENCE_TIMEOUT_SECONDS,
         )
 
     def test_libvmaf_probe_avoids_a_shell_fork_under_managed_containment(self) -> None:
@@ -597,6 +599,121 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
         self.assertIsNone(cleanup_error)
         self.assertNotIn(SCHEDULE_CLOSE_DEADLINE_KEY, run_remote.call_args.args[0])
         self.assertEqual(host, self.HOST)
+
+
+class RemoteQualityStallTests(unittest.TestCase):
+    """A remote quality run that goes silent is stopped like one that ran too long.
+
+    A stand-in ``ssh`` runs as a real child process through the real transport: it answers the
+    temp-folder and stop steps itself and plays the quality run as silent or steadily logging.
+    """
+
+    HOST = {"mode": "ssh", "host": "encoder@example.invalid", "key": "remote-a", "label": "M1 mini"}
+    SILENCE_SECONDS = 1
+    # Logs to stderr like ab-av1 does over SSH, then prints its result on stdout.
+    FAKE_SSH = f"""
+import json, os, pathlib, sys, time
+remote = sys.argv[-1]
+with open(os.environ["FAKE_SSH_LOG"], "a") as log:
+    log.write(remote.replace("\\n", " ") + "\\n")
+if {REMOTE_QUALITY_CONTAINED_MARKER!r} in remote:
+    if os.environ["FAKE_SSH_CONTAINED"] == "1":
+        print({REMOTE_QUALITY_CONTAINED_MARKER!r})
+    sys.exit(0)
+if "sample-encode" not in remote:
+    sys.exit(0)
+print("encoding sample 1/5 crf 28", file=sys.stderr, flush=True)
+if os.environ["FAKE_SSH_RUN"] == "silent":
+    time.sleep(120)
+for index in range(25):
+    print(f"sample {{index}} VMAF 93.32", file=sys.stderr, flush=True)
+    time.sleep(0.1)
+print(json.dumps({{
+    "xpsnr": 41.2, "predicted_encode_percent": 30, "predicted_encode_seconds": 100, "predicted_encode_size": 1000,
+}}))
+"""
+
+    def _sample_encode(self, run: str, *, contained: bool = True) -> tuple[SampleEncodeResult | Exception, list[str]]:
+        tools = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tools)
+        ssh = tools / "ssh"
+        ssh.write_text(f"#!{sys.executable}\n{self.FAKE_SSH}")
+        ssh.chmod(0o755)
+        log = tools / "calls.log"
+        log.write_text("")
+        environment = {
+            "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
+            "FAKE_SSH_LOG": str(log),
+            "FAKE_SSH_RUN": run,
+            "FAKE_SSH_CONTAINED": "1" if contained else "0",
+        }
+        with (
+            patch.dict(os.environ, environment),
+            patch("mediaforce.remote._ensure_remote_awake_for_ssh"),
+            patch("mediaforce.remote.ssh_client_options", return_value=[]),
+            patch("mediaforce.encoding.quality.REMOTE_QUALITY_SILENCE_TIMEOUT_SECONDS", self.SILENCE_SECONDS),
+        ):
+            try:
+                outcome: SampleEncodeResult | Exception = run_sample_encode(
+                    Path("/remote/input.mkv"), crf=28.0, preferred_metric="xpsnr", preset=4,
+                    pixel_format="yuv420p10le", sample_every="12m", sample_duration="20s", svt_params=[],
+                    host=dict(self.HOST), quality_temp_dir=Path("/remote/quality-temp"),
+                )
+            except Exception as exc:  # noqa: BLE001 - the test inspects whichever error the run raised.
+                outcome = exc
+        return outcome, log.read_text().splitlines()
+
+    def test_silent_run_is_stopped_on_that_computer_and_told_in_plain_words(self) -> None:
+        started_at = time.monotonic()
+
+        exc, calls = self._sample_encode("silent")
+
+        self.assertLess(time.monotonic() - started_at, 60)
+        assert isinstance(exc, RemoteQualityTimeoutError), exc
+        self.assertTrue(exc.stalled)
+        self.assertTrue(exc.remote_process_contained)
+        self.assertEqual(exc.failure_kind, REMOTE_QUALITY_TIMEOUT_FAILURE_KIND)
+        self.assertEqual(exc.timeout_seconds, self.SILENCE_SECONDS)
+        self.assertEqual(
+            quality_error_message(exc),
+            "Measuring quality on M1 mini printed nothing for 1 second; that run was stopped.",
+        )
+        self.assertEqual(exc.output_tail, "encoding sample 1/5 crf 28")
+        self.assertTrue(any(REMOTE_QUALITY_CONTAINED_MARKER in call for call in calls), calls)
+        self.assertIn("rm -rf", calls[-1])
+
+    def test_silent_run_not_shown_stopped_is_unproven(self) -> None:
+        exc, calls = self._sample_encode("silent", contained=False)
+
+        assert isinstance(exc, RemoteQualityTimeoutError), exc
+        self.assertTrue(exc.stalled)
+        self.assertFalse(exc.remote_process_contained)
+        self.assertEqual(exc.failure_kind, CONTAINMENT_UNPROVEN_FAILURE_KIND)
+        self.assertIn("printed nothing for 1 second", str(exc))
+        self.assertIn("not confirmed stopped", str(exc))
+        self.assertNotIn("rm -rf", calls[-1])
+
+    def test_steadily_logging_run_outlives_the_silence_limit(self) -> None:
+        started_at = time.monotonic()
+
+        result, calls = self._sample_encode("steady")
+
+        assert isinstance(result, SampleEncodeResult), result
+        self.assertGreater(time.monotonic() - started_at, 2 * self.SILENCE_SECONDS)
+        self.assertEqual(result.score, 41.2)
+        self.assertFalse(any(REMOTE_QUALITY_CONTAINED_MARKER in call for call in calls), calls)
+
+    def test_silence_limit_is_told_in_minutes(self) -> None:
+        exc = RemoteQualityTimeoutError(
+            phase="crf_search", timeout_seconds=REMOTE_QUALITY_SILENCE_TIMEOUT_SECONDS, host_key="remote-a",
+            host_label="M1 mini", remote_process_contained=True, stalled=True,
+        )
+
+        self.assertEqual(
+            str(exc),
+            f"Measuring quality on M1 mini printed nothing for {REMOTE_QUALITY_SILENCE_TIMEOUT_SECONDS // 60} minutes; "
+            "that run was stopped.",
+        )
 
 
 def _process_stopped(pid: int) -> bool:

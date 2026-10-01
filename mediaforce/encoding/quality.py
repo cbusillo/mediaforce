@@ -17,6 +17,7 @@ from mediaforce.core.process_control import (
     ManagedProcessController,
     ProcessCancelledError,
     ProcessDeadlineEnforcementError,
+    ProcessOutputStalledError,
     ScheduleWindowClosedError,
     run_command,
     run_trusted_local_orchestrator_command,
@@ -119,7 +120,9 @@ CONTAINMENT_UNPROVEN_FAILURE_KIND = "containment_unproven"
 
 
 class RemoteQualityTimeoutError(RuntimeError):
-    """A quality run on another computer outlasted its time limit.
+    """A quality run on another computer outlasted its time limit, or went silent for too long.
+
+    ``stalled`` says the run printed nothing for ``timeout_seconds``; otherwise it ran past them.
 
     ``remote_process_contained`` says whether every process of that run was shown stopped on
     that computer. Until it is, the run may still be using its temp folder and the computer.
@@ -134,6 +137,7 @@ class RemoteQualityTimeoutError(RuntimeError):
             host_label: str,
             remote_process_contained: bool,
             output_tail: str | None = None,
+            stalled: bool = False,
     ) -> None:
         outcome = (
             "that run was stopped."
@@ -141,10 +145,13 @@ class RemoteQualityTimeoutError(RuntimeError):
             else "the run on that computer was not confirmed stopped. "
                  "Check that computer is idle, then try this file again."
         )
-        super().__init__(
-            f"Measuring quality on {host_label} ran past {_plain_duration(timeout_seconds)} without a result; "
-            f"{outcome}"
+        what_happened = (
+            f"printed nothing for {_plain_duration(timeout_seconds)}"
+            if stalled
+            else f"ran past {_plain_duration(timeout_seconds)} without a result"
         )
+        super().__init__(f"Measuring quality on {host_label} {what_happened}; {outcome}")
+        self.stalled = stalled
         self.remote_process_contained = remote_process_contained
         self.failure_kind = (
             REMOTE_QUALITY_TIMEOUT_FAILURE_KIND if remote_process_contained else CONTAINMENT_UNPROVEN_FAILURE_KIND
@@ -164,6 +171,10 @@ class RemoteQualityTimeoutError(RuntimeError):
 
 
 REMOTE_QUALITY_TIMEOUT_SECONDS = 2 * 60 * 60
+# A healthy remote ab-av1 run logs a line every 5-15 seconds while it encodes samples and measures
+# them (measured over SSH, 2026-10-01). Twenty minutes of silence leaves wide room for a slow 4K
+# sample and still stops a hung run long before the overall limit.
+REMOTE_QUALITY_SILENCE_TIMEOUT_SECONDS = 20 * 60
 REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_LINES = 5
 REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_MAX_CHARS = 500
 REMOTE_QUALITY_CLEANUP_TIMEOUT_SECONDS = 15
@@ -888,6 +899,7 @@ def _run_quality_command(
             cmd,
             REMOTE_QUALITY_TIMEOUT_SECONDS,
             process_controller=process_controller,
+            idle_timeout=REMOTE_QUALITY_SILENCE_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
         host_payload = object_dict(host)
@@ -901,6 +913,7 @@ def _run_quality_command(
             host_label=str(host_payload.get("label") or "").strip() or host_key or "another computer",
             remote_process_contained=_stop_timed_out_remote_quality_run(host_payload, temp_dir),
             output_tail=output_tail,
+            stalled=isinstance(exc, ProcessOutputStalledError),
         )
         if output_tail is not None:
             error.add_note(f"Last output from that computer:\n{output_tail}")
