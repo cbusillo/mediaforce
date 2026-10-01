@@ -3218,6 +3218,12 @@ def run_encode_job(
         manifest = json.loads(manifest_path.read_text())
         manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
         indexes = _manifest_indexes_for_job(job, manifest_items)
+        # Re-read under the lock: a lease renewed while the manifest was read must not be put back.
+        connection.commit()
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        job = load_encode_job(connection, job_id)
+        if job is None:
+            return
         job.update({"process_pid": process_controller.pid, "updated_at": deps.now_iso()})
         save_encode_job(connection, job)
 

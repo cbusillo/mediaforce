@@ -520,10 +520,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         def load_then_heartbeat(connection: DBClient, job_id: str) -> dict[str, Any] | None:
             loaded = load(connection, job_id)
-            if threading.current_thread() is progress_thread and not heartbeat.is_alive():
-                # The heartbeat lands between the progress write's read and its save.
+            if threading.current_thread() is progress_thread and heartbeat.ident is None:
+                # The heartbeat runs between the progress write's read and its save. Unless the
+                # progress write holds the lock, nothing stops the heartbeat committing first.
                 heartbeat.start()
-                heartbeat.join(timeout=1.0)
+                if not connection.connection.driver_connection.in_transaction:
+                    heartbeat.join()
             return loaded
 
         with patch.object(encode_runtime, "load_encode_job", side_effect=load_then_heartbeat):
