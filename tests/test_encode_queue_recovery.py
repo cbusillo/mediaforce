@@ -96,6 +96,7 @@ from mediaforce.web.runtime import ambiguous_motion as ambiguous_motion_runtime
 from mediaforce.web.runtime import production_holds as production_holds_runtime
 from mediaforce.web.runtime import host_status as web_host_status_runtime
 from mediaforce.library import workflow_state as workflow_state_runtime
+from mediaforce.web.runtime.episode_progress import folder_episodes_payload
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
@@ -3712,7 +3713,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(updated["status"], "needs_attention")
         self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
         self.assertEqual(updated["error"], f"{plain_message} {encode_runtime.REMOTE_QUALITY_TIMEOUT_EXHAUSTED_NOTE}")
-        reason, label, needs_owner = encode_runtime._unfinished_child_reason(updated)
+        reason, label, needs_owner = encode_runtime.unfinished_child_reason(updated)
         self.assertEqual((reason, label, needs_owner), (failure_kind, encode_runtime._UNFINISHED_REASON_LABELS[failure_kind], True))
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
@@ -7858,6 +7859,182 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
         self.assertEqual(workflow.state, "processing")
+
+    def test_season_episodes_payload_reads_each_episode_from_its_run(self) -> None:
+        season = "tv/show/Season 1"
+        rel_paths = [f"{season}/Episode {number:02d}.mkv" for number in (1, 2, 3)]
+        manifest_path = self._write_manifest(
+            "season-episodes.json",
+            [{"rel_path": rel_path, "duration_seconds": 60.0} for rel_path in rel_paths],
+        )
+        now = web_app._now_iso()
+
+        def job(job_id: str, **overrides: object) -> dict[str, object]:
+            payload: dict[str, object] = {
+                "job_id": job_id,
+                "prefix": season,
+                "job_kind": "folder",
+                "parent_job_id": None,
+                "status": "running",
+                "manifest_path": str(manifest_path),
+                "manifest_indexes": None,
+                "item_count": 3,
+                "saved_profile_path": None,
+                "host": {},
+                "last_host": {},
+                "notes": "",
+                "bypass_schedule": False,
+                "attempt_count": 0,
+                "process_pid": None,
+                "error": None,
+                "leased_at": None,
+                "lease_expires_at": None,
+                "heartbeat_at": None,
+                "worker_id": None,
+                "retry_not_before": None,
+                "waiting_reason": None,
+                "terminal_reason": None,
+                "last_failure_kind": None,
+                "last_failure_at": None,
+                "host_cooldown_until": None,
+                "created_at": now,
+                "started_at": now,
+                "finished_at": None,
+                "updated_at": now,
+            }
+            payload.update(overrides)
+            return payload
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = [
+                self._insert_library_item(
+                    connection,
+                    self._create_source_file(f"Season 1/Episode {number:02d}.mkv"),
+                    status="promoted" if number == 3 else "planned",
+                    rel_path=rel_path,
+                )
+                for number, rel_path in zip((1, 2, 3), rel_paths, strict=True)
+            ]
+            connection.execute(
+                staged_artifacts.insert().values(
+                    library_item_id=item_ids[2],
+                    staging_path=str(self._staging_path("Season 1/Episode 03.mkv")),
+                    bytes_saved=700_000_000,
+                    promoted_at=now,
+                    updated_at=now,
+                )
+            )
+            save_encode_job(connection, job("season-run"))
+            save_encode_job(
+                connection,
+                job(
+                    "season-run-e01",
+                    job_kind="shard",
+                    parent_job_id="season-run",
+                    manifest_indexes=[0],
+                    item_count=1,
+                    progress={"progress_state": "encoding", "percent_complete": 30},
+                ),
+            )
+            save_encode_job(
+                connection,
+                job(
+                    "season-run-e02",
+                    job_kind="shard",
+                    parent_job_id="season-run",
+                    status="queued",
+                    manifest_indexes=[1],
+                    item_count=1,
+                    waiting_reason="Waiting for available encode host capacity.",
+                ),
+            )
+
+            held_id = self._insert_library_item(
+                connection,
+                self._create_source_file("Season 1/Episode 04.mkv"),
+                status="encoded",
+                rel_path=f"{season}/Episode 04.mkv",
+            )
+            connection.execute(
+                staged_artifacts.insert().values(
+                    library_item_id=held_id,
+                    staging_path=str(self._staging_path("Season 1/Episode 04.mkv")),
+                    validation_json=json.dumps({
+                        "passed": False,
+                        "checks": [{"passed": False, "message": staging_runtime.FAR_BELOW_PREDICTION_CHECK}],
+                        "size_prediction": {"held": True},
+                    }),
+                    updated_at=now,
+                )
+            )
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 1/Episode 05.mkv"),
+                rel_path=f"{season}/Episode 05.mkv",
+            )
+            save_encode_job(
+                connection,
+                job(
+                    "season-run-e05",
+                    job_kind="shard",
+                    parent_job_id="season-run",
+                    status="needs_attention",
+                    manifest_path=str(self.root / "runs" / "gone.json"),
+                    manifest_indexes=[4],
+                    item_count=1,
+                    progress={"current_item_rel_path": f"{season}/Episode 05.mkv"},
+                ),
+            )
+
+            # An older run left Episode 06 waiting on the owner; the newer run doesn't include it.
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 1/Episode 06.mkv"),
+                rel_path=f"{season}/Episode 06.mkv",
+            )
+            older_manifest = self._write_manifest(
+                "season-episodes-older.json",
+                [{"rel_path": f"{season}/Episode 06.mkv", "duration_seconds": 60.0}],
+            )
+            save_encode_job(
+                connection,
+                job("older-run", status="needs_attention", manifest_path=str(older_manifest), created_at="2000-01-01T00:00:00+00:00"),
+            )
+            save_encode_job(
+                connection,
+                job(
+                    "older-run-e06",
+                    job_kind="shard",
+                    parent_job_id="older-run",
+                    status="needs_attention",
+                    manifest_path=str(older_manifest),
+                    manifest_indexes=[0],
+                    item_count=1,
+                    created_at="2000-01-01T00:00:00+00:00",
+                    progress={"failure_analysis": {"kind": "final_size_target_miss"}},
+                ),
+            )
+
+        payload = folder_episodes_payload(self.config, season)
+        show_payload = folder_episodes_payload(self.config, "tv/show")
+
+        self.assertTrue(payload["available"])
+        self.assertEqual(
+            [
+                (episode["rel_path"], episode["stage"], episode["detail"], episode["percent_complete"])
+                for episode in payload["episodes"]
+            ],
+            [
+                (f"{season}/Episode 04.mkv", "needs_you", "much smaller than expected; keep it or make it again", None),
+                (f"{season}/Episode 05.mkv", "needs_you", "waiting for you to take a look", None),
+                (f"{season}/Episode 06.mkv", "needs_you", "didn't pass the final size check", None),
+                (rel_paths[0], "compressing", None, 30),
+                (rel_paths[1], "waiting", "waiting for a free computer", None),
+                (rel_paths[2], "published", None, None),
+            ],
+        )
+        self.assertEqual(payload["episodes"][5]["bytes_saved"], 700_000_000)
+        self.assertFalse(show_payload["available"])
 
     def test_folder_delivery_badge_ignores_fully_promoted_folders(self) -> None:
         card = self._folder_card_for_delivery_badge(

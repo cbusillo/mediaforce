@@ -604,6 +604,15 @@ def _held_size_prediction(raw_validation: Any) -> dict[str, Any] | None:
     return size_prediction
 
 
+def staged_validation_outcome(raw_validation: Any) -> Literal["size_held", "failed"] | None:
+    """Whether a staged file's recorded check waits on the owner, and why; None when it does not."""
+    if _held_size_prediction(raw_validation) is not None:
+        return "size_held"
+    if _validation_passed(raw_validation) is False:
+        return "failed"
+    return None
+
+
 def _validation_passed(raw_validation: Any) -> bool | None:
     if not isinstance(raw_validation, str) or not raw_validation.strip():
         return None

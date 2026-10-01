@@ -933,7 +933,7 @@ _OWNER_CHILD_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
 _UNFINISHED_BREAKDOWN_ITEM_LIMIT = 5
 
 
-def _unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str, bool]:
+def unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str, bool]:
     """The child's reason key, its plain label, and whether only the owner can end it."""
     status = str(child.get("status") or "")
     if status == "queued":
@@ -1010,7 +1010,7 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
         status = str(child.get("status") or "")
         if status not in _OWNER_CHILD_STATUSES | {"retry_backoff", "queued"}:
             continue
-        reason, label, needs_owner = _unfinished_child_reason(child)
+        reason, label, needs_owner = unfinished_child_reason(child)
         group = groups.setdefault(
             reason,
             {
