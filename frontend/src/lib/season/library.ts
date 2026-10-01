@@ -39,17 +39,27 @@ export function seasonHoldLabel(season: SeasonLifecycleState | null | undefined)
 	return `${season.held_candidate_count} held`;
 }
 
+// Season states that only say no work has started; a hold explains them better.
+const STATES_A_HOLD_EXPLAINS = new Set(['needs_test', 'ready_to_make']);
+
 /**
- * The held badge for a season row when every episode is held and nothing is working on or wrong with it.
- * The season's own work, such as a run the owner started despite the hold, still shows instead.
+ * A held season's badge, unless the season has its own work or problem to show, such as a sample or
+ * a run the owner started despite the hold.
  */
+export function seasonStateHoldLabel(
+	season: SeasonLifecycleState | null | undefined,
+	state: { key: string }
+): string {
+	return STATES_A_HOLD_EXPLAINS.has(state.key) ? seasonHoldLabel(season) : '';
+}
+
+/** The show page's badge for a season whose every episode is held. */
 export function seasonRowHoldLabel(
 	season: SeasonLifecycleState | null | undefined,
-	state: { tone: string }
+	state: { key: string }
 ): string {
 	const fullyHeld = Boolean(season?.held_candidate_count) && !season?.eligible_candidate_count;
-	if (!fullyHeld || state.tone === 'active' || state.tone === 'attention') return '';
-	return seasonHoldLabel(season);
+	return fullyHeld ? seasonStateHoldLabel(season, state) : '';
 }
 
 export function tvLibraryStateGroup(

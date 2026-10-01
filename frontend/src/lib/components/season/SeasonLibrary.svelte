@@ -24,7 +24,7 @@
 		savingsPercent,
 		seasonsByShow,
 		sortShowCards,
-		seasonHoldLabel,
+		seasonStateHoldLabel,
 		tvLibraryStateGroup,
 		type LibrarySort,
 		type TvLibraryStateKey
@@ -593,6 +593,7 @@
 							{@const state = librarySeasonState(season, dashboard)}
 							{@const seasonName = seasonIdentity(season.prefix).season}
 							{@const seasonLifecycle = season.lifecycle?.seasons?.[0]}
+							{@const holdLabel = seasonStateHoldLabel(seasonLifecycle, state)}
 							<a
 								class="season-row"
 								class:season-row--mobile-optional={hiddenSelectedSeasonCount > 0 &&
@@ -622,14 +623,14 @@
 										<small>estimated saved · {savingsPercent(season)}%</small>
 									{/if}
 								</span>
-								{#if seasonLifecycle?.held_candidate_count}
+								{#if holdLabel && seasonLifecycle}
 									<span
 										class="season-state"
 										title={seasonLifecycle.hold_reasons
 											.map((reason) => `${reason.label}: ${reason.detail}`)
 											.join(' ')}
 									>
-										<StateBadge tone="wait" label={seasonHoldLabel(seasonLifecycle)} compact />
+										<StateBadge tone="wait" label={holdLabel} compact />
 									</span>
 								{:else if state.key !== 'needs_test'}
 									<span class="season-state">

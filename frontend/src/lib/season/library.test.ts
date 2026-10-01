@@ -13,6 +13,7 @@ import {
 	savingsPercent,
 	seasonHoldLabel,
 	seasonRowHoldLabel,
+	seasonStateHoldLabel,
 	seasonsByShow,
 	sortShowCards,
 	tvLibraryStateGroup
@@ -275,17 +276,27 @@ describe('season library grouping', () => {
 		});
 	});
 
-	it('shows a fully held season as held unless its own work is running or needs help', () => {
+	it('shows a held season as held unless it has its own work or problem to show', () => {
 		const fullyHeld = seasonLifecycle('tv/Alpha/Season 2', 10);
 		const partlyHeld = seasonLifecycle('tv/Alpha/Season 2', 3);
-		const idle = { tone: 'quiet' };
+		const idle = { key: 'needs_test' };
 
 		expect(seasonHoldLabel(seasonLifecycle('tv/Alpha/Season 1', 0))).toBe('');
 		expect(seasonRowHoldLabel(fullyHeld, idle)).toBe('Current · held');
+		expect(seasonRowHoldLabel(fullyHeld, { key: 'ready_to_make' })).toBe('Current · held');
 		expect(seasonRowHoldLabel(partlyHeld, idle)).toBe('');
 		expect(seasonRowHoldLabel(undefined, idle)).toBe('');
-		expect(seasonRowHoldLabel(fullyHeld, { tone: 'active' })).toBe('');
-		expect(seasonRowHoldLabel(fullyHeld, { tone: 'attention' })).toBe('');
+		expect(seasonStateHoldLabel(partlyHeld, idle)).toBe('Current · held');
+		for (const key of [
+			'making_season',
+			'needs_help',
+			'sample_waiting',
+			'making_test',
+			'ready_to_compare'
+		]) {
+			expect(seasonRowHoldLabel(fullyHeld, { key })).toBe('');
+			expect(seasonStateHoldLabel(partlyHeld, { key })).toBe('');
+		}
 	});
 
 	it('offers one older-season action while preserving the latest season', () => {
