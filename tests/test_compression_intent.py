@@ -75,7 +75,11 @@ class CompressionIntentTests(unittest.TestCase):
                 "perceptual_floor": True,
             },
         )
-        self.assertIn("measured quality floor", options[2]["detail"])
+        details = [option["detail"] for option in options]
+        self.assertEqual(len(set(details)), len(details))
+        for detail in details:
+            self.assertTrue(detail)
+            self.assertNotRegex(detail, r"(?i)\b(measured|fidelity|floor|band)\b")
 
     def test_legacy_options_do_not_preselect_a_named_intent(self) -> None:
         options = compression_intent_options(CompressionIntentV1("legacy_unconfirmed", "legacy", False))

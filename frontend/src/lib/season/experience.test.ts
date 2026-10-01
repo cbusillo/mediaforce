@@ -710,24 +710,22 @@ describe('season experience translation', () => {
 			compressionIntentOptions().map((option) => [option.key, compressionIntentContract(option)])
 		);
 
-		expect(contracts.reference).toMatchObject({
-			sizeLabel: 'Size limit',
-			searchLabel: 'High fidelity first',
-			qualityLabel: 'Highest measured fidelity',
-			finalHeadline: 'Final result must meet the final band.'
-		});
-		expect(contracts.balanced).toMatchObject({
-			sizeLabel: 'Size goal',
-			searchLabel: 'Closest result to the goal',
-			qualityLabel: 'Measured quality floor',
-			finalHeadline: 'The finished file must stay under the size limit.'
-		});
-		expect(contracts.perceptual_floor).toMatchObject({
-			sizeLabel: 'Size ceiling',
-			searchLabel: 'Low end first',
-			qualityLabel: 'Measured acceptability floor',
-			finalHeadline: 'A smaller final result may pass.'
-		});
+		// Each preference is described differently, fully, and without internal terms.
+		const internalTerms = /\b(measured|fidelity|floor|band|candidate|CRF|VMAF)\b/i;
+		for (const key of ['reference', 'balanced', 'perceptual_floor']) {
+			const contract = contracts[key];
+			for (const value of Object.values(contract)) {
+				expect(value).not.toBe('');
+				expect(value).not.toMatch(internalTerms);
+			}
+		}
+		expect(
+			new Set(
+				[contracts.reference, contracts.balanced, contracts.perceptual_floor].map(
+					(c) => c.searchRule
+				)
+			).size
+		).toBe(3);
 		const legacyTransparent = compressionIntentContract({
 			key: 'transparent',
 			title: 'No visible difference',

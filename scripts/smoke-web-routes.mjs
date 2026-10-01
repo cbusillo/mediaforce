@@ -583,23 +583,23 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
     [
       "Balance size and detail",
       "Size goal",
-      "Closest result to the goal",
+      "Must still look and sound right",
       "The finished file must stay under the size limit.",
     ],
     [
       "Smallest that still looks good",
-      "Size ceiling",
-      "Low end first",
-      "A smaller final result may pass.",
+      "Size goal",
+      "Must still look and sound right",
+      "A smaller finished file is fine.",
     ],
     [
       "Preserve the reference",
-      "Size limit",
-      "High fidelity first",
-      "Final result must meet the final band.",
+      "Size goal",
+      "Keep as much detail as fits",
+      "The finished file must land in the allowed size.",
     ],
   ];
-  for (const [title, sizeLabel, searchLabel, finalHeadline] of states) {
+  for (const [title, sizeLabel, qualityLabel, finalHeadline] of states) {
     const option = page.getByRole("radio", { name: title, exact: false });
     const optionText = await option.innerText();
     if (optionText.trim().length <= title.length + 10) {
@@ -608,18 +608,18 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
     await option.click();
     await page
       .waitForFunction(
-        ({ expectedSize, expectedSearch, expectedFinal }) => {
+        ({ expectedSize, expectedQuality, expectedFinal }) => {
           const contract =
             document.querySelector(".goal-contract")?.innerText ?? "";
           return (
             contract.includes(expectedSize) &&
-            contract.includes(expectedSearch) &&
+            contract.includes(expectedQuality) &&
             contract.includes(expectedFinal)
           );
         },
         {
           expectedSize: sizeLabel,
-          expectedSearch: searchLabel,
+          expectedQuality: qualityLabel,
           expectedFinal: finalHeadline,
         },
         { timeout: timeoutMs },
@@ -660,14 +660,18 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
   }
   const contractText = await page.locator(".goal-contract").innerText();
   for (const requiredCopy of [
-    "Sample search range",
-    "Final acceptance band",
-    "Quality rule",
-    "Final acceptance",
+    "Allowed final size",
+    "Quality",
+    "When a file finishes",
   ]) {
     if (!contractText.includes(requiredCopy)) {
       throw new Error(`${label} omitted ${requiredCopy}.`);
     }
+  }
+  if (/sample search|acceptance band|measured/i.test(contractText)) {
+    throw new Error(
+      `${label} still shows internal size terms: ${JSON.stringify(contractText)}`,
+    );
   }
   if (contractText.includes("Size is the target.")) {
     throw new Error(`${label} retained the static size-target sentence.`);
@@ -1813,7 +1817,9 @@ async function checkActiveTestProgress(baseUrl, route, timeoutMs) {
 async function checkUnderTargetSampleRecovery(baseUrl, timeoutMs) {
   const browser = await launchSmokeBrowser();
   try {
-    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 900 },
+    });
     const prefix = "/api/folders/tv/Review Ready/Season 1";
     let requestedIntent = null;
     let confirmed = false;
@@ -1824,7 +1830,12 @@ async function checkUnderTargetSampleRecovery(baseUrl, timeoutMs) {
       if (request.method() === "POST") {
         if (pathname === `${prefix}/ai-tune/preview`) {
           requestedIntent = request.postDataJSON().operator_intent;
-          return route.fulfill({ json: { ok: true, proposal: { proposal_id: "smaller-review", can_queue: true } } });
+          return route.fulfill({
+            json: {
+              ok: true,
+              proposal: { proposal_id: "smaller-review", can_queue: true },
+            },
+          });
         }
         if (pathname === `${prefix}/ai-tune/confirm`) {
           expect(request.postDataJSON().proposal_id).toBe("smaller-review");
@@ -1833,11 +1844,14 @@ async function checkUnderTargetSampleRecovery(baseUrl, timeoutMs) {
         }
         throw new Error(`Unexpected recovery mutation: ${pathname}`);
       }
-      if (pathname !== prefix && pathname !== `${prefix}/status`) return route.continue();
+      if (pathname !== prefix && pathname !== `${prefix}/status`)
+        return route.continue();
       const response = await route.fetch();
       const payload = await response.json();
       // The short-lived failed-job notice can expire while its trace remains.
-      payload.calibration_job = confirmed ? { job_id: "smaller-search", status: "queued", mode: "sample" } : null;
+      payload.calibration_job = confirmed
+        ? { job_id: "smaller-search", status: "queued", mode: "sample" }
+        : null;
       payload.calibration_status = confirmed ? "queued" : "idle";
       payload.retryable_sample_job = null;
       payload.workflow_state = null;
@@ -1845,38 +1859,74 @@ async function checkUnderTargetSampleRecovery(baseUrl, timeoutMs) {
         originalIntent = payload.resolved_operator_intent.request;
         payload.calibration = null;
         payload.pending_proposal = null;
-        payload.review_gate = { status: "missing_sample", can_confirm_full: false };
+        payload.review_gate = {
+          status: "missing_sample",
+          can_confirm_full: false,
+        };
         payload.failed_target_size_search = {
           status: "bound_exhausted",
           selection_reason: "largest_quality_safe_candidate_under_target_band",
           under_target_review_candidate: {
-            crf: 42, metric: "VMAF", metric_score: 90.8, minimum_metric_score: 80,
-            predicted_whole_episode_bytes: 219000000, requires_fresh_sample: true,
+            crf: 42,
+            metric: "VMAF",
+            metric_score: 90.8,
+            minimum_metric_score: 80,
+            predicted_whole_episode_bytes: 219000000,
+            requires_fresh_sample: true,
           },
         };
       }
       await route.fulfill({ response, json: payload });
     });
-    await openRoute(page, baseUrl, "/folders/tv/Review%20Ready/Season%201", timeoutMs);
-    await expect(page.getByRole("heading", { name: "A smaller result passed the measured quality checks.", exact: true })).toBeVisible();
+    await openRoute(
+      page,
+      baseUrl,
+      "/folders/tv/Review%20Ready/Season%201",
+      timeoutMs,
+    );
+    await expect(
+      page.getByRole("heading", {
+        name: "A smaller result passed the measured quality checks.",
+        exact: true,
+      }),
+    ).toBeVisible();
     await expect(page.getByText(/219 MB with VMAF 90.8/).first()).toBeVisible();
-    await expect(page.getByRole("button", { name: "Keep this version", exact: true })).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Keep this version", exact: true }),
+    ).toHaveCount(0);
     const outputDir = path.join(rootDir, "scratch", "web-review");
     await mkdir(outputDir, { recursive: true });
-    await page.screenshot({ path: path.join(outputDir, "591-recovery-wide.png"), fullPage: true });
+    await page.screenshot({
+      path: path.join(outputDir, "591-recovery-wide.png"),
+      fullPage: true,
+    });
     await page.setViewportSize(NARROW_VIEWPORT);
-    const recovery = page.getByRole("button", { name: "Allow smaller and create review sample", exact: true });
+    const recovery = page.getByRole("button", {
+      name: "Allow smaller and create review sample",
+      exact: true,
+    });
     await expect(recovery).toBeVisible();
-    await page.screenshot({ path: path.join(outputDir, "591-recovery-narrow.png"), fullPage: true });
+    await page.screenshot({
+      path: path.join(outputDir, "591-recovery-narrow.png"),
+      fullPage: true,
+    });
     await recovery.click();
     await expect.poll(() => confirmed).toBe(true);
-    expect(requestedIntent.compression_intent).toEqual({ schema_version: 1, level: "perceptual_floor", confirmed: true });
+    expect(requestedIntent.compression_intent).toEqual({
+      schema_version: 1,
+      level: "perceptual_floor",
+      confirmed: true,
+    });
     expect(requestedIntent.size_goal).toEqual(originalIntent.size_goal);
     expect(requestedIntent.resolution).toEqual(originalIntent.resolution);
     expect(requestedIntent.quality).toEqual(originalIntent.quality);
     expect(requestedIntent.streams).toEqual(originalIntent.streams);
-    await expect(page.getByRole("heading", { name: /^Sample waiting for / })).toBeVisible();
-    console.log("route ok: Under-target recovery confirms smaller intent and queues only a fresh sample");
+    await expect(
+      page.getByRole("heading", { name: /^Sample waiting for / }),
+    ).toBeVisible();
+    console.log(
+      "route ok: Under-target recovery confirms smaller intent and queues only a fresh sample",
+    );
   } finally {
     await browser.close();
   }

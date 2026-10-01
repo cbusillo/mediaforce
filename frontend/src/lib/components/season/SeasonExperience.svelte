@@ -490,7 +490,7 @@
 	);
 	const selectedCompressionIntentAnnouncement = $derived(
 		selectedGoal && selectedCompressionIntent && selectedCompressionIntentContract
-			? `${selectedCompressionIntentContract.announcement} Selected size ${formatDecimalFileSize(selectedGoal.targetSizeBytes)}. Sample search band ${formatDecimalFileSize(selectedGoalSampleLower)} to ${formatDecimalFileSize(selectedGoalSampleUpper)}. ${selectedCompressionIntent.accepts_under_target_result ? `Final size ceiling ${formatDecimalFileSize(selectedGoalFinalUpper)}; smaller results may pass.` : `Final acceptance band ${formatDecimalFileSize(selectedGoalFinalLower)} to ${formatDecimalFileSize(selectedGoalFinalUpper)}.`}`
+			? `${selectedCompressionIntentContract.announcement} Selected size ${formatDecimalFileSize(selectedGoal.targetSizeBytes)}. ${selectedCompressionIntent.accepts_under_target_result || selectedCompressionIntent.key === 'balanced' ? `Allowed final size up to ${formatDecimalFileSize(selectedGoalFinalUpper)}.` : `Allowed final size ${formatDecimalFileSize(selectedGoalFinalLower)} to ${formatDecimalFileSize(selectedGoalFinalUpper)}.`}`
 			: ''
 	);
 	const crfLimitReached = $derived(
@@ -2027,31 +2027,15 @@
 							<small>{selectedCompressionIntentContract.sizeRule}</small>
 						</div>
 						<div>
-							<span>Sample search range</span>
-							<strong
-								>{formatDecimalFileSize(selectedGoalSampleLower)}–{formatDecimalFileSize(
-									Math.min(selectedGoalSampleUpper, selectedGoalFinalUpper)
-								)}</strong
-							>
-							<small
-								>{selectedCompressionIntentContract.searchLabel}. {selectedCompressionIntentContract.searchRule}</small
-							>
-						</div>
-						<div>
-							<span
-								>{selectedCompressionIntent?.accepts_under_target_result ||
-								selectedCompressionIntent?.key === 'balanced'
-									? 'Final size limit'
-									: 'Final acceptance band'}</span
-							>
+							<span>Allowed final size</span>
 							{#if selectedCompressionIntent?.accepts_under_target_result}
 								<strong>Up to {formatDecimalFileSize(selectedGoalFinalUpper)}</strong>
-								<small>Smaller outputs may pass when the measured quality rule still holds.</small>
+								<small>A smaller file is fine if it still looks right.</small>
 							{:else if selectedCompressionIntent?.key === 'balanced'}
 								<strong>Up to {formatDecimalFileSize(selectedGoalFinalUpper)}</strong>
 								<small
-									>Goal + {selectedGoal.operatorIntent.size_goal.final_output_tolerance_percent}%. A
-									smaller file is kept once it meets the quality target.</small
+									>Your goal plus {selectedGoal.operatorIntent.size_goal
+										.final_output_tolerance_percent}%. {selectedCompressionIntentContract.searchRule}</small
 								>
 							{:else}
 								<strong
@@ -2060,18 +2044,18 @@
 									)}</strong
 								>
 								<small
-									>±{selectedGoal.operatorIntent.size_goal.final_output_tolerance_percent}% after
-									the full encode</small
+									>Within {selectedGoal.operatorIntent.size_goal.final_output_tolerance_percent}% of
+									your goal.</small
 								>
 							{/if}
 						</div>
 						<div>
-							<span>Quality rule</span>
+							<span>Quality</span>
 							<strong>{selectedCompressionIntentContract.qualityLabel}</strong>
 							<small>{selectedCompressionIntentContract.qualityRule}</small>
 						</div>
 						<div class="goal-contract__truth">
-							<span>Final acceptance</span>
+							<span>When a file finishes</span>
 							<strong>{selectedCompressionIntentContract.finalHeadline}</strong>
 							<small>{selectedCompressionIntentContract.finalRule}</small>
 							{#if isExactItemScope && targetProvenance}
@@ -2133,8 +2117,7 @@
 						</div>
 						{#if noAvailableHosts}
 							<p class="host-unavailable" role="status">
-								No computers are available right now. Open Technical details to see what needs
-								attention.
+								No computers are available right now. Open Details to see what needs attention.
 							</p>
 						{:else if requiresExplicitGoalSelection && !goalSelectionConfirmed}
 							<p class="host-unavailable" role="status">
@@ -2149,7 +2132,7 @@
 					<div class="goal-action__button">
 						<span class="mobile-safety">
 							{noAvailableHosts
-								? 'No computers available · Open Technical details'
+								? 'No computers available · Open Details'
 								: requiresExplicitGoalSelection && !goalSelectionConfirmed
 									? 'Choose one size behavior first'
 									: !compressionIntentConfirmed
@@ -3324,15 +3307,22 @@
 
 		<details class="details-drawer">
 			<summary>
-				<span
-					>{isExactItemScope && humanState.key === 'ready_to_make'
-						? 'Technical details'
-						: 'Details'}</span
-				>
+				<span>Details</span>
 				<small>For computers, formats, and exact settings</small>
 				<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7.5 5 5 5-5" /></svg>
 			</summary>
 			<div class="details-content">
+				{#if showGoalScreen && selectedGoal && selectedCompressionIntentContract}
+					<p class="sample-size-range">
+						<span>Sizes the sample tries</span>
+						<strong
+							>{formatDecimalFileSize(selectedGoalSampleLower)}–{formatDecimalFileSize(
+								Math.min(selectedGoalSampleUpper, selectedGoalFinalUpper)
+							)}</strong
+						>
+						<small>{selectedCompressionIntentContract.searchRule}</small>
+					</p>
+				{/if}
 				{#if showGoalScreen && hostOptions.length}
 					<label class="host-select">
 						<span>Computer for this sample</span>
@@ -6873,7 +6863,7 @@
 		border: 1px solid var(--mf-line-muted);
 		border-radius: var(--mf-radius-3);
 		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 
 	.goal-contract > div {
@@ -6883,11 +6873,11 @@
 	}
 
 	.goal-contract > div:nth-child(2),
-	.goal-contract > div:nth-child(4) {
+	.goal-contract > div:nth-child(3) {
 		border-left: 1px solid var(--mf-line-muted);
 	}
 
-	.goal-contract > div:nth-child(n + 3) {
+	.goal-contract > div:nth-child(n + 4) {
 		border-top: 1px solid var(--mf-line-muted);
 	}
 
@@ -6900,6 +6890,18 @@
 	.goal-contract strong {
 		color: var(--mf-fg-primary);
 		font-size: 15px;
+	}
+
+	.sample-size-range {
+		display: grid;
+		gap: 2px;
+		margin: 0;
+	}
+
+	.sample-size-range span,
+	.sample-size-range small {
+		color: var(--mf-fg-secondary);
+		font-size: 12px;
 	}
 
 	.goal-contract__truth {
