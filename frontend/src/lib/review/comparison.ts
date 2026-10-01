@@ -118,6 +118,23 @@ export function clampMomentIndex(index: number, momentCount: number): number {
 	return Math.min(Math.max(index, 0), momentCount - 1);
 }
 
+export function nextLoopMoment(index: number, momentCount: number): number {
+	if (momentCount <= 1) return 0;
+	return (clampMomentIndex(index, momentCount) + 1) % momentCount;
+}
+
+export function comparisonLoopStatus(
+	momentIndex: number,
+	momentCount: number,
+	looping: boolean
+): string {
+	if (momentCount <= 1) return looping ? 'Playing on repeat' : 'Play repeats this clip.';
+	const position = `Moment ${clampMomentIndex(momentIndex, momentCount) + 1} of ${momentCount}`;
+	return looping
+		? `${position} · playing every moment on repeat`
+		: `${position}. Play repeats every moment.`;
+}
+
 export function formatPlaybackTime(value: number): string {
 	const totalSeconds = Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
 	const minutes = Math.floor(totalSeconds / 60);
