@@ -46,6 +46,7 @@ def register_folder_routes(
         checked_output_preview_stream_action: Callable[[str, str | None], Response] | None = None,
         accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
         decide_size_held_action: Callable[[str, int, bool], dict[str, Any]] | None = None,
+        folder_episodes_payload: Callable[[str], dict[str, Any]] | None = None,
 ) -> None:
     staged_integrity_payload = folder_staged_integrity_payload or (lambda _prefix, _offset, _limit: {})
     preview_payload = checked_output_preview_payload or (
@@ -58,6 +59,13 @@ def register_folder_routes(
     @app.get("/api/folders/{prefix:path}/status")
     def api_folder_status(prefix: str) -> JSONResponse:
         return JSONResponse(folder_status_payload(prefix.strip("/")))
+
+    if folder_episodes_payload is not None:
+        episodes_payload = folder_episodes_payload
+
+        @app.get("/api/folders/{prefix:path}/episodes")
+        def api_folder_episodes(prefix: str) -> JSONResponse:
+            return JSONResponse(episodes_payload(prefix.strip("/")))
 
     @app.get("/api/folders/{prefix:path}/staged-integrity")
     def api_folder_staged_integrity(prefix: str, offset: int = 0, limit: int = 50) -> JSONResponse:
