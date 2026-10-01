@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { libraryCopy } from '$lib/library-copy';
 	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
 	import { postJson } from '$lib/api/client';
@@ -243,32 +244,34 @@
 	function providerStateCopy(): string {
 		const lifecycle = selectedLifecycle;
 		if (!lifecycle)
-			return detailsPending ? 'Checking lifecycle policy' : 'Lifecycle policy unavailable';
+			return detailsPending
+				? 'Checking whether the show is still airing'
+				: 'Airing status is unavailable';
 		if (lifecycle.provider_state === 'active') return lifecycle.provider_status || 'Active series';
 		if (lifecycle.provider_state === 'ended') return lifecycle.provider_status || 'Ended series';
 		if (lifecycle.provider_state === 'stale') {
 			return lifecycle.provider_status
 				? `${lifecycle.provider_status} when last checked`
-				: 'Series status is out of date';
+				: 'Airing status is out of date';
 		}
-		return 'Series status unknown';
+		return libraryCopy.airingUnknown;
 	}
 
 	function staleStatusCopy(observedAt: string | null | undefined): string {
 		const observed = observedAt ? new Date(observedAt) : null;
-		if (!observed || Number.isNaN(observed.getTime())) return 'Series status has not refreshed.';
+		if (!observed || Number.isNaN(observed.getTime())) return 'Airing status has not been checked.';
 		const day = observed.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-		return `Series status last refreshed ${day}.`;
+		return `Airing status last checked ${day}.`;
 	}
 
 	function lifecycleModeCopy(): string {
 		switch (displayedLifecycleMode) {
 			case 'on':
-				return 'On always protects the highest numbered season. For an active series, this matches Auto.';
+				return 'The newest season stays as it is until a newer season appears or it has had no new episodes for the time set in Settings.';
 			case 'off':
-				return 'Off skips current-season protection. Recent additions can still be held.';
+				return 'The newest season can be compressed. Recently added episodes may still wait.';
 			default:
-				return 'Auto uses series status. Active, unknown, or stale status protects the current season.';
+				return 'While the show is airing, or when Mediaforce cannot tell, the newest season stays as it is until it has had no new episodes for the time set in Settings.';
 		}
 	}
 
@@ -362,7 +365,7 @@
 				<option value="all">All states</option>
 				<option value="attention">Needs attention</option>
 				<option value="processing">In progress</option>
-				<option value="ready">Ready to act on</option>
+				<option value="ready">{libraryCopy.ready}</option>
 				<option value="idle">No active work</option>
 			</select>
 		</label>
@@ -428,8 +431,7 @@
 										<strong class="metric-pending">…</strong>
 										<small>{detailsPending ? 'estimating' : 'estimate unavailable'}</small>
 									{:else if fullyHeld(show)}
-										<strong>Held</strong>
-										<small>no eligible savings</small>
+										<strong>{libraryCopy.skipped}</strong>
 									{:else}
 										<strong>~{formatFileSize(show.projected_reclaim_bytes)}</strong>
 									{/if}
@@ -494,8 +496,7 @@
 											{detailsPending ? 'estimating space saved' : 'estimate unavailable'}</span
 										>
 									{:else if fullyHeld(selectedShow)}
-										<span class="show-summary__savings"
-											><strong>Held</strong> · no eligible savings</span
+										<span class="show-summary__savings"><strong>{libraryCopy.skipped}</strong></span
 										>
 									{:else}
 										<span class="show-summary__savings"
@@ -506,7 +507,7 @@
 								</div>
 								<div class="show-policy">
 									<label>
-										<span>Current-season policy for this show</span>
+										<span>{libraryCopy.newestSeason}</span>
 										{#key selectedShow.prefix}
 											<select
 												value={displayedLifecycleMode}
@@ -514,25 +515,28 @@
 												disabled={policySaving || !lifecycleAvailable}
 												aria-describedby="current-season-policy-help"
 											>
-												<option value="auto">Auto · use series status</option>
-												<option value="on">On · protect current season</option>
-												<option value="off">Off · no current-season hold</option>
+												<option value="auto">{libraryCopy.newestSeasonModes.auto}</option>
+												<option value="on">{libraryCopy.newestSeasonModes.on}</option>
+												<option value="off">{libraryCopy.newestSeasonModes.off}</option>
 											</select>
 										{/key}
 										<small id="current-season-policy-help">
 											{policySaving
-												? `Saving current-season policy for ${policySavingTitle}…`
+												? `Saving the newest-season choice for ${policySavingTitle}…`
 												: lifecycleModeCopy()}
 										</small>
 									</label>
 									<div>
 										<strong>{providerStateCopy()}</strong>
 										{#if lifecycleAvailable}
-											<span>{eligibleEpisodeCount} eligible · {heldEpisodeCount} held</span>
+											<span
+												>{countLabel(eligibleEpisodeCount, 'episode')} ready · {heldEpisodeCount} skipped</span
+											>
 											{#if selectedLifecycle?.provider_state === 'stale'}
 												<span
 													>{staleStatusCopy(selectedLifecycle.provider_observed_at)} Refresh the library
-													in Activity, or choose Off to release the held season.</span
+													in Activity, or choose “{libraryCopy.newestSeasonModes.off}” to compress
+													it.</span
 												>
 											{/if}
 										{:else}
@@ -570,14 +574,18 @@
 						{#if selectedShow && !olderSeasonAction && selectedSeasons.length > 1 && (!lifecycleAvailable || eligibleEpisodeCount > 0)}
 							<div class="show-action">
 								<div>
-									<strong>Use one setup for eligible seasons</strong>
+									<strong>Use one setup for the ready seasons</strong>
 									{#if lifecycleAvailable}
 										<span
-											>Approve one representative test, then make {eligibleEpisodeCount} eligible episodes
-											with that choice. {heldEpisodeCount} held episodes stay original.</span
+											>Approve one sample, then compress {countLabel(
+												eligibleEpisodeCount,
+												'ready episode'
+											)}
+											the same way. {countLabel(heldEpisodeCount, 'skipped episode')}
+											{heldEpisodeCount === 1 ? 'stays as it is' : 'stay as they are'}.</span
 										>
 									{:else}
-										<span>Mediaforce is checking which seasons the lifecycle policy allows.</span>
+										<span>Mediaforce is checking which seasons are ready.</span>
 									{/if}
 								</div>
 								{#if lifecycleAvailable && eligibleEpisodeCount > 0}
@@ -586,7 +594,7 @@
 									>
 								{:else}
 									<button class="primary-button primary-button--disabled" type="button" disabled>
-										{lifecycleAvailable ? 'No eligible seasons' : 'Checking eligibility'}
+										{lifecycleAvailable ? 'No seasons ready' : 'Checking which seasons are ready'}
 									</button>
 								{/if}
 							</div>
@@ -1253,6 +1261,16 @@
 	}
 
 	@media (max-width: 760px) {
+		/* The newest-season choices are full sentences; give the select the whole width. */
+		.show-policy {
+			flex-direction: column;
+			gap: var(--mf-space-3);
+		}
+
+		.show-policy label {
+			width: 100%;
+		}
+
 		.show-list__head {
 			border: 0;
 			height: 0;

@@ -1,3 +1,4 @@
+import { libraryCopy } from '$lib/library-copy';
 import { describe, expect, it } from 'vitest';
 
 import type { FolderWorkflowState, OtherLibraryPayload, OtherWorkUnit } from '$lib/api/types';
@@ -142,7 +143,7 @@ describe('Other workflow presentation', () => {
 		);
 		expect(otherLibraryStateGroup({ ...workUnit, workflow_state: workflow('encode') })).toEqual({
 			key: 'ready',
-			label: 'Ready to act on',
+			label: libraryCopy.ready,
 			tone: 'ready'
 		});
 	});

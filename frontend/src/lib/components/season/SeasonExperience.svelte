@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { libraryCopy } from '$lib/library-copy';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { onMount, tick } from 'svelte';
@@ -970,7 +971,7 @@
 			selection.already_eligible_candidate_count > 0
 				? `${selection.already_eligible_candidate_count} already-eligible ${selection.already_eligible_candidate_count === 1 ? 'episode is' : 'episodes are'} included.`
 				: '',
-			'The current-season policy does not change.',
+			libraryCopy.newestSeasonUnchanged,
 			'Specials, ambiguous seasons, and episodes without motion-pattern clearance remain excluded.'
 		].filter(Boolean);
 		await openSafetyDialog({

@@ -1,3 +1,4 @@
+import { libraryCopy } from '$lib/library-copy';
 import type { FolderWorkflowState, OtherLibraryPayload, OtherWorkUnit } from '$lib/api/types';
 
 export interface OtherScopeSummary {
@@ -140,7 +141,7 @@ export function otherLibraryStateGroup(unit: OtherWorkUnit): OtherLibraryStateGr
 		return { key: 'processing', label: 'Compressing', tone: 'active' };
 	}
 	if (['encode', 'validate', 'promote', 'mixed'].includes(lane ?? '')) {
-		return { key: 'ready', label: 'Ready to act on', tone: 'ready' };
+		return { key: 'ready', label: libraryCopy.ready, tone: 'ready' };
 	}
 	return { key: 'idle', label: 'No active work', tone: 'idle' };
 }
