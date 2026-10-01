@@ -245,9 +245,13 @@ def register_folder_routes(
         except HTTPException as exc:
             return {"mode": start_mode, "ok": False, "message": str(exc.detail)}
         already_active = queued.get("code") == "encode_already_active"
+        job = queued.get("job") if isinstance(queued.get("job"), dict) else {}
         return {
             "mode": start_mode,
             "ok": bool(queued.get("ok")) or already_active,
             "already_active": already_active,
             "message": str(queued.get("message") or ""),
+            # What was actually queued, so the page never reports its own pre-request count.
+            "queued_count": int(queued.get("recovered_item_count") or job.get("item_count") or 0),
+            "left_out_count": len(queued.get("left_out") or []),
         }

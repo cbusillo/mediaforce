@@ -274,6 +274,15 @@ class WebRouteSecurityTests(unittest.TestCase):
         self.assertEqual((status, body["start_encode"]["ok"], body["start_encode"]["mode"]), (200, True, "scope"))
         self.assertEqual(queue_calls, [("scope", ("tv/Show", ANY_NOTES, False, False, ""))])
 
+        partial = {"ok": True, "message": "Queued 2 files. Left 1 out.", "job": {"item_count": 2}, "left_out": [{}]}
+        status, body = call(build({"ok": True}, partial), {"start_encode": "scope"})
+        self.assertEqual((body["start_encode"]["queued_count"], body["start_encode"]["left_out_count"]), (2, 1))
+        self.assertEqual(body["start_encode"]["message"], partial["message"])
+
+        recovered = {"ok": True, "message": "Recovered.", "recovered_item_count": 3, "job": {"item_count": 9}}
+        status, body = call(build({"ok": True}, recovered), {"start_encode": "scope"})
+        self.assertEqual(body["start_encode"]["queued_count"], 3)
+
         queue_calls.clear()
         status, body = call(build({"ok": True}, {"ok": True}), {"start_encode": "older_seasons"})
         self.assertEqual(queue_calls, [("older_seasons", ("tv/Show", ANY_NOTES, False, True, ""))])
