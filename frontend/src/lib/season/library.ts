@@ -27,6 +27,41 @@ export interface OlderSeasonLibraryAction {
 
 const OVERRIDEABLE_HOLD_CODES = new Set(['current_season', 'recent_acquisition']);
 
+/** The short badge for a season whose episodes the newest-season or recent-episode rule keeps as they are. */
+export function seasonHoldLabel(season: SeasonLifecycleState | null | undefined): string {
+	if (!season?.held_candidate_count) return '';
+	const reasonCodes = new Set(season.hold_reasons.map((reason) => reason.code));
+	if (reasonCodes.has('current_season') && reasonCodes.has('recent_acquisition')) {
+		return 'Current + recent · held';
+	}
+	if (reasonCodes.has('current_season')) return 'Current · held';
+	if (reasonCodes.has('recent_acquisition')) return 'Recent · held';
+	return `${season.held_candidate_count} held`;
+}
+
+// Season states that only say no work has started; a hold explains them better.
+const STATES_A_HOLD_EXPLAINS = new Set(['needs_test', 'ready_to_make']);
+
+/**
+ * A held season's badge, unless the season has its own work or problem to show, such as a sample or
+ * a run the owner started despite the hold.
+ */
+export function seasonStateHoldLabel(
+	season: SeasonLifecycleState | null | undefined,
+	state: { key: string }
+): string {
+	return STATES_A_HOLD_EXPLAINS.has(state.key) ? seasonHoldLabel(season) : '';
+}
+
+/** The show page's badge for a season with all of its episodes held. */
+export function seasonRowHoldLabel(
+	season: SeasonLifecycleState | null | undefined,
+	state: { key: string }
+): string {
+	const fullyHeld = Boolean(season?.held_candidate_count) && !season?.eligible_candidate_count;
+	return fullyHeld ? seasonStateHoldLabel(season, state) : '';
+}
+
 export function tvLibraryStateGroup(
 	states: Array<{ key?: string; tone: string }>
 ): TvLibraryStateGroup {

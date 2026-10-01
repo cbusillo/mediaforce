@@ -79,6 +79,22 @@ class EncodeEligibility:
 
 
 @dataclass(frozen=True, slots=True)
+class ScopeJobStates:
+    """The encode lane from every job touching a scope, and from only the jobs at or inside it.
+
+    A job over a wider scope, such as a whole show, cannot be working on a season whose files are all
+    held or already finished, so for such a season only its own jobs count.
+    """
+    overlapping: tuple[WorkflowLane, str] | None
+    own: tuple[WorkflowLane, str] | None
+
+
+NO_SCOPE_JOBS = ScopeJobStates(overlapping=None, own=None)
+# Files no job from a wider scope can still be working on.
+OUT_OF_WIDER_JOB_STATES = frozenset({"held", "complete"})
+
+
+@dataclass(frozen=True, slots=True)
 class ItemWorkflowState:
     item_id: int
     rel_path: str
@@ -143,8 +159,8 @@ def build_folder_workflow_state(
         _derive_item_workflow_state(row, candidate_eligibility)
         for row in _load_item_rows(connection, scope)
     )
-    job_state = _load_encode_job_state(connection, scope)
-    return _build_folder_state(scope.prefix, item_states, job_state=job_state)
+    job_states = _load_encode_job_state(connection, scope)
+    return _build_folder_state(scope.prefix, item_states, job_states=job_states)
 
 
 def build_folder_workflow_states(
@@ -185,7 +201,7 @@ def build_folder_workflow_states_for_scopes(
         result[scope.prefix] = _build_folder_state(
             scope.prefix,
             item_states,
-            job_state=job_states.get(scope.prefix),
+            job_states=job_states.get(scope.prefix, NO_SCOPE_JOBS),
         )
     return result
 
@@ -345,7 +361,7 @@ def _build_folder_state(
         prefix: str,
         items: tuple[ItemWorkflowState, ...],
         *,
-        job_state: tuple[WorkflowLane, str] | None,
+        job_states: ScopeJobStates,
 ) -> FolderWorkflowState:
     lane_counts = Counter(item.lane for item in items)
     state_counts = Counter(item.state for item in items)
@@ -354,6 +370,8 @@ def _build_folder_state(
         for item in items
         if item.blocker and item.state == "blocked"
     ))
+    wider_jobs_apply = not items or any(item.state not in OUT_OF_WIDER_JOB_STATES for item in items)
+    job_state = job_states.overlapping if wider_jobs_apply else job_states.own
     job_lane = job_state[0] if job_state is not None else None
     job_detail = job_state[1] if job_state is not None else None
     counts = {
@@ -523,22 +541,38 @@ def _mixed_next_action(prefix: str, lane: WorkflowLane) -> WorkflowNextAction:
     return WorkflowNextAction("review_scope", "Review scope", True, prefix)
 
 
-def _load_encode_job_state(connection: DBClient, scope: MediaScope) -> tuple[WorkflowLane, str] | None:
+def _load_encode_job_state(connection: DBClient, scope: MediaScope) -> ScopeJobStates:
     rows = _workflow_encode_job_rows(connection)
-    return _encode_job_workflow_state([row for row in rows if scopes_overlap(scope, str(row["prefix"] or ""))])
+    return _scope_job_states(scope, [row for row in rows if scopes_overlap(scope, str(row["prefix"] or ""))])
 
 
-def _load_encode_job_states(connection: DBClient, scopes: list[MediaScope]) -> dict[str, tuple[WorkflowLane, str] | None]:
+def _load_encode_job_states(connection: DBClient, scopes: list[MediaScope]) -> dict[str, ScopeJobStates]:
     scoped_rows = [
         (row, media_scope_from_prefix(str(row["prefix"] or ""), match="descendants"))
         for row in _workflow_encode_job_rows(connection)
     ]
     return {
-        scope.prefix: _encode_job_workflow_state(
-            [row for row, job_scope in scoped_rows if scopes_overlap(scope, job_scope)]
+        scope.prefix: _scope_job_states(
+            scope,
+            [row for row, job_scope in scoped_rows if scopes_overlap(scope, job_scope)],
         )
         for scope in scopes
     }
+
+
+def _scope_job_states(scope: MediaScope, overlapping_rows: list[DBRow]) -> ScopeJobStates:
+    own_rows = [row for row in overlapping_rows if not _job_is_wider(scope, str(row["prefix"] or ""))]
+    return ScopeJobStates(
+        overlapping=_encode_job_workflow_state(overlapping_rows),
+        own=_encode_job_workflow_state(own_rows),
+    )
+
+
+def _job_is_wider(scope: MediaScope, job_prefix: str) -> bool:
+    job_prefix = normalize_scope_prefix(job_prefix)
+    if job_prefix == scope.prefix:
+        return False
+    return not job_prefix or scope.prefix.startswith(f"{job_prefix}/")
 
 
 def _workflow_encode_job_rows(connection: DBClient) -> list[DBRow]:

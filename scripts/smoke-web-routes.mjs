@@ -1484,6 +1484,52 @@ async function checkSeriesSeasonIndex(baseUrl, timeoutMs) {
   }
 }
 
+async function checkHeldSeasonUnderShowJob(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 960 },
+    });
+    await openRoute(page, baseUrl, "/folders/tv/Show%20Job%20Hold", timeoutMs);
+    const row = (season) =>
+      page.locator(`[data-season-prefix="tv/Show Job Hold/${season}"]`);
+    await row("Season 2").waitFor({ state: "visible", timeout: timeoutMs });
+    await page.waitForFunction(
+      () =>
+        document
+          .querySelector('[data-season-prefix="tv/Show Job Hold/Season 1"]')
+          ?.textContent?.includes("Compressing"),
+      undefined,
+      { timeout: timeoutMs },
+    );
+    const heldRow = (await row("Season 2").innerText()).replace(/\s+/g, " ");
+    if (!heldRow.includes("held") || heldRow.includes("Compressing")) {
+      throw new Error(
+        `A held season read as working while its show's run was active: ${heldRow}`,
+      );
+    }
+    await openRoute(
+      page,
+      baseUrl,
+      "/folders/tv/Show%20Job%20Hold/Season%202",
+      timeoutMs,
+    );
+    await page
+      .getByText("Show Job Hold", { exact: false })
+      .first()
+      .waitFor({ state: "visible", timeout: timeoutMs });
+    const seasonText = await page.locator("body").innerText();
+    if (seasonText.includes("Compressing the season")) {
+      throw new Error(
+        "A held season's page said it was being compressed because its show's run was active.",
+      );
+    }
+    console.log("route ok: A held season stays held while its show's run works");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function checkSeriesSeasonContextFailures(baseUrl, timeoutMs) {
   const browser = await launchSmokeBrowser();
   try {
@@ -3347,6 +3393,7 @@ async function main() {
       await checkLibraryModeLayout(targetUrl, args.routeTimeoutMs);
       await checkLibraryStateReachability(targetUrl, args.routeTimeoutMs);
       await checkSeriesSeasonIndex(targetUrl, args.routeTimeoutMs);
+      await checkHeldSeasonUnderShowJob(targetUrl, args.routeTimeoutMs);
       await checkSeriesSeasonContextFailures(targetUrl, args.routeTimeoutMs);
       await checkCompletedCleanupLanguage(targetUrl, args.routeTimeoutMs);
     }

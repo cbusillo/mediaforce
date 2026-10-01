@@ -90,7 +90,12 @@
 		type ReviewSizeAdjustmentDirection,
 		type SizeGoal
 	} from '$lib/season/experience';
-	import { applySeriesLifecycle, compareSeasonCards, seasonsByShow } from '$lib/season/library';
+	import {
+		applySeriesLifecycle,
+		compareSeasonCards,
+		seasonRowHoldLabel,
+		seasonsByShow
+	} from '$lib/season/library';
 
 	type ActionPhase =
 		| 'idle'
@@ -1626,6 +1631,7 @@
 						{#each seriesSeasonCards as season (season.prefix)}
 							{@const state = librarySeasonState(season, dashboard)}
 							{@const seasonName = seasonIdentity(season.prefix).season}
+							{@const holdLabel = seasonRowHoldLabel(season.lifecycle?.seasons?.[0], state)}
 							<a
 								class="series-season-index__row"
 								data-season-prefix={season.prefix}
@@ -1636,7 +1642,11 @@
 								</span>
 								<span>{season.item_count}</span>
 								<span>{formatFileSize(season.total_size_bytes)}</span>
-								<StateBadge tone={seasonBadgeTone(state.tone)} label={state.label} compact />
+								{#if holdLabel}
+									<StateBadge tone="wait" label={holdLabel} compact />
+								{:else}
+									<StateBadge tone={seasonBadgeTone(state.tone)} label={state.label} compact />
+								{/if}
 								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4.5 5.5 5.5L7 15.5" /></svg>
 							</a>
 						{/each}
