@@ -16,6 +16,15 @@ export type SchedulePresentation = {
 	transitionAt?: string | null;
 };
 
+// Owner-facing work-window state names. Tests and other screens read them from here.
+export const scheduleLabels = {
+	stopsAtClose: 'Stops when the work window closes',
+	bypassed: 'Running outside the work window',
+	pausedUntilNextWindow: 'Paused until the next work window',
+	waitingForLongerWindow: 'Waiting for a longer work window',
+	finishingBeforeClose: 'Finishing before the window closes'
+} as const;
+
 function compactText(value: unknown): string {
 	return typeof value === 'string' ? value.trim() : '';
 }
@@ -135,7 +144,7 @@ export function jobSchedulePresentation(
 			.join(' · ');
 		return {
 			state,
-			label: 'Stops at close',
+			label: scheduleLabels.stopsAtClose,
 			tone: 'active',
 			detail: `${timing}. If unfinished, this item returns to the queue automatically.`,
 			transitionAt: job.schedule_close_deadline_at
@@ -144,7 +153,7 @@ export function jobSchedulePresentation(
 	if (state === 'bypassed') {
 		return {
 			state,
-			label: 'Bypassing schedule',
+			label: scheduleLabels.bypassed,
 			tone: 'wait',
 			detail: 'This work ignores the normal worker close time and can continue past it.'
 		};
@@ -154,11 +163,11 @@ export function jobSchedulePresentation(
 		const opening = nextOpening ? transitionCopy(nextOpening.opensAt, nextOpening.host, now) : null;
 		const detail =
 			nextOpening && opening
-				? `The interrupted item will restart from the beginning automatically when ${nextOpening.host.label} opens ${opening}. No failure attempt was used.`
-				: 'The interrupted item will restart from the beginning automatically in the next compatible work window. No failure attempt was used.';
+				? `The interrupted item will restart from the beginning automatically when ${nextOpening.host.label} opens ${opening}.`
+				: 'The interrupted item will restart from the beginning automatically in the next compatible work window.';
 		return {
 			state,
-			label: 'Paused by schedule',
+			label: scheduleLabels.pausedUntilNextWindow,
 			tone: 'wait',
 			detail,
 			transitionAt: nextOpening?.opensAt
@@ -173,7 +182,7 @@ export function jobSchedulePresentation(
 				: 'No queued item safely fits the time left. It will retry automatically in the next compatible full work window.';
 		return {
 			state,
-			label: 'Waiting for full window',
+			label: scheduleLabels.waitingForLongerWindow,
 			tone: 'wait',
 			detail,
 			transitionAt: nextOpening?.opensAt
@@ -255,7 +264,7 @@ export function hostSchedulePresentation(
 	if (activeBypassJob(host, queue)) {
 		return {
 			state: 'bypassed',
-			label: 'Bypassing schedule',
+			label: scheduleLabels.bypassed,
 			tone: 'wait',
 			detail: 'Active work can continue after this worker’s normal close time.'
 		};
@@ -286,7 +295,7 @@ export function hostSchedulePresentation(
 		const countdown = formatScheduleCountdown(host.schedule_closes_at, now);
 		return {
 			state: 'host_draining',
-			label: 'Draining',
+			label: scheduleLabels.finishingBeforeClose,
 			tone: 'wait',
 			detail: [
 				close ? `Open until ${close}` : 'Open now',

@@ -6,6 +6,13 @@ import type {
 } from '$lib/api/types';
 import { operatorStateCopy, safeOperatorErrorCopy } from '$lib/operator-copy';
 
+// Owner-facing library check states. Tests and the console read them from here.
+export const libraryCheckLabels = {
+	title: 'Library check',
+	catalogStale: 'Worth a fresh look',
+	analysisReady: 'Ready to start'
+} as const;
+
 export type OperatorStateTone = 'active' | 'ready' | 'wait' | 'fail' | 'idle';
 
 export interface OperatorStateView {
@@ -102,7 +109,7 @@ export function catalogStateView(
 	}
 	if (catalog.freshness === 'stale') {
 		return {
-			label: 'Refresh suggested',
+			label: libraryCheckLabels.catalogStale,
 			tone: 'wait',
 			detail: 'The remembered catalog is old enough to check again.'
 		};
@@ -138,7 +145,7 @@ export function evidenceStateView(
 	if (queue.status === 'paused') {
 		const started = evidence.progress.done_count > 0 || Boolean(queue.started_at);
 		return {
-			label: started ? 'Paused' : 'Prepared',
+			label: started ? 'Paused' : libraryCheckLabels.analysisReady,
 			tone: 'wait',
 			detail: started
 				? 'No new analyzer will start until you resume this batch.'
@@ -274,7 +281,11 @@ export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): Operato
 		return { label: 'Not prepared', tone: 'idle', detail: 'This item is not in the active batch.' };
 	}
 	if (status === 'queued') {
-		return { label: 'Prepared', tone: 'wait', detail: 'Waiting for an explicit start.' };
+		return {
+			label: libraryCheckLabels.analysisReady,
+			tone: 'wait',
+			detail: 'Waiting for an explicit start.'
+		};
 	}
 	if (status === 'running') {
 		return { label: 'Running', tone: 'active', detail: 'The analyzer owns this item now.' };

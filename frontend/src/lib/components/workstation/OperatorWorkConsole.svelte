@@ -18,6 +18,7 @@
 		evidenceStateView,
 		evidenceWorkReasonView,
 		evidenceWorkStatusView,
+		libraryCheckLabels,
 		formatCount,
 		formatTimestamp,
 		scopeLabel,
@@ -172,7 +173,7 @@
 	<summary class="maintenance-summary">
 		<div class="maintenance-summary__identity">
 			<span class="work-lane__eyebrow">Maintenance</span>
-			<strong>Library maintenance</strong>
+			<strong>{libraryCheckLabels.title}</strong>
 			<small>{catalogView.label} · {evidenceView.label}</small>
 		</div>
 		<div class="maintenance-summary__state">
@@ -319,7 +320,7 @@
 							>
 								{actionPending === 'resume-evidence'
 									? 'Starting…'
-									: evidenceView.label === 'Prepared'
+									: evidenceView.label === libraryCheckLabels.analysisReady
 										? 'Start analysis'
 										: 'Resume analysis'}
 							</button>
