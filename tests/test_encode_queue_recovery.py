@@ -7773,6 +7773,92 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(workflow.counts["ready_to_validate"], 1)
         self.assertEqual(workflow.next_action.kind, "monitor_encode")
 
+    def _save_show_job(self, connection: DBClient, *, job_id: str, prefix: str, status: str) -> None:
+        self._save_job(
+            connection,
+            job_id=job_id,
+            manifest_name=f"{job_id}.json",
+            host={"key": "local", "label": "Local"},
+            status=status,
+            attempt_count=1,
+        )
+        connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == job_id).values(prefix=prefix))
+
+    def test_folder_workflow_held_season_ignores_its_shows_running_job(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            eligible_id = self._insert_library_item(
+                connection,
+                self._create_source_file("Season 1/episode.mkv"),
+                rel_path="tv/show/Season 1/episode.mkv",
+            )
+            held_id = self._insert_library_item(
+                connection,
+                self._create_source_file("Season 8/episode.mkv"),
+                rel_path="tv/show/Season 8/episode.mkv",
+            )
+            self._save_show_job(connection, job_id="show-processing", prefix="tv/show", status="running")
+            eligibility = {
+                eligible_id: workflow_state_runtime.EncodeEligibility(eligible=True),
+                held_id: workflow_state_runtime.EncodeEligibility(
+                    eligible=False,
+                    blocker="This season is still receiving episodes.",
+                ),
+            }
+
+            held = workflow_state_runtime.build_folder_workflow_state(
+                connection, "tv/show/Season 8", candidate_eligibility=eligibility
+            )
+            working = workflow_state_runtime.build_folder_workflow_state(
+                connection, "tv/show/Season 1", candidate_eligibility=eligibility
+            )
+            bulk = workflow_state_runtime.build_folder_workflow_states(
+                connection,
+                ["tv/show/Season 8", "tv/show/Season 1"],
+                candidate_eligibility=eligibility,
+            )
+
+        self.assertEqual(held.state, "held")
+        self.assertEqual(held.primary_lane, "none")
+        self.assertEqual(working.state, "processing")
+        self.assertEqual(bulk["tv/show/Season 8"].to_payload(), held.to_payload())
+        self.assertEqual(bulk["tv/show/Season 1"].to_payload(), working.to_payload())
+
+    def test_folder_workflow_finished_season_ignores_its_shows_failed_job(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 2/episode.mkv"),
+                status="promoted",
+                rel_path="tv/show/Season 2/episode.mkv",
+            )
+            self._save_show_job(connection, job_id="show-failed", prefix="tv/show", status="failed")
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertEqual(workflow.state, "complete")
+
+    def test_folder_workflow_held_season_keeps_its_own_override_job(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            held_id = self._insert_library_item(
+                connection,
+                self._create_source_file("Season 8/episode.mkv"),
+                rel_path="tv/show/Season 8/episode.mkv",
+            )
+            self._save_show_job(connection, job_id="season-override", prefix="tv/show/Season 8", status="queued")
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(
+                connection,
+                "tv/show/Season 8",
+                candidate_eligibility={
+                    held_id: workflow_state_runtime.EncodeEligibility(
+                        eligible=False,
+                        blocker="This season is still receiving episodes.",
+                    ),
+                },
+            )
+
+        self.assertEqual(workflow.state, "processing")
+
     def test_folder_delivery_badge_ignores_fully_promoted_folders(self) -> None:
         card = self._folder_card_for_delivery_badge(
             item_count=4,
@@ -21414,7 +21500,7 @@ raise SystemExit(0)
 
             working = resync()
             badge = web_app._folder_needs_attention_badges(connection).get("tv/show")
-            working_state = workflow_state_runtime._load_encode_job_state(connection, scope)
+            working_state = workflow_state_runtime._load_encode_job_state(connection, scope).overlapping
 
             def complete(*indexes: int) -> None:
                 for index in indexes:
@@ -21424,10 +21510,10 @@ raise SystemExit(0)
 
             complete(2)
             queued_left = resync()
-            queued_left_state = workflow_state_runtime._load_encode_job_state(connection, scope)
+            queued_left_state = workflow_state_runtime._load_encode_job_state(connection, scope).overlapping
             complete(3, 4)
             ended = resync()
-            ended_state = workflow_state_runtime._load_encode_job_state(connection, scope)
+            ended_state = workflow_state_runtime._load_encode_job_state(connection, scope).overlapping
 
         labels = encode_runtime._UNFINISHED_REASON_LABELS
         self.assertEqual(working["status"], "running")

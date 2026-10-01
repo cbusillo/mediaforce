@@ -91,6 +91,10 @@ CURRENT_SERIES_PREFIX = "tv/Current Season"
 PROTECTED_READY_PREFIX = "tv/Protected Ready/Season 2"
 PROTECTED_READY_PREVIOUS_PREFIX = "tv/Protected Ready/Season 1"
 PROTECTED_READY_SERIES_PREFIX = "tv/Protected Ready"
+# A show whose run is working on an older season while its newest season is held.
+SHOW_JOB_HOLD_SERIES_PREFIX = "tv/Show Job Hold"
+SHOW_JOB_HOLD_WORKING_PREFIX = "tv/Show Job Hold/Season 1"
+SHOW_JOB_HOLD_HELD_PREFIX = "tv/Show Job Hold/Season 2"
 FIXTURE_PREFIXES = (
     FOLDER_PREFIX,
     SAMPLING_PREFIX,
@@ -135,6 +139,8 @@ FIXTURE_PREFIXES = (
     CURRENT_SEASON_PREFIX,
     PROTECTED_READY_PREVIOUS_PREFIX,
     PROTECTED_READY_PREFIX,
+    SHOW_JOB_HOLD_WORKING_PREFIX,
+    SHOW_JOB_HOLD_HELD_PREFIX,
 )
 
 
@@ -1065,7 +1071,9 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             )
         connection.execute(
             series_metadata.delete().where(
-                series_metadata.c.series_prefix.in_((CURRENT_SERIES_PREFIX, PROTECTED_READY_SERIES_PREFIX))
+                series_metadata.c.series_prefix.in_(
+                    (CURRENT_SERIES_PREFIX, PROTECTED_READY_SERIES_PREFIX, SHOW_JOB_HOLD_SERIES_PREFIX)
+                )
             )
         )
 
@@ -1401,6 +1409,29 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 priority_score=85,
                 recommendation="priority_encode",
                 recommendation_reason="Fixture approved current season requires an explicit lifecycle override.",
+                age_days=5,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Show Job Hold/Season 1/Episode 01.mkv",
+                size_bytes=7 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=81,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture older season the show's run is compressing.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Show Job Hold/Season 2/Episode 01.mkv",
+                size_bytes=8 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=80,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture newest season held while the show's run works on older seasons.",
                 age_days=5,
             ),
             *(
@@ -1810,6 +1841,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         for series_prefix, tmdb_series_id in (
             (CURRENT_SERIES_PREFIX, 4242),
             (PROTECTED_READY_SERIES_PREFIX, 4343),
+            (SHOW_JOB_HOLD_SERIES_PREFIX, 4444),
         ):
             connection.execute(
                 series_metadata.insert().values(
@@ -2359,6 +2391,14 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                          "items": ["tv/Encoding Show/Season 1/Episode 07.mkv"]},
                     ],
                 },
+            ),
+            _encode_job(
+                project_root=project_root,
+                job_id="web-smoke-encode-show-job-hold",
+                prefix=SHOW_JOB_HOLD_SERIES_PREFIX,
+                rel_path="tv/Show Job Hold/Season 1/Episode 01.mkv",
+                status="running",
+                progress={"percent_complete": 10, "progress_state": "encoding"},
             ),
             _encode_job(
                 project_root=project_root,

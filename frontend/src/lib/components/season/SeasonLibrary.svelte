@@ -7,8 +7,7 @@
 		DashboardFoldersPayload,
 		DashboardSummaryPayload,
 		FolderCard,
-		LifecycleState,
-		SeasonLifecycleState
+		LifecycleState
 	} from '$lib/api/types';
 	import {
 		folderHref,
@@ -25,6 +24,7 @@
 		savingsPercent,
 		seasonsByShow,
 		sortShowCards,
+		seasonHoldLabel,
 		tvLibraryStateGroup,
 		type LibrarySort,
 		type TvLibraryStateKey
@@ -273,17 +273,6 @@
 			default:
 				return 'While the show is airing, or when Mediaforce cannot tell, the newest season stays as it is until it has had no new episodes for the time set in Settings.';
 		}
-	}
-
-	function seasonHoldCopy(season: SeasonLifecycleState | undefined): string {
-		if (!season?.held_candidate_count) return '';
-		const reasonCodes = new Set(season.hold_reasons.map((reason) => reason.code));
-		if (reasonCodes.has('current_season') && reasonCodes.has('recent_acquisition')) {
-			return 'Current + recent · held';
-		}
-		if (reasonCodes.has('current_season')) return 'Current · held';
-		if (reasonCodes.has('recent_acquisition')) return 'Recent · held';
-		return `${season.held_candidate_count} held`;
 	}
 
 	async function saveLifecycleMode(event: Event) {
@@ -640,7 +629,7 @@
 											.map((reason) => `${reason.label}: ${reason.detail}`)
 											.join(' ')}
 									>
-										<StateBadge tone="wait" label={seasonHoldCopy(seasonLifecycle)} compact />
+										<StateBadge tone="wait" label={seasonHoldLabel(seasonLifecycle)} compact />
 									</span>
 								{:else if state.key !== 'needs_test'}
 									<span class="season-state">

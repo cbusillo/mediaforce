@@ -684,7 +684,10 @@ function compressionIntentOptions(): CompressionIntentOptionPayload[] {
 	}));
 }
 
-function workflowState(primaryLane: WorkflowLane, state = primaryLane): FolderWorkflowState {
+function workflowState(
+	primaryLane: WorkflowLane,
+	state: string = primaryLane
+): FolderWorkflowState {
 	return {
 		prefix: card.prefix,
 		state,
@@ -1701,6 +1704,36 @@ describe('season experience translation', () => {
 				status
 			)
 		).toMatchObject({ key: 'making_season', label: 'Compressing the season' });
+	});
+
+	it('does not call a held season working because its show has a job', () => {
+		const showJob = {
+			job_id: 'show-job',
+			prefix: 'tv/Big Brother (US)',
+			status: 'running',
+			progress: { percent_complete: 42 }
+		};
+		const held = detailSeasonState(
+			folder({ encode_job: showJob, workflow_state: workflowState('none', 'held') }),
+			status
+		);
+		expect(held.key).not.toBe('making_season');
+
+		expect(
+			detailSeasonState(
+				folder({ encode_job: showJob, workflow_state: workflowState('processing') }),
+				status
+			)
+		).toMatchObject({ key: 'making_season', label: 'Compressing the season' });
+		expect(
+			detailSeasonState(
+				folder({
+					encode_job: { ...showJob, prefix: card.prefix },
+					workflow_state: workflowState('none', 'held')
+				}),
+				status
+			)
+		).toMatchObject({ key: 'making_season' });
 	});
 
 	it('uses the API-resolved runtime-normalized goal instead of rebuilding it from flat policy', () => {

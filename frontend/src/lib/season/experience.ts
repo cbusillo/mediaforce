@@ -2074,12 +2074,29 @@ export function waitingScopeName(jobPrefix: string): string {
 		: `${identity.show} ${identity.season}`;
 }
 
+/**
+ * A job over a wider scope, such as the whole show, is not working on a season whose episodes are all
+ * held or finished; the server's workflow state already says which.
+ */
+function jobOwnsScope(
+	job: EncodeQueueJob | null | undefined,
+	prefix: string,
+	workflowState: string | undefined
+): boolean {
+	if (!job) return false;
+	const jobPrefix = job.prefix.replace(/\/+$/, '');
+	const wider = jobPrefix !== prefix && (jobPrefix === '' || prefix.startsWith(`${jobPrefix}/`));
+	return !wider || (workflowState !== 'held' && workflowState !== 'complete');
+}
+
 export function detailSeasonState(
 	folder: FolderPayload,
 	status: FolderStatusPayload
 ): HumanSeasonState {
-	const encodeJob = folder.encode_job;
 	const workflow = status.workflow_state ?? folder.workflow_state;
+	const encodeJob = jobOwnsScope(folder.encode_job, folder.prefix, workflow?.state)
+		? folder.encode_job
+		: null;
 	const sampleJob = status.calibration_job ?? folder.calibration_job;
 	const retryableSample = status.retryable_sample_job;
 	const calibration = record(folder.calibration);

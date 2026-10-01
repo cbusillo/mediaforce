@@ -27,6 +27,23 @@ export interface OlderSeasonLibraryAction {
 
 const OVERRIDEABLE_HOLD_CODES = new Set(['current_season', 'recent_acquisition']);
 
+/** The short badge for a season whose episodes the newest-season or recent-episode rule keeps as they are. */
+export function seasonHoldLabel(season: SeasonLifecycleState | null | undefined): string {
+	if (!season?.held_candidate_count) return '';
+	const reasonCodes = new Set(season.hold_reasons.map((reason) => reason.code));
+	if (reasonCodes.has('current_season') && reasonCodes.has('recent_acquisition')) {
+		return 'Current + recent · held';
+	}
+	if (reasonCodes.has('current_season')) return 'Current · held';
+	if (reasonCodes.has('recent_acquisition')) return 'Recent · held';
+	return `${season.held_candidate_count} held`;
+}
+
+/** Every episode the season could compress is held, so no work can be running on it. */
+export function isSeasonFullyHeld(season: SeasonLifecycleState | null | undefined): boolean {
+	return Boolean(season?.held_candidate_count) && !season?.eligible_candidate_count;
+}
+
 export function tvLibraryStateGroup(
 	states: Array<{ key?: string; tone: string }>
 ): TvLibraryStateGroup {

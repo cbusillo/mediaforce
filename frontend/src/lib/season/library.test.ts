@@ -8,9 +8,11 @@ import {
 	buildShowCards,
 	compareSeasonCards,
 	filterShowCards,
+	isSeasonFullyHeld,
 	mergeFolderPayloads,
 	olderSeasonLibraryAction,
 	savingsPercent,
+	seasonHoldLabel,
 	seasonsByShow,
 	sortShowCards,
 	tvLibraryStateGroup
@@ -271,6 +273,17 @@ describe('season library grouping', () => {
 			held_candidate_count: 0,
 			hold_reason_counts: {}
 		});
+	});
+
+	it('names a held season and tells a fully held one from a partly held one', () => {
+		const fullyHeld = seasonLifecycle('tv/Alpha/Season 2', 10);
+		const partlyHeld = seasonLifecycle('tv/Alpha/Season 2', 3);
+
+		expect(seasonHoldLabel(fullyHeld)).toBe('Current · held');
+		expect(seasonHoldLabel(seasonLifecycle('tv/Alpha/Season 1', 0))).toBe('');
+		expect(isSeasonFullyHeld(fullyHeld)).toBe(true);
+		expect(isSeasonFullyHeld(partlyHeld)).toBe(false);
+		expect(isSeasonFullyHeld(undefined)).toBe(false);
 	});
 
 	it('offers one older-season action while preserving the latest season', () => {
