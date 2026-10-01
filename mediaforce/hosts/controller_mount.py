@@ -2,6 +2,7 @@ import fcntl
 import json
 import os
 import re
+import socket
 import subprocess
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -15,9 +16,12 @@ from mediaforce.hosts.mount_runtime import ControllerSmbMount, remote_smb_mounts
 
 AccessMode = Literal["read", "write"]
 SubprocessRunner = Callable[..., subprocess.CompletedProcess[str]]
+ServerResolver = Callable[[str], frozenset[str]]
 
 _PROBE_TIMEOUT_SECONDS = 10
 _MOUNT_TIMEOUT_SECONDS = 30
+_SMB_PORT = 445
+_BONJOUR_SMB_SERVICE = "._smb._tcp."
 _PROBE_SCRIPT = r'''set -u
 mount_output="$(/sbin/mount 2>/dev/null)" || exit 20
 /usr/bin/printf '%s\n' "$mount_output"
@@ -114,6 +118,7 @@ def probe_controller_mount(
         *,
         run_subprocess: SubprocessRunner = subprocess.run,
         timeout_seconds: int = _PROBE_TIMEOUT_SECONDS,
+        resolve_server: ServerResolver | None = None,
 ) -> ControllerMountProbe:
     if _mapping_has_credentials(mount):
         return _failed_probe(
@@ -127,6 +132,7 @@ def probe_controller_mount(
         expected_mount=mount,
         run_subprocess=run_subprocess,
         timeout_seconds=timeout_seconds,
+        resolve_server=resolve_server,
     )
 
 
@@ -143,6 +149,7 @@ def probe_controller_volume(
         expected_mount=None,
         run_subprocess=run_subprocess,
         timeout_seconds=timeout_seconds,
+        resolve_server=None,
     )
 
 
@@ -153,6 +160,7 @@ def _probe_controller_volume(
         expected_mount: ControllerSmbMount | None,
         run_subprocess: SubprocessRunner,
         timeout_seconds: int,
+        resolve_server: ServerResolver | None,
 ) -> ControllerMountProbe:
     access_specs = [f"{mode}:{Path(path)}" for path, mode in required_paths.items()]
     try:
@@ -197,7 +205,8 @@ def _probe_controller_volume(
             ),
         )
     if expected_mount is not None and (
-            filesystem != "smbfs" or _smb_identity(observed_source) != _smb_identity(expected_mount.source)
+            filesystem != "smbfs"
+            or not same_smb_share(observed_source, expected_mount.source, resolve_server=resolve_server)
     ):
         return ControllerMountProbe(
             False, False, mount_point, observed_source, filesystem, True,
@@ -219,9 +228,11 @@ def mount_controller_smb_no_ui(
         run_subprocess: SubprocessRunner = subprocess.run,
         probe_timeout_seconds: int = _PROBE_TIMEOUT_SECONDS,
         mount_timeout_seconds: int = _MOUNT_TIMEOUT_SECONDS,
+        resolve_server: ServerResolver | None = None,
 ) -> ControllerMountResult:
     before = probe_controller_mount(
         mount, required_paths, run_subprocess=run_subprocess, timeout_seconds=probe_timeout_seconds,
+        resolve_server=resolve_server,
     )
     if before.mounted and before.accessible:
         return ControllerMountResult(True, False, None, None, before)
@@ -266,6 +277,7 @@ def mount_controller_smb_no_ui(
         )
     after = probe_controller_mount(
         mount, required_paths, run_subprocess=run_subprocess, timeout_seconds=probe_timeout_seconds,
+        resolve_server=resolve_server,
     )
     return ControllerMountResult(
         after.mounted and after.accessible,
@@ -318,6 +330,50 @@ def _smb_identity(source: str) -> tuple[str, str, str] | None:
     return user, unquote(server).lower(), unquote(raw_share)
 
 
+def same_smb_share(
+        observed_source: str,
+        expected_source: str,
+        *,
+        resolve_server: ServerResolver | None = None,
+) -> bool:
+    """Whether two SMB sources name the same share on the same server.
+
+    The same server can be mounted under different names, for example
+    `nas.shiny` and the Bonjour service name `nas._smb._tcp.local` that Finder
+    uses after a reconnect (#612). Names that differ count as one server only
+    when both resolve to a common address; a name that does not resolve fails
+    closed.
+    """
+    observed = _smb_identity(observed_source)
+    expected = _smb_identity(expected_source)
+    if observed == expected:
+        return True
+    if observed is None or expected is None:
+        return False
+    observed_user, observed_server, observed_share = observed
+    expected_user, expected_server, expected_share = expected
+    if observed_user != expected_user or observed_share != expected_share:
+        return False
+    resolve = resolve_server or _resolve_server_addresses
+    return bool(resolve(observed_server) & resolve(expected_server))
+
+
+def _resolve_server_addresses(server: str) -> frozenset[str]:
+    host = _bonjour_service_host(server) or server.removeprefix("[").removesuffix("]")
+    try:
+        addresses = socket.getaddrinfo(host, _SMB_PORT, proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError):
+        return frozenset()
+    return frozenset(str(address[4][0]) for address in addresses)
+
+
+def _bonjour_service_host(server: str) -> str | None:
+    instance, marker, domain = server.partition(_BONJOUR_SMB_SERVICE)
+    if not marker or not instance or domain.rstrip(".") != "local":
+        return None
+    return f"{instance}.local"
+
+
 def _mapping_has_credentials(mount: ControllerSmbMount) -> bool:
     source = mount.source
     if not source.startswith("//"):
@@ -344,4 +400,5 @@ __all__ = [
     "mount_controller_smb_no_ui",
     "probe_controller_mount",
     "probe_controller_volume",
+    "same_smb_share",
 ]

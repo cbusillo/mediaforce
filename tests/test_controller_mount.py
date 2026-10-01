@@ -8,14 +8,22 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from mediaforce.hosts.controller_mount import controller_mount_lock, mount_controller_smb_no_ui, \
-    probe_controller_mount, probe_controller_volume
+from mediaforce.hosts.controller_mount import _resolve_server_addresses as resolve_server_addresses, \
+    controller_mount_lock, mount_controller_smb_no_ui, probe_controller_mount, probe_controller_volume, same_smb_share
 from mediaforce.hosts.mount_runtime import ControllerSmbMount
 
 
 class ControllerMountTests(unittest.TestCase):
     mount = ControllerSmbMount("//local@NAS.local/media", Path("/Volumes/media"))
     required_paths = {Path("/Volumes/media/tv"): "read", Path("/Volumes/media/transcode"): "write"}
+
+    def setUp(self) -> None:
+        # No test may reach the network: names resolve only where a test says so.
+        resolver = patch(
+            "mediaforce.hosts.controller_mount._resolve_server_addresses", return_value=frozenset(),
+        )
+        resolver.start()
+        self.addCleanup(resolver.stop)
 
     def test_controller_mount_lock_is_nonblocking_and_shared_by_path(self) -> None:
         with patch("mediaforce.hosts.controller_mount.os.open", return_value=17), patch(
@@ -106,6 +114,57 @@ class ControllerMountTests(unittest.TestCase):
         self.assertEqual(wrong_share.failure_kind, "mount_identity_mismatch")
         self.assertTrue(wrong_share.occupied)
         self.assertEqual(unavailable.failure_kind, "path_unavailable")
+
+    def test_probe_accepts_same_share_mounted_under_another_name_for_the_same_server(self) -> None:
+        mount = ControllerSmbMount("//cbusillo@nas.shiny/media", Path("/Volumes/media"))
+        addresses = {
+            "nas.shiny": frozenset({"192.168.1.37"}),
+            "nas._smb._tcp.local": frozenset({"192.168.1.37", "2600:4040::1"}),
+            "other-nas.shiny": frozenset({"192.168.1.99"}),
+        }
+
+        def resolve(server: str) -> frozenset[str]:
+            return addresses.get(server, frozenset())
+
+        def probe(source: str):
+            return probe_controller_mount(
+                mount, self.required_paths,
+                run_subprocess=Mock(return_value=self._probe(source=source)), resolve_server=resolve,
+            )
+
+        bonjour = probe("//cbusillo@nas._smb._tcp.local/media")
+        other_server = probe("//cbusillo@other-nas.shiny/media")
+        unresolved = probe("//cbusillo@unknown.shiny/media")
+        other_share = probe("//cbusillo@nas._smb._tcp.local/extras")
+        other_user = probe("//guest@nas._smb._tcp.local/media")
+
+        self.assertTrue(bonjour.mounted)
+        self.assertTrue(bonjour.accessible)
+        self.assertIsNone(bonjour.failure_kind)
+        for refused in (other_server, unresolved, other_share, other_user):
+            self.assertEqual(refused.failure_kind, "mount_identity_mismatch")
+
+    def test_bonjour_service_name_resolves_through_its_host_name(self) -> None:
+        lookups: list[str] = []
+
+        def getaddrinfo(host: str, *_args, **_kwargs):
+            lookups.append(host)
+            if host == "nas.local":
+                return [(None, None, None, "", ("192.168.1.37", 445))]
+            raise OSError("not found")
+
+        with patch("mediaforce.hosts.controller_mount.socket.getaddrinfo", side_effect=getaddrinfo):
+            same = same_smb_share(
+                "//u@nas._smb._tcp.local/media", "//u@nas.local/media", resolve_server=resolve_server_addresses,
+            )
+            unresolved = same_smb_share(
+                "//u@nas._smb._tcp.local/media", "//u@nas.shiny/media", resolve_server=resolve_server_addresses,
+            )
+
+        self.assertTrue(same)
+        self.assertFalse(unresolved)
+        self.assertIn("nas.local", lookups)
+        self.assertNotIn("nas._smb._tcp.local", lookups)
 
     def test_probe_timeout_is_bounded(self) -> None:
         run = Mock(side_effect=subprocess.TimeoutExpired(["sh"], 4))

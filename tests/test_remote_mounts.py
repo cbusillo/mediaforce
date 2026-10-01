@@ -21,6 +21,39 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         remote._MOUNT_RECOVERY_COOLDOWNS.clear()
         remote._MOUNT_RECOVERY_NO_GUI_SESSIONS.clear()
 
+    def test_learning_keeps_saved_server_name_when_finder_used_an_alias(self) -> None:
+        from mediaforce.hosts.mount_runtime import controller_smb_mounts_path, load_controller_smb_mounts, \
+            save_controller_smb_mounts
+
+        path = controller_smb_mounts_path(self.runtime_settings_path)
+        save_controller_smb_mounts(path, [
+            ControllerSmbMount("//cbusillo@nas.shiny/media", Path("/Volumes/media")),
+            ControllerSmbMount("//cbusillo@old-nas.shiny/extras", Path("/Volumes/extras")),
+        ])
+        config = SimpleNamespace(paths=SimpleNamespace(runtime_settings_path=self.runtime_settings_path))
+        addresses = {
+            "nas.shiny": frozenset({"192.168.1.37"}),
+            "nas._smb._tcp.local": frozenset({"192.168.1.37"}),
+            "old-nas.shiny": frozenset({"192.168.1.20"}),
+        }
+        mount_output = "\n".join([
+            "//cbusillo@nas._smb._tcp.local/media on /Volumes/media (smbfs, nodev, nosuid)",
+            "//cbusillo@nas._smb._tcp.local/extras on /Volumes/extras (smbfs, nodev, nosuid)",
+        ])
+
+        with patch("mediaforce.remote._controller_smb_mount_output", return_value=mount_output), patch(
+                "mediaforce.remote._controller_required_mount_roots",
+                return_value={Path("/Volumes/media"), Path("/Volumes/extras")},
+        ), patch(
+            "mediaforce.hosts.controller_mount._resolve_server_addresses",
+            side_effect=lambda server: addresses.get(server, frozenset()),
+        ):
+            remote.learn_controller_smb_mounts(config)
+
+        saved = {mount.mount_point: mount.source for mount in load_controller_smb_mounts(path)}
+        self.assertEqual(saved[Path("/Volumes/media")], "//cbusillo@nas.shiny/media")
+        self.assertEqual(saved[Path("/Volumes/extras")], "//cbusillo@nas._smb._tcp.local/extras")
+
     def test_controller_smb_mounts_parse_only_smb_volumes(self) -> None:
         mounts = controller_smb_mounts_from_output(
             "\n".join(
