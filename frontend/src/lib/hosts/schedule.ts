@@ -19,7 +19,7 @@ export type SchedulePresentation = {
 // Owner-facing work-window state names. Tests and other screens read them from here.
 export const scheduleLabels = {
 	stopsAtClose: 'Stops when the work window closes',
-	bypassed: 'Running outside the work window',
+	bypassed: 'Not limited by the work window',
 	pausedUntilNextWindow: 'Paused until the next work window',
 	waitingForLongerWindow: 'Waiting for a longer work window',
 	finishingBeforeClose: 'Finishing before the window closes'
@@ -295,7 +295,10 @@ export function hostSchedulePresentation(
 		const countdown = formatScheduleCountdown(host.schedule_closes_at, now);
 		return {
 			state: 'host_draining',
-			label: scheduleLabels.finishingBeforeClose,
+			label:
+				host.active_encode_count > 0
+					? scheduleLabels.finishingBeforeClose
+					: scheduleLabels.waitingForLongerWindow,
 			tone: 'wait',
 			detail: [
 				close ? `Open until ${close}` : 'Open now',

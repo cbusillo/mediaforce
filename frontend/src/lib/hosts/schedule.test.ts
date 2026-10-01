@@ -136,7 +136,13 @@ describe('schedule presentation', () => {
 
 		expect(offSchedule).toMatchObject({ label: 'Off schedule', tone: 'wait' });
 		expect(offSchedule?.detail).toContain('today at 6:00 PM EDT');
-		expect(draining).toMatchObject({ label: scheduleLabels.finishingBeforeClose, tone: 'wait' });
+		expect(draining).toMatchObject({ label: scheduleLabels.waitingForLongerWindow, tone: 'wait' });
+		const finishing = hostSchedulePresentation(
+			host({ active_encode_count: 1 }),
+			queue({ queued_count: 1, queued: [drainingJob] }),
+			NOW
+		);
+		expect(finishing).toMatchObject({ label: scheduleLabels.finishingBeforeClose, tone: 'wait' });
 		expect(draining?.detail).toContain('no queued item safely fits');
 	});
 
