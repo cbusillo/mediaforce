@@ -32,12 +32,19 @@
 	let anchorsOnPage = $state<string[]>([]);
 	let loadedPrefix = '';
 	let generation = 0;
+	let retryTimer: ReturnType<typeof setTimeout> | undefined;
+	const RETRY_AFTER_MS = 15000;
 
+	// Only a question the page can actually answer gets a link; other reasons have no control above.
 	function answerAnchor(episode: EpisodeProgress): string {
 		if (episode.stage !== 'needs_you') return '';
-		const preferred =
-			episode.owner_action === 'keep_or_remake' ? SIZE_HELD_ANCHOR : DECISIONS_ANCHOR;
-		return anchorsOnPage.includes(preferred) ? preferred : '';
+		const target =
+			episode.owner_action === 'keep_or_remake'
+				? SIZE_HELD_ANCHOR
+				: episode.size_question
+					? DECISIONS_ANCHOR
+					: '';
+		return target && anchorsOnPage.includes(target) ? target : '';
 	}
 
 	const collapsed = $derived(episodeListStartsCollapsed(episodes) && !expanded);
@@ -45,6 +52,7 @@
 
 	async function load(currentPrefix: string) {
 		const request = ++generation;
+		clearTimeout(retryTimer);
 		try {
 			const encoded = currentPrefix
 				.split('/')
@@ -58,8 +66,12 @@
 				document.getElementById(id)
 			);
 		} catch {
-			// Keep the last list on a failed refresh; say so only when there is nothing to show.
-			if (request === generation) loadFailed = episodes.length === 0;
+			// Keep the last list on a failed refresh; with nothing to show, say so and try again, since
+			// a finished season's status no longer refreshes on its own.
+			if (request === generation && episodes.length === 0) {
+				loadFailed = true;
+				retryTimer = setTimeout(() => void load(currentPrefix), RETRY_AFTER_MS);
+			}
 		}
 	}
 
@@ -72,6 +84,7 @@
 			expanded = false;
 		}
 		void load(currentPrefix);
+		return () => clearTimeout(retryTimer);
 	});
 </script>
 
@@ -81,7 +94,7 @@
 			<h2 id="season-episodes-title">{episodeListCopy.title}</h2>
 			<p>{episodeSummary(episodes)}</p>
 		</header>
-		<ul class="season-episodes__rows">
+		<ul class="season-episodes__rows" id="season-episodes-rows">
 			{#each visible as episode (episode.rel_path)}
 				{@const copy = episodeStageCopy[episode.stage]}
 				{@const detail = episodeDetail(episode)}
@@ -99,7 +112,13 @@
 			{/each}
 		</ul>
 		{#if episodeListStartsCollapsed(episodes)}
-			<button class="season-episodes__toggle" type="button" onclick={() => (expanded = !expanded)}>
+			<button
+				class="season-episodes__toggle"
+				type="button"
+				aria-expanded={expanded}
+				aria-controls="season-episodes-rows"
+				onclick={() => (expanded = !expanded)}
+			>
 				{expanded ? episodeListCopy.showFewer : episodeListCopy.showAll(episodes.length)}
 			</button>
 		{/if}
