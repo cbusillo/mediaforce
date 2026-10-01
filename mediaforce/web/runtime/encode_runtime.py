@@ -2723,6 +2723,9 @@ def encode_job_heartbeat_loop(
         # noinspection PyBroadException
         try:
             with open_db(deps.load_config(config_path).paths.db_path) as connection:
+                # Read and write in one locked transaction: a writer that saved a row it read before
+                # this heartbeat would otherwise put back the old lease, and the job would look silent.
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
                 job = load_encode_job(connection, job_id)
                 status = str(job.get("status") or "") if job is not None else "missing"
                 if job is None or status != "running":
@@ -3215,6 +3218,12 @@ def run_encode_job(
         manifest = json.loads(manifest_path.read_text())
         manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
         indexes = _manifest_indexes_for_job(job, manifest_items)
+        # Re-read under the lock: a lease renewed while the manifest was read must not be put back.
+        connection.commit()
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        job = load_encode_job(connection, job_id)
+        if job is None:
+            return
         job.update({"process_pid": process_controller.pid, "updated_at": deps.now_iso()})
         save_encode_job(connection, job)
 
@@ -3490,6 +3499,8 @@ def _persist_encode_job_progress(
         deps: EncodeQueueRuntimeDeps,
 ) -> None:
     with open_db(deps.load_config(config_path).paths.db_path) as connection:
+        # Locked like the heartbeat, so neither write puts back what the other just wrote.
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
         job = load_encode_job(connection, job_id)
         if job is None or str(job.get("status") or "") != "running":
             return

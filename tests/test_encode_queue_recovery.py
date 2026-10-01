@@ -495,6 +495,52 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertGreater(str(job["lease_expires_at"]), "2026")
 
+    def test_progress_write_does_not_put_back_a_lease_a_heartbeat_renewed_meanwhile(self) -> None:
+        from mediaforce.web.runtime import encode_runtime
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._running_job_with_expired_lease(connection, progress_age=timedelta(seconds=5))
+            job = load_encode_job(connection, "job-live")
+            assert job is not None
+            job["worker_id"] = "worker-a"
+            save_encode_job(connection, job)
+            connection.commit()
+        deps = replace(web_app._encode_queue_runtime_deps(), load_config=Mock(return_value=self.config), logger=Mock())
+        heartbeat_stop = Mock()
+        heartbeat_stop.wait.side_effect = [False, True]
+        heartbeat = threading.Thread(
+            target=encode_runtime.encode_job_heartbeat_loop,
+            kwargs={
+                "config_path": self.config.paths.config_path, "job_id": "job-live", "worker_id": "worker-a",
+                "stop_event": heartbeat_stop, "process_controller": Mock(pid=4242), "deps": deps,
+            },
+        )
+        load = encode_runtime.load_encode_job
+        progress_thread = threading.current_thread()
+
+        def load_then_heartbeat(connection: DBClient, job_id: str) -> dict[str, Any] | None:
+            loaded = load(connection, job_id)
+            if threading.current_thread() is progress_thread and heartbeat.ident is None:
+                # The heartbeat runs between the progress write's read and its save. Unless the
+                # progress write holds the lock, nothing stops the heartbeat committing first.
+                heartbeat.start()
+                if not connection.connection.driver_connection.in_transaction:
+                    heartbeat.join()
+            return loaded
+
+        with patch.object(encode_runtime, "load_encode_job", side_effect=load_then_heartbeat):
+            encode_runtime._persist_encode_job_progress(
+                self.config.paths.config_path, "job-live", {"progress_state": "encoding"}, deps,
+            )
+        heartbeat.join(timeout=30)
+
+        with open_db(self.config.paths.db_path) as connection:
+            job = load_encode_job(connection, "job-live")
+        assert job is not None
+        self.assertFalse(heartbeat.is_alive())
+        self.assertGreater(deps.parse_iso(job["lease_expires_at"]), datetime.now(tz=UTC))
+        self.assertEqual(object_dict(job["progress"]).get("progress_state"), "encoding")
+
     def test_stale_lease_reconciler_preserves_a_fresh_heartbeat(self) -> None:
         source_path = self._create_source_file("episode-fresh-heartbeat.mkv")
         staging_path = self._staging_path("episode-fresh-heartbeat.mkv")
