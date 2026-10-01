@@ -433,6 +433,9 @@ def summarize_encode_queue(
         "running": _count_jobs(connection, statuses=("running",), job_kinds=DISPLAY_ENCODE_JOB_KINDS),
         "retry_backoff": _count_jobs(connection, statuses=("retry_backoff",), job_kinds=DISPLAY_ENCODE_JOB_KINDS),
         "needs_attention": _count_jobs(connection, statuses=("needs_attention",), job_kinds=DISPLAY_ENCODE_JOB_KINDS),
+        # Counted on the runnable parts: a show whose row reads needs_attention can still have
+        # episodes queued for a later host window, and the display counts above miss them.
+        "pending_work": _count_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES, job_kinds=RUNNABLE_ENCODE_JOB_KINDS),
     }
     needs_attention = list_encode_jobs(
         connection,
@@ -458,6 +461,7 @@ def summarize_encode_queue(
         "running_count": counts["running"],
         "retry_backoff_count": counts["retry_backoff"],
         "needs_attention_count": counts["needs_attention"],
+        "pending_work_count": counts["pending_work"],
     }
 
 
