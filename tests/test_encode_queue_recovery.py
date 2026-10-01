@@ -7904,6 +7904,49 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(bulk["tv/show/Season 8"].to_payload(), held.to_payload())
         self.assertEqual(bulk["tv/show/Season 1"].to_payload(), working.to_payload())
 
+    def test_folder_workflow_held_season_with_missing_files_ignores_its_shows_queued_job(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            held_id = self._insert_library_item(
+                connection,
+                self._create_source_file("Season 8/episode.mkv"),
+                rel_path="tv/show/Season 8/episode.mkv",
+            )
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 8/gone.mkv"),
+                status="missing",
+                rel_path="tv/show/Season 8/gone.mkv",
+            )
+            self._save_show_job(connection, job_id="show-queued", prefix="tv/show", status="queued")
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(
+                connection,
+                "tv/show/Season 8",
+                candidate_eligibility={
+                    held_id: workflow_state_runtime.EncodeEligibility(
+                        eligible=False,
+                        blocker="This season is still receiving episodes.",
+                    ),
+                },
+            )
+
+        self.assertEqual(workflow.state, "held")
+        self.assertEqual(workflow.primary_lane, "none")
+
+    def test_folder_workflow_season_with_only_missing_files_keeps_its_shows_queued_job(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 9/gone.mkv"),
+                status="missing",
+                rel_path="tv/show/Season 9/gone.mkv",
+            )
+            self._save_show_job(connection, job_id="show-queued", prefix="tv/show", status="queued")
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 9")
+
+        self.assertEqual(workflow.state, "processing")
+
     def test_folder_workflow_finished_season_ignores_its_shows_failed_job(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._insert_library_item(

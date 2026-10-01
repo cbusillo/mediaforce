@@ -90,8 +90,8 @@ class ScopeJobStates:
 
 
 NO_SCOPE_JOBS = ScopeJobStates(overlapping=None, own=None)
-# Files no job from a wider scope can still be working on.
-OUT_OF_WIDER_JOB_STATES = frozenset({"held", "complete"})
+# Files no job from a wider scope can still be working on: held, finished, or gone from disk.
+OUT_OF_WIDER_JOB_STATES = frozenset({"held", "complete", "missing"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,7 +370,12 @@ def _build_folder_state(
         for item in items
         if item.blocker and item.state == "blocked"
     ))
-    wider_jobs_apply = not items or any(item.state not in OUT_OF_WIDER_JOB_STATES for item in items)
+    # A scope whose files are all missing keeps the wider job's state rather than reading as finished.
+    wider_jobs_apply = (
+        not items
+        or any(item.state not in OUT_OF_WIDER_JOB_STATES for item in items)
+        or all(item.state == "missing" for item in items)
+    )
     job_state = job_states.overlapping if wider_jobs_apply else job_states.own
     job_lane = job_state[0] if job_state is not None else None
     job_detail = job_state[1] if job_state is not None else None
