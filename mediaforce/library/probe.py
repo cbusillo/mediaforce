@@ -3,6 +3,7 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mediaforce.core.binaries import ffprobe_binary
 from mediaforce.core.models import ProbeSummary
@@ -11,6 +12,9 @@ from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, analyze_media_fingerprint
 from mediaforce.library.evidence_state import EvidenceKind
+
+if TYPE_CHECKING:
+    from mediaforce.encoding.remote_media import RemoteMediaCommands
 
 TRACK_FIELDS = (
     "index",
@@ -120,8 +124,10 @@ def probe_evidence(
         evidence_kind: EvidenceKind,
         *,
         process_controller: ManagedProcessController | None = None,
+        command_runner: "RemoteMediaCommands | None" = None,
 ) -> dict[str, object]:
-    payload = _probe_payload(path, process_controller=process_controller)
+    """Measure one kind of evidence; with a command runner, every command runs on that encode computer."""
+    payload = _probe_payload(path, process_controller=process_controller, command_runner=command_runner)
     streams = [object_dict(stream) for stream in object_list(payload.get("streams"))]
     format_info = object_dict(payload.get("format"))
     video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
@@ -132,6 +138,7 @@ def probe_evidence(
             video_stream=video_stream,
             duration_seconds=duration_seconds,
             process_controller=process_controller,
+            command_runner=command_runner,
         )
     if evidence_kind == MEDIA_FINGERPRINT_EVIDENCE_KIND:
         audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
@@ -141,6 +148,7 @@ def probe_evidence(
             audio_streams=audio_streams,
             duration_seconds=duration_seconds,
             process_controller=process_controller,
+            command_runner=command_runner,
         )
     raise ValueError(f"Unsupported evidence kind: {evidence_kind}")
 
@@ -149,9 +157,10 @@ def _probe_payload(
         path: Path,
         *,
         process_controller: ManagedProcessController | None,
+        command_runner: "RemoteMediaCommands | None" = None,
 ) -> dict[str, object]:
     cmd = [
-        ffprobe_binary(),
+        "ffprobe" if command_runner is not None else ffprobe_binary(),
         "-v",
         "error",
         "-print_format",
@@ -160,7 +169,7 @@ def _probe_payload(
         "-show_streams",
         str(path),
     ]
-    result = _run_probe_command(cmd, process_controller=process_controller)
+    result = _run_probe_command(cmd, process_controller=process_controller, command_runner=command_runner)
     return object_dict(json.loads(result.stdout))
 
 
@@ -168,17 +177,26 @@ def _run_probe_command(
         cmd: list[str],
         *,
         process_controller: ManagedProcessController | None,
+        command_runner: "RemoteMediaCommands | None" = None,
 ) -> subprocess.CompletedProcess[str]:
     for attempt in range(TRANSIENT_PROBE_RETRY_ATTEMPTS):
         try:
-            return run_command(
+            if command_runner is None:
+                return run_command(
+                    cmd,
+                    process_controller=process_controller,
+                    capture_output=True,
+                    text=True,
+                    timeout=PROBE_TIMEOUT_SECONDS,
+                    check=True,
+                )
+            result = command_runner.run(
                 cmd,
+                timeout_seconds=PROBE_TIMEOUT_SECONDS,
                 process_controller=process_controller,
-                capture_output=True,
-                text=True,
-                timeout=PROBE_TIMEOUT_SECONDS,
-                check=True,
             )
+            result.check_returncode()
+            return result
         except subprocess.CalledProcessError as exc:
             if (
                     exc.returncode not in TRANSIENT_PROBE_RETURN_CODES
