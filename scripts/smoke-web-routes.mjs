@@ -2722,12 +2722,27 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
         throw new Error(`Finished register is missing ${selector}.`);
       }
     }
-    await completedPanel
-      .getByText("Review resolution", { exact: true })
-      .waitFor();
-    await completedPanel
-      .getByText("Destructive cleanup", { exact: true })
-      .waitFor();
+    for (const eyebrow of ["Backups already gone", "Delete original backups"]) {
+      await completedPanel
+        .locator(".action-command__copy > span")
+        .getByText(eyebrow, { exact: true })
+        .waitFor();
+    }
+    const completedText = (await completedPanel.innerText()).toLowerCase();
+    for (const staleTerm of [
+      "review resolution",
+      "destructive cleanup",
+      "audit state",
+      " reclaim ·",
+      " promoted",
+      "needs review",
+    ]) {
+      if (completedText.includes(staleTerm)) {
+        throw new Error(
+          `Finished exposed stale term ${JSON.stringify(staleTerm)}.`,
+        );
+      }
+    }
     await completedRegister
       .getByText("Backups ready to delete", { exact: true })
       .waitFor();

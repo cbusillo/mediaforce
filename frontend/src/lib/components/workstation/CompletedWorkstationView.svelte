@@ -24,6 +24,7 @@
 		cleanupDetail,
 		cleanupActionBlockers,
 		cleanupLabel,
+		finishedCopy,
 		cleanupState,
 		cleanupStateCounts,
 		cleanupTone,
@@ -498,7 +499,7 @@
 					<strong>{counts.ready.toLocaleString('en-US')}</strong>
 				</div>
 				<div class:completed-metrics__attention={counts.blocked + counts.unknown > 0}>
-					<span>Needs review</span>
+					<span>{finishedCopy.needsLook}</span>
 					<strong>{(counts.blocked + counts.unknown).toLocaleString('en-US')}</strong>
 				</div>
 				<div>
@@ -665,7 +666,7 @@
 										: counts.blocked > 0
 											? 'Check before deleting'
 											: counts.unknown > 0
-												? 'Needs review'
+												? finishedCopy.needsLook
 												: 'No action'}
 								/>
 								<div>
@@ -696,9 +697,9 @@
 								{#if cleanupReviewCount > 0}
 									<section class="action-command action-command--review">
 										<div class="action-command__copy">
-											<span>Review resolution</span>
+											<span>{finishedCopy.alreadyGone}</span>
 											<strong>Record backups that are already gone</strong>
-											<small>This updates the audit state. It does not delete files.</small>
+											<small>{finishedCopy.alreadyGoneNote}</small>
 										</div>
 										<div class="action-command__control">
 											<button
@@ -729,8 +730,8 @@
 								{#if cleanupDeleteRelevant}
 									<section class="action-command action-command--danger">
 										<div class="action-command__copy">
-											<span>Destructive cleanup</span>
-											<strong>Delete original backups</strong>
+											<span>{finishedCopy.deleteBackups}</span>
+											<strong>Free up the space they use</strong>
 											<small>Deletion is permanent and always requires confirmation.</small>
 										</div>
 										<div class="action-command__options">
@@ -937,9 +938,12 @@
 											{/if}
 										</td>
 										<td class="media-state-cell">
-											<a class="folder-link" href={resolve(folderRoutePath(folder.prefix))}>
+											<a
+												class="folder-link"
+												href={resolve(folderRoutePath(folder.prefix))}
+												title={folder.prefix}
+											>
 												<strong>{folder.title}</strong>
-												<span>{folder.prefix}</span>
 											</a>
 											<div class="row-state">
 												<StateBadge compact tone={cleanupTone(state)} label={cleanupLabel(state)} />
@@ -949,9 +953,14 @@
 										<td class="originals-cell" data-label="Original backups">
 											<strong>{countLabel(folder.archived_backup_count, 'backup')}</strong>
 											<span
-												>{formatBytes(folder.archived_backup_size_bytes)} reclaim · {folder.promoted_item_count.toLocaleString(
-													'en-US'
-												)} promoted</span
+												>{[
+													folder.archived_backup_size_bytes > 0
+														? `${formatBytes(folder.archived_backup_size_bytes)} to free up`
+														: '',
+													`${folder.promoted_item_count.toLocaleString('en-US')} replaced`
+												]
+													.filter(Boolean)
+													.join(' · ')}</span
 											>
 										</td>
 										<td class="saved-cell" data-label="Saved"
@@ -1200,7 +1209,6 @@
 	.cleanup-command__state span,
 	.action-command__copy small,
 	.scope-row small,
-	.folder-link span,
 	.state-detail,
 	.history-row span,
 	.history-row p,
@@ -1665,12 +1673,6 @@
 	.folder-link strong {
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-semibold);
-		overflow-wrap: anywhere;
-	}
-
-	.folder-link span {
-		font-family: var(--mf-font-mono), monospace;
-		font-size: var(--mf-text-2xs);
 		overflow-wrap: anywhere;
 	}
 
@@ -2193,7 +2195,6 @@
 		font-family: var(--mf-font-sans);
 	}
 
-	.folder-link span,
 	.state-detail {
 		color: var(--mf-fg-tertiary);
 		font-family: var(--mf-font-sans);
