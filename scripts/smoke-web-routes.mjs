@@ -668,6 +668,9 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
       throw new Error(`${label} omitted ${requiredCopy}.`);
     }
   }
+  if ((await page.locator(".sample-size-range").count()) === 0) {
+    throw new Error(`${label} lost the sample size range from Details.`);
+  }
   if (/sample search|acceptance band|measured/i.test(contractText)) {
     throw new Error(
       `${label} still shows internal size terms: ${JSON.stringify(contractText)}`,
