@@ -40,6 +40,9 @@ EVIDENCE_JOB_MAX_ATTEMPTS = 3
 EVIDENCE_SOURCE_RETRY_DELAY_SECONDS = 30
 SourceAvailability = Literal["available", "root_unavailable", "source_unavailable"]
 SOURCE_ROOT_WAIT_REASON = "Source root is unavailable; evidence work will resume without consuming an attempt."
+REMOTE_SOURCE_MISMATCH_ERROR = (
+    "The encode computer does not see the same copy of this file; run a scan before retrying evidence work."
+)
 
 
 @dataclass(slots=True)
@@ -178,35 +181,35 @@ def _run_evidence_claim(
         )
         return
 
-    try:
-        analysis_target = _analysis_target(config, claim, source_path, deps)
-    except RemoteMediaHostUnavailableError:
-        analysis_target = None
-    if analysis_target is None:
-        _defer_for_encode_computer(config, claim, deps, restore_attempt=False)
-        return
-
-    with open_db(config.paths.db_path) as connection:
-        active_claim = mark_evidence_attempt_started(connection, claim)
-    if active_claim is None:
-        return
-    claim = active_claim
-
     process_controller = ManagedProcessController()
-    heartbeat_stop = threading.Event()
-    heartbeat_thread = threading.Thread(
-        target=_evidence_heartbeat_loop,
-        kwargs={
-            "config": config,
-            "claim": claim,
-            "process_controller": process_controller,
-            "stop_event": heartbeat_stop,
-            "deps": deps,
-        },
-        name=f"evidence-heartbeat-{claim.library_item_id}-{claim.evidence_kind}",
-    )
-    heartbeat_thread.start()
+    heartbeat = _ClaimHeartbeat(config=config, claim=claim, process_controller=process_controller, deps=deps)
+    attempt_started = False
     try:
+        try:
+            analysis_target = _analysis_target(config, claim, source_path, deps, process_controller)
+        except RemoteMediaHostUnavailableError:
+            analysis_target = None
+        if analysis_target is None:
+            heartbeat.stop()
+            _defer_for_encode_computer(config, claim, deps, restore_attempt=False)
+            return
+        if not _remote_source_matches(analysis_target, source_path, process_controller):
+            heartbeat.stop()
+            _finish_claim(
+                config,
+                claim,
+                work_status="failed",
+                last_error=REMOTE_SOURCE_MISMATCH_ERROR,
+            )
+            return
+
+        with open_db(config.paths.db_path) as connection:
+            active_claim = mark_evidence_attempt_started(connection, claim)
+        if active_claim is None:
+            return
+        claim = active_claim
+        attempt_started = True
+
         process_controller.throw_if_cancelled()
         remote_kwargs = (
             {"command_runner": analysis_target.command_runner}
@@ -220,38 +223,50 @@ def _run_evidence_claim(
             **remote_kwargs,
         )
         process_controller.throw_if_cancelled()
+        remote_source_unchanged = _remote_source_matches(analysis_target, source_path, process_controller)
     except ProcessCancelledError:
+        heartbeat.stop()
         _finish_claim(
             config,
             claim,
             work_status="cancelled",
             last_error="Evidence work was cancelled.",
-            restore_attempt=True,
+            restore_attempt=attempt_started,
         )
         return
     except RemoteMediaHostUnavailableError:
-        _defer_for_encode_computer(config, claim, deps, restore_attempt=True)
+        heartbeat.stop()
+        _defer_for_encode_computer(config, claim, deps, restore_attempt=attempt_started)
         return
     except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+        heartbeat.stop()
         source_availability, _current_fingerprint = _source_fingerprint(config, claim, source_path)
         if source_availability == "root_unavailable":
-            _defer_unavailable_source(config, claim, deps, restore_attempt=True)
+            _defer_unavailable_source(config, claim, deps, restore_attempt=attempt_started)
         elif source_availability == "source_unavailable":
             _finish_claim(
                 config,
                 claim,
                 work_status="failed",
                 last_error="Source file became unavailable during evidence analysis; the result was discarded.",
-                restore_attempt=True,
+                restore_attempt=attempt_started,
             )
         else:
             _retry_or_fail(config, claim, deps, exc)
         return
     finally:
-        heartbeat_stop.set()
-        heartbeat_thread.join()
+        heartbeat.stop()
         process_controller.reset()
 
+    if not remote_source_unchanged:
+        _finish_claim(
+            config,
+            claim,
+            work_status="failed",
+            last_error="Source changed during evidence analysis; the result was discarded.",
+            restore_attempt=True,
+        )
+        return
     final_availability, final_fingerprint = _source_fingerprint(config, claim, source_path)
     if final_availability == "root_unavailable":
         _defer_unavailable_source(config, claim, deps, restore_attempt=True)
@@ -471,6 +486,7 @@ def _analysis_target(
         claim: EvidenceWorkClaim,
         source_path: Path,
         deps: EvidenceWorkerDeps,
+        process_controller: ManagedProcessController,
 ) -> _AnalysisTarget | None:
     """Where the measurement runs: locally when no encode computer is set up, otherwise only on one.
 
@@ -483,7 +499,7 @@ def _analysis_target(
     if host is None:
         return None
     command_runner = RemoteMediaCommands(host)
-    command_runner.ffmpeg_version()
+    command_runner.ffmpeg_version(process_controller)
     return _AnalysisTarget(
         source_path=evidence_source_path_on_host(
             config,
@@ -494,6 +510,56 @@ def _analysis_target(
         ),
         command_runner=command_runner,
     )
+
+
+def _remote_source_matches(
+        analysis_target: _AnalysisTarget,
+        source_path: Path,
+        process_controller: ManagedProcessController,
+) -> bool:
+    """Whether the encode computer sees the same size and modification time as the controller's copy."""
+    if analysis_target.command_runner is None:
+        return True
+    try:
+        stat_result = source_path.stat()
+    except OSError:
+        return False
+    remote = analysis_target.command_runner.source_size_and_mtime(
+        analysis_target.source_path,
+        process_controller=process_controller,
+    )
+    return remote == (stat_result.st_size, int(stat_result.st_mtime))
+
+
+class _ClaimHeartbeat:
+    """Keeps the claim's lease alive and cancels its commands when the claim is lost or cancelled."""
+
+    def __init__(
+            self,
+            *,
+            config: MediaforceConfig,
+            claim: EvidenceWorkClaim,
+            process_controller: ManagedProcessController,
+            deps: EvidenceWorkerDeps,
+    ) -> None:
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=_evidence_heartbeat_loop,
+            kwargs={
+                "config": config,
+                "claim": claim,
+                "process_controller": process_controller,
+                "stop_event": self._stop_event,
+                "deps": deps,
+            },
+            name=f"evidence-heartbeat-{claim.library_item_id}-{claim.evidence_kind}",
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not threading.current_thread():
+            self._thread.join()
 
 
 def _defer_unavailable_source(

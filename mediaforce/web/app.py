@@ -547,7 +547,7 @@ def create_app(
     shutdown_event = threading.Event()
     evidence_runner = BoundedEvidenceRunner(
         config.paths.config_path,
-        deps=replace(default_evidence_worker_deps(), evidence_host_rows=_evidence_host_rows),
+        deps=replace(default_evidence_worker_deps(), evidence_host_rows=evidence_host_rows),
     )
     review_dir = config.paths.review_dir
 
@@ -3067,10 +3067,14 @@ def _host_runtime_rows(
     )
 
 
-def _evidence_host_rows(config: MediaforceConfig) -> list[dict[str, Any]]:
+def evidence_host_rows(
+        config: MediaforceConfig,
+        *,
+        collect_statuses: Any | None = None,
+) -> list[dict[str, Any]]:
     """Encode computers as the encode queue sees them, so measuring follows the same schedules."""
     with open_db(config.paths.db_path) as connection:
-        return _host_runtime_rows(connection, config)
+        return _host_runtime_rows(connection, config, collect_statuses=collect_statuses)
 
 
 def _host_config_for_key(config: MediaforceConfig, host_key: str) -> dict[str, Any]:

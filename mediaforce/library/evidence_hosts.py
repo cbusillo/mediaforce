@@ -8,7 +8,7 @@ from typing import Any
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import object_list
 from mediaforce.encoding.helpers import resolve_item_source_path
-from mediaforce.hosts.config import _host_priority, execution_mode_for_host, host_media_access_for_host
+from mediaforce.hosts.config import _host_priority, configured_remote_host_execution_mode, host_media_access_for_host
 from mediaforce.hosts.types import FFMPEG_MISSING_ISSUE
 from mediaforce.remote import collect_host_statuses
 
@@ -23,7 +23,7 @@ def remote_evidence_hosts(config: MediaforceConfig) -> list[dict[str, Any]]:
         for host in config.remote_hosts
         if isinstance(host, dict)
         and host_media_access_for_host(host) == "mounted"
-        and execution_mode_for_host(host) == "ssh"
+        and configured_remote_host_execution_mode(host) == "ssh"
     ]
 
 

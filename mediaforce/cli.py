@@ -1,5 +1,5 @@
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import os
 from pathlib import Path
@@ -26,7 +26,8 @@ from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, Evid
     cancel_evidence_queue, evidence_queue_summary, pause_evidence_queue, resume_evidence_queue, \
     start_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_KINDS
-from mediaforce.library.evidence_worker import run_evidence_queue_until_blocked
+from mediaforce.library.evidence_worker import default_evidence_worker_deps, run_evidence_queue_until_blocked
+from mediaforce.remote import collect_host_statuses
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.run_manifests import build_run_manifest as build_db_run_manifest, \
     select_candidates as select_run_manifest_candidates, \
@@ -570,6 +571,14 @@ def _run_locked_command(
     return 1
 
 
+def _schedule_aware_evidence_host_rows(config: MediaforceConfig) -> list[dict[str, Any]]:
+    """Fresh host checks, filtered through the encode queue's schedules like the web app's evidence runs."""
+    # Imported here so other commands do not load the web app.
+    from mediaforce.web.app import evidence_host_rows
+
+    return evidence_host_rows(config, collect_statuses=collect_host_statuses)
+
+
 def _run_evidence_command(config: MediaforceConfig, args: argparse.Namespace) -> int:
     action = str(args.evidence_action)
     try:
@@ -577,6 +586,7 @@ def _run_evidence_command(config: MediaforceConfig, args: argparse.Namespace) ->
             summary = run_evidence_queue_until_blocked(
                 config_path=config.paths.config_path,
                 config=config,
+                deps=replace(default_evidence_worker_deps(), evidence_host_rows=_schedule_aware_evidence_host_rows),
                 max_work_items=args.max_items,
                 max_seconds=args.max_seconds,
             )

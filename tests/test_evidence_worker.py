@@ -7,11 +7,11 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from sqlalchemy import select, update
 
-from mediaforce.cli import main as cli_main
+from mediaforce.cli import _schedule_aware_evidence_host_rows, main as cli_main
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_item_evidence_state, library_items
@@ -1020,9 +1020,11 @@ class EvidenceWorkerTests(unittest.TestCase):
         run_worker.assert_called_once_with(
             config_path=self.config.paths.config_path,
             config=self.config,
+            deps=ANY,
             max_work_items=1,
             max_seconds=None,
         )
+        self.assertIs(run_worker.call_args.kwargs["deps"].evidence_host_rows, _schedule_aware_evidence_host_rows)
 
     def _insert_item(
             self,
