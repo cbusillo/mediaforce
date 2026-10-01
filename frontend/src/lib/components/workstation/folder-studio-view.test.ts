@@ -6,6 +6,7 @@ import type {
 	HostRuntime,
 	HostsPayload
 } from '$lib/api/types';
+import { scheduleLabels } from '$lib/hosts/schedule';
 import type { FolderCalibrationJob } from '$lib/folders/studio';
 import {
 	buildBenchHostOptions,
@@ -1618,12 +1619,11 @@ describe('Folder Studio review request mapping', () => {
 
 		expect(workflow).toMatchObject({
 			tone: 'wait',
-			label: 'Paused by schedule',
+			label: scheduleLabels.pausedUntilNextWindow,
 			title: 'Restarts automatically',
 			primary: 'Open Ops'
 		});
 		expect(workflow.copy).toContain('restart from the beginning automatically');
-		expect(workflow.copy).toContain('No failure attempt was used');
 	});
 
 	it('shows hard-stop and bypass schedule state on active folder processing', () => {
@@ -1693,9 +1693,9 @@ describe('Folder Studio review request mapping', () => {
 			hosts
 		);
 
-		expect(hardStopWorkflow.label).toBe('Stops at close');
+		expect(hardStopWorkflow.label).toBe(scheduleLabels.stopsAtClose);
 		expect(hardStopWorkflow.copy).toContain('returns to the queue automatically');
-		expect(bypassWorkflow.label).toBe('Bypassing schedule');
+		expect(bypassWorkflow.label).toBe(scheduleLabels.bypassed);
 		expect(bypassWorkflow.copy).toContain('can continue past it');
 	});
 

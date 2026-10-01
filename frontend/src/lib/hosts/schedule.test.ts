@@ -4,6 +4,7 @@ import type { EncodeQueueJob, EncodeQueueSummary, HostRuntime } from '$lib/api/t
 import {
 	hostSchedulePresentation,
 	jobSchedulePresentation,
+	scheduleLabels,
 	workScheduleSummaryCopy
 } from './schedule';
 
@@ -85,7 +86,7 @@ describe('schedule presentation', () => {
 		);
 
 		expect(presentation).toMatchObject({
-			label: 'Stops at close',
+			label: scheduleLabels.stopsAtClose,
 			tone: 'active',
 			transitionAt: '2026-07-23T19:00:00Z'
 		});
@@ -103,10 +104,10 @@ describe('schedule presentation', () => {
 			NOW
 		);
 
-		expect(presentation.label).toBe('Paused by schedule');
+		expect(presentation.label).toBe(scheduleLabels.pausedUntilNextWindow);
 		expect(presentation.detail).toContain('restart from the beginning automatically');
 		expect(presentation.detail).toContain('today at 6:00 PM EDT');
-		expect(presentation.detail).toContain('No failure attempt was used');
+		expect(presentation.detail).not.toContain('No failure attempt was used');
 	});
 
 	it('makes impossible schedule fit actionable', () => {
@@ -135,7 +136,13 @@ describe('schedule presentation', () => {
 
 		expect(offSchedule).toMatchObject({ label: 'Off schedule', tone: 'wait' });
 		expect(offSchedule?.detail).toContain('today at 6:00 PM EDT');
-		expect(draining).toMatchObject({ label: 'Draining', tone: 'wait' });
+		expect(draining).toMatchObject({ label: scheduleLabels.waitingForLongerWindow, tone: 'wait' });
+		const finishing = hostSchedulePresentation(
+			host({ active_encode_count: 1 }),
+			queue({ queued_count: 1, queued: [drainingJob] }),
+			NOW
+		);
+		expect(finishing).toMatchObject({ label: scheduleLabels.finishingBeforeClose, tone: 'wait' });
 		expect(draining?.detail).toContain('no queued item safely fits');
 	});
 
@@ -153,7 +160,7 @@ describe('schedule presentation', () => {
 			NOW
 		);
 
-		expect(presentation).toMatchObject({ label: 'Bypassing schedule', tone: 'wait' });
-		expect(workerPresentation).toMatchObject({ label: 'Bypassing schedule', tone: 'wait' });
+		expect(presentation).toMatchObject({ label: scheduleLabels.bypassed, tone: 'wait' });
+		expect(workerPresentation).toMatchObject({ label: scheduleLabels.bypassed, tone: 'wait' });
 	});
 });

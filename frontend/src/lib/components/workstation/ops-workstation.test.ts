@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DashboardSummaryPayload, HostsPayload, MediaScopePayload } from '$lib/api/types';
+import { scheduleLabels } from '$lib/hosts/schedule';
 import {
 	activityScheduleDetailCopy,
 	activitySchedulePresentationCopy,
@@ -234,10 +235,10 @@ describe('Ops workstation mapping', () => {
 			['Running', 'Working'],
 			['Open', 'Ready'],
 			['Not accepting', 'Off schedule'],
-			['Waiting for full window', 'Draining'],
-			['Window too short', 'Draining'],
+			[scheduleLabels.waitingForLongerWindow, scheduleLabels.waitingForLongerWindow],
+			['Window too short', scheduleLabels.waitingForLongerWindow],
 			['No schedule state', 'Schedule unavailable'],
-			['Bypassing schedule', 'Bypassing schedule']
+			[scheduleLabels.bypassed, scheduleLabels.bypassed]
 		] as const;
 
 		for (const [label, expected] of cases) {
@@ -345,13 +346,13 @@ describe('Ops workstation mapping', () => {
 		const rows = buildOpsQueueRows(dashboard, hosts, new Date('2026-07-24T16:00:00Z'));
 
 		expect(rows[0]).toMatchObject({
-			scheduler: 'Stops at close',
+			scheduler: scheduleLabels.stopsAtClose,
 			schedulerTone: 'active',
 			scheduleState: 'active_hard_stop'
 		});
 		expect(rows[0].schedulerDetail).toContain('today at 3:00 PM EDT');
 		expect(rows[1]).toMatchObject({
-			scheduler: 'Bypassing schedule',
+			scheduler: scheduleLabels.bypassed,
 			schedulerTone: 'wait',
 			scheduleState: 'bypassed'
 		});
@@ -492,7 +493,7 @@ describe('Ops workstation mapping', () => {
 
 		expect(buildOpsBlockers(dashboard, hostsFixture(), null)[0]).toMatchObject({
 			key: 'needs-attention:stopped-encode',
-			title: 'Futurama · Season 8 needs review',
+			title: 'Futurama · Season 8 is waiting for you to take a look',
 			href: '/folders/tv/Futurama/Season%208',
 			linkLabel: 'Review item'
 		});
@@ -951,7 +952,7 @@ describe('Ops workstation mapping', () => {
 			'An episode needs attention'
 		);
 		expect(buildOpsBlockers(dashboard, hostsFixture(), null)[0].title).toBe(
-			'Constellation · Season 1 · Episode 1 needs review'
+			'Constellation · Season 1 · Episode 1 is waiting for you to take a look'
 		);
 
 		dashboard.encode_queue.recent[0].prefix = 'tv/Constellation/S01E01.mkv';
@@ -1085,7 +1086,7 @@ describe('Ops workstation mapping', () => {
 
 		expect(row).toBeUndefined();
 		expect(blockers[0]).toMatchObject({
-			title: 'Constellation · Season 1 needs review',
+			title: 'Constellation · Season 1 is waiting for you to take a look',
 			detail:
 				'Mediaforce cannot access /Volumes/media on this computer. Mount the storage, then retry.'
 		});
@@ -1256,7 +1257,8 @@ describe('Ops workstation mapping', () => {
 		};
 
 		expect(buildOpsQueueRows(dashboard)[0]).toMatchObject({
-			detail: '0.36x · 8.7 fps · ETA 11h 4m'
+			detail: 'ETA 11h 4m',
+			technicalDetail: '1% · 0.36x · 8.7 fps · Est. ETA 11h 4m'
 		});
 	});
 

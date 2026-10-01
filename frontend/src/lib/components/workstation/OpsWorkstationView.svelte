@@ -113,8 +113,7 @@
 				!encodeQueue?.state.is_paused &&
 				!encodeQueue?.state.stop_requested &&
 				encodeWorkCount > 0 &&
-				actionPending === null,
-			unavailable: 'No media work is running or waiting.'
+				actionPending === null
 		},
 		{
 			id: 'resume-encode' as const,
@@ -122,14 +121,12 @@
 			enabled:
 				Boolean(encodeQueue) &&
 				Boolean(encodeQueue?.state.is_paused || encodeQueue?.state.stop_requested) &&
-				actionPending === null,
-			unavailable: 'Work is already accepting eligible folders.'
+				actionPending === null
 		},
 		{
 			id: 'retry-failed-encode' as const,
 			tone: 'warn',
-			enabled: Boolean(encodeQueue) && needsAttentionCount > 0 && actionPending === null,
-			unavailable: 'No approved processing retries are waiting.'
+			enabled: Boolean(encodeQueue) && needsAttentionCount > 0 && actionPending === null
 		},
 		{
 			id: 'stop-encode' as const,
@@ -141,8 +138,7 @@
 					(encodeQueue?.queued_count ?? 0) > 0 ||
 					encodeQueue?.state.is_paused
 				) &&
-				actionPending === null,
-			unavailable: 'No media work is running, waiting, or paused.'
+				actionPending === null
 		},
 		{
 			id: 'stop-calibration' as const,
@@ -150,16 +146,12 @@
 			enabled:
 				Boolean(calibrationQueue) &&
 				(calibrationQueue?.active_count ?? 0) > 0 &&
-				actionPending === null,
-			unavailable: 'No sample or review jobs are running.'
+				actionPending === null
 		}
 	]);
 	const availableGlobalCommands = $derived(globalCommands.filter((command) => command.enabled));
 	const workControlCommands = $derived(
 		availableGlobalCommands.filter((command) => command.id !== 'retry-failed-encode')
-	);
-	const unavailableGlobalCommands = $derived(
-		globalCommands.filter((command) => !command.enabled && actionPending === null)
 	);
 
 	const actionEndpoints: Record<OpsActionId, string> = {
@@ -330,6 +322,10 @@
 		return 'Sample';
 	}
 
+	function queueKindCopy(row: OpsQueueRow): string {
+		return [queueKindLabel(row), row.phase].filter(Boolean).join(' · ');
+	}
+
 	onMount(() => {
 		lastRefreshAt = new Date();
 	});
@@ -431,19 +427,6 @@
 									</div>
 								{/each}
 							</div>
-							{#if unavailableGlobalCommands.length > 0}
-								<details class="command-details">
-									<summary>{unavailableGlobalCommands.length} unavailable controls</summary>
-									<ul>
-										{#each unavailableGlobalCommands as command (command.id)}
-											<li>
-												<strong>{queueActionLabel(command.id)}</strong>
-												<span>{command.unavailable}</span>
-											</li>
-										{/each}
-									</ul>
-								</details>
-							{/if}
 							{#if actionMessage}
 								<p class="action-message">{actionMessage}</p>
 							{/if}
@@ -476,12 +459,12 @@
 												{#if canOpenFolder(row)}
 													<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
 														<strong>{opsWorkLabel(row.prefix)}</strong>
-														<span>{queueKindLabel(row)} · {row.phase}</span>
+														<span>{queueKindCopy(row)}</span>
 													</a>
 												{:else}
 													<div class="work-link">
 														<strong>{opsWorkLabel(row.prefix)}</strong>
-														<span>{queueKindLabel(row)} · {row.phase}</span>
+														<span>{queueKindCopy(row)}</span>
 													</div>
 												{/if}
 											</td>
@@ -489,7 +472,7 @@
 											<td data-label="Progress">
 												<div class="cell-stack">
 													<strong>{row.progress}</strong>
-													<span title={row.detail}>{row.detail}</span>
+													<span title={row.technicalDetail ?? row.detail}>{row.detail}</span>
 												</div>
 											</td>
 											<td data-label="Work window" class="schedule-cell">
@@ -569,12 +552,12 @@
 												{#if canOpenFolder(row)}
 													<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
 														<strong>{opsWorkLabel(row.prefix)}</strong>
-														<span>{queueKindLabel(row)} · {row.phase}</span>
+														<span>{queueKindCopy(row)}</span>
 													</a>
 												{:else}
 													<div class="work-link">
 														<strong>{opsWorkLabel(row.prefix)}</strong>
-														<span>{queueKindLabel(row)} · {row.phase}</span>
+														<span>{queueKindCopy(row)}</span>
 													</div>
 												{/if}
 											</td>
@@ -602,7 +585,7 @@
 			<details class="system-details">
 				<summary class="system-details__summary">
 					<div>
-						<span class="mf-eyebrow">System details</span>
+						<span class="mf-eyebrow">Details</span>
 						<strong>Computers and schedule</strong>
 					</div>
 					<div class="system-details__state">
@@ -874,40 +857,6 @@
 		font-size: var(--mf-text-xs);
 	}
 
-	.command-details {
-		border-top: var(--mf-border-muted);
-		padding-top: var(--mf-space-3);
-	}
-
-	.command-details summary {
-		color: var(--mf-fg-tertiary);
-		cursor: pointer;
-		font-size: var(--mf-text-2xs);
-		font-weight: var(--mf-weight-semibold);
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-	}
-
-	.command-details ul {
-		display: grid;
-		gap: var(--mf-space-2);
-		list-style: none;
-		margin: var(--mf-space-3) 0 0;
-		padding: 0;
-	}
-
-	.command-details li {
-		display: grid;
-		gap: var(--mf-space-1);
-		grid-template-columns: minmax(112px, 0.32fr) minmax(0, 1fr);
-	}
-
-	.command-details li strong,
-	.command-details li span {
-		color: var(--mf-fg-tertiary);
-		font-size: var(--mf-text-xs);
-	}
-
 	.action-message,
 	.action-error {
 		border-left: 2px solid var(--mf-ready-fg);
@@ -1032,11 +981,11 @@
 	}
 
 	.ops-table--jobs th:nth-child(4) {
-		width: 20%;
+		width: 15%;
 	}
 
 	.ops-table--jobs th:nth-child(5) {
-		width: 15%;
+		width: 20%;
 	}
 
 	.ops-table--jobs th:nth-child(6) {
@@ -1071,6 +1020,13 @@
 		line-height: 1.35;
 		overflow: visible;
 		-webkit-line-clamp: unset;
+	}
+
+	/* Work window states are short sentences; let them wrap inside the column. */
+	.schedule-cell__content :global(.state-badge) {
+		line-height: 1.25;
+		max-width: 100%;
+		white-space: normal;
 	}
 
 	.schedule-cell__content .inline-link {
@@ -1398,10 +1354,6 @@
 		.queue-toolbar__refresh {
 			justify-content: start;
 		}
-
-		.command-details li {
-			grid-template-columns: 1fr;
-		}
 	}
 
 	/* Human activity surface */
@@ -1601,13 +1553,6 @@
 		color: var(--mf-fail-fg);
 	}
 
-	.command-details {
-		background: transparent;
-		border: 0;
-		color: var(--mf-fg-secondary);
-	}
-
-	.command-details summary,
 	.refresh-note,
 	.disabled-copy {
 		color: var(--mf-fg-tertiary);
