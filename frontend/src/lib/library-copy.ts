@@ -4,7 +4,7 @@ export const libraryCopy = {
 	newestSeason: 'Newest season',
 	newestSeasonModes: {
 		auto: 'Auto: skip it while the show is airing',
-		on: 'Always skip the newest season',
+		on: 'Skip the newest season',
 		off: 'Include the newest season'
 	},
 	airingUnknown: 'Not sure if the show is still airing',

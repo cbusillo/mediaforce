@@ -259,19 +259,19 @@
 
 	function staleStatusCopy(observedAt: string | null | undefined): string {
 		const observed = observedAt ? new Date(observedAt) : null;
-		if (!observed || Number.isNaN(observed.getTime())) return 'Series status has not refreshed.';
+		if (!observed || Number.isNaN(observed.getTime())) return 'Airing status has not been checked.';
 		const day = observed.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-		return `Series status last refreshed ${day}.`;
+		return `Airing status last checked ${day}.`;
 	}
 
 	function lifecycleModeCopy(): string {
 		switch (displayedLifecycleMode) {
 			case 'on':
-				return 'The newest season always stays as it is.';
+				return 'The newest season stays as it is until a newer season appears or it has had no new episodes for the time set in Settings.';
 			case 'off':
 				return 'The newest season can be compressed. Recently added episodes may still wait.';
 			default:
-				return 'The newest season stays as it is while the show is airing, or when Mediaforce cannot tell.';
+				return 'While the show is airing, or when Mediaforce cannot tell, the newest season stays as it is until it has had no new episodes for the time set in Settings.';
 		}
 	}
 
