@@ -320,6 +320,10 @@ def _browser_preview_proxy_command(
         "error",
         "-nostdin",
         "-y",
+        # Keep the first frame's offset from the seek point. Without audio, ffmpeg
+        # would otherwise move it to zero and the preview would play one frame
+        # ahead of its source clip (#601).
+        "-copyts",
         "-i",
         str(source_path),
         "-map",
