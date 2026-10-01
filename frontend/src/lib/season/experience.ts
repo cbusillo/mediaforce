@@ -1435,7 +1435,7 @@ export function compressionIntentContract(
 					qualityRule: 'Detail matters more than extra savings.',
 					finalHeadline: 'The finished file must land in the allowed size.',
 					finalRule:
-						'A file that comes out too big is tried once more when that can be done safely; otherwise it waits for you. A file that comes out too small waits for you.'
+						'A file that comes out too big is tried again when that can be done safely; otherwise it waits for you. A file that comes out too small waits for you.'
 				}
 			: option.key === 'transparent' || option.key === 'perceptual_floor'
 				? {
@@ -1447,7 +1447,7 @@ export function compressionIntentContract(
 						qualityRule: 'Picks the smallest file that still looks and sounds right.',
 						finalHeadline: 'A smaller finished file is fine.',
 						finalRule:
-							'A smaller file is kept while it still looks right. A file that comes out too big is tried once more when that can be done safely; otherwise it waits for you, as does a file that does not look right.'
+							'A smaller file is kept while it still looks right. A file that comes out too big is tried again when that can be done safely; otherwise it waits for you, as does a file that does not look right.'
 					}
 				: {
 						sizeLabel: 'Size goal',
@@ -1458,7 +1458,7 @@ export function compressionIntentContract(
 						qualityRule: 'Mediaforce checks picture and sound before keeping a file.',
 						finalHeadline: 'The finished file must stay under the size limit.',
 						finalRule:
-							'A smaller file is kept once it looks right. A file that comes out too big is tried once more when that can be done safely; otherwise it waits for you.'
+							'A smaller file is kept once it looks right. A file that comes out too big is tried again when that can be done safely; otherwise it waits for you.'
 					};
 	return {
 		...contract,
