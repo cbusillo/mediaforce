@@ -2723,6 +2723,9 @@ def encode_job_heartbeat_loop(
         # noinspection PyBroadException
         try:
             with open_db(deps.load_config(config_path).paths.db_path) as connection:
+                # Read and write in one locked transaction: a writer that saved a row it read before
+                # this heartbeat would otherwise put back the old lease, and the job would look silent.
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
                 job = load_encode_job(connection, job_id)
                 status = str(job.get("status") or "") if job is not None else "missing"
                 if job is None or status != "running":
@@ -3490,6 +3493,8 @@ def _persist_encode_job_progress(
         deps: EncodeQueueRuntimeDeps,
 ) -> None:
     with open_db(deps.load_config(config_path).paths.db_path) as connection:
+        # Locked like the heartbeat, so neither write puts back what the other just wrote.
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
         job = load_encode_job(connection, job_id)
         if job is None or str(job.get("status") or "") != "running":
             return
