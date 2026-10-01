@@ -18,7 +18,7 @@
 </script>
 
 {#if records.length > 0}
-	<section class="size-held" aria-label="Files that need you">
+	<section id="season-size-held" class="size-held" aria-label="Files that need you">
 		<h3>Needs you</h3>
 		<ul>
 			{#each records as record (record.item_id)}

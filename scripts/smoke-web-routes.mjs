@@ -1524,7 +1524,63 @@ async function checkHeldSeasonUnderShowJob(baseUrl, timeoutMs) {
         "A held season's page said it was being compressed because its show's run was active.",
       );
     }
-    console.log("route ok: A held season stays held while its show's run works");
+    console.log(
+      "route ok: A held season stays held while its show's run works",
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
+async function checkSeasonEpisodeList(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  try {
+    for (const viewport of [{ width: 1440, height: 960 }, NARROW_VIEWPORT]) {
+      const page = await browser.newPage({ viewport });
+      await openRoute(
+        page,
+        baseUrl,
+        "/folders/tv/Episode%20Progress/Season%201",
+        timeoutMs,
+      );
+      const list = page.locator(".season-episodes");
+      await list.waitFor({ state: "visible", timeout: timeoutMs });
+      const state = await list.evaluate((element) => ({
+        stages: Array.from(
+          element.querySelectorAll("[data-episode-stage]"),
+        ).map((row) => row.getAttribute("data-episode-stage")),
+        text: element.innerText.replace(/\s+/g, " "),
+        pageOverflow:
+          document.scrollingElement.scrollWidth >
+          document.scrollingElement.clientWidth + 1,
+      }));
+      const expectedStages = [
+        "needs_you",
+        "waiting",
+        "published",
+        "not_started",
+      ];
+      const missingCopy = [
+        "Episodes",
+        "1 needs you · 1 waiting · 1 published · 1 not started",
+        "Needs you",
+        "Didn't pass the final size check",
+        "Trying again soon",
+        "Published",
+        "Not started",
+      ].filter((copy) => !state.text.includes(copy));
+      if (
+        JSON.stringify(state.stages) !== JSON.stringify(expectedStages) ||
+        missingCopy.length ||
+        state.pageOverflow
+      ) {
+        throw new Error(
+          `Season episode list contract failed at ${viewport.width}px: ${JSON.stringify({ ...state, missingCopy })}`,
+        );
+      }
+      await page.close();
+    }
+    console.log("route ok: Season page lists where each episode has got");
   } finally {
     await browser.close();
   }
@@ -3393,6 +3449,7 @@ async function main() {
       await checkLibraryModeLayout(targetUrl, args.routeTimeoutMs);
       await checkLibraryStateReachability(targetUrl, args.routeTimeoutMs);
       await checkSeriesSeasonIndex(targetUrl, args.routeTimeoutMs);
+      await checkSeasonEpisodeList(targetUrl, args.routeTimeoutMs);
       await checkHeldSeasonUnderShowJob(targetUrl, args.routeTimeoutMs);
       await checkSeriesSeasonContextFailures(targetUrl, args.routeTimeoutMs);
       await checkCompletedCleanupLanguage(targetUrl, args.routeTimeoutMs);

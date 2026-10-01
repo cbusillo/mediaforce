@@ -477,6 +477,34 @@ export interface EncodeSizeQuestion {
 	smallest_quality_safe_bytes: number;
 }
 
+export type EpisodeStage =
+	| 'needs_you'
+	| 'compressing'
+	| 'measuring'
+	| 'getting_ready'
+	| 'checking'
+	| 'waiting'
+	| 'published'
+	| 'kept_original'
+	| 'held'
+	| 'not_started';
+
+export interface EpisodeProgress {
+	rel_path: string;
+	stage: EpisodeStage;
+	detail: string | null;
+	percent_complete: number | null;
+	bytes_saved: number | null;
+	size_question: EncodeSizeQuestion | null;
+	owner_action: 'keep_or_remake' | null;
+}
+
+export interface FolderEpisodesPayload {
+	prefix: string;
+	available: boolean;
+	episodes: EpisodeProgress[];
+}
+
 export interface EncodeQueueJob {
 	job_id: string;
 	prefix: string;

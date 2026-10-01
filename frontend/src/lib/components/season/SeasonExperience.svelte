@@ -8,6 +8,7 @@
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import SeasonIntegrityPanel from '$lib/components/season/SeasonIntegrityPanel.svelte';
 	import WaitingReasons from '$lib/components/season/WaitingReasons.svelte';
+	import SeasonEpisodes from '$lib/components/season/SeasonEpisodes.svelte';
 	import SizeHeldQuestions from '$lib/components/season/SizeHeldQuestions.svelte';
 	import TargetDefaultEvidence from '$lib/components/TargetDefaultEvidence.svelte';
 	import StateBadge from '$lib/components/workstation/StateBadge.svelte';
@@ -2940,6 +2941,7 @@
 						{#if encodeProgress.eta}<small>{encodeProgress.eta}</small>{/if}
 					</div>
 					<WaitingReasons
+						anchorId="season-decisions"
 						reasons={waitingReasons}
 						scope={waitingReasonsScope}
 						busy={actionPhase !== 'idle'}
@@ -3131,6 +3133,7 @@
 				<h1>{targetConstraint?.title || `${humanState.label}.`}</h1>
 				<p class="lede">{targetConstraint?.detail || plainFailureMessage(folder, status)}</p>
 				<WaitingReasons
+					anchorId="season-decisions"
 					reasons={waitingReasons}
 					scope={waitingReasonsScope}
 					busy={actionPhase !== 'idle'}
@@ -3262,6 +3265,11 @@
 			busy={actionPhase !== 'idle'}
 			onDecision={decideSizeHeld}
 		/>
+
+		<!-- Below the season's state and its questions, so "Answer this above" points up the page. -->
+		{#if !folder.pending && folder.media_scope?.kind === 'tv_season'}
+			<SeasonEpisodes prefix={folder.prefix} refreshKey={status} />
+		{/if}
 
 		<section
 			hidden={['sample_waiting', 'making_test'].includes(humanState.key) ||
