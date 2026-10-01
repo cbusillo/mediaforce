@@ -93,8 +93,7 @@
 	import {
 		applySeriesLifecycle,
 		compareSeasonCards,
-		isSeasonFullyHeld,
-		seasonHoldLabel,
+		seasonRowHoldLabel,
 		seasonsByShow
 	} from '$lib/season/library';
 
@@ -1632,7 +1631,7 @@
 						{#each seriesSeasonCards as season (season.prefix)}
 							{@const state = librarySeasonState(season, dashboard)}
 							{@const seasonName = seasonIdentity(season.prefix).season}
-							{@const seasonLifecycle = season.lifecycle?.seasons?.[0]}
+							{@const holdLabel = seasonRowHoldLabel(season.lifecycle?.seasons?.[0], state)}
 							<a
 								class="series-season-index__row"
 								data-season-prefix={season.prefix}
@@ -1643,8 +1642,8 @@
 								</span>
 								<span>{season.item_count}</span>
 								<span>{formatFileSize(season.total_size_bytes)}</span>
-								{#if isSeasonFullyHeld(seasonLifecycle)}
-									<StateBadge tone="wait" label={seasonHoldLabel(seasonLifecycle)} compact />
+								{#if holdLabel}
+									<StateBadge tone="wait" label={holdLabel} compact />
 								{:else}
 									<StateBadge tone={seasonBadgeTone(state.tone)} label={state.label} compact />
 								{/if}

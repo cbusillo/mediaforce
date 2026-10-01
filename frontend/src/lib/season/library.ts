@@ -39,9 +39,17 @@ export function seasonHoldLabel(season: SeasonLifecycleState | null | undefined)
 	return `${season.held_candidate_count} held`;
 }
 
-/** Every episode the season could compress is held, so no work can be running on it. */
-export function isSeasonFullyHeld(season: SeasonLifecycleState | null | undefined): boolean {
-	return Boolean(season?.held_candidate_count) && !season?.eligible_candidate_count;
+/**
+ * The held badge for a season row when every episode is held and nothing is working on or wrong with it.
+ * The season's own work, such as a run the owner started despite the hold, still shows instead.
+ */
+export function seasonRowHoldLabel(
+	season: SeasonLifecycleState | null | undefined,
+	state: { tone: string }
+): string {
+	const fullyHeld = Boolean(season?.held_candidate_count) && !season?.eligible_candidate_count;
+	if (!fullyHeld || state.tone === 'active' || state.tone === 'attention') return '';
+	return seasonHoldLabel(season);
 }
 
 export function tvLibraryStateGroup(

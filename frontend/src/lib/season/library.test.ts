@@ -8,11 +8,11 @@ import {
 	buildShowCards,
 	compareSeasonCards,
 	filterShowCards,
-	isSeasonFullyHeld,
 	mergeFolderPayloads,
 	olderSeasonLibraryAction,
 	savingsPercent,
 	seasonHoldLabel,
+	seasonRowHoldLabel,
 	seasonsByShow,
 	sortShowCards,
 	tvLibraryStateGroup
@@ -275,15 +275,17 @@ describe('season library grouping', () => {
 		});
 	});
 
-	it('names a held season and tells a fully held one from a partly held one', () => {
+	it('shows a fully held season as held unless its own work is running or needs help', () => {
 		const fullyHeld = seasonLifecycle('tv/Alpha/Season 2', 10);
 		const partlyHeld = seasonLifecycle('tv/Alpha/Season 2', 3);
+		const idle = { tone: 'quiet' };
 
-		expect(seasonHoldLabel(fullyHeld)).toBe('Current · held');
 		expect(seasonHoldLabel(seasonLifecycle('tv/Alpha/Season 1', 0))).toBe('');
-		expect(isSeasonFullyHeld(fullyHeld)).toBe(true);
-		expect(isSeasonFullyHeld(partlyHeld)).toBe(false);
-		expect(isSeasonFullyHeld(undefined)).toBe(false);
+		expect(seasonRowHoldLabel(fullyHeld, idle)).toBe('Current · held');
+		expect(seasonRowHoldLabel(partlyHeld, idle)).toBe('');
+		expect(seasonRowHoldLabel(undefined, idle)).toBe('');
+		expect(seasonRowHoldLabel(fullyHeld, { tone: 'active' })).toBe('');
+		expect(seasonRowHoldLabel(fullyHeld, { tone: 'attention' })).toBe('');
 	});
 
 	it('offers one older-season action while preserving the latest season', () => {
