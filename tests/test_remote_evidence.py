@@ -351,6 +351,30 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
         self.assertIn("Source changed during evidence analysis", state["last_error"])
         self.assertEqual(state["attempt_count"], 0)
 
+    def test_cancelling_while_hosts_are_checked_ends_cancelled_even_when_none_can_measure(self) -> None:
+        config = self._config([self.mini])
+        item_id = self._prepare_cadence_item(config)
+
+        def cancel_then_find_no_host(_config: MediaforceConfig) -> list[dict[str, Any]]:
+            with open_db(config.paths.db_path) as connection:
+                cancel_evidence_queue(connection)
+            return [_row(self.mini, available=False)]
+
+        process_evidence_queue_once(
+            config_path=config.paths.config_path,
+            deps=self._deps(
+                config,
+                Mock(side_effect=AssertionError("must not measure")),
+                host_rows=cancel_then_find_no_host,
+            ),
+        )
+
+        state, summary = self._stored(config, item_id)
+        self.assertIsNone(summary)
+        self.assertEqual(state["work_status"], "cancelled")
+        self.assertEqual(state["attempt_count"], 0)
+        self.assertIsNone(state["lease_expires_at"])
+
     def test_cancelling_while_the_encode_computer_is_prepared_stops_it(self) -> None:
         config = self._config([self.mini])
         item_id = self._prepare_cadence_item(config)

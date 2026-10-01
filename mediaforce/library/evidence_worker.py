@@ -189,11 +189,14 @@ def _run_evidence_claim(
             analysis_target = _analysis_target(config, claim, source_path, deps, process_controller)
         except RemoteMediaHostUnavailableError:
             analysis_target = None
+        _throw_if_preparation_cancelled(config, claim, process_controller)
         if analysis_target is None:
             heartbeat.stop()
             _defer_for_encode_computer(config, claim, deps, restore_attempt=False)
             return
-        if not _remote_source_matches(analysis_target, source_path, process_controller):
+        source_matches = _remote_source_matches(analysis_target, source_path, process_controller)
+        _throw_if_preparation_cancelled(config, claim, process_controller)
+        if not source_matches:
             heartbeat.stop()
             _finish_claim(
                 config,
@@ -510,6 +513,25 @@ def _analysis_target(
         ),
         command_runner=command_runner,
     )
+
+
+def _throw_if_preparation_cancelled(
+        config: MediaforceConfig,
+        claim: EvidenceWorkClaim,
+        process_controller: ManagedProcessController,
+) -> None:
+    """A cancel during host preparation wins over whatever the preparation found.
+
+    The heartbeat may not have noticed the cancel yet, so the batch is read as well.
+    """
+    process_controller.throw_if_cancelled()
+    with open_db(config.paths.db_path) as connection:
+        queue_state = load_evidence_queue_state(connection)
+    if (
+            str(queue_state.get("batch_id") or "") != claim.batch_id
+            or bool(queue_state.get("cancel_requested"))
+    ):
+        raise ProcessCancelledError("Evidence work was cancelled.")
 
 
 def _remote_source_matches(
