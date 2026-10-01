@@ -17,6 +17,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.encode_queue import list_child_encode_jobs, load_latest_encode_job
 from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
 from mediaforce.library.media_scopes import resolve_media_scope
+from mediaforce.library.staged_integrity import staged_validation_outcome
 from mediaforce.library.workflow_state import ItemWorkflowState, build_folder_workflow_state
 from mediaforce.web.runtime.encode_runtime import (
     encode_job_rel_paths,
@@ -39,6 +40,10 @@ EPISODE_STAGES = (
 )
 _RUNNING_PREPARATION_STATES = frozenset({"starting", "staging_source"})
 _OWNER_RUN_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
+_VALIDATION_DETAILS = {
+    "size_held": "much smaller than expected; keep it or make it again",
+    "failed": "didn't pass its check",
+}
 
 
 def folder_episodes_payload(config: MediaforceConfig, prefix: str) -> dict[str, Any]:
@@ -74,20 +79,37 @@ def load_season_episode_progress(
     run_by_rel_path: dict[str, dict[str, Any]] = {}
     manifest_items_cache: dict[Path, list[dict[str, Any]] | None] = {}
     for run in runs:
-        for rel_path in encode_job_rel_paths(run, manifest_items_cache=manifest_items_cache):
+        for rel_path in encode_job_rel_paths(run, manifest_items_cache=manifest_items_cache) or _saved_rel_paths(run):
             # A later run for the same file replaces an earlier one.
             run_by_rel_path[rel_path] = run
-    bytes_saved = _bytes_saved(connection, [item.item_id for item in items if item.state == "complete"])
-    return season_episode_progress(items, run_by_rel_path, bytes_saved)
+    staged = _staged_rows(
+        connection,
+        [item.item_id for item in items if item.has_staged_output or item.state == "complete"],
+    )
+    bytes_saved = {item_id: int_value(row["bytes_saved"]) for item_id, row in staged.items()}
+    validation = {
+        item_id: outcome
+        for item_id, row in staged.items()
+        if (outcome := staged_validation_outcome(row["validation_json"])) is not None
+    }
+    return season_episode_progress(items, run_by_rel_path, bytes_saved, validation)
 
 
 def season_episode_progress(
         items: Iterable[ItemWorkflowState],
         run_by_rel_path: Mapping[str, Mapping[str, Any]],
         bytes_saved: Mapping[int, int],
+        validation: Mapping[int, str] | None = None,
 ) -> list[dict[str, Any]]:
+    """`validation` names the staged files whose check waits on the owner: "size_held" or "failed"."""
+    validation = validation or {}
     episodes = [
-        _episode(item, run_by_rel_path.get(item.rel_path), bytes_saved.get(item.item_id))
+        _episode(
+            item,
+            run_by_rel_path.get(item.rel_path),
+            bytes_saved.get(item.item_id),
+            validation.get(item.item_id),
+        )
         for item in items
         if item.state != "missing"
     ]
@@ -99,6 +121,7 @@ def _episode(
         item: ItemWorkflowState,
         run: Mapping[str, Any] | None,
         bytes_saved: int | None,
+        validation: str | None,
 ) -> dict[str, Any]:
     episode: dict[str, Any] = {
         "rel_path": item.rel_path,
@@ -107,6 +130,7 @@ def _episode(
         "percent_complete": None,
         "bytes_saved": None,
         "size_question": None,
+        "owner_action": None,
     }
     if item.state == "complete":
         episode["stage"] = "published"
@@ -136,6 +160,11 @@ def _episode(
             episode["stage"] = "waiting"
         episode["detail"] = label
         return episode
+    if validation is not None:
+        episode["stage"] = "needs_you"
+        episode["detail"] = _VALIDATION_DETAILS[validation]
+        episode["owner_action"] = "keep_or_remake" if validation == "size_held" else None
+        return episode
     if item.state in {"ready_to_validate", "ready_to_promote"} or (run is not None and run_status == "completed"):
         episode["stage"] = "checking"
     elif item.state == "encoding":
@@ -157,11 +186,26 @@ def _runs_for(connection: DBClient, latest_job: Mapping[str, Any] | None) -> lis
     return [dict(latest_job)]
 
 
-def _bytes_saved(connection: DBClient, item_ids: list[int]) -> dict[int, int]:
+def _saved_rel_paths(run: Mapping[str, Any]) -> list[str]:
+    """The file a one-file run recorded in its own progress, for when its manifest is gone."""
+    progress = object_dict(run.get("progress"))
+    rel_path = str(
+        object_dict(progress.get("failure_analysis")).get("item_rel_path")
+        or progress.get("current_item_rel_path")
+        or ""
+    ).strip()
+    return [rel_path] if rel_path else []
+
+
+def _staged_rows(connection: DBClient, item_ids: list[int]) -> dict[int, Mapping[str, Any]]:
     if not item_ids:
         return {}
     rows = connection.execute(
-        select(staged_artifacts.c.library_item_id, staged_artifacts.c.bytes_saved)
+        select(
+            staged_artifacts.c.library_item_id,
+            staged_artifacts.c.bytes_saved,
+            staged_artifacts.c.validation_json,
+        )
         .where(staged_artifacts.c.library_item_id.in_(item_ids))
     ).mappings().fetchall()
-    return {int(row["library_item_id"]): int_value(row["bytes_saved"]) for row in rows}
+    return {int(row["library_item_id"]): row for row in rows}

@@ -7949,6 +7949,43 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 ),
             )
 
+            held_id = self._insert_library_item(
+                connection,
+                self._create_source_file("Season 1/Episode 04.mkv"),
+                status="encoded",
+                rel_path=f"{season}/Episode 04.mkv",
+            )
+            connection.execute(
+                staged_artifacts.insert().values(
+                    library_item_id=held_id,
+                    staging_path=str(self._staging_path("Season 1/Episode 04.mkv")),
+                    validation_json=json.dumps({
+                        "passed": False,
+                        "checks": [{"passed": False, "message": staging_runtime.FAR_BELOW_PREDICTION_CHECK}],
+                        "size_prediction": {"held": True},
+                    }),
+                    updated_at=now,
+                )
+            )
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 1/Episode 05.mkv"),
+                rel_path=f"{season}/Episode 05.mkv",
+            )
+            save_encode_job(
+                connection,
+                job(
+                    "season-run-e05",
+                    job_kind="shard",
+                    parent_job_id="season-run",
+                    status="needs_attention",
+                    manifest_path=str(self.root / "runs" / "gone.json"),
+                    manifest_indexes=[4],
+                    item_count=1,
+                    progress={"current_item_rel_path": f"{season}/Episode 05.mkv"},
+                ),
+            )
+
         payload = folder_episodes_payload(self.config, season)
         show_payload = folder_episodes_payload(self.config, "tv/show")
 
@@ -7959,12 +7996,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 for episode in payload["episodes"]
             ],
             [
+                (f"{season}/Episode 04.mkv", "needs_you", "much smaller than expected; keep it or make it again", None),
+                (f"{season}/Episode 05.mkv", "needs_you", "waiting for you to take a look", None),
                 (rel_paths[0], "compressing", None, 30),
                 (rel_paths[1], "waiting", "waiting for a free computer", None),
                 (rel_paths[2], "published", None, None),
             ],
         )
-        self.assertEqual(payload["episodes"][2]["bytes_saved"], 700_000_000)
+        self.assertEqual(payload["episodes"][4]["bytes_saved"], 700_000_000)
         self.assertFalse(show_payload["available"])
 
     def test_folder_delivery_badge_ignores_fully_promoted_folders(self) -> None:

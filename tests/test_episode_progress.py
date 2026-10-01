@@ -156,6 +156,29 @@ class SeasonEpisodeProgressTests(unittest.TestCase):
 
         self.assertEqual(episode["stage"], "checking")
 
+    def test_a_checked_file_waiting_on_the_owner_needs_them(self) -> None:
+        held, failed, remade = _item(1, "ready_to_validate"), _item(2, "ready_to_validate"), _item(3, "ready_to_validate")
+        runs = {
+            held.rel_path: _run("completed"),
+            failed.rel_path: _run("completed"),
+            remade.rel_path: _run("running", progress={"progress_state": "encoding", "percent_complete": 5}),
+        }
+
+        episodes = season_episode_progress(
+            [held, failed, remade],
+            runs,
+            {},
+            {held.item_id: "size_held", failed.item_id: "failed", remade.item_id: "size_held"},
+        )
+        by_name = {episode["rel_path"].rsplit("/", 1)[-1]: episode for episode in episodes}
+
+        self.assertEqual(by_name["Episode 01.mkv"]["stage"], "needs_you")
+        self.assertEqual(by_name["Episode 01.mkv"]["owner_action"], "keep_or_remake")
+        self.assertEqual(by_name["Episode 02.mkv"]["stage"], "needs_you")
+        self.assertEqual(by_name["Episode 02.mkv"]["detail"], "didn't pass its check")
+        # Making it again is the newer work, so it shows instead of the old question.
+        self.assertEqual(by_name["Episode 03.mkv"]["stage"], "compressing")
+
     def test_missing_files_are_left_out(self) -> None:
         self.assertEqual(season_episode_progress([_item(1, "missing")], {}, {}), [])
 
