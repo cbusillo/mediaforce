@@ -259,7 +259,7 @@
 <svelte:head>
 	<title
 		>{mode === 'studio'
-			? `${prefix.split('/').at(-1)} · ${folder.pending ? 'Studio' : folder.media_scope.domain === 'movie' ? 'Movie Studio' : folder.media_scope.domain === 'other' ? 'Other Studio' : 'Mediaforce'}`
+			? `${prefix.split('/').at(-1)} · ${folder.pending ? 'Mediaforce' : folder.media_scope.domain === 'movie' ? 'Movie Studio' : folder.media_scope.domain === 'other' ? 'Other Studio' : 'Mediaforce'}`
 			: 'Make a TV season smaller · Mediaforce'}</title
 	>
 </svelte:head>
@@ -268,12 +268,11 @@
 	{#if !folderHydrated && (folder.pending || folderPending)}
 		<div class="studio-loading" role="status">
 			<span aria-hidden="true"></span>
-			<strong>Opening Studio</strong>
-			<p>Reading scope, membership, workflow, and worker readiness.</p>
+			<strong>Opening {prefix.split('/').at(-1) || 'Mediaforce'}…</strong>
 		</div>
 	{:else if folder.pending}
 		<div class="studio-loading" role="alert">
-			<strong>Studio could not open</strong>
+			<strong>This page could not open</strong>
 			<p>{loadError ?? 'The media scope is unavailable.'}</p>
 		</div>
 	{:else if folder.media_scope.domain === 'movie'}

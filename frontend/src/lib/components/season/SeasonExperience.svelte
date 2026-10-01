@@ -85,6 +85,7 @@
 		technicalVideoPolicy,
 		testRequestWithInstructions,
 		withCompressionIntent,
+		showCopy,
 		type ReviewSizeAdjustment,
 		type ReviewSizeAdjustmentDirection,
 		type SizeGoal
@@ -1777,7 +1778,7 @@
 				<div class="episode-selector__copy">
 					<p class="eyebrow">Episode selection</p>
 					<h2 id="episode-selector-title">Choose an episode</h2>
-					<p>Opening an episode does not start a test or change any media.</p>
+					<p>Opening an episode does not start a sample or change any media.</p>
 				</div>
 				{#if episodeNavigationUnavailable}
 					<p class="episode-selector__status" role="alert">
@@ -2372,7 +2373,7 @@
 										? formatDecimalFileSize(exactReviewFacts.estimatedSpaceSavedBytes)
 										: 'No estimate'
 							},
-							{ label: 'Target', value: sizeTargetLabel }
+							{ label: showCopy.sizeGoal, value: sizeTargetLabel }
 						]}
 						decisionTargetId="season-review-decision"
 						canCreateSoundSample={sampleHasAudio}
@@ -3262,7 +3263,7 @@
 		>
 			<header class="quality-memory__header">
 				<div>
-					<span>Quality memory</span>
+					<span>{showCopy.pastResults}</span>
 					<h2 id="quality-memory-title">{qualityMemory.title}</h2>
 					{#if qualityMemory.source}<small>{qualityMemory.source}</small>{/if}
 				</div>

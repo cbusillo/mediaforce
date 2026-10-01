@@ -339,7 +339,7 @@
 	<title>TV Library · Mediaforce</title>
 	<meta
 		name="description"
-		content="Choose a TV season or show, make one test, compare it, and then make the rest smaller."
+		content="Choose a TV season or show, make one sample, compare it, and then make the rest smaller."
 	/>
 </svelte:head>
 
