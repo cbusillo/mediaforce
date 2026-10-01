@@ -4216,6 +4216,40 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             all(object_dict(job["media_scope"])["domain"] == "tv" for job in summary["needs_attention"])
         )
 
+    def test_encode_queue_summary_counts_queued_parts_of_a_show_that_needs_attention(self) -> None:
+        self._write_manifest("manifest-pending-parts.json", [])
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, status in (
+                    ("show", "needs_attention"),
+                    ("show-done", "completed"),
+                    ("show-attention", "needs_attention"),
+                    ("show-waiting", "queued"),
+                    ("show-retrying", "retry_backoff"),
+            ):
+                self._save_job(
+                    connection,
+                    job_id=job_id,
+                    manifest_name="manifest-pending-parts.json",
+                    host={},
+                    status=status,
+                    attempt_count=1,
+                    waiting_reason="waiting for a host window with enough time remaining" if status == "queued" else None,
+                )
+                job = load_encode_job(connection, job_id)
+                assert job is not None
+                if job_id == "show":
+                    job["job_kind"] = "folder"
+                else:
+                    job["job_kind"] = "shard"
+                    job["parent_job_id"] = "show"
+                save_encode_job(connection, job)
+
+            summary = summarize_encode_queue(connection, library_types={"tv": "tv"})
+
+        self.assertEqual(summary["queued_count"], 0)
+        self.assertEqual(summary["running_count"], 0)
+        self.assertEqual(summary["pending_work_count"], 2)
+
     def test_permission_denied_ssh_failure_still_needs_attention_after_attempt_cap(self) -> None:
         source_path = self._create_source_file("episode-host-permission.mkv")
         staging_path = self._staging_path("episode-host-permission.mkv")
