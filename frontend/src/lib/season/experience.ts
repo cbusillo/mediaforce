@@ -412,7 +412,7 @@ export interface ReviewConcern {
 // Owner-facing wording on a show or sample page. Tests read it from here.
 export const showCopy = {
 	pastResults: 'Past results',
-	noPastResults: 'No finished episodes to learn from yet',
+	noPastResults: 'No saved results to learn from yet',
 	sizeGoal: 'Your size goal'
 } as const;
 
