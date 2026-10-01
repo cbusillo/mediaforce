@@ -66,10 +66,10 @@
 				document.getElementById(id)
 			);
 		} catch {
-			// Keep the last list on a failed refresh; with nothing to show, say so and try again, since
-			// a finished season's status no longer refreshes on its own.
-			if (request === generation && episodes.length === 0) {
-				loadFailed = true;
+			// Keep the last list and try again; a finished season's status no longer refreshes on its
+			// own, so nothing else would. Say so only when there is nothing to show.
+			if (request === generation) {
+				loadFailed = episodes.length === 0;
 				retryTimer = setTimeout(() => void load(currentPrefix), RETRY_AFTER_MS);
 			}
 		}
