@@ -1,3 +1,4 @@
+import { libraryCopy } from '$lib/library-copy';
 import { describe, expect, it } from 'vitest';
 
 import type { FolderCard, LifecycleState, SeasonLifecycleState } from '$lib/api/types';
@@ -90,7 +91,7 @@ describe('season library grouping', () => {
 		});
 		expect(tvLibraryStateGroup([{ key: 'needs_test', tone: 'quiet' }])).toEqual({
 			key: 'ready',
-			label: 'Ready to act on',
+			label: libraryCopy.ready,
 			tone: 'ready'
 		});
 		expect(tvLibraryStateGroup([{ key: 'sample_waiting', tone: 'quiet' }])).toEqual({

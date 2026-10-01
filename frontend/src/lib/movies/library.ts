@@ -1,3 +1,4 @@
+import { libraryCopy } from '$lib/library-copy';
 import type {
 	FolderWorkflowState,
 	MovieLibraryPayload,
@@ -163,7 +164,7 @@ export function movieLibraryStateGroup(title: MovieTitle): MovieLibraryStateGrou
 	if (
 		['encode', 'validate', 'promote', 'mixed'].includes(title.workflow_state?.primary_lane ?? '')
 	) {
-		return { key: 'ready', label: 'Ready to act on', tone: 'ready' };
+		return { key: 'ready', label: libraryCopy.ready, tone: 'ready' };
 	}
 	return { key: 'idle', label: 'No work needed', tone: 'idle' };
 }
