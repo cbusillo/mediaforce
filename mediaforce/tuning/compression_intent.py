@@ -64,10 +64,10 @@ _INTENT_TITLES = {
     "legacy_unconfirmed": "Choose a compression goal",
 }
 _INTENT_DETAILS = {
-    "reference": "Prefer the highest measured fidelity that fits within the size limit.",
-    "transparent": "Legacy name for the same smallest measured-acceptable result behavior.",
-    "balanced": "Prefer the result closest to the requested size after measured quality clears.",
-    "perceptual_floor": "Prefer the smallest result that clears the measured quality floor.",
+    "reference": "Keep as much detail as fits under the size limit.",
+    "transparent": "An older name for Smallest that still looks good.",
+    "balanced": "Get as close to your size goal as possible while it still looks right.",
+    "perceptual_floor": "Use the smallest size that still looks and sounds right.",
     "legacy_unconfirmed": "This older policy needs a compression goal before Mediaforce can change its size direction.",
 }
 

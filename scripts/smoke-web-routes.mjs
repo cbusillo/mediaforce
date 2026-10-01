@@ -583,23 +583,23 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
     [
       "Balance size and detail",
       "Size goal",
-      "Closest result to the goal",
+      "Must still look and sound right",
       "The finished file must stay under the size limit.",
     ],
     [
       "Smallest that still looks good",
-      "Size ceiling",
-      "Low end first",
-      "A smaller final result may pass.",
+      "Size goal",
+      "Must still look and sound right",
+      "A smaller finished file is fine.",
     ],
     [
       "Preserve the reference",
-      "Size limit",
-      "High fidelity first",
-      "Final result must meet the final band.",
+      "Size goal",
+      "Keep as much detail as fits",
+      "The finished file must land in the allowed size.",
     ],
   ];
-  for (const [title, sizeLabel, searchLabel, finalHeadline] of states) {
+  for (const [title, sizeLabel, qualityLabel, finalHeadline] of states) {
     const option = page.getByRole("radio", { name: title, exact: false });
     const optionText = await option.innerText();
     if (optionText.trim().length <= title.length + 10) {
@@ -608,18 +608,18 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
     await option.click();
     await page
       .waitForFunction(
-        ({ expectedSize, expectedSearch, expectedFinal }) => {
+        ({ expectedSize, expectedQuality, expectedFinal }) => {
           const contract =
             document.querySelector(".goal-contract")?.innerText ?? "";
           return (
             contract.includes(expectedSize) &&
-            contract.includes(expectedSearch) &&
+            contract.includes(expectedQuality) &&
             contract.includes(expectedFinal)
           );
         },
         {
           expectedSize: sizeLabel,
-          expectedSearch: searchLabel,
+          expectedQuality: qualityLabel,
           expectedFinal: finalHeadline,
         },
         { timeout: timeoutMs },
@@ -660,14 +660,21 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
   }
   const contractText = await page.locator(".goal-contract").innerText();
   for (const requiredCopy of [
-    "Sample search range",
-    "Final acceptance band",
-    "Quality rule",
-    "Final acceptance",
+    "Allowed final size",
+    "Quality",
+    "When a file finishes",
   ]) {
     if (!contractText.includes(requiredCopy)) {
       throw new Error(`${label} omitted ${requiredCopy}.`);
     }
+  }
+  if ((await page.locator(".sample-size-range").count()) === 0) {
+    throw new Error(`${label} lost the sample size range from Details.`);
+  }
+  if (/sample search|acceptance band|measured/i.test(contractText)) {
+    throw new Error(
+      `${label} still shows internal size terms: ${JSON.stringify(contractText)}`,
+    );
   }
   if (contractText.includes("Size is the target.")) {
     throw new Error(`${label} retained the static size-target sentence.`);

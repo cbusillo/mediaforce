@@ -1427,41 +1427,38 @@ export function compressionIntentContract(
 	const contract: Omit<CompressionIntentContract, 'announcement'> =
 		option.key === 'reference'
 			? {
-					sizeLabel: 'Size limit',
-					sizeRule: 'Highest measured fidelity wins as long as it fits.',
-					searchLabel: 'High fidelity first',
-					searchRule:
-						'Tests higher-fidelity candidates and only moves smaller as needed to fit the limit.',
-					qualityLabel: 'Highest measured fidelity',
-					qualityRule: 'Measured fidelity outranks extra savings.',
-					finalHeadline: 'Final result must meet the final band.',
+					sizeLabel: 'Size goal',
+					sizeRule: 'Keeps as much detail as fits near this size.',
+					searchLabel: 'Most detail first',
+					searchRule: 'Tries the most detailed versions first and only goes smaller to fit.',
+					qualityLabel: 'Keep as much detail as fits',
+					qualityRule: 'Detail matters more than extra savings.',
+					finalHeadline: 'The finished file must land in the allowed size.',
 					finalRule:
-						'Outside-band results stop after the bounded correction path instead of silently passing.'
+						'A file that comes out too big is tried again when that can be done safely; otherwise it waits for you. A file that comes out too small waits for you.'
 				}
 			: option.key === 'transparent' || option.key === 'perceptual_floor'
 				? {
-						sizeLabel: 'Size ceiling',
-						sizeRule: 'Smaller is acceptable while measured quality remains good.',
-						searchLabel: 'Low end first',
-						searchRule: 'Searches below the size ceiling while the measured quality floor holds.',
-						qualityLabel: 'Measured acceptability floor',
-						qualityRule:
-							'Chooses the smallest candidate that still clears the measured quality floor.',
-						finalHeadline: 'A smaller final result may pass.',
+						sizeLabel: 'Size goal',
+						sizeRule: 'Smaller is fine as long as it still looks and sounds right.',
+						searchLabel: 'Smallest first',
+						searchRule: 'Tries smaller sizes and keeps the smallest one that still looks right.',
+						qualityLabel: 'Must still look and sound right',
+						qualityRule: 'Picks the smallest file that still looks and sounds right.',
+						finalHeadline: 'A smaller finished file is fine.',
 						finalRule:
-							'Under-target is accepted while the measured floor holds; larger or below-floor results stop.'
+							'A smaller file is kept while it still looks right. A file that comes out too big is tried again when that can be done safely; otherwise it waits for you, as does a file that does not look right.'
 					}
 				: {
 						sizeLabel: 'Size goal',
 						sizeRule: 'Aims for this size and stays under the limit.',
-						searchLabel: 'Closest result to the goal',
-						searchRule:
-							'Searches around the goal and ranks the nearest candidate after quality clears.',
-						qualityLabel: 'Measured quality floor',
-						qualityRule: 'Picture and sound still have to clear the measured floor.',
+						searchLabel: 'Closest to your goal',
+						searchRule: 'Tries sizes near your goal and keeps the closest one that looks right.',
+						qualityLabel: 'Must still look and sound right',
+						qualityRule: 'Mediaforce checks picture and sound before keeping a file.',
 						finalHeadline: 'The finished file must stay under the size limit.',
 						finalRule:
-							'A smaller file is kept once it meets the quality target. A file over the limit gets one measured correction, then stops for review.'
+							'A smaller file is kept once it looks right. A file that comes out too big is tried again when that can be done safely; otherwise it waits for you.'
 					};
 	return {
 		...contract,
