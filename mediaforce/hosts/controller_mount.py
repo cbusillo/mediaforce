@@ -450,7 +450,7 @@ def _host_addresses(host: str, deadline: float | None = None) -> frozenset[str]:
     def lookup() -> None:
         try:
             infos = socket.getaddrinfo(host, _SMB_PORT, proto=socket.IPPROTO_TCP)
-            found.append(frozenset(_endpoint_address(info[4]) for info in infos))
+            found.append(frozenset(_endpoint_address(sockaddr) for *_, sockaddr in infos))
         except (OSError, UnicodeError):
             pass
         finally:
@@ -466,7 +466,7 @@ def _host_addresses(host: str, deadline: float | None = None) -> frozenset[str]:
     return found[0] if found else frozenset()
 
 
-def _endpoint_address(sockaddr: tuple) -> str:
+def _endpoint_address(sockaddr: tuple[str, int] | tuple[str, int, int, int] | tuple[int, bytes]) -> str:
     # A link-local IPv6 address names a different machine on each interface, so it keeps its scope.
     address = str(sockaddr[0])
     if len(sockaddr) == 4 and sockaddr[3] and "%" not in address:
