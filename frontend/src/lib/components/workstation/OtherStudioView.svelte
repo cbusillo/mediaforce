@@ -14,6 +14,12 @@
 	import { folderActionResponseCopy, type HeldFileCopyInput } from '$lib/folders/studio';
 	import { formatFileSize } from '$lib/format';
 	import { operatorStateCopy, safeOperatorErrorCopy } from '$lib/operator-copy';
+	import {
+		approvalStartDetail,
+		approvalStartLabel,
+		approvalStartOutcome,
+		type ApprovalStartResponse
+	} from '$lib/review/approvalStart';
 	import { reviewAvailability } from '$lib/review/availability';
 	import { reviewSampleSizes, reviewSourceHasAudio, reviewSourceLabel } from '$lib/review/pairs';
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
@@ -123,6 +129,12 @@
 	const eligibleItemCount = $derived(context?.eligible_item_count ?? 0);
 	const blockedItemCount = $derived(context?.blocked_item_count ?? 0);
 	const actionFileCount = $derived(otherActionFileCount(workflow, eligibleItemCount, itemCount));
+	const approvalStartFileCount = $derived(
+		folder.media_scope.match === 'exact_item' ? 1 : Math.max(eligibleItemCount || itemCount, 1)
+	);
+	const approvalStartWhat = $derived(
+		approvalStartFileCount === 1 ? 'this file' : `${approvalStartFileCount} files`
+	);
 	const untouchedFileCount = $derived(Math.max(0, itemCount - actionFileCount));
 	const scopeSummary = $derived(
 		otherScopeSummary(
@@ -313,18 +325,20 @@
 	async function approveSample() {
 		if (!actionReady || isBusy) return;
 		await runAction('approve-sample', async () => {
-			const response = await postJson<{ ok: boolean; message?: string }>(
-				`/api/folders/${folderRoutePrefix(folder.prefix)}/save-profile`,
-				{
-					confirm_high_impact: true,
-					confirm_size_tradeoff: true,
-					reviewed_draft_hash: asText(calibration.draft_hash),
-					scope_membership_token: scopeMembershipToken()
-				}
-			);
+			const response = await postJson<{
+				ok: boolean;
+				message?: string;
+				start_encode?: ApprovalStartResponse;
+			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/save-profile`, {
+				confirm_high_impact: true,
+				confirm_size_tradeoff: true,
+				reviewed_draft_hash: asText(calibration.draft_hash),
+				scope_membership_token: scopeMembershipToken(),
+				start_encode: 'scope'
+			});
 			if (!response.ok)
 				throw new Error(response.message || 'The sample approval could not be saved.');
-			return `Sample approved for this ${scopeNoun}.`;
+			return approvalStartOutcome(response.start_encode, queuedMessage, approvalStartFileCount);
 		});
 	}
 
@@ -350,10 +364,14 @@
 				safeCount(response.recovered_item_count) ||
 				safeCount(response.job?.item_count) ||
 				actionFileCount;
-			return queuedCount === 1
-				? 'This file is waiting to compress.'
-				: `${queuedCount} files are waiting to compress.`;
+			return queuedMessage(queuedCount);
 		});
+	}
+
+	function queuedMessage(queuedCount: number): string {
+		return queuedCount === 1
+			? 'This file is waiting to compress.'
+			: `${queuedCount} files are waiting to compress.`;
 	}
 
 	async function validateOutputs() {
@@ -679,7 +697,7 @@
 					>{folderPending
 						? 'Refreshing…'
 						: reviewReady && !approved
-							? 'Nothing is compressed or queued until you choose a separate production action.'
+							? approvalStartDetail(approvalStartWhat, approvalStartFileCount)
 							: decisionDetail}</span
 				>
 			</header>
@@ -807,7 +825,7 @@
 						onclick={() => reviseReview('improve')}>Improve picture or sound</button
 					>
 					<button class="primary" disabled={!actionReady || isBusy} onclick={approveSample}
-						>Keep this version</button
+						>{approvalStartLabel(approvalStartWhat)}</button
 					>
 				{:else if approved && workflow?.primary_lane === 'encode'}
 					<span class="action-consequence">

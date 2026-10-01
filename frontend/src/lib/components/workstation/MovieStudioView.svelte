@@ -15,6 +15,12 @@
 	} from '$lib/api/types';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
 	import { safeOperatorErrorCopy } from '$lib/operator-copy';
+	import {
+		approvalStartDetail,
+		approvalStartLabel,
+		approvalStartOutcome,
+		type ApprovalStartResponse
+	} from '$lib/review/approvalStart';
 	import { reviewAvailability } from '$lib/review/availability';
 	import { reviewSampleSizes, reviewSourceHasAudio, reviewSourceLabel } from '$lib/review/pairs';
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
@@ -203,6 +209,8 @@
 	const productionFileCount = $derived(
 		exactScope ? 1 : (context?.included_item_count ?? context?.item_count ?? 0)
 	);
+	const approvalStartWhat = $derived(exactScope ? 'this movie' : 'the whole title');
+	const approvalStartFileCount = $derived(Math.max(productionFileCount, 1));
 	const parentTitlePrefix = $derived(
 		asText(context?.prefix) || asText(folder.media_scope.parent?.prefix)
 	);
@@ -485,17 +493,19 @@
 	async function approveSample() {
 		if (isBrowseOnly || isBusy) return;
 		await runAction('approve-sample', async () => {
-			const response = await postJson<{ ok: boolean; message?: string }>(
-				`/api/folders/${folderRoutePrefix(folder.prefix)}/save-profile`,
-				{
-					confirm_high_impact: true,
-					confirm_size_tradeoff: true,
-					reviewed_draft_hash: asText(calibration.draft_hash)
-				}
-			);
+			const response = await postJson<{
+				ok: boolean;
+				message?: string;
+				start_encode?: ApprovalStartResponse;
+			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/save-profile`, {
+				confirm_high_impact: true,
+				confirm_size_tradeoff: true,
+				reviewed_draft_hash: asText(calibration.draft_hash),
+				start_encode: 'scope'
+			});
 			if (!response.ok)
 				throw new Error(response.message || 'The sample approval could not be saved.');
-			return 'Sample approved. Choose compression when you are ready.';
+			return approvalStartOutcome(response.start_encode, queuedMessage, approvalStartFileCount);
 		});
 	}
 
@@ -516,10 +526,14 @@
 				safeCount(response.recovered_item_count) ||
 				safeCount(response.job?.item_count) ||
 				(exactScope ? 1 : (context?.included_item_count ?? context?.item_count ?? 0));
-			return exactScope || queuedCount === 1
-				? 'This movie file is waiting to compress.'
-				: `${queuedCount} movie files are waiting to compress.`;
+			return queuedMessage(queuedCount);
 		});
+	}
+
+	function queuedMessage(queuedCount: number): string {
+		return exactScope || queuedCount === 1
+			? 'This movie file is waiting to compress.'
+			: `${queuedCount} movie files are waiting to compress.`;
 	}
 
 	async function validateOutputs() {
@@ -1131,10 +1145,7 @@
 								{:else if isSizeCapBlock}
 									<p>{sizeCapBlock.remedy}</p>
 								{:else if reviewReady && reviewGate.status !== 'accepted'}
-									<p>
-										Choose the result you want. Nothing is compressed or queued until you choose a
-										separate production action.
-									</p>
+									<p>{approvalStartDetail(approvalStartWhat, approvalStartFileCount)}</p>
 								{:else if reviewGate.status === 'accepted' && primaryAction() === 'queue'}
 									<p>
 										{exactScope
@@ -1224,7 +1235,7 @@
 											>Improve picture or sound</button
 										>
 										<button class="primary" disabled={isBusy} onclick={approveSample}
-											>Keep this version</button
+											>{approvalStartLabel(approvalStartWhat)}</button
 										>
 									{/if}
 								{:else if primaryAction() === 'validate'}
