@@ -193,6 +193,27 @@ class ControllerMountTests(unittest.TestCase):
         self.assertEqual(targets, frozenset({"storage-1.local"}))
         self.assertLess(time.monotonic() - started, 5)
 
+    def test_bonjour_lookup_waits_for_the_whole_port(self) -> None:
+        from mediaforce.hosts import controller_mount
+
+        # The first answer arrives in two pieces, split inside its port 4450.
+        stand_in = [
+            sys.executable, "-u", "-c",
+            "import sys, time\n"
+            "sys.stdout.write('NAS._smb._tcp.local. can be reached at other.local.:445'); sys.stdout.flush()\n"
+            "time.sleep(0.5)\n"
+            "print('0 (interface 4)')\n"
+            "time.sleep(30)\n",
+        ]
+        real_popen = subprocess.Popen
+        with patch(
+                "mediaforce.hosts.controller_mount.subprocess.Popen",
+                side_effect=lambda _command, **kwargs: real_popen(stand_in, **kwargs),
+        ):
+            targets = controller_mount._bonjour_smb_targets("nas", time.monotonic() + 1.5)
+
+        self.assertEqual(targets, frozenset())
+
     def test_link_local_addresses_keep_their_interface(self) -> None:
         from mediaforce.hosts import controller_mount
 

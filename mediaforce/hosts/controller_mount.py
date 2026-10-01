@@ -425,7 +425,9 @@ def _bonjour_smb_targets(instance: str, deadline: float) -> frozenset[str]:
             if not chunk:
                 break
             buffered += chunk
-            for match in _BONJOUR_TARGET_PATTERN.finditer(buffered.decode("utf-8", "replace")):
+            # Only complete lines: a read can end inside a port, so ":445" may still become ":4450".
+            complete = buffered[:buffered.rfind(b"\n") + 1]
+            for match in _BONJOUR_TARGET_PATTERN.finditer(complete.decode("utf-8", "replace")):
                 if int(match.group(2)) == _SMB_PORT:
                     targets.add(match.group(1))
     finally:
