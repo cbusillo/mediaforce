@@ -8,7 +8,7 @@ from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.process_control import ManagedProcessController
-from mediaforce.hosts.controller_mount import controller_mount_lock, same_smb_share
+from mediaforce.hosts.controller_mount import controller_mount_lock, is_bonjour_smb_server, same_smb_share
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host, \
     host_status_targets_current_machine, host_targets_current_machine, normalize_host_media_access, \
@@ -201,13 +201,22 @@ def learn_controller_smb_mounts(config: MediaforceConfig) -> int:
     merged = {m.mount_point: m for m in load_controller_smb_mounts(path)}
     for mount in learned:
         saved = merged.get(mount.mount_point)
-        # Finder may have reconnected the same share under another server name,
-        # such as its Bonjour name; keep the saved name so recovery remounts
-        # through it (#612).
-        if saved is None or not same_smb_share(mount.source, saved.source):
+        # Finder may have reconnected the same share under its Bonjour service
+        # name, which no-UI remounts can't reach. Keep the saved name unless it
+        # is the Bonjour one and the new name is an ordinary host name (#612).
+        if (
+                saved is None
+                or not same_smb_share(mount.source, saved.source)
+                or (_is_bonjour_smb_source(saved.source) and not _is_bonjour_smb_source(mount.source))
+        ):
             merged[mount.mount_point] = mount
     save_controller_smb_mounts(path, list(merged.values()))
     return len(learned)
+
+
+def _is_bonjour_smb_source(source: str) -> bool:
+    server = source.removeprefix("//").partition("/")[0].rpartition("@")[2]
+    return is_bonjour_smb_server(server.lower())
 
 
 def _controller_smb_mounts_for_config(config: MediaforceConfig) -> list[ControllerSmbMount]:

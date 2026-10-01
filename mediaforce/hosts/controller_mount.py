@@ -4,6 +4,8 @@ import os
 import re
 import socket
 import subprocess
+import threading
+import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,6 +24,11 @@ _PROBE_TIMEOUT_SECONDS = 10
 _MOUNT_TIMEOUT_SECONDS = 30
 _SMB_PORT = 445
 _BONJOUR_SMB_SERVICE = "._smb._tcp."
+_RESOLVE_TIMEOUT_SECONDS = 3
+_RESOLVED_ADDRESS_TTL_SECONDS = 300
+_RESOLVED_ADDRESSES: dict[str, tuple[float, frozenset[str]]] = {}
+_RESOLVED_ADDRESSES_LOCK = threading.Lock()
+_BONJOUR_TARGET_PATTERN = re.compile(r"can be reached at (\S+?)\.?:\d+")
 _PROBE_SCRIPT = r'''set -u
 mount_output="$(/sbin/mount 2>/dev/null)" || exit 20
 /usr/bin/printf '%s\n' "$mount_output"
@@ -358,20 +365,71 @@ def same_smb_share(
     return bool(resolve(observed_server) & resolve(expected_server))
 
 
+def is_bonjour_smb_server(server: str) -> bool:
+    return _bonjour_smb_instance(server) is not None
+
+
 def _resolve_server_addresses(server: str) -> frozenset[str]:
-    host = _bonjour_service_host(server) or server.removeprefix("[").removesuffix("]")
-    try:
-        addresses = socket.getaddrinfo(host, _SMB_PORT, proto=socket.IPPROTO_TCP)
-    except (OSError, UnicodeError):
-        return frozenset()
-    return frozenset(str(address[4][0]) for address in addresses)
+    now = time.monotonic()
+    with _RESOLVED_ADDRESSES_LOCK:
+        cached = _RESOLVED_ADDRESSES.get(server)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    instance = _bonjour_smb_instance(server)
+    host = _bonjour_smb_target(instance) if instance is not None else server.removeprefix("[").removesuffix("]")
+    addresses = _host_addresses(host) if host else frozenset()
+    if addresses:
+        with _RESOLVED_ADDRESSES_LOCK:
+            _RESOLVED_ADDRESSES[server] = (now + _RESOLVED_ADDRESS_TTL_SECONDS, addresses)
+    return addresses
 
 
-def _bonjour_service_host(server: str) -> str | None:
+def _bonjour_smb_instance(server: str) -> str | None:
     instance, marker, domain = server.partition(_BONJOUR_SMB_SERVICE)
     if not marker or not instance or domain.rstrip(".") != "local":
         return None
-    return f"{instance}.local"
+    return instance
+
+
+def _bonjour_smb_target(instance: str) -> str | None:
+    """The host a Bonjour SMB service advertises, from its SRV record.
+
+    `dns-sd -L` keeps listening, so it is stopped at the timeout and its output
+    read; a service that does not answer in time has no target.
+    """
+    try:
+        result = subprocess.run(
+            ["/usr/bin/dns-sd", "-L", instance, "_smb._tcp", "local"],
+            capture_output=True,
+            timeout=_RESOLVE_TIMEOUT_SECONDS,
+        )
+        output = result.stdout
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not output:
+        return None
+    match = _BONJOUR_TARGET_PATTERN.search(output.decode("utf-8", "replace"))
+    return match.group(1) if match else None
+
+
+def _host_addresses(host: str) -> frozenset[str]:
+    addresses: list[frozenset[str]] = []
+
+    def lookup() -> None:
+        try:
+            found = socket.getaddrinfo(host, _SMB_PORT, proto=socket.IPPROTO_TCP)
+        except (OSError, UnicodeError):
+            return
+        addresses.append(frozenset(str(address[4][0]) for address in found))
+
+    # getaddrinfo has no timeout of its own; a lookup still running at the
+    # deadline is abandoned and the name counts as unresolved.
+    worker = threading.Thread(target=lookup, name="mediaforce-smb-resolve", daemon=True)
+    worker.start()
+    worker.join(_RESOLVE_TIMEOUT_SECONDS)
+    return addresses[0] if addresses else frozenset()
 
 
 def _mapping_has_credentials(mount: ControllerSmbMount) -> bool:
@@ -400,5 +458,6 @@ __all__ = [
     "mount_controller_smb_no_ui",
     "probe_controller_mount",
     "probe_controller_volume",
+    "is_bonjour_smb_server",
     "same_smb_share",
 ]

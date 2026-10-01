@@ -29,6 +29,7 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         save_controller_smb_mounts(path, [
             ControllerSmbMount("//cbusillo@nas.shiny/media", Path("/Volumes/media")),
             ControllerSmbMount("//cbusillo@old-nas.shiny/extras", Path("/Volumes/extras")),
+            ControllerSmbMount("//cbusillo@nas._smb._tcp.local/staging", Path("/Volumes/staging")),
         ])
         config = SimpleNamespace(paths=SimpleNamespace(runtime_settings_path=self.runtime_settings_path))
         addresses = {
@@ -39,11 +40,12 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         mount_output = "\n".join([
             "//cbusillo@nas._smb._tcp.local/media on /Volumes/media (smbfs, nodev, nosuid)",
             "//cbusillo@nas._smb._tcp.local/extras on /Volumes/extras (smbfs, nodev, nosuid)",
+            "//cbusillo@nas.shiny/staging on /Volumes/staging (smbfs, nodev, nosuid)",
         ])
 
         with patch("mediaforce.remote._controller_smb_mount_output", return_value=mount_output), patch(
                 "mediaforce.remote._controller_required_mount_roots",
-                return_value={Path("/Volumes/media"), Path("/Volumes/extras")},
+                return_value={Path("/Volumes/media"), Path("/Volumes/extras"), Path("/Volumes/staging")},
         ), patch(
             "mediaforce.hosts.controller_mount._resolve_server_addresses",
             side_effect=lambda server: addresses.get(server, frozenset()),
@@ -53,6 +55,8 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         saved = {mount.mount_point: mount.source for mount in load_controller_smb_mounts(path)}
         self.assertEqual(saved[Path("/Volumes/media")], "//cbusillo@nas.shiny/media")
         self.assertEqual(saved[Path("/Volumes/extras")], "//cbusillo@nas._smb._tcp.local/extras")
+        # A saved Bonjour name gives way to an ordinary host name for the same share.
+        self.assertEqual(saved[Path("/Volumes/staging")], "//cbusillo@nas.shiny/staging")
 
     def test_controller_smb_mounts_parse_only_smb_volumes(self) -> None:
         mounts = controller_smb_mounts_from_output(
