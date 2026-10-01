@@ -71,7 +71,8 @@ import {
 	targetProvenanceSummary,
 	testRequestWithInstructions,
 	technicalVideoPolicy,
-	withCompressionIntent
+	withCompressionIntent,
+	showCopy
 } from './experience';
 import { normalizeReviewPairs, reviewSampleSizes } from '$lib/review/pairs';
 
@@ -409,11 +410,11 @@ describe('quality memory explanation', () => {
 		expect(view).toMatchObject({
 			state: 'empty',
 			tone: 'quiet',
-			badge: 'No memory yet',
+			badge: 'Nothing yet',
+			title: showCopy.noPastResults,
 			measured: []
 		});
-		expect(view.reason).toContain('No completed quality search');
-		expect(view.policyCopy).toContain('Quality floors and saved policy remain unchanged');
+		expect(view.reason).toBe('Your size and quality settings stay as they are.');
 	});
 
 	it('separates a measured production run from a high-confidence recommendation', () => {

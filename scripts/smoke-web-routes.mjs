@@ -579,6 +579,19 @@ async function checkMovieEstimateCoverage(page, timeoutMs, label) {
 }
 
 async function checkCompressionIntentContract(page, timeoutMs, label) {
+  const showText = (await page.locator("body").innerText()).toLowerCase();
+  for (const staleTerm of [
+    "quality memory",
+    "no completed quality search",
+    "does not start a test",
+    "opening studio",
+  ]) {
+    if (showText.includes(staleTerm)) {
+      throw new Error(
+        `${label} exposed stale term ${JSON.stringify(staleTerm)}.`,
+      );
+    }
+  }
   const states = [
     [
       "Balance size and detail",

@@ -409,6 +409,13 @@ export interface ReviewConcern {
 	label: string;
 }
 
+// Owner-facing wording on a show or sample page. Tests read it from here.
+export const showCopy = {
+	pastResults: 'Past results',
+	noPastResults: 'No saved results to learn from yet',
+	sizeGoal: 'Your size goal'
+} as const;
+
 export const REVIEW_CONCERNS: readonly ReviewConcern[] = [
 	{ tag: 'softness_detail_loss', label: 'Picture looks soft' },
 	{ tag: 'motion_breakup', label: 'Motion breaks up' },
@@ -952,8 +959,8 @@ export function qualityMemoryView(folder: FolderPayload): QualityMemoryView {
 		return {
 			state: 'empty',
 			tone: 'quiet',
-			badge: 'No memory yet',
-			title: 'No recorded runs yet',
+			badge: 'Nothing yet',
+			title: showCopy.noPastResults,
 			source: '',
 			measured: [],
 			recommendation: {
@@ -964,8 +971,7 @@ export function qualityMemoryView(folder: FolderPayload): QualityMemoryView {
 			evidence: '0 observations',
 			dispersion: '—',
 			comparison: '—',
-			reason:
-				'No completed quality search has been recorded for this folder yet. Quality floors and saved policy remain unchanged.',
+			reason: 'Your size and quality settings stay as they are.',
 			policyCopy: passivePolicyCopy
 		};
 	}
