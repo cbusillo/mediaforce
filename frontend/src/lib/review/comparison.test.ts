@@ -6,6 +6,7 @@ import {
 	clampMomentIndex,
 	comparisonSideMuted,
 	comparisonKeyboardAction,
+	comparisonLoopStatus,
 	followerCorrectionTime,
 	followerPlaybackRate,
 	formatPlaybackTime,
@@ -13,6 +14,7 @@ import {
 	mediaElementReady,
 	mediaSourceMatches,
 	mediaStartFailureMessage,
+	nextLoopMoment,
 	normalizedScrollPosition,
 	playbackBoundaryReached,
 	reviewPairHasSound,
@@ -156,6 +158,23 @@ describe('comparison workspace helpers', () => {
 		expect(formatPlaybackTime(68.9)).toBe('1:08');
 		expect(frameAspectRatio(1440, 1080)).toBeCloseTo(4 / 3);
 		expect(frameAspectRatio(0, 0)).toBeCloseTo(16 / 9);
+	});
+
+	it('cycles through every moment and wraps back to the first', () => {
+		const visited = [0];
+		for (let step = 0; step < 4; step += 1) visited.push(nextLoopMoment(visited.at(-1)!, 3));
+		expect(visited).toEqual([0, 1, 2, 0, 1]);
+		expect(nextLoopMoment(0, 1)).toBe(0);
+		expect(nextLoopMoment(7, 3)).toBe(0);
+	});
+
+	it('names the current moment and whether the moments are repeating', () => {
+		const looping = comparisonLoopStatus(1, 3, true);
+		const paused = comparisonLoopStatus(1, 3, false);
+		expect(looping).toContain('2 of 3');
+		expect(paused).toContain('2 of 3');
+		expect(looping).not.toBe(paused);
+		expect(comparisonLoopStatus(0, 1, true)).not.toMatch(/of 1/);
 	});
 
 	it('keeps playback bounded to the declared review clip instead of auxiliary media duration', () => {
