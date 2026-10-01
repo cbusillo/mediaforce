@@ -7933,6 +7933,20 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(workflow.state, "held")
         self.assertEqual(workflow.primary_lane, "none")
 
+    def test_folder_workflow_season_with_only_missing_files_keeps_its_shows_queued_job(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 9/gone.mkv"),
+                status="missing",
+                rel_path="tv/show/Season 9/gone.mkv",
+            )
+            self._save_show_job(connection, job_id="show-queued", prefix="tv/show", status="queued")
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 9")
+
+        self.assertEqual(workflow.state, "processing")
+
     def test_folder_workflow_finished_season_ignores_its_shows_failed_job(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._insert_library_item(

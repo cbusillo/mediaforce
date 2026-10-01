@@ -370,7 +370,12 @@ def _build_folder_state(
         for item in items
         if item.blocker and item.state == "blocked"
     ))
-    wider_jobs_apply = not items or any(item.state not in OUT_OF_WIDER_JOB_STATES for item in items)
+    # A scope whose files are all missing keeps the wider job's state rather than reading as finished.
+    wider_jobs_apply = (
+        not items
+        or any(item.state not in OUT_OF_WIDER_JOB_STATES for item in items)
+        or all(item.state == "missing" for item in items)
+    )
     job_state = job_states.overlapping if wider_jobs_apply else job_states.own
     job_lane = job_state[0] if job_state is not None else None
     job_detail = job_state[1] if job_state is not None else None
