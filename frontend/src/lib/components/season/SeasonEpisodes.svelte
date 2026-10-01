@@ -84,7 +84,11 @@
 			expanded = false;
 		}
 		void load(currentPrefix);
-		return () => clearTimeout(retryTimer);
+		return () => {
+			// A request still in flight belongs to a page that is gone; it must not schedule a retry.
+			generation += 1;
+			clearTimeout(retryTimer);
+		};
 	});
 </script>
 
