@@ -593,6 +593,23 @@
 		duration = boundedReviewDuration(duration, sourceVideo.duration);
 	}
 
+	function handleOutsidePause(video: HTMLVideoElement) {
+		// Pauses this component asks for clear playbackRequested first or happen while
+		// warming or seeking; any other pause came from the browser or the system.
+		if (!playbackRequested || warming || pairSeekPending || video.ended) return;
+		if (
+			previewVideo &&
+			playbackBoundaryReached(
+				previewVideo.currentTime,
+				duration,
+				PLAYBACK_BOUNDARY_TOLERANCE_SECONDS
+			)
+		)
+			return;
+		stopLoop();
+		playbackError = 'Playback paused. Press Play to continue.';
+	}
+
 	function handleEnded() {
 		if (!playbackRequested && playbackCompleted) return;
 		finishMoment();
@@ -836,6 +853,7 @@
 							onloadeddata={(event) => handleMediaLoaded('original', event.currentTarget)}
 							oncanplay={(event) => handleMediaLoaded('original', event.currentTarget)}
 							onseeked={() => (sourceCorrectionPending = false)}
+							onpause={(event) => handleOutsidePause(event.currentTarget)}
 							onerror={() => handleMediaError('original')}
 						></video>
 						{#if warming}
@@ -886,7 +904,10 @@
 							onwaiting={() => {
 								if (playbackRequested && !warming) preparing = true;
 							}}
-							onpause={() => (playing = false)}
+							onpause={(event) => {
+								playing = false;
+								handleOutsidePause(event.currentTarget);
+							}}
 							ontimeupdate={handleTimeUpdate}
 							onended={handleEnded}
 						></video>
