@@ -95,6 +95,10 @@ PROTECTED_READY_SERIES_PREFIX = "tv/Protected Ready"
 SHOW_JOB_HOLD_SERIES_PREFIX = "tv/Show Job Hold"
 SHOW_JOB_HOLD_WORKING_PREFIX = "tv/Show Job Hold/Season 1"
 SHOW_JOB_HOLD_HELD_PREFIX = "tv/Show Job Hold/Season 2"
+# A season part-way through, with an episode in each stage the season page's episode list shows.
+EPISODE_PROGRESS_PREFIX = "tv/Episode Progress/Season 1"
+# The smoke server reclaims running work when it starts, so no episode here is mid-compression.
+EPISODE_PROGRESS_STATUSES = ("promoted", "planned", "planned", "planned")
 FIXTURE_PREFIXES = (
     FOLDER_PREFIX,
     SAMPLING_PREFIX,
@@ -141,6 +145,7 @@ FIXTURE_PREFIXES = (
     PROTECTED_READY_PREFIX,
     SHOW_JOB_HOLD_WORKING_PREFIX,
     SHOW_JOB_HOLD_HELD_PREFIX,
+    EPISODE_PROGRESS_PREFIX,
 )
 
 
@@ -610,6 +615,53 @@ def _encode_job(
         "finished_at": finished_at,
         "updated_at": timestamp,
     }
+
+
+def _episode_progress_runs(project_root: Path) -> list[dict[str, Any]]:
+    """A season run whose per-file runs are waiting and needing the owner."""
+    rel_paths = [f"{EPISODE_PROGRESS_PREFIX}/Episode {index:02d}.mkv" for index in (2, 3)]
+    parent = _encode_job(
+        project_root=project_root,
+        job_id="web-smoke-episode-progress",
+        prefix=EPISODE_PROGRESS_PREFIX,
+        rel_path=rel_paths[0],
+        status="running",
+    )
+    manifest_path = Path(parent["manifest_path"])
+    manifest_path.write_text(json.dumps({
+        "run_id": parent["job_id"],
+        "items": [
+            {"rel_path": rel_path, "source_size_bytes": 2 * 1024**3, "duration_seconds": 3_600.0}
+            for rel_path in rel_paths
+        ],
+    }, indent=2) + "\n")
+    parent["item_count"] = len(rel_paths)
+    # The smoke server's scheduler runs against these parts, so the waiting one is a retry not due yet.
+    tomorrow = (datetime.now(UTC) + timedelta(days=1)).isoformat(timespec="seconds")
+    parts = [
+        ("retry_backoff", {}, {"retry_not_before": tomorrow}),
+        ("needs_attention", {"failure_analysis": {"kind": "final_size_target_miss", "item_rel_path": rel_paths[1]}},
+         {}),
+    ]
+    runs = [parent]
+    for index, (status, progress, fields) in enumerate(parts):
+        part = _encode_job(
+            project_root=project_root,
+            job_id=f"web-smoke-episode-progress-{index + 2:02d}",
+            prefix=EPISODE_PROGRESS_PREFIX,
+            rel_path=rel_paths[index],
+            status=status,
+            progress=progress,
+        )
+        part.update(
+            job_kind="shard",
+            parent_job_id=parent["job_id"],
+            manifest_path=str(manifest_path),
+            manifest_indexes_json=json.dumps([index]),
+            **fields,
+        )
+        runs.append(part)
+    return runs
 
 
 def _write_review_sample_state(
@@ -1433,6 +1485,20 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 recommendation="priority_encode",
                 recommendation_reason="Fixture newest season held while the show's run works on older seasons.",
                 age_days=5,
+            ),
+            *(
+                _library_item(
+                    project_root=project_root,
+                    media_root="tv",
+                    rel_path=f"{EPISODE_PROGRESS_PREFIX}/Episode {index:02d}.mkv",
+                    size_bytes=2 * 1024**3,
+                    status=status,
+                    video_codec="h264",
+                    priority_score=40,
+                    recommendation="priority_encode",
+                    recommendation_reason="Fixture episode for the season episode list.",
+                )
+                for index, status in enumerate(EPISODE_PROGRESS_STATUSES, start=1)
             ),
             *(
                 _library_item(
@@ -2472,6 +2538,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 },
             ),
         ]
+        encode_rows.extend(_episode_progress_runs(project_root))
         for row in encode_rows:
             connection.execute(encode_jobs.insert().values(**row))
         connection.execute(

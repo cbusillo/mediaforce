@@ -5,11 +5,14 @@
 		reasons,
 		scope = '',
 		busy = false,
+		anchorId = undefined,
 		onSizeDecision
 	}: {
 		reasons: WaitingReasons;
 		scope?: string;
 		busy?: boolean;
+		/** An id other parts of the page link to, such as the season's episode list. */
+		anchorId?: string;
 		onSizeDecision?: (jobId: string, allow: boolean) => void;
 	} = $props();
 
@@ -19,7 +22,7 @@
 </script>
 
 {#if reasons.needsYou.length || reasons.waiting.length || reasons.yourChoices.length}
-	<div class="waiting-reasons">
+	<div class="waiting-reasons" id={anchorId}>
 		{#if scope}<p class="waiting-reasons__scope">For {scope}</p>{/if}
 		{#if reasons.needsYou.length}
 			<section class="waiting-reasons__group waiting-reasons__group--owner">
