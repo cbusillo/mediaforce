@@ -183,7 +183,7 @@ def _run_evidence_claim(
     except RemoteMediaHostUnavailableError:
         analysis_target = None
     if analysis_target is None:
-        _defer_claim(config, claim, deps, reason=EVIDENCE_HOST_WAIT_REASON, restore_attempt=False)
+        _defer_for_encode_computer(config, claim, deps, restore_attempt=False)
         return
 
     with open_db(config.paths.db_path) as connection:
@@ -230,7 +230,7 @@ def _run_evidence_claim(
         )
         return
     except RemoteMediaHostUnavailableError:
-        _defer_claim(config, claim, deps, reason=EVIDENCE_HOST_WAIT_REASON, restore_attempt=True)
+        _defer_for_encode_computer(config, claim, deps, restore_attempt=True)
         return
     except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
         source_availability, _current_fingerprint = _source_fingerprint(config, claim, source_path)
@@ -503,7 +503,31 @@ def _defer_unavailable_source(
         *,
         restore_attempt: bool,
 ) -> None:
-    _defer_claim(config, claim, deps, reason=SOURCE_ROOT_WAIT_REASON, restore_attempt=restore_attempt)
+    _defer_claim(
+        config,
+        claim,
+        deps,
+        work_status="waiting_source",
+        reason=SOURCE_ROOT_WAIT_REASON,
+        restore_attempt=restore_attempt,
+    )
+
+
+def _defer_for_encode_computer(
+        config: MediaforceConfig,
+        claim: EvidenceWorkClaim,
+        deps: EvidenceWorkerDeps,
+        *,
+        restore_attempt: bool,
+) -> None:
+    _defer_claim(
+        config,
+        claim,
+        deps,
+        work_status="waiting_host",
+        reason=EVIDENCE_HOST_WAIT_REASON,
+        restore_attempt=restore_attempt,
+    )
 
 
 def _defer_claim(
@@ -511,6 +535,7 @@ def _defer_claim(
         claim: EvidenceWorkClaim,
         deps: EvidenceWorkerDeps,
         *,
+        work_status: str,
         reason: str,
         restore_attempt: bool,
 ) -> None:
@@ -521,7 +546,7 @@ def _defer_claim(
     _finish_claim(
         config,
         claim,
-        work_status="waiting_source",
+        work_status=work_status,
         last_error=reason,
         retry_not_before=retry_not_before,
         restore_attempt=restore_attempt,

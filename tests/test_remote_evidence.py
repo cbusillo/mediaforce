@@ -2,6 +2,7 @@ import json
 import subprocess
 import tempfile
 from contextlib import ExitStack
+from datetime import UTC, datetime, timedelta
 import unittest
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,9 @@ from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, MED
 from mediaforce.encoding.remote_media import RemoteMediaCommands
 from mediaforce.hosts.types import FFMPEG_MISSING_ISSUE
 from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, select_evidence_host
-from mediaforce.library.evidence_queue import resume_evidence_queue, start_evidence_work
+from mediaforce.library.background_work import list_evidence_backlog
+from mediaforce.library.evidence_queue import claim_next_evidence_work, evidence_queue_summary, \
+    resume_evidence_queue, start_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_STATE_CURRENT, \
     EVIDENCE_REASON_TOOL_CHANGED, load_library_item_evidence_states, project_evidence_state, \
     rebuild_library_item_evidence_states
@@ -243,9 +246,36 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
         self.assertTrue(processed)
         analyzer.assert_not_called()
         remote.assert_not_called()
-        self.assertEqual(state["work_status"], "waiting_source")
+        self.assertEqual(state["work_status"], "waiting_host")
         self.assertEqual(state["last_error"], EVIDENCE_HOST_WAIT_REASON)
         self.assertEqual(state["attempt_count"], 0)
+
+    def test_work_waiting_for_an_encode_computer_stays_queued_and_returns_after_its_delay(self) -> None:
+        config = self._config([self.mini])
+        item_id = self._prepare_cadence_item(config)
+        process_evidence_queue_once(
+            config_path=config.paths.config_path,
+            deps=self._deps(config, Mock(), host_rows=[_row(self.mini, available=False)]),
+        )
+
+        with open_db(config.paths.db_path) as connection:
+            summary = evidence_queue_summary(connection)
+            backlog = list_evidence_backlog(connection, work_status="waiting_host")
+            early_claim = claim_next_evidence_work(connection, worker_id="worker-a", lease_seconds=5)
+        with open_db(config.paths.db_path) as connection:
+            later_claim = claim_next_evidence_work(
+                connection,
+                worker_id="worker-a",
+                lease_seconds=5,
+                now=datetime.now(UTC) + timedelta(minutes=5),
+            )
+
+        self.assertEqual(summary["status"], "queued")
+        self.assertEqual(summary["remaining_count"], 1)
+        self.assertEqual([row["library_item_id"] for row in backlog["rows"]], [item_id])
+        self.assertIsNone(early_claim)
+        assert later_claim is not None
+        self.assertEqual(later_claim.library_item_id, item_id)
 
     def test_lost_connection_waits_for_the_computer_instead_of_failing_the_file(self) -> None:
         config = self._config([self.mini])
@@ -267,7 +297,7 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
 
         state, summary = self._stored(config, item_id)
         self.assertIsNone(summary)
-        self.assertEqual(state["work_status"], "waiting_source")
+        self.assertEqual(state["work_status"], "waiting_host")
         self.assertEqual(state["last_error"], EVIDENCE_HOST_WAIT_REASON)
         self.assertEqual(state["attempt_count"], 0)
 

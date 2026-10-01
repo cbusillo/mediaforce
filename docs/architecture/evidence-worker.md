@@ -118,7 +118,7 @@ an encode computer, never on the controller:
   client through the managed process controller; the remote commands are
   bounded by frame counts and timeouts.
 - When none can take the work, or the connection drops mid-run, the item moves
-  to `waiting_source` with the reason "Waiting for an encode computer to
+  to `waiting_host` with the reason "Waiting for an encode computer to
   measure this file." without consuming an attempt.
 - The summary records the measuring host and that host's `ffmpeg -version`
   line. Freshness compares the analyzer name and version, schema, source, and

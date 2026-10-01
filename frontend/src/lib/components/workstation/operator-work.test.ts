@@ -8,6 +8,7 @@ import {
 	evidenceWorkStatusView,
 	operatorRefreshInterval
 } from './operator-work';
+import { operatorStateCopy } from '$lib/operator-copy';
 
 function evidenceFixture(status: string, runnerActive = false): OperatorEvidenceState {
 	return {
@@ -164,6 +165,13 @@ describe('operator work copy', () => {
 		expect(evidenceWorkStatusView({ ...row, work_status: 'waiting_source' }).label).toBe(
 			'Source unavailable'
 		);
+		const waitingForComputer = evidenceWorkStatusView({ ...row, work_status: 'waiting_host' });
+		expect(operatorStateCopy('waiting_host', {}, '')).not.toBe('');
+		expect(waitingForComputer.label).toBe(operatorStateCopy('waiting_host'));
+		expect(waitingForComputer.label).not.toBe(
+			evidenceWorkStatusView({ ...row, work_status: 'waiting_source' }).label
+		);
+		expect(waitingForComputer.tone).toBe('wait');
 		expect(
 			evidenceWorkStatusView({
 				...row,

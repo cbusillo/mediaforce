@@ -36,6 +36,7 @@ const DEFAULT_STATE_LABELS: Readonly<Record<string, string>> = {
 	stopped: 'Stopped',
 	stopping: 'Stopping',
 	validated: 'Ready to replace',
+	waiting_host: 'Waiting for an encode computer',
 	waiting_source: 'Source unavailable'
 };
 
