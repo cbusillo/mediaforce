@@ -189,6 +189,10 @@ def calibration_job_compatibility_key(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
+def _utc_now() -> datetime:
+    return datetime.now(tz=UTC)
+
+
 def calibration_job_progress_payload(
         connection: DBClient,
         payload: dict[str, Any],
@@ -197,7 +201,7 @@ def calibration_job_progress_payload(
     status = str(payload.get("status") or "").strip()
     if not stored and status not in {"queued", "starting", "running"}:
         return None
-    now = datetime.now(tz=UTC)
+    now = _utc_now()
     compatibility_key = str(stored.get("compatibility_key") or calibration_job_compatibility_key(payload))
     heartbeat_at = _parse_job_timestamp(payload.get("heartbeat_at"))
     started_at = _parse_job_timestamp(payload.get("started_at") or payload.get("created_at"))
