@@ -71,10 +71,19 @@ export function cleanupTone(state: CleanupState): ShellTone {
 	return 'idle';
 }
 
+// Owner-facing Finished wording. Tests and the smoke check read it from here.
+export const finishedCopy = {
+	needsLook: 'Needs a look',
+	alreadyGone: 'Backups already gone',
+	alreadyGoneNote: 'Nothing is deleted.',
+	deleteBackups: 'Delete original backups',
+	spaceToFree: 'Space to free up'
+} as const;
+
 export function cleanupLabel(state: CleanupState): string {
 	if (state === 'ready') return 'Backups ready to delete';
 	if (state === 'blocked') return 'Check before deleting';
-	if (state === 'unknown') return 'Backups already gone';
+	if (state === 'unknown') return finishedCopy.alreadyGone;
 	return 'Nothing to delete';
 }
 
@@ -311,16 +320,16 @@ export function buildCompletedStatusTiles(
 			tone: payload.folders_with_backups_count > 0 ? 'wait' : 'idle'
 		},
 		{
-			label: 'Space to reclaim',
+			label: finishedCopy.spaceToFree,
 			value: formatBytes(archive.total_size_bytes),
 			detail: archive.has_cleanup ? 'in the Cleanup folder' : 'nothing to delete',
 			tone: archive.has_cleanup ? 'ready' : 'idle',
 			mono: true
 		},
 		{
-			label: 'Review needed',
+			label: finishedCopy.needsLook,
 			value: `${counts.ready} / ${counts.blocked + counts.unknown}`,
-			detail: 'ready to delete versus needing review',
+			detail: 'ready to delete versus needing a look',
 			tone:
 				counts.blocked > 0
 					? 'fail'
@@ -347,12 +356,12 @@ export function buildCompletedFooterSignals(payload: CompletedPayload | null): F
 		{ label: 'Backups', value: String(payload.folders_with_backups_count), tone: 'wait' },
 		{ label: 'Ready', value: String(counts.ready), tone: counts.ready > 0 ? 'ready' : 'idle' },
 		{
-			label: 'Review',
+			label: finishedCopy.needsLook,
 			value: String(counts.blocked + counts.unknown),
 			tone: counts.blocked > 0 ? 'fail' : 'wait'
 		},
 		{
-			label: 'Reclaimable',
+			label: finishedCopy.spaceToFree,
 			value: formatBytes(payload.archive_cleanup.total_size_bytes),
 			tone: 'ready'
 		}
