@@ -1,3 +1,4 @@
+import { libraryCopy } from '$lib/library-copy';
 import type {
 	CalibrationJobPayload,
 	CalibrationScopeActivityPayload,
@@ -1987,7 +1988,7 @@ export function librarySeasonState(
 	if (card.workflow_state?.primary_lane === 'mixed') {
 		return {
 			key: 'ready_to_make',
-			label: 'Ready to act on',
+			label: libraryCopy.ready,
 			detail: 'This season has more than one step ready in Studio.',
 			tone: 'ready'
 		};

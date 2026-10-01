@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { libraryCopy } from '$lib/library-copy';
 	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
 
@@ -458,7 +459,7 @@
 				<option value="attention">Needs attention</option>
 				<option value="blocked">Cannot start</option>
 				<option value="processing">Compressing</option>
-				<option value="ready">Ready to act on</option>
+				<option value="ready">{libraryCopy.ready}</option>
 				<option value="explicit">Needs a file choice</option>
 			</select>
 		</label>

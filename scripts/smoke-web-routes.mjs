@@ -1632,6 +1632,20 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
       undefined,
       { timeout: timeoutMs },
     );
+    const libraryText = (await page.locator("body").innerText()).toLowerCase();
+    for (const staleTerm of [
+      "ready to act on",
+      "current-season policy",
+      "use series status",
+      "no eligible savings",
+      " eligible · ",
+    ]) {
+      if (libraryText.includes(staleTerm)) {
+        throw new Error(
+          `TV Library exposed stale term ${JSON.stringify(staleTerm)}.`,
+        );
+      }
+    }
     await showButton(alternateShowName).click();
     const alternatePolicy = await policySelect.inputValue();
     if (alternatePolicy !== "auto") {
@@ -1657,7 +1671,7 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
     const selectedValue = await policySelect.inputValue();
     if (selectedValue !== "auto") {
       throw new Error(
-        `Current-season policy leaked across shows while saving: ${selectedValue}`,
+        `Newest-season choice leaked across shows while saving: ${selectedValue}`,
       );
     }
     const saveError = await saveCompleted;
@@ -1673,7 +1687,7 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
       undefined,
       { timeout: timeoutMs },
     );
-    console.log("route ok: Current-season policy stays scoped to one show");
+    console.log("route ok: Newest-season choice stays scoped to one show");
   } finally {
     await browser.close();
   }
@@ -1708,7 +1722,7 @@ async function checkOlderSeasonConfirmation(baseUrl, timeoutMs) {
       "Safety-cleared size:",
       "Estimated space saved: about",
       "Season 2 stays original",
-      "current-season policy does not change",
+      "newest-season setting does not change",
     ]) {
       if (!dialogText.includes(marker)) {
         throw new Error(

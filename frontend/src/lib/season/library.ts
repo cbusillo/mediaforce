@@ -1,3 +1,4 @@
+import { libraryCopy } from '$lib/library-copy';
 import type {
 	DashboardFoldersPayload,
 	FolderCard,
@@ -38,7 +39,7 @@ export function tvLibraryStateGroup(
 		return { key: 'processing', tone: 'active', label: 'In progress' };
 	}
 	if (tones.has('ready') || keys.has('needs_test')) {
-		return { key: 'ready', tone: 'ready', label: 'Ready to act on' };
+		return { key: 'ready', tone: 'ready', label: libraryCopy.ready };
 	}
 	return { key: 'idle', tone: 'idle', label: 'No active work' };
 }
