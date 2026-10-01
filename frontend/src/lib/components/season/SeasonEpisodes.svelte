@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onDestroy } from 'svelte';
+
 	import { fetchJson } from '$lib/api/client';
 	import type { EpisodeProgress, FolderEpisodesPayload } from '$lib/api/types';
 	import StateBadge from '$lib/components/workstation/StateBadge.svelte';
@@ -33,6 +35,10 @@
 	let loadedPrefix = '';
 	let generation = 0;
 	let retryTimer: ReturnType<typeof setTimeout> | undefined;
+	// One request at a time: a refresh that arrives meanwhile runs once, after it, for the current season.
+	let inFlight = false;
+	let reloadPending = false;
+	let alive = true;
 	const RETRY_AFTER_MS = 15000;
 
 	// Only a question the page can actually answer gets a link; other reasons have no control above.
@@ -51,7 +57,12 @@
 	const visible = $derived(collapsed ? focusedEpisodes(episodes) : episodes);
 
 	async function load(currentPrefix: string) {
-		const request = ++generation;
+		if (inFlight) {
+			reloadPending = true;
+			return;
+		}
+		inFlight = true;
+		const request = generation;
 		clearTimeout(retryTimer);
 		try {
 			const encoded = currentPrefix
@@ -68,9 +79,15 @@
 		} catch {
 			// Keep the last list and try again; a finished season's status no longer refreshes on its
 			// own, so nothing else would. Say so only when there is nothing to show.
-			if (request === generation) {
+			if (request === generation && alive) {
 				loadFailed = episodes.length === 0;
-				retryTimer = setTimeout(() => void load(currentPrefix), RETRY_AFTER_MS);
+				retryTimer = setTimeout(() => void load(prefix), RETRY_AFTER_MS);
+			}
+		} finally {
+			inFlight = false;
+			if (reloadPending && alive) {
+				reloadPending = false;
+				void load(prefix);
 			}
 		}
 	}
@@ -79,16 +96,18 @@
 		void refreshKey;
 		const currentPrefix = prefix;
 		if (currentPrefix !== loadedPrefix) {
+			// A request for the previous season must not fill this one's list.
+			generation += 1;
 			loadedPrefix = currentPrefix;
 			episodes = [];
 			expanded = false;
 		}
 		void load(currentPrefix);
-		return () => {
-			// A request still in flight belongs to a page that is gone; it must not schedule a retry.
-			generation += 1;
-			clearTimeout(retryTimer);
-		};
+	});
+
+	onDestroy(() => {
+		alive = false;
+		clearTimeout(retryTimer);
 	});
 </script>
 
