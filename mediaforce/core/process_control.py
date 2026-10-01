@@ -33,6 +33,17 @@ class _ContainmentReportedUnavailableError(ProcessDeadlineEnforcementError):
     pass
 
 
+class ProcessOutputStalledError(subprocess.TimeoutExpired):
+    """The process printed nothing on stdout or stderr for ``timeout`` seconds and was stopped.
+
+    It is a ``subprocess.TimeoutExpired``, so callers that already stop and report a run that
+    took too long handle a silent one the same way; ``output`` and ``stderr`` hold what it printed.
+    """
+
+    def __str__(self) -> str:
+        return f"Command '{self.cmd}' printed nothing for {self.timeout} seconds"
+
+
 _PROCESS_COMMUNICATION_POLL_SECONDS = 0.05
 _PROCESS_REAP_TIMEOUT_SECONDS = 2.0
 _PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS = 8.0
@@ -606,8 +617,11 @@ def _communicate_with_containment_monitor(
         input_text: str | None,
         timeout: float | None,
         monitor: _ContainmentStatusMonitor,
+        idle_timeout: float | None = None,
 ) -> tuple[str, str]:
     started_at = time.monotonic()
+    last_output_at = started_at
+    output_size = 0
     pending_input = input_text
     while True:
         monitor_error = monitor.error() if monitor.failure_detected() else None
@@ -629,10 +643,25 @@ def _communicate_with_containment_monitor(
             monitor_error = monitor.error() if monitor.failure_detected() else None
             if monitor_error is not None:
                 raise monitor_error
-            if timeout is not None and time.monotonic() - started_at >= timeout:
+            now = time.monotonic()
+            if timeout is not None and now - started_at >= timeout:
                 raise subprocess.TimeoutExpired(
                     cmd,
                     timeout,
+                    output=exc.output,
+                    stderr=exc.stderr,
+                ) from exc
+            if idle_timeout is None:
+                continue
+            # A timed-out communicate() reports everything read so far, so growth means new output.
+            current_output_size = len(exc.output or b"") + len(exc.stderr or b"")
+            if current_output_size != output_size:
+                output_size = current_output_size
+                last_output_at = now
+            elif now - last_output_at >= idle_timeout:
+                raise ProcessOutputStalledError(
+                    cmd,
+                    idle_timeout,
                     output=exc.output,
                     stderr=exc.stderr,
                 ) from exc
@@ -743,8 +772,18 @@ def run_command(
         timeout: float | None = None,
         check: bool = False,
         input_text: str | None = None,
+        idle_timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """Run ``cmd``; with ``idle_timeout``, stop it once it prints nothing for that many seconds.
+
+    A silent run raises ``ProcessOutputStalledError``. Watching output needs the managed runner,
+    so a call without a controller gets one of its own.
+    """
     resolved_env = _command_environment(cmd, env)
+    if idle_timeout is not None:
+        if not capture_output:
+            raise ValueError("An idle timeout needs captured output to watch.")
+        process_controller = process_controller or ManagedProcessController()
     if process_controller is None:
         return subprocess.run(
             cmd,
@@ -767,6 +806,7 @@ def run_command(
         timeout=timeout,
         check=check,
         input_text=input_text,
+        idle_timeout=idle_timeout,
     )
 
 
@@ -813,6 +853,7 @@ def _run_managed_command(
         check: bool,
         input_text: str | None,
         containment_mode: str | None = None,
+        idle_timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
 
     process_controller.throw_if_cancelled()
@@ -885,6 +926,7 @@ def _run_managed_command(
             input_text=input_text,
             timeout=timeout,
             monitor=status_monitor,
+            idle_timeout=idle_timeout,
         )
         if not status_monitor.wait(_PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS):
             raise ProcessDeadlineEnforcementError(

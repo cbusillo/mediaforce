@@ -19,6 +19,7 @@ from mediaforce.core.process_control import (
     ProcessCancelledError,
     ProcessDeadlineEnforcementError,
     ProcessDeadlineExpiredError,
+    ProcessOutputStalledError,
     ScheduleWindowClosedError,
     _terminate_process,
     run_command,
@@ -1985,3 +1986,59 @@ class ProcessControlTests(TestCase):
         killpg_mock.assert_not_called()
         self.assertEqual(process.terminate.call_count, 1)
         self.assertEqual(process.kill.call_count, 1)
+
+
+class IdleTimeoutTests(TestCase):
+    """A run watched for silence is stopped once it prints nothing for the idle limit."""
+
+    def test_silent_run_is_stopped_with_what_it_printed(self) -> None:
+        source = "import os, sys, time; print(os.getpid(), flush=True); time.sleep(60)"
+        started_at = time.monotonic()
+
+        with self.assertRaises(ProcessOutputStalledError) as raised:
+            run_command([sys.executable, "-c", source], timeout=60, idle_timeout=0.5)
+
+        self.assertLess(time.monotonic() - started_at, 30)
+        self.assertIsInstance(raised.exception, subprocess.TimeoutExpired)
+        self.assertEqual(raised.exception.timeout, 0.5)
+        child_pid = int(raised.exception.output.decode())
+        self.assertFalse(_pid_is_alive(child_pid))
+
+    def test_steady_output_on_either_stream_keeps_a_run_alive_past_the_idle_limit(self) -> None:
+        for stream in ("stdout", "stderr"):
+            with self.subTest(stream=stream):
+                source = (
+                    "import sys, time\n"
+                    "for index in range(15):\n"
+                    f"    print(index, file=sys.{stream}, flush=True)\n"
+                    "    time.sleep(0.1)\n"
+                )
+
+                result = run_command([sys.executable, "-c", source], timeout=60, idle_timeout=0.5)
+
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(getattr(result, stream).split(), [str(index) for index in range(15)])
+
+    def test_overall_limit_still_stops_a_run_that_keeps_printing(self) -> None:
+        source = "import time\nwhile True:\n    print('working', flush=True)\n    time.sleep(0.1)\n"
+
+        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+            run_command([sys.executable, "-c", source], timeout=1.5, idle_timeout=0.5)
+
+        self.assertNotIsInstance(raised.exception, ProcessOutputStalledError)
+        self.assertEqual(raised.exception.timeout, 1.5)
+
+    def test_cancelling_a_watched_run_still_stops_it(self) -> None:
+        controller = ManagedProcessController()
+        timer = threading.Timer(0.5, controller.cancel)
+        timer.start()
+        try:
+            with self.assertRaises(ProcessCancelledError):
+                run_command(
+                    [sys.executable, "-c", "import time; time.sleep(60)"],
+                    process_controller=controller,
+                    timeout=60,
+                    idle_timeout=30,
+                )
+        finally:
+            timer.cancel()
