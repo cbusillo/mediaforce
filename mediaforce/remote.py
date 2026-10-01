@@ -8,7 +8,8 @@ from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.process_control import ManagedProcessController
-from mediaforce.hosts.controller_mount import controller_mount_lock, is_bonjour_smb_server, same_smb_share
+from mediaforce.hosts.controller_mount import controller_mount_lock, is_bonjour_smb_server, \
+    smb_servers_confirmed_different, smb_source_identity
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host, \
     host_status_targets_current_machine, host_targets_current_machine, normalize_host_media_access, \
@@ -201,22 +202,36 @@ def learn_controller_smb_mounts(config: MediaforceConfig) -> int:
     merged = {m.mount_point: m for m in load_controller_smb_mounts(path)}
     for mount in learned:
         saved = merged.get(mount.mount_point)
-        # Finder may have reconnected the same share under its Bonjour service
-        # name, which no-UI remounts can't reach. Keep the saved name unless it
-        # is the Bonjour one and the new name is an ordinary host name (#612).
-        if (
-                saved is None
-                or not same_smb_share(mount.source, saved.source)
-                or (_is_bonjour_smb_source(saved.source) and not _is_bonjour_smb_source(mount.source))
+        # Finder may reconnect a share under its Bonjour service name, which no-UI remounts can't
+        # reach. Keep a saved ordinary name against that alias unless the two names resolve to
+        # different servers; an ordinary name replaces a saved Bonjour one (#612). The probe still
+        # checks the mounted share is the same one.
+        if saved is not None and _bonjour_alias_of(mount.source, saved.source) and not (
+                _servers_confirmed_different(mount.source, saved.source)
         ):
-            merged[mount.mount_point] = mount
+            continue
+        merged[mount.mount_point] = mount
     save_controller_smb_mounts(path, list(merged.values()))
     return len(learned)
 
 
-def _is_bonjour_smb_source(source: str) -> bool:
-    server = source.removeprefix("//").partition("/")[0].rpartition("@")[2]
-    return is_bonjour_smb_server(server.lower())
+def _bonjour_alias_of(observed_source: str, saved_source: str) -> bool:
+    observed = smb_source_identity(observed_source)
+    saved = smb_source_identity(saved_source)
+    if observed is None or saved is None:
+        return False
+    return (
+        observed[0] == saved[0]
+        and observed[2] == saved[2]
+        and is_bonjour_smb_server(observed[1])
+        and not is_bonjour_smb_server(saved[1])
+    )
+
+
+def _servers_confirmed_different(observed_source: str, saved_source: str) -> bool:
+    observed = smb_source_identity(observed_source)
+    saved = smb_source_identity(saved_source)
+    return observed is not None and saved is not None and smb_servers_confirmed_different(observed[1], saved[1])
 
 
 def _controller_smb_mounts_for_config(config: MediaforceConfig) -> list[ControllerSmbMount]:

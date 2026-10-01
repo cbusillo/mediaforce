@@ -4,6 +4,7 @@ import select
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -145,19 +146,7 @@ class ControllerMountTests(unittest.TestCase):
             self.assertEqual(refused.failure_kind, "mount_identity_mismatch")
 
     def test_bonjour_service_name_resolves_through_its_advertised_host(self) -> None:
-        from mediaforce.hosts import controller_mount
-
-        controller_mount._RESOLVED_ADDRESSES.clear()
-        self.addCleanup(controller_mount._RESOLVED_ADDRESSES.clear)
         lookups: list[str] = []
-        browsed: list[list[str]] = []
-
-        def dns_sd(command: list[str], **_kwargs):
-            browsed.append(command)
-            # dns-sd keeps listening until it is stopped at the timeout.
-            output = b"NAS._smb._tcp.local. can be reached at storage-1.local.:445 (interface 17)\n" \
-                if command[2] == "nas" else None
-            raise subprocess.TimeoutExpired(command, 3, output=output)
 
         def getaddrinfo(host: str, *_args, **_kwargs):
             lookups.append(host)
@@ -165,9 +154,11 @@ class ControllerMountTests(unittest.TestCase):
                 return [(None, None, None, "", ("192.168.1.37", 445))]
             raise OSError("not found")
 
-        with patch("mediaforce.hosts.controller_mount.subprocess.run", side_effect=dns_sd), patch(
-                "mediaforce.hosts.controller_mount.socket.getaddrinfo", side_effect=getaddrinfo,
-        ):
+        with patch(
+                "mediaforce.hosts.controller_mount._bonjour_smb_targets",
+                side_effect=lambda instance, _deadline: frozenset({"storage-1.local"}) if instance == "nas"
+                else frozenset(),
+        ), patch("mediaforce.hosts.controller_mount.socket.getaddrinfo", side_effect=getaddrinfo):
             same = same_smb_share(
                 "//u@nas._smb._tcp.local/media", "//u@nas.shiny/media", resolve_server=resolve_server_addresses,
             )
@@ -177,9 +168,40 @@ class ControllerMountTests(unittest.TestCase):
 
         self.assertTrue(same)
         self.assertFalse(silent)
-        self.assertEqual(browsed[0][1:], ["-L", "nas", "_smb._tcp", "local"])
         self.assertIn("storage-1.local", lookups)
         self.assertNotIn("nas.local", lookups)
+
+    def test_bonjour_lookup_stops_at_first_answer_and_skips_other_ports(self) -> None:
+        from mediaforce.hosts import controller_mount
+
+        # Stands in for dns-sd, which prints answers and then keeps listening.
+        stand_in = [
+            sys.executable, "-u", "-c",
+            "import time\n"
+            "print('NAS._smb._tcp.local. can be reached at other.local.:8445 (interface 4)')\n"
+            "print('NAS._smb._tcp.local. can be reached at storage-1.local.:445 (interface 4)')\n"
+            "time.sleep(30)\n",
+        ]
+        real_popen = subprocess.Popen
+        started = time.monotonic()
+        with patch(
+                "mediaforce.hosts.controller_mount.subprocess.Popen",
+                side_effect=lambda _command, **kwargs: real_popen(stand_in, **kwargs),
+        ):
+            targets = controller_mount._bonjour_smb_targets("nas", time.monotonic() + 10)
+
+        self.assertEqual(targets, frozenset({"storage-1.local"}))
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_link_local_addresses_keep_their_interface(self) -> None:
+        from mediaforce.hosts import controller_mount
+
+        self.assertEqual(controller_mount._endpoint_address(("fe80::1", 445, 0, 4)), "fe80::1%4")
+        self.assertNotEqual(
+            controller_mount._endpoint_address(("fe80::1", 445, 0, 4)),
+            controller_mount._endpoint_address(("fe80::1", 445, 0, 7)),
+        )
+        self.assertEqual(controller_mount._endpoint_address(("192.168.1.37", 445)), "192.168.1.37")
 
     def test_probe_timeout_is_bounded(self) -> None:
         run = Mock(side_effect=subprocess.TimeoutExpired(["sh"], 4))

@@ -2,6 +2,7 @@ import fcntl
 import json
 import os
 import re
+import select
 import socket
 import subprocess
 import threading
@@ -25,10 +26,9 @@ _MOUNT_TIMEOUT_SECONDS = 30
 _SMB_PORT = 445
 _BONJOUR_SMB_SERVICE = "._smb._tcp."
 _RESOLVE_TIMEOUT_SECONDS = 3
-_RESOLVED_ADDRESS_TTL_SECONDS = 300
-_RESOLVED_ADDRESSES: dict[str, tuple[float, frozenset[str]]] = {}
-_RESOLVED_ADDRESSES_LOCK = threading.Lock()
-_BONJOUR_TARGET_PATTERN = re.compile(r"can be reached at (\S+?)\.?:\d+")
+_LOOKUPS_IN_FLIGHT: set[str] = set()
+_LOOKUPS_IN_FLIGHT_LOCK = threading.Lock()
+_BONJOUR_TARGET_PATTERN = re.compile(r"can be reached at (\S+?)\.?:(\d+)")
 _PROBE_SCRIPT = r'''set -u
 mount_output="$(/sbin/mount 2>/dev/null)" || exit 20
 /usr/bin/printf '%s\n' "$mount_output"
@@ -369,19 +369,27 @@ def is_bonjour_smb_server(server: str) -> bool:
     return _bonjour_smb_instance(server) is not None
 
 
+def smb_servers_confirmed_different(first_server: str, second_server: str) -> bool:
+    """True only when both names resolve and share no address; an unresolved name proves nothing."""
+    first = _resolve_server_addresses(first_server)
+    second = _resolve_server_addresses(second_server)
+    return bool(first) and bool(second) and not first & second
+
+
+def smb_source_identity(source: str) -> tuple[str, str, str] | None:
+    """(user, lower-case server, share) of an SMB source, percent-decoded."""
+    return _smb_identity(source)
+
+
 def _resolve_server_addresses(server: str) -> frozenset[str]:
-    now = time.monotonic()
-    with _RESOLVED_ADDRESSES_LOCK:
-        cached = _RESOLVED_ADDRESSES.get(server)
-    if cached is not None and cached[0] > now:
-        return cached[1]
     instance = _bonjour_smb_instance(server)
-    host = _bonjour_smb_target(instance) if instance is not None else server.removeprefix("[").removesuffix("]")
-    addresses = _host_addresses(host) if host else frozenset()
-    if addresses:
-        with _RESOLVED_ADDRESSES_LOCK:
-            _RESOLVED_ADDRESSES[server] = (now + _RESOLVED_ADDRESS_TTL_SECONDS, addresses)
-    return addresses
+    if instance is None:
+        return _host_addresses(server.removeprefix("[").removesuffix("]"))
+    deadline = time.monotonic() + _RESOLVE_TIMEOUT_SECONDS
+    addresses: set[str] = set()
+    for host in _bonjour_smb_targets(instance, deadline):
+        addresses |= _host_addresses(host, deadline)
+    return frozenset(addresses)
 
 
 def _bonjour_smb_instance(server: str) -> str | None:
@@ -391,45 +399,77 @@ def _bonjour_smb_instance(server: str) -> str | None:
     return instance
 
 
-def _bonjour_smb_target(instance: str) -> str | None:
-    """The host a Bonjour SMB service advertises, from its SRV record.
+def _bonjour_smb_targets(instance: str, deadline: float) -> frozenset[str]:
+    """The hosts a Bonjour SMB service advertises on the standard SMB port, from its SRV record.
 
-    `dns-sd -L` keeps listening, so it is stopped at the timeout and its output
-    read; a service that does not answer in time has no target.
+    `dns-sd -L` keeps listening, so it is stopped at the first answer or the deadline. A target
+    on another port is a different SMB service and is left out.
     """
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             ["/usr/bin/dns-sd", "-L", instance, "_smb._tcp", "local"],
-            capture_output=True,
-            timeout=_RESOLVE_TIMEOUT_SECONDS,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
-        output = result.stdout
-    except subprocess.TimeoutExpired as exc:
-        output = exc.stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if not output:
-        return None
-    match = _BONJOUR_TARGET_PATTERN.search(output.decode("utf-8", "replace"))
-    return match.group(1) if match else None
+    except OSError:
+        return frozenset()
+    targets: set[str] = set()
+    try:
+        stdout = process.stdout
+        buffered = b""
+        while stdout is not None and not targets and (remaining := deadline - time.monotonic()) > 0:
+            ready, _, _ = select.select([stdout], [], [], remaining)
+            if not ready:
+                break
+            chunk = os.read(stdout.fileno(), 4096)
+            if not chunk:
+                break
+            buffered += chunk
+            for match in _BONJOUR_TARGET_PATTERN.finditer(buffered.decode("utf-8", "replace")):
+                if int(match.group(2)) == _SMB_PORT:
+                    targets.add(match.group(1))
+    finally:
+        process.kill()
+        process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
+    return frozenset(targets)
 
 
-def _host_addresses(host: str) -> frozenset[str]:
-    addresses: list[frozenset[str]] = []
+def _host_addresses(host: str, deadline: float | None = None) -> frozenset[str]:
+    with _LOOKUPS_IN_FLIGHT_LOCK:
+        # A lookup for this host still stuck from an earlier check means the name counts as
+        # unresolved now, rather than starting another one.
+        if host in _LOOKUPS_IN_FLIGHT:
+            return frozenset()
+        _LOOKUPS_IN_FLIGHT.add(host)
+    found: list[frozenset[str]] = []
 
     def lookup() -> None:
         try:
-            found = socket.getaddrinfo(host, _SMB_PORT, proto=socket.IPPROTO_TCP)
+            infos = socket.getaddrinfo(host, _SMB_PORT, proto=socket.IPPROTO_TCP)
+            found.append(frozenset(_endpoint_address(info[4]) for info in infos))
         except (OSError, UnicodeError):
-            return
-        addresses.append(frozenset(str(address[4][0]) for address in found))
+            pass
+        finally:
+            with _LOOKUPS_IN_FLIGHT_LOCK:
+                _LOOKUPS_IN_FLIGHT.discard(host)
 
-    # getaddrinfo has no timeout of its own; a lookup still running at the
-    # deadline is abandoned and the name counts as unresolved.
+    # getaddrinfo has no timeout of its own; a lookup still running at the deadline is abandoned
+    # and the name counts as unresolved.
     worker = threading.Thread(target=lookup, name="mediaforce-smb-resolve", daemon=True)
     worker.start()
-    worker.join(_RESOLVE_TIMEOUT_SECONDS)
-    return addresses[0] if addresses else frozenset()
+    timeout = _RESOLVE_TIMEOUT_SECONDS if deadline is None else max(deadline - time.monotonic(), 0)
+    worker.join(timeout)
+    return found[0] if found else frozenset()
+
+
+def _endpoint_address(sockaddr: tuple) -> str:
+    # A link-local IPv6 address names a different machine on each interface, so it keeps its scope.
+    address = str(sockaddr[0])
+    if len(sockaddr) == 4 and sockaddr[3] and "%" not in address:
+        return f"{address}%{sockaddr[3]}"
+    return address
 
 
 def _mapping_has_credentials(mount: ControllerSmbMount) -> bool:
@@ -460,4 +500,6 @@ __all__ = [
     "probe_controller_volume",
     "is_bonjour_smb_server",
     "same_smb_share",
+    "smb_servers_confirmed_different",
+    "smb_source_identity",
 ]

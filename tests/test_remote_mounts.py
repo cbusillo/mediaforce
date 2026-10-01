@@ -30,22 +30,26 @@ class RemoteMountRuntimeTests(unittest.TestCase):
             ControllerSmbMount("//cbusillo@nas.shiny/media", Path("/Volumes/media")),
             ControllerSmbMount("//cbusillo@old-nas.shiny/extras", Path("/Volumes/extras")),
             ControllerSmbMount("//cbusillo@nas._smb._tcp.local/staging", Path("/Volumes/staging")),
+            ControllerSmbMount("//cbusillo@nas.shiny/archive", Path("/Volumes/archive")),
         ])
-        config = SimpleNamespace(paths=SimpleNamespace(runtime_settings_path=self.runtime_settings_path))
         addresses = {
             "nas.shiny": frozenset({"192.168.1.37"}),
             "nas._smb._tcp.local": frozenset({"192.168.1.37"}),
             "old-nas.shiny": frozenset({"192.168.1.20"}),
         }
+        config = SimpleNamespace(paths=SimpleNamespace(runtime_settings_path=self.runtime_settings_path))
         mount_output = "\n".join([
             "//cbusillo@nas._smb._tcp.local/media on /Volumes/media (smbfs, nodev, nosuid)",
             "//cbusillo@nas._smb._tcp.local/extras on /Volumes/extras (smbfs, nodev, nosuid)",
             "//cbusillo@nas.shiny/staging on /Volumes/staging (smbfs, nodev, nosuid)",
+            "//cbusillo@silent._smb._tcp.local/archive on /Volumes/archive (smbfs, nodev, nosuid)",
         ])
 
         with patch("mediaforce.remote._controller_smb_mount_output", return_value=mount_output), patch(
                 "mediaforce.remote._controller_required_mount_roots",
-                return_value={Path("/Volumes/media"), Path("/Volumes/extras"), Path("/Volumes/staging")},
+                return_value={
+                    Path("/Volumes/media"), Path("/Volumes/extras"), Path("/Volumes/staging"), Path("/Volumes/archive"),
+                },
         ), patch(
             "mediaforce.hosts.controller_mount._resolve_server_addresses",
             side_effect=lambda server: addresses.get(server, frozenset()),
@@ -54,9 +58,12 @@ class RemoteMountRuntimeTests(unittest.TestCase):
 
         saved = {mount.mount_point: mount.source for mount in load_controller_smb_mounts(path)}
         self.assertEqual(saved[Path("/Volumes/media")], "//cbusillo@nas.shiny/media")
+        # Both names resolve to different servers: the share really moved, so learning takes it.
         self.assertEqual(saved[Path("/Volumes/extras")], "//cbusillo@nas._smb._tcp.local/extras")
         # A saved Bonjour name gives way to an ordinary host name for the same share.
         self.assertEqual(saved[Path("/Volumes/staging")], "//cbusillo@nas.shiny/staging")
+        # A Bonjour name that does not resolve proves nothing, so the saved name stays.
+        self.assertEqual(saved[Path("/Volumes/archive")], "//cbusillo@nas.shiny/archive")
 
     def test_controller_smb_mounts_parse_only_smb_volumes(self) -> None:
         mounts = controller_smb_mounts_from_output(
