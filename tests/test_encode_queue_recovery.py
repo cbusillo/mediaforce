@@ -24409,7 +24409,8 @@ raise SystemExit(0)
         self.assertEqual(payload["scope_activity"]["job"]["target_contract"]["target_size_bytes"], 225_000_000)
 
     def test_calibration_progress_uses_comparable_history_for_eta_range(self) -> None:
-        now = datetime.now(tz=UTC)
+        # Whole-second clock, read by the code under test too, so stored timestamps match exactly.
+        now = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
         policy = {
             "video": {
                 "encoder": "libsvtav1",
@@ -24480,12 +24481,12 @@ raise SystemExit(0)
                 },
             )
             active = load_latest_calibration_job(connection, "tv/show")
-            public = job_runtime.calibration_job_public_payload(connection, self.config, active)
+            with patch.object(job_runtime, "_utc_now", return_value=now):
+                public = job_runtime.calibration_job_public_payload(connection, self.config, active)
 
         estimate = public["progress"]["estimate"]
         self.assertEqual(public["progress"]["liveness"], "reporting")
-        self.assertGreaterEqual(public["progress"]["stage_elapsed_seconds"], 239)
-        self.assertLessEqual(public["progress"]["stage_elapsed_seconds"], 241)
+        self.assertEqual(public["progress"]["stage_elapsed_seconds"], 240)
         self.assertEqual(estimate["kind"], "historical_range")
         self.assertEqual(estimate["sample_size"], 3)
         self.assertGreater(estimate["remaining_seconds_high"], estimate["remaining_seconds_low"])
