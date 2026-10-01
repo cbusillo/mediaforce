@@ -6,6 +6,7 @@ import {
 	evidenceStateView,
 	evidenceWorkReasonView,
 	evidenceWorkStatusView,
+	libraryCheckLabels,
 	operatorRefreshInterval
 } from './operator-work';
 import { operatorStateCopy } from '$lib/operator-copy';
@@ -121,7 +122,7 @@ describe('operator work copy', () => {
 				warnings: [],
 				can_refresh: true
 			}).label
-		).toBe('Refresh suggested');
+		).toBe(libraryCheckLabels.catalogStale);
 		expect(
 			catalogStateView({
 				status: 'failed',
@@ -149,7 +150,9 @@ describe('operator work copy', () => {
 	});
 
 	it('uses prepared, running, and terminal analysis language', () => {
-		expect(evidenceStateView(evidenceFixture('paused')).label).toBe('Prepared');
+		expect(evidenceStateView(evidenceFixture('paused')).label).toBe(
+			libraryCheckLabels.analysisReady
+		);
 		expect(evidenceStateView(evidenceFixture('queued', true)).label).toBe('Analyzing');
 		expect(evidenceStateView(evidenceFixture('completed_with_errors')).label).toBe(
 			'Needs attention'

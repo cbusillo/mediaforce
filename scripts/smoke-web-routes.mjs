@@ -857,6 +857,21 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
             );
           }
         }
+        const lowerBodyText = bodyText.toLowerCase();
+        for (const staleTerm of [
+          "unavailable controls",
+          "system details",
+          "library maintenance",
+          "compression queue",
+          "draining",
+          "no failure attempt was used",
+        ]) {
+          if (lowerBodyText.includes(staleTerm)) {
+            throw new Error(
+              `Activity exposed stale term ${JSON.stringify(staleTerm)}.`,
+            );
+          }
+        }
       }
       if (route === "/ops") {
         await checkActivityQueueFirst(page, label, label === "Activity");

@@ -9,6 +9,7 @@ import { folderRoutePath } from '$lib/folder-display';
 import {
 	hostSchedulePresentation,
 	jobSchedulePresentation,
+	scheduleLabels,
 	workScheduleSummaryCopy,
 	type SchedulePresentation
 } from '$lib/hosts/schedule';
@@ -43,6 +44,7 @@ export type OpsQueueRow = {
 	schedulerTone: ShellTone;
 	scheduleState?: string;
 	detail: string;
+	technicalDetail?: string;
 	action?: OpsActionId;
 	actionScope?: 'global' | 'row';
 };
@@ -140,8 +142,7 @@ export function activitySchedulePresentationCopy(
 		Running: 'Working',
 		Open: 'Ready',
 		'Not accepting': 'Off schedule',
-		'Waiting for full window': 'Draining',
-		'Window too short': 'Draining',
+		'Window too short': scheduleLabels.waitingForLongerWindow,
 		'No schedule state': 'Schedule unavailable'
 	};
 	return {
@@ -403,8 +404,16 @@ function operatorErrorSummary(value: unknown): string {
 	return operatorErrorCopy(detail);
 }
 
+// Speed and frame rate stay out of the row; the row's hover detail keeps them.
+const technicalTelemetryPart = /^\d+(?:\.\d+)?(?:x| fps)$/i;
+
 function compactTelemetryCopy(value: string): string {
-	return value.replace(/^\d+(?:\.\d+)?%\s*·\s*/, '').replace(/Est\. ETA\s*/i, 'ETA ');
+	return value
+		.replace(/^\d+(?:\.\d+)?%\s*·\s*/, '')
+		.replace(/Est\. ETA\s*/i, 'ETA ')
+		.split(' · ')
+		.filter((part) => !technicalTelemetryPart.test(part.trim()))
+		.join(' · ');
 }
 
 function controllerStorageWaitingJobs(
@@ -696,7 +705,7 @@ export function buildEncodeRows(
 			host: encodeHostCopy(job),
 			phase: activePartCount
 				? `${activePartCount} active compression ${activePartCount === 1 ? 'task' : 'tasks'}`
-				: 'compression queue',
+				: '',
 			progress: encodeJobProgress(job),
 			scheduler: schedule.label,
 			schedulerDetail: schedule.detail,
@@ -713,6 +722,7 @@ export function buildEncodeRows(
 						.filter(Boolean)
 						.join(' · ')
 				: encodeJobDetail(job),
+			technicalDetail: compactText(job.telemetry_summary) || undefined,
 			action: canRetryPrefix ? 'retry-encode-prefix' : undefined,
 			actionScope: canRetryPrefix ? 'row' : undefined
 		};
@@ -735,13 +745,7 @@ function buildCalibrationLaneRows(
 			status: options.historical ? 'History' : reviewUnavailable ? 'Waiting' : statusCopy(status),
 			prefix: calibrationPrefix(job),
 			host: calibrationHostCopy(job),
-			phase: options.historical
-				? laneName === 'sample'
-					? 'sample history'
-					: 'comparison clip history'
-				: laneName === 'sample'
-					? 'sample'
-					: 'comparison clips',
+			phase: '',
 			progress: waitingForReview ? 'Complete' : calibrationProgressCopy(job, status),
 			scheduler: waitingForReview
 				? reviewUnavailable
@@ -913,7 +917,7 @@ export function buildOpsBlockers(
 				blockers.push({
 					key: `needs-attention:${job.job_id}`,
 					tone: 'wait',
-					title: `${encodeJobLabel(job)} needs review`,
+					title: `${encodeJobLabel(job)} is waiting for you to take a look`,
 					detail: encodeUnfinishedBreakdownCopy(job) || operatorErrorCopy(encodeJobRawDetail(job)),
 					href: job.prefix ? folderRoutePath(job.prefix) : undefined,
 					linkLabel: job.prefix ? 'Review item' : undefined
@@ -923,7 +927,7 @@ export function buildOpsBlockers(
 			blockers.push({
 				key: 'needs-attention',
 				tone: 'wait',
-				title: `${encodeCountLabel(attentionJobs, attentionCount)} need review`,
+				title: `${encodeCountLabel(attentionJobs, attentionCount)} ${attentionCount === 1 ? 'is' : 'are'} waiting for you to take a look`,
 				detail: 'Nothing was replaced. Open the affected folders to see what each one needs.'
 			});
 		}
@@ -1126,7 +1130,7 @@ export function buildOpsReadinessSummary(
 	if (drainingJobs.length > 0 && runningCount === 0) {
 		return {
 			tone: 'wait',
-			title: 'Computers are draining',
+			title: scheduleLabels.waitingForLongerWindow,
 			detail:
 				'No queued task safely fits the time left. Work resumes automatically in the next compatible full window.',
 			metricLabel: 'Waiting',
