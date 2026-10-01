@@ -5,6 +5,7 @@
 		alignedScrollOffset,
 		boundedReviewDuration,
 		comparisonKeyboardAction,
+		comparisonLoopStatus,
 		comparisonSideMuted,
 		followerCorrectionTime,
 		followerPlaybackRate,
@@ -14,6 +15,7 @@
 		mediaElementReady,
 		mediaSourceMatches,
 		mediaStartFailureMessage,
+		nextLoopMoment,
 		normalizedScrollPosition,
 		playbackBoundaryReached,
 		reviewPairHasSound,
@@ -78,6 +80,8 @@
 	let playing = $state(false);
 	let playbackRequested = $state(false);
 	let playbackCompleted = $state(false);
+	let loopActive = $state(false);
+	let autoStartPending = $state(false);
 	let preparing = $state(false);
 	let warming = $state(false);
 	let scrubbing = $state(false);
@@ -114,6 +118,7 @@
 	const frameAspect = $derived(frameAspectRatio(sourceFrameWidth, sourceFrameHeight));
 	const workspaceTitle = $derived(hasSound ? 'Compare picture and sound' : 'Compare picture');
 	const timeText = $derived(`${formatPlaybackTime(currentTime)} / ${formatPlaybackTime(duration)}`);
+	const loopStatus = $derived(comparisonLoopStatus(selectedMoment, pairs.length, loopActive));
 	const workspaceStyle = $derived(`--frame-aspect:${frameAspect}`);
 	const sourceFrameStyle = $derived(
 		`--media-width:${sourceFrameWidth}px;--media-height:${sourceFrameHeight}px`
@@ -156,6 +161,12 @@
 		});
 	});
 
+	$effect(() => {
+		if (!autoStartPending || !sourceReady || !previewReady || sourceError || previewError) return;
+		autoStartPending = false;
+		untrack(() => void startPlayback());
+	});
+
 	onMount(() => {
 		const handleFullscreenChange = () => {
 			if (nativeFullscreen && document.fullscreenElement !== workspaceElement) finishClose();
@@ -169,7 +180,9 @@
 	});
 
 	function chooseMoment(index: number) {
+		const continueLoop = loopActive && (playbackRequested || autoStartPending);
 		pauseBoth();
+		autoStartPending = continueLoop;
 		onMomentChange(index);
 	}
 
@@ -208,11 +221,24 @@
 				.then(() => (nativeFullscreen = true))
 				.catch(() => (nativeFullscreen = false));
 		}
+		const resumePlayback = playbackRequested;
+		pauseBoth();
 		void tick().then(() => {
+			sourceReady = false;
+			previewReady = false;
 			sourceVideo?.load();
 			previewVideo?.load();
 			closeButton?.focus();
+			// Opening full screen is the one gesture that starts every moment on repeat.
+			if (resumePlayback || !prefersReducedMotion()) {
+				loopActive = true;
+				autoStartPending = true;
+			}
 		});
+	}
+
+	function prefersReducedMotion(): boolean {
+		return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 	}
 
 	function jumpToDecision() {
@@ -220,7 +246,7 @@
 		const target = document.getElementById(decisionTargetId);
 		if (!target) return;
 		target.scrollIntoView({
-			behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+			behavior: prefersReducedMotion() ? 'auto' : 'smooth',
 			block: 'start'
 		});
 		const focusTarget = target.querySelector<HTMLElement>(
@@ -238,7 +264,7 @@
 
 	function finishClose() {
 		if (!isOpen) return;
-		pauseBoth();
+		stopLoop();
 		isOpen = false;
 		nativeFullscreen = false;
 		document.body.style.overflow = previousBodyOverflow;
@@ -251,10 +277,11 @@
 	async function togglePlayback() {
 		if (!sourceVideo || !previewVideo) return;
 		playbackError = '';
-		if (playbackRequested || playing || preparing) {
-			pauseBoth();
+		if (playbackRequested || playing || preparing || autoStartPending) {
+			stopLoop();
 			return;
 		}
+		loopActive = true;
 		await startPlayback();
 	}
 
@@ -292,6 +319,12 @@
 			schedulePlaybackBoundary(sequence);
 		} catch (error) {
 			if (sequence !== playbackSequence) return;
+			loopActive = false;
+			if (error instanceof DOMException && error.name === 'NotAllowedError') {
+				// The browser refused to start on its own; Play starts it.
+				pauseBoth();
+				return;
+			}
 			const failedSide =
 				error instanceof MediaStartError
 					? error.side
@@ -368,6 +401,22 @@
 		hardCorrectionAllowedAt = 0;
 	}
 
+	function stopLoop() {
+		loopActive = false;
+		autoStartPending = false;
+		pauseBoth();
+	}
+
+	function finishMoment() {
+		pauseBoth();
+		playbackCompleted = true;
+		currentTime = duration;
+		if (!loopActive) return;
+		autoStartPending = true;
+		const next = nextLoopMoment(selectedMoment, pairs.length);
+		if (next !== selectedMoment) onMomentChange(next);
+	}
+
 	function clearPlaybackBoundary() {
 		if (playbackBoundaryTimer == null) return;
 		window.clearTimeout(playbackBoundaryTimer);
@@ -392,9 +441,7 @@
 					schedulePlaybackBoundary(sequence);
 					return;
 				}
-				pauseBoth();
-				playbackCompleted = true;
-				currentTime = duration;
+				finishMoment();
 			},
 			Math.max(remainingSeconds * 1000, 100)
 		);
@@ -464,9 +511,7 @@
 		if (!scrubbing)
 			currentTime = Math.min(previewVideo.currentTime, duration || previewVideo.currentTime);
 		if (playbackRequested && playbackBoundaryReached(previewVideo.currentTime, duration)) {
-			pauseBoth();
-			playbackCompleted = true;
-			currentTime = duration;
+			finishMoment();
 			return;
 		}
 		if (
@@ -507,6 +552,8 @@
 	}
 
 	function handleMediaError(side: ComparisonSide) {
+		loopActive = false;
+		autoStartPending = false;
 		if (side === 'original') {
 			sourceReady = false;
 			sourceError = true;
@@ -547,9 +594,8 @@
 	}
 
 	function handleEnded() {
-		pauseBoth();
-		playbackCompleted = true;
-		currentTime = duration;
+		if (!playbackRequested && playbackCompleted) return;
+		finishMoment();
 	}
 
 	function syncPaneScroll(source: HTMLElement, target: HTMLElement | null) {
@@ -864,14 +910,16 @@
 						class="play-control"
 						type="button"
 						onclick={togglePlayback}
-						disabled={!sourceReady || !previewReady || sourceError || previewError}
+						disabled={sourceError ||
+							previewError ||
+							(!autoStartPending && (!sourceReady || !previewReady))}
 					>
 						{sourceError || previewError
 							? 'Unavailable'
-							: !sourceReady || !previewReady
-								? 'Loading…'
-								: playbackRequested
-									? 'Pause'
+							: playbackRequested || autoStartPending
+								? 'Pause'
+								: !sourceReady || !previewReady
+									? 'Loading…'
 									: 'Play'}
 					</button>
 					{#if preparing && playbackRequested}
@@ -914,6 +962,7 @@
 				{:else}
 					<p class="picture-only-note">These clips show picture only.</p>
 				{/if}
+				<p class="loop-status" aria-live="polite">{loopStatus}</p>
 				{#if playbackError}<p class="playback-error" role="alert">{playbackError}</p>{/if}
 			</footer>
 		</div>
@@ -1282,6 +1331,13 @@
 		color: #aeb7b3;
 		font-size: 12px;
 		padding-inline: 5px;
+	}
+
+	.loop-status {
+		color: #c7d0cc;
+		font-size: 12px;
+		grid-column: 1 / -1;
+		margin: 0;
 	}
 
 	.picture-only-note,
