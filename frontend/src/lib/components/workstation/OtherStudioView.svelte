@@ -338,7 +338,7 @@
 			});
 			if (!response.ok)
 				throw new Error(response.message || 'The sample approval could not be saved.');
-			return approvalStartOutcome(response.start_encode, queuedMessage(approvalStartFileCount));
+			return approvalStartOutcome(response.start_encode, queuedMessage, approvalStartFileCount);
 		});
 	}
 

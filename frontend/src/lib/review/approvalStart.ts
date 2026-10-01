@@ -1,8 +1,10 @@
-/** What the approval request reports about the encode it was asked to start. */
+/** What the approval request reports about the encoding job it was asked to start. */
 export type ApprovalStartResponse = {
 	ok?: boolean;
 	message?: string;
 	already_active?: boolean;
+	queued_count?: number;
+	left_out_count?: number;
 } | null;
 
 export type ApprovalStartOutcome = {
@@ -24,12 +26,13 @@ export function approvalStartDetail(what: string, fileCount: number): string {
 }
 
 /**
- * The approval is saved before the encode is queued, so a queue failure is reported as
+ * The approval is saved before the encoding job is queued, so a queue failure is reported as
  * needing attention beside the saved approval; the approved page then offers the retry.
  */
 export function approvalStartOutcome(
 	start: ApprovalStartResponse | undefined,
-	startedMessage: string
+	queuedMessage: (queuedCount: number) => string,
+	expectedCount: number
 ): ApprovalStartOutcome {
 	if (!start || start.ok !== true) {
 		return {
@@ -42,5 +45,8 @@ export function approvalStartOutcome(
 	if (start.already_active) {
 		return { message: 'Your approval is saved. This work was already waiting to compress.' };
 	}
-	return { message: startedMessage };
+	// The server names the files it left out and why; repeat its words rather than a count.
+	if ((start.left_out_count ?? 0) > 0 && start.message) return { message: start.message };
+	const queued = start.queued_count ?? 0;
+	return { message: queuedMessage(queued > 0 ? queued : expectedCount) };
 }
