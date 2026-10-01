@@ -14,7 +14,7 @@ from mediaforce.library.background_work import list_evidence_backlog, load_backg
     summarize_evidence_inventory
 from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EVIDENCE_QUEUE_ACTIVE_STATUSES, \
     evidence_queue_summary, runnable_evidence_work_count
-from mediaforce.library.evidence_worker import run_evidence_queue_until_blocked
+from mediaforce.library.evidence_worker import EvidenceWorkerDeps, run_evidence_queue_until_blocked
 from mediaforce.library.metadata_sync import metadata_configuration_status
 
 LOGGER = logging.getLogger(__name__)
@@ -24,8 +24,9 @@ TERMINAL_EVIDENCE_QUEUE_STATUSES = ("completed", "completed_with_errors", "cance
 
 
 class BoundedEvidenceRunner:
-    def __init__(self, config_path: Path) -> None:
+    def __init__(self, config_path: Path, *, deps: EvidenceWorkerDeps | None = None) -> None:
         self._config_path = config_path
+        self._deps = deps
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
@@ -69,6 +70,7 @@ class BoundedEvidenceRunner:
         try:
             run_evidence_queue_until_blocked(
                 config_path=self._config_path,
+                deps=self._deps,
                 max_work_items=max_work_items,
             )
         except Exception:

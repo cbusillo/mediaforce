@@ -72,6 +72,7 @@ from mediaforce.execution import (
     search_quality_for_source,
     validate_manifest_items,
 )
+from mediaforce.library.evidence_worker import default_evidence_worker_deps
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state, \
     set_background_work_paused
@@ -544,7 +545,10 @@ def create_app(
     advisor_routing = advisor_routing_from_config(config)
     cleanup_lock = threading.Lock()
     shutdown_event = threading.Event()
-    evidence_runner = BoundedEvidenceRunner(config.paths.config_path)
+    evidence_runner = BoundedEvidenceRunner(
+        config.paths.config_path,
+        deps=replace(default_evidence_worker_deps(), evidence_host_rows=_evidence_host_rows),
+    )
     review_dir = config.paths.review_dir
 
     @asynccontextmanager
@@ -3061,6 +3065,12 @@ def _host_runtime_rows(
         default_host_schedule_profile=DEFAULT_HOST_SCHEDULE_PROFILE,
         now=now,
     )
+
+
+def _evidence_host_rows(config: MediaforceConfig) -> list[dict[str, Any]]:
+    """Encode computers as the encode queue sees them, so measuring follows the same schedules."""
+    with open_db(config.paths.db_path) as connection:
+        return _host_runtime_rows(connection, config)
 
 
 def _host_config_for_key(config: MediaforceConfig, host_key: str) -> dict[str, Any]:
