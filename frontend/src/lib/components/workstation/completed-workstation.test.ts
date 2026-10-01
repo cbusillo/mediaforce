@@ -12,6 +12,7 @@ import {
 	completedHistoryLabel,
 	completedHistorySearchText,
 	completedStateOptions,
+	finishedCopy,
 	folderCanBeSelected
 } from './completed-workstation';
 
@@ -74,8 +75,8 @@ describe('Completed workstation mapping', () => {
 		expect(tiles).toMatchObject([
 			{ label: 'Finished folders', tone: 'ready' },
 			{ label: 'Backups to delete', tone: 'wait' },
-			{ label: 'Space to reclaim', tone: 'ready' },
-			{ label: 'Review needed', value: '1 / 1', tone: 'fail' },
+			{ label: finishedCopy.spaceToFree, tone: 'ready' },
+			{ label: finishedCopy.needsLook, value: '1 / 1', tone: 'fail' },
 			{ label: 'Cleanup folder', tone: 'ready' }
 		]);
 	});
