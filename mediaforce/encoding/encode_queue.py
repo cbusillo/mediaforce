@@ -396,6 +396,24 @@ def list_child_encode_jobs(connection: DBClient, parent_job_id: str) -> list[dic
     return [_hydrate_job(row) for row in rows]
 
 
+def list_child_encode_jobs_for_parents(
+        connection: DBClient,
+        parent_job_ids: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Each parent's queue parts, oldest first, read in one query."""
+    children: dict[str, list[dict[str, Any]]] = {job_id: [] for job_id in parent_job_ids}
+    if not parent_job_ids:
+        return children
+    rows = connection.execute(
+        _encode_job_select()
+        .where(encode_jobs.c.parent_job_id.in_(parent_job_ids))
+        .order_by(encode_jobs.c.created_at.asc(), _rowid_column().asc())
+    ).mappings().fetchall()
+    for row in rows:
+        children[str(row["parent_job_id"])].append(_hydrate_job(row))
+    return children
+
+
 def summarize_encode_queue(
         connection: DBClient,
         *,

@@ -1050,8 +1050,21 @@ def encode_job_manifest_totals(
         *,
         manifest_items_cache: dict[Path, list[dict[str, Any]] | None] | None = None,
 ) -> dict[str, Any]:
+    manifest_path = Path(str(job.get("manifest_path") or "")).expanduser()
     fallback_item_count = int_value(job.get("item_count"))
-    manifest_items = _job_manifest_items(job, manifest_items_cache)
+    if manifest_items_cache is not None and manifest_path in manifest_items_cache:
+        manifest_items = manifest_items_cache[manifest_path]
+    else:
+        manifest_items = None
+        if manifest_path.exists():
+            try:
+                payload = json.loads(manifest_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                pass
+            else:
+                manifest_items = [object_dict(item) for item in object_list(payload.get("items"))]
+        if manifest_items_cache is not None:
+            manifest_items_cache[manifest_path] = manifest_items
     if manifest_items is None:
         return {
             "total_item_count": fallback_item_count,
@@ -1065,42 +1078,6 @@ def encode_job_manifest_totals(
         "total_duration_seconds": sum(float_value(item.get("duration_seconds")) for item in items),
         "total_source_size_bytes": sum(int_value(item.get("source_size_bytes")) for item in items),
     }
-
-
-def encode_job_rel_paths(
-        job: Mapping[str, Any],
-        *,
-        manifest_items_cache: dict[Path, list[dict[str, Any]] | None] | None = None,
-) -> list[str]:
-    """The library paths of the files a job encodes, read from its manifest."""
-    manifest_items = _job_manifest_items(job, manifest_items_cache)
-    if manifest_items is None:
-        return []
-    rel_paths = (
-        str(manifest_items[index].get("rel_path") or "").strip()
-        for index in _manifest_indexes_for_job(dict(job), manifest_items)
-    )
-    return [rel_path for rel_path in rel_paths if rel_path]
-
-
-def _job_manifest_items(
-        job: Mapping[str, Any],
-        manifest_items_cache: dict[Path, list[dict[str, Any]] | None] | None,
-) -> list[dict[str, Any]] | None:
-    manifest_path = Path(str(job.get("manifest_path") or "")).expanduser()
-    if manifest_items_cache is not None and manifest_path in manifest_items_cache:
-        return manifest_items_cache[manifest_path]
-    manifest_items = None
-    if manifest_path.exists():
-        try:
-            payload = json.loads(manifest_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            pass
-        else:
-            manifest_items = [object_dict(item) for item in object_list(payload.get("items"))]
-    if manifest_items_cache is not None:
-        manifest_items_cache[manifest_path] = manifest_items
-    return manifest_items
 
 
 def _manifest_indexes_for_job(job: dict[str, Any], manifest_items: list[dict[str, Any]]) -> list[int]:

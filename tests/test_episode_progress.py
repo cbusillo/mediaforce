@@ -159,7 +159,7 @@ class SeasonEpisodeProgressTests(unittest.TestCase):
         self.assertEqual(_stages(episodes), {"Episode 01.mkv": "checking", "Episode 02.mkv": "needs_you"})
 
     def test_a_checked_file_waiting_on_the_owner_needs_them(self) -> None:
-        held, failed, remade = _item(1, "ready_to_validate"), _item(2, "ready_to_validate"), _item(3, "ready_to_validate")
+        held, failed, remade = (_item(number, "ready_to_validate") for number in (1, 2, 3))
         runs = {
             held.rel_path: _run("completed"),
             failed.rel_path: _run("completed"),
