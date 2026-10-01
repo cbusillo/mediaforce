@@ -30,6 +30,7 @@
 	const DECODER_WARMUP_MS = 350;
 	const MEDIA_PLAYING_TIMEOUT_MS = 1200;
 	const PLAYBACK_BOUNDARY_TOLERANCE_SECONDS = 0.15;
+	const OUTSIDE_PAUSE_MESSAGE = 'Playback paused. Press Play to continue.';
 
 	let {
 		pairs,
@@ -313,6 +314,12 @@
 			if (sequence !== playbackSequence || !playbackRequested) {
 				sourceVideo.pause();
 				previewVideo.pause();
+				return;
+			}
+			if (sourceVideo.paused || previewVideo.paused) {
+				// Something outside the page paused a clip while it was warming up.
+				stopLoop();
+				playbackError = OUTSIDE_PAUSE_MESSAGE;
 				return;
 			}
 			playing = true;
@@ -607,7 +614,7 @@
 		)
 			return;
 		stopLoop();
-		playbackError = 'Playback paused. Press Play to continue.';
+		playbackError = OUTSIDE_PAUSE_MESSAGE;
 	}
 
 	function handleEnded() {
