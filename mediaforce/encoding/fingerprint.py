@@ -8,12 +8,15 @@ from pathlib import Path
 import re
 import signal
 import subprocess
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.evidence import build_evidence_envelope, evidence_staleness, stable_policy_hash
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+
+if TYPE_CHECKING:
+    from mediaforce.encoding.remote_media import RemoteMediaCommands
 
 MEDIA_FINGERPRINT_SCHEMA_VERSION = 1
 MEDIA_FINGERPRINT_EVIDENCE_KIND = "media_fingerprint"
@@ -69,6 +72,7 @@ def analyze_media_fingerprint(
         timeout_seconds: float = 60.0,
         sample_fps: float = DEFAULT_FINGERPRINT_SAMPLE_FPS,
         process_controller: ManagedProcessController | None = None,
+        command_runner: RemoteMediaCommands | None = None,
 ) -> dict[str, Any]:
     stream = object_dict(video_stream)
     audio_probe = audio_probe_summary(audio_streams or [])
@@ -78,7 +82,7 @@ def analyze_media_fingerprint(
             decision=_unknown_decision(0.0, "No video stream was available."),
         )
 
-    ffmpeg_name = ffmpeg_binary()
+    ffmpeg_name = "ffmpeg" if command_runner is not None else ffmpeg_binary()
     starts = _sample_starts(duration_seconds, range_count)
     frames_per_range = max(1, max_frames // max(1, len(starts)))
     ranges: list[dict[str, Any]] = []
@@ -93,6 +97,7 @@ def analyze_media_fingerprint(
             sample_fps=sample_fps,
             timeout_seconds=timeout_seconds,
             process_controller=process_controller,
+            command_runner=command_runner,
         )
         edge_result = _run_edge_range(
             path,
@@ -102,6 +107,7 @@ def analyze_media_fingerprint(
             sample_fps=sample_fps,
             timeout_seconds=timeout_seconds,
             process_controller=process_controller,
+            command_runner=command_runner,
         )
         signal_frames = parse_signalstats_metadata(signal_result.get("output", ""))
         edge_frames = parse_signalstats_metadata(edge_result.get("output", ""))
@@ -115,6 +121,7 @@ def analyze_media_fingerprint(
                 duration_seconds=audio_duration,
                 timeout_seconds=timeout_seconds,
                 process_controller=process_controller,
+                command_runner=command_runner,
             )
             audio = {
                 "status": audio_result["status"],
@@ -156,7 +163,11 @@ def analyze_media_fingerprint(
         "tool": {
             "name": MEDIA_FINGERPRINT_TOOL_NAME,
             "version": MEDIA_FINGERPRINT_TOOL_VERSION,
-            "ffmpeg_version": _ffmpeg_version(ffmpeg_name),
+            **(
+                command_runner.tool_lineage()
+                if command_runner is not None
+                else {"ffmpeg_version": _ffmpeg_version(ffmpeg_name)}
+            ),
         },
     }
     return _summary_payload(analysis=analysis, decision=classify_media_fingerprint(analysis))
@@ -357,9 +368,7 @@ def media_fingerprint_staleness(
 ) -> dict[str, Any]:
     active_tool_version = tool_version
     if active_tool_version is None:
-        active_tool_version = (
-            f"{MEDIA_FINGERPRINT_TOOL_VERSION}|{_ffmpeg_version(ffmpeg_binary())}"
-        )
+        active_tool_version = _current_tool_version_for(envelope)
     return evidence_staleness(
         envelope,
         sources=[{"source_id": source_id, "fingerprint": source_fingerprint}],
@@ -367,6 +376,20 @@ def media_fingerprint_staleness(
         tool_name=MEDIA_FINGERPRINT_TOOL_NAME,
         tool_version=active_tool_version,
     )
+
+
+def _current_tool_version_for(envelope: Mapping[str, Any]) -> str:
+    """The analyzer version that keeps this evidence current, whichever computer's ffmpeg measured it.
+
+    The ffmpeg build is lineage, not identity: encode computers and the controller run different builds,
+    so comparing it with this computer's ffmpeg would call every result from another computer stale.
+    A new analyzer version still makes old evidence stale.
+    """
+    recorded = str(object_dict(object_dict(envelope.get("inputs")).get("tool")).get("version") or "")
+    recorded_analyzer_version = recorded.partition("|")[0]
+    if recorded_analyzer_version == MEDIA_FINGERPRINT_TOOL_VERSION:
+        return recorded
+    return MEDIA_FINGERPRINT_TOOL_VERSION
 
 
 def _run_signalstats_range(
@@ -378,6 +401,7 @@ def _run_signalstats_range(
         sample_fps: float,
         timeout_seconds: float,
         process_controller: ManagedProcessController | None,
+        command_runner: RemoteMediaCommands | None,
 ) -> dict[str, str]:
     filtergraph = (
         f"fps={sample_fps:.3f},scale=320:-2:flags=bicubic,format=yuv420p,"
@@ -391,6 +415,7 @@ def _run_signalstats_range(
         filtergraph=filtergraph,
         timeout_seconds=timeout_seconds,
         process_controller=process_controller,
+        command_runner=command_runner,
     )
 
 
@@ -403,6 +428,7 @@ def _run_edge_range(
         sample_fps: float,
         timeout_seconds: float,
         process_controller: ManagedProcessController | None,
+        command_runner: RemoteMediaCommands | None,
 ) -> dict[str, str]:
     filtergraph = (
         f"fps={sample_fps:.3f},scale=320:-2:flags=bicubic,format=gray,"
@@ -416,6 +442,7 @@ def _run_edge_range(
         filtergraph=filtergraph,
         timeout_seconds=timeout_seconds,
         process_controller=process_controller,
+        command_runner=command_runner,
     )
 
 
@@ -428,6 +455,7 @@ def _run_video_filter_range(
         filtergraph: str,
         timeout_seconds: float,
         process_controller: ManagedProcessController | None,
+        command_runner: RemoteMediaCommands | None,
 ) -> dict[str, str]:
     command = [
         ffmpeg_name,
@@ -452,7 +480,12 @@ def _run_video_filter_range(
         "null",
         "-",
     ]
-    return _run_bounded_media_command(command, timeout_seconds=timeout_seconds, process_controller=process_controller)
+    return _run_bounded_media_command(
+        command,
+        timeout_seconds=timeout_seconds,
+        process_controller=process_controller,
+        command_runner=command_runner,
+    )
 
 
 def _run_audio_range(
@@ -463,6 +496,7 @@ def _run_audio_range(
         duration_seconds: float,
         timeout_seconds: float,
         process_controller: ManagedProcessController | None,
+        command_runner: RemoteMediaCommands | None,
 ) -> dict[str, str]:
     command = [
         ffmpeg_name,
@@ -487,7 +521,12 @@ def _run_audio_range(
         "null",
         "-",
     ]
-    return _run_bounded_media_command(command, timeout_seconds=timeout_seconds, process_controller=process_controller)
+    return _run_bounded_media_command(
+        command,
+        timeout_seconds=timeout_seconds,
+        process_controller=process_controller,
+        command_runner=command_runner,
+    )
 
 
 def _run_bounded_media_command(
@@ -495,9 +534,17 @@ def _run_bounded_media_command(
         *,
         timeout_seconds: float,
         process_controller: ManagedProcessController | None,
+        command_runner: RemoteMediaCommands | None = None,
 ) -> dict[str, str]:
     if process_controller is not None:
         process_controller.throw_if_cancelled()
+    if command_runner is not None:
+        return _run_remote_media_command(
+            command_runner,
+            command,
+            timeout_seconds=timeout_seconds,
+            process_controller=process_controller,
+        )
     try:
         process = subprocess.Popen(
             command,
@@ -528,9 +575,39 @@ def _run_bounded_media_command(
 
     if process_controller is not None and process_controller.cancelled:
         raise ProcessCancelledError("Operation was cancelled.")
-    status = "measured" if process.returncode == 0 else "failed"
-    failure = "" if status == "measured" else f"ffmpeg exited with code {process.returncode}."
+    return _media_command_result(process.returncode, stdout, stderr)
+
+
+def _run_remote_media_command(
+        command_runner: RemoteMediaCommands,
+        command: list[str],
+        *,
+        timeout_seconds: float,
+        process_controller: ManagedProcessController | None,
+) -> dict[str, str]:
+    try:
+        result = command_runner.run(command, timeout_seconds=timeout_seconds, process_controller=process_controller)
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "timeout",
+            "output": f"{_text(exc.stdout)}\n{_text(exc.stderr)}",
+            "failure_reason": f"Timed out after {timeout_seconds:g} seconds.",
+        }
+    except OSError as exc:
+        return {"status": "failed", "output": "", "failure_reason": str(exc)}
+    return _media_command_result(result.returncode, result.stdout, result.stderr)
+
+
+def _media_command_result(returncode: int, stdout: str | None, stderr: str | None) -> dict[str, str]:
+    status = "measured" if returncode == 0 else "failed"
+    failure = "" if status == "measured" else f"ffmpeg exited with code {returncode}."
     return {"status": status, "output": f"{stdout or ''}\n{stderr or ''}", "failure_reason": failure}
+
+
+def _text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:

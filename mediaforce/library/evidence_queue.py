@@ -29,7 +29,7 @@ EVIDENCE_WORK_PRIORITY_OPERATOR = 50
 EVIDENCE_WORK_PRIORITY_REPRESENTATIVE = 70
 
 EVIDENCE_QUEUE_ACTIVE_STATUSES = ("queued", "running", "paused", "cancel_requested")
-EVIDENCE_WORK_CLAIMABLE_STATUSES = ("queued", "retry_wait", "waiting_source")
+EVIDENCE_WORK_CLAIMABLE_STATUSES = ("queued", "retry_wait", "waiting_source", "waiting_host")
 EVIDENCE_WORK_ACTIVE_STATUSES = (*EVIDENCE_WORK_CLAIMABLE_STATUSES, "running")
 EVIDENCE_WORK_TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 EvidenceHeartbeatStatus = Literal["active", "cancel_requested", "claim_lost"]
@@ -340,7 +340,7 @@ def queue_decision_evidence_work(
                 str(row.get("state") or "") == EVIDENCE_STATE_ANALYSIS_REQUIRED
                 and current_source_fingerprint
                 and str(row.get("work_source_fingerprint") or "") == current_source_fingerprint
-                and row_status in {"retry_wait", "waiting_source", "failed"}
+                and row_status in {"retry_wait", "waiting_source", "waiting_host", "failed"}
             )
             if preserve_retry_state and row_status == "failed":
                 connection.execute(

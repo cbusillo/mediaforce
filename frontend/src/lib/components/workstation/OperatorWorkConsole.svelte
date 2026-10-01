@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { postJson } from '$lib/api/client';
+	import { operatorStateCopy } from '$lib/operator-copy';
 	import type {
 		OperatorEvidenceBacklogRow,
 		OperatorWorkActionResult,
@@ -451,6 +452,7 @@
 							<option value="running">Running</option>
 							<option value="retry_wait">Retry scheduled</option>
 							<option value="waiting_source">Source unavailable</option>
+							<option value="waiting_host">{operatorStateCopy('waiting_host')}</option>
 							<option value="failed">Failed</option>
 							<option value="cancelled">Stopped</option>
 						</select>

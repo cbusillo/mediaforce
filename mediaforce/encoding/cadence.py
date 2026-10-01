@@ -6,13 +6,16 @@ import math
 from pathlib import Path
 import re
 import subprocess
-from typing import Any, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Literal, Mapping
 
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.evidence import build_evidence_envelope, evidence_envelope_valid, stable_json_hash, \
     stable_policy_hash
 from mediaforce.core.process_control import ManagedProcessController, run_command
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+
+if TYPE_CHECKING:
+    from mediaforce.encoding.remote_media import RemoteMediaCommands
 
 CADENCE_SCHEMA_VERSION = 1
 CADENCE_EVIDENCE_KIND = "cadence_analysis"
@@ -91,6 +94,7 @@ def analyze_cadence(
         range_count: int = DEFAULT_IDET_RANGE_COUNT,
         timeout_seconds: float = 60.0,
         process_controller: ManagedProcessController | None = None,
+        command_runner: RemoteMediaCommands | None = None,
 ) -> dict[str, Any]:
     stream = object_dict(video_stream)
     probe = {
@@ -112,7 +116,7 @@ def analyze_cadence(
         )
         return _summary_payload(probe=probe, analysis=_empty_analysis(max_frames), decision=decision)
 
-    ffmpeg_name = ffmpeg_binary()
+    ffmpeg_name = "ffmpeg" if command_runner is not None else ffmpeg_binary()
     starts = _sample_starts(duration_seconds, range_count)
     frames_per_range = max(1, max_frames // max(1, len(starts)))
     frame_rate = _rational_value(probe["average_frame_rate"] or probe["nominal_frame_rate"])
@@ -128,6 +132,7 @@ def analyze_cadence(
             frame_limit=frames_per_range,
             timeout_seconds=timeout_seconds,
             process_controller=process_controller,
+            command_runner=command_runner,
         )
         counts = parse_idet_output(result["stderr"]) if result["status"] == "measured" else _empty_counts()
         _merge_counts(aggregate, counts)
@@ -159,7 +164,11 @@ def analyze_cadence(
         "tool": {
             "name": CADENCE_TOOL_NAME,
             "version": CADENCE_TOOL_VERSION,
-            "ffmpeg_version": _ffmpeg_version(ffmpeg_name),
+            **(
+                command_runner.tool_lineage()
+                if command_runner is not None
+                else {"ffmpeg_version": _ffmpeg_version(ffmpeg_name)}
+            ),
         },
     }
     decision = classify_cadence(probe=probe, analysis=evidence, coverage=coverage)
@@ -553,6 +562,7 @@ def _run_idet_range(
         frame_limit: int,
         timeout_seconds: float,
         process_controller: ManagedProcessController | None = None,
+        command_runner: RemoteMediaCommands | None = None,
 ) -> dict[str, str]:
     command = [
         ffmpeg_name,
@@ -577,13 +587,20 @@ def _run_idet_range(
         "-",
     ]
     try:
-        result = run_command(
-            command,
-            process_controller=process_controller,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
+        if command_runner is not None:
+            result = command_runner.run(
+                command,
+                timeout_seconds=timeout_seconds,
+                process_controller=process_controller,
+            )
+        else:
+            result = run_command(
+                command,
+                process_controller=process_controller,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
     except subprocess.TimeoutExpired as exc:
         return {"status": "timeout", "stderr": str(exc.stderr or "")}
     except OSError as exc:

@@ -286,6 +286,13 @@ export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): Operato
 			detail: 'A retry delay is protecting the source.'
 		};
 	}
+	if (status === 'waiting_host') {
+		return {
+			label: operatorStateCopy(status),
+			tone: 'wait',
+			detail: 'Files are measured only on an encode computer; this resumes when one is free.'
+		};
+	}
 	if (status === 'waiting_source') {
 		return {
 			label: 'Source unavailable',

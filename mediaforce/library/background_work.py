@@ -22,6 +22,7 @@ EVIDENCE_BACKLOG_WORK_STATUSES = (
     "running",
     "retry_wait",
     "waiting_source",
+    "waiting_host",
     "failed",
     "cancelled",
     "completed",

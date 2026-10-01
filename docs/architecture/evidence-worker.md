@@ -102,6 +102,39 @@ The canonical result, refreshed projection, and terminal work transition
 commit together. A stale result is discarded rather than rebound to newer
 media.
 
+## Where measurement runs
+
+When no encode computer is set up, `ffprobe` and the cadence and fingerprint
+`ffmpeg` commands run on the controller as before. Once at least one remote
+host reads the library from its own mount over SSH (a configured remote host
+without an explicit `mode` counts as SSH), measurement runs only on an encode
+computer, never on the controller:
+
+- The worker picks the highest-priority host that is available, has `ffmpeg`,
+  keeps the `encode_queue` capability, has its encode schedule open, and is
+  allowed the item's library. Both the web app and `mediaforce evidence run`
+  use the encode queue's schedule-aware host rows; the web app reads its
+  cached host checks and the CLI checks each host fresh.
+- The claim's heartbeat starts before the host is chosen, so the host check,
+  a wake, and the remote `ffmpeg -version` stay inside the lease and can be
+  cancelled.
+- The same command builders and parsers run over `run_remote_command`,
+  against the host's own path to the source. Lease loss stops the local SSH
+  client through the managed process controller; the remote commands are
+  bounded by frame counts and timeouts.
+- When none can take the work, or the connection drops mid-run, the item moves
+  to `waiting_host` with the reason "Waiting for an encode computer to
+  measure this file." without consuming an attempt.
+- The summary records the measuring host and that host's `ffmpeg -version`
+  line. Freshness compares the analyzer name and version, schema, source, and
+  policy, not the `ffmpeg` build, so a result from another computer is not
+  re-queued because the controller's `ffmpeg` differs.
+- The source identity check before and after the run stays on the controller:
+  a stat plus, for content fingerprints, three 64 KiB samples. Before and
+  after measuring, one remote `stat` must also report the controller's size
+  and whole-second modification time. A mismatch fails the item like any other
+  source change and no evidence is saved.
+
 ## Retry and recovery
 
 - Unavailable roots move to `waiting_source` without consuming an attempt.
