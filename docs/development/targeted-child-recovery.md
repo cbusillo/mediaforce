@@ -1,6 +1,6 @@
 # Targeted recovery of terminal folder children
 
-Use this admin API when explicitly selected child jobs of a folder batch
+Use this API when explicitly selected child jobs of a folder batch
 failed for a reason that did not judge the source, policy or encode result. The
 parent may still be active, or may have aggregated to `needs_attention` after
 its last active child ended. It requeues those same
@@ -53,7 +53,7 @@ ineligible. Host isolation and retained-output reconciliation remain
 separate work under #593.
 
 Send a POST to `/api/encode-queue/recover-children/preview` on the running
-controller, using its normal trusted admin access:
+controller, using its normal trusted controller access:
 
 ```json
 {"parent_job_id":"<folder job>","child_ids":["<exact failed child>"]}

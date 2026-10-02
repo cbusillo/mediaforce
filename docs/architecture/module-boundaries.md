@@ -332,7 +332,7 @@ Guidance:
 - `tuning_memory.py`
   - learned-memory session recording and artifact promotion helpers
 - `quality_risk.py`
-  - versioned quality-risk facts/gates/interpretation/user-decision
+  - versioned quality-risk `facts`/`gates`/`interpretation`/`operator_decision`
     contract
   - allow-listed transform compilation checks, typed risk shaping, and
     evidence-bound review-record precedence
