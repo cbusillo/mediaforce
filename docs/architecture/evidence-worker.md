@@ -8,11 +8,13 @@ Catalog refresh and evidence analysis are separate operations.
   launches cadence or media-fingerprint `ffmpeg` analysis.
 - Canonical cadence and fingerprint JSON remains on `library_items` and is
   reused until the source, analyzer, schema, or policy makes it non-current.
-- Expensive updates run only after an operator creates an explicit item,
-  folder, or root batch and then resumes it.
+- Expensive updates run only inside a bounded item, folder, or root batch.
+  A batch an operator prepares starts paused and runs when it is started; a
+  batch created because production is waiting on a file starts unpaused.
 
-There is no evidence worker attached to web-server startup and no permanent
-idle polling loop. A foreground worker pass claims bounded work and exits.
+The web app's evidence-autostart worker runs any unpaused batch that has
+claimable work (see the just-in-time path below). Catalog scans never start
+analysis. The CLI `evidence run` pass claims bounded work and exits.
 
 ## Durable state
 
@@ -140,7 +142,7 @@ computer, never on the controller:
 - Unavailable roots move to `waiting_source` without consuming an attempt.
 - Tool, corrupt-media, timeout, and parse failures use exponential backoff and
   stop after three attempts by default.
-- Expired leases are reclaimed on the next explicit worker pass. A live lease
+- Expired leases are reclaimed on the next worker pass (CLI or autostart). A live lease
   is never stolen merely because another scheduler starts.
 - Pause prevents new claims but does not interrupt the active safe unit.
 - The global background-work pause prevents new catalog scans, batch creation,

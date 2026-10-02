@@ -40,7 +40,7 @@ User-facing MB remains decimal. Canonical arithmetic uses integer bytes.
 
 ## Feasibility
 
-The ledger distinguishes four deterministic states:
+New ledgers distinguish three deterministic states:
 
 - `feasible`: a positive video budget remains with sufficiently bounded
   non-video costs
@@ -91,6 +91,12 @@ Monotonic curves select a
 candidate inside the sample band when one exists. Arithmetic impossibility,
 quality-floor conflict, and exhausted or noisy non-monotonic searches surface as
 structured infeasibility, quality-conflict, or needs-review outcomes.
+Target-size search never changes the goal itself. When a measured
+quality-floor violation shows the goal is too small for one file, encode
+recovery records an item-local size exception at the smallest quality-safe
+size within the automatic allowance and queues only that file again; beyond
+the allowance it asks the owner about that one file
+(`mediaforce/web/runtime/size_exception.py`).
 
 Production encodes verify actual output bytes against the resolved final band
 from the same size goal, currently ±5% by default. A final miss can retry only

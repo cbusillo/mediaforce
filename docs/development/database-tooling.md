@@ -37,9 +37,8 @@ Mediaforce's SQLite schema.
 - Add or update regression coverage in `tests/test_db_runtime.py` whenever the
   legacy bridge, head revision, or migration ordering changes.
 - Validate schema work with:
-  - `PYTHONPATH=. uv run --with pytest pytest tests/test_db_runtime.py`
-  - `PYTHONPATH=. uv run --with pytest pytest`
-    `tests/test_encode_queue_recovery.py tests/test_tuning_runtime.py`
+  - `uv run --with pytest pytest tests/test_db_runtime.py`
+  - `uv run --with pytest pytest tests/test_encode_queue_recovery.py tests/test_tuning_runtime.py`
   - `uv run mediaforce --help`
 
 ## Runtime transaction boundaries
