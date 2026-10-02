@@ -31,6 +31,6 @@ Frontend changes should feel intentional and production-ready.
 - Validate UI changes in a real browser
 - Prefer browser-visible proof over code-only reasoning
 - Keep the built frontend bundle fresh when backend-served UI behavior matters
-- When reviewing a primary operator surface, explicitly check for unreachable
+- When reviewing a primary user surface, explicitly check for unreachable
   counts, search-only access to counted objects, hidden row caps, dashboard
   drift, and actions that do not explain why they are safe or blocked

@@ -9,7 +9,7 @@ Catalog refresh and evidence analysis are separate operations.
 - Canonical cadence and fingerprint JSON remains on `library_items` and is
   reused until the source, analyzer, schema, or policy makes it non-current.
 - Expensive updates run only inside a bounded item, folder, or root batch.
-  A batch an operator prepares starts paused and runs when it is started; a
+  A batch a user prepares starts paused and runs when it is started; a
   batch created because production is waiting on a file starts unpaused.
 
 The web app's evidence-autostart worker runs any unpaused batch that has
@@ -38,7 +38,7 @@ batch or queueing existing evidence. Revision `20260719_0013` adds the durable
 `background_work_state` switch shared by catalog inventory and evidence
 analysis. Revision `20260719_0014` adds durable work priority and a plain-language
 reason so decision-blocking safety work can run before advisory backfill.
-Analyzer or policy changes remain visible as projection state until an operator
+Analyzer or policy changes remain visible as projection state until a user
 explicitly prepares and starts work.
 
 ## Batch lifecycle
@@ -47,7 +47,7 @@ explicitly prepares and starts work.
 non-current evidence inside that exact item or descendant scope, caps the
 batch at 25 evidence updates by default, snapshots each source fingerprint,
 and creates the batch paused. Policy-only reclassification is selected first.
-Cadence analysis then follows the explicit operator scope. Fingerprint analysis
+Cadence analysis then follows the explicit user scope. Fingerprint analysis
 starts with technical representatives, stays within a per-scope budget, and
 adds only a small uncertainty frontier when measured hard cases justify it.
 One media file can contribute two updates because cadence and media fingerprint
@@ -56,7 +56,7 @@ are independent evidence kinds.
 Sample and production actions use a separate just-in-time path. Missing or stale
 cadence holds back only the affected media items, adds those exact rows to the
 active batch at decision priority, and lets the rest of a production selection
-queue; the operator sees each held item in Activity. A new batch created for a
+queue; the user sees each held item in Activity. A new batch created for a
 production run starts unpaused, and the web app's evidence-autostart worker
 runs any unpaused batch with claimable work, so held files are checked without
 anyone pressing `Start analysis`. The global background pause, a paused batch,
@@ -158,7 +158,7 @@ computer, never on the controller:
   required, the row completes its policy-only pass and returns to the bounded
   representative planner instead of fanning out into immediate analysis.
 
-## Operator flow
+## User flow
 
 The Activity workstation exposes the same bounded state machine:
 

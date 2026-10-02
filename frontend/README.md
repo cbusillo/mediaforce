@@ -2,7 +2,7 @@
 
 This is the SvelteKit frontend for Mediaforce.
 
-It owns the operator UI for:
+It owns the user UI for:
 
 - the TV, Movies, and Other libraries and their show, season, and movie pages
 - Activity: the queue, computers, and work windows

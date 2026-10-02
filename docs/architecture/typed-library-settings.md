@@ -1,6 +1,6 @@
 # Typed Library Settings
 
-Mediaforce stores operator-facing library configuration as ordered typed roots.
+Mediaforce stores user-facing library configuration as ordered typed roots.
 The Settings workstation is the authority for root labels, order, type,
 availability, processing profile, Plex path translation, and type-specific
 policy.
@@ -11,9 +11,9 @@ policy.
 
 - `key`: stable root identity used by catalog rows, hosts, manifests, and saved
   work
-- `label`: editable operator-facing name
+- `label`: editable user-facing name
 - `path`: the controller's local path
-- `color`: operator color used by Library views
+- `color`: display color used by Library views
 - `plex_path`: optional path reported by Plex when it differs from `path`
 - `type`: `tv`, `movie`, `spatial`, or `other`
 - `availability`: `production`, `browse_only`, or `disabled`
@@ -46,7 +46,7 @@ membership limit must be split or switched to exact-file grouping before
 processing. Every non-empty folder scope requires a current membership token,
 and unscoped candidate selection excludes Other items. Library responses cap one
 catalog window at 5,000 indexed items and 500 work units so a generic root cannot
-exhaust the operator process; truncated catalogs remain non-actionable until the
+exhaust the Mediaforce process; truncated catalogs remain non-actionable until the
 configured roots are narrowed. Spatial media remains safety-blocked until the
 3D/VR qualification plan proves geometry, stream, metadata, audio, and
 target-device playback invariants.
@@ -59,7 +59,7 @@ and below explicit folder overrides.
 
 Movies records title grouping, separate editions, extras inclusion, and ranking
 intent. Other records a bounded top-level folder or exact-file work unit and
-requires operators to review folder membership before sampling or queueing.
+requires users to review folder membership before sampling or queueing.
 Spatial records the playback target, stereo layout, projection,
 source-preserving geometry, and an unqualified container state. Controls that do
 not apply to the selected type are structurally absent from Settings.
@@ -93,7 +93,7 @@ files missing inside roots that were completely enumerated. If a configured
 root is absent, unreadable, only partially readable, or unexpectedly returns no
 media after previously containing active items, cached catalog state is
 preserved. The same circuit breaker applies when a previously populated root
-returns 20% or less of at least 25 active items. The scan reports an operator
+returns 20% or less of at least 25 active items. The scan reports a user
 warning without exposing the local path. Disabling or removing a library in
 Settings remains the explicit action that accepts its disappearance and marks
 its former rows missing. Prefix scans only access roots named by their logical

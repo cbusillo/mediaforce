@@ -11,7 +11,7 @@ sources below. Treat archived briefs as evidence only.
   layouts are valid.
 - `docs/design/movies-workflow.md`: active Movies Library and movie page
   contract.
-- `docs/style/workstation-ui.md`: operator-workstation doctrine.
+- `docs/style/workstation-ui.md`: workstation doctrine.
 - `docs/style/frontend.md`: Svelte/frontend implementation and validation
   expectations.
 
@@ -26,7 +26,7 @@ Archived files include:
 - `calm-workstation-visual-system.md`
 - `final-love-pass-qa.md`
 - `full-frontend-reset-brief.md`
-- `operator-workstation-shell-brief.md`
+- `workstation-shell-brief.md`
 - `workstation-reset-plan.md` (the June 2026 frontend reset plan)
 - `workstation-home-screen-brief.md`
 - `workstation-home-screen-inventory.md`

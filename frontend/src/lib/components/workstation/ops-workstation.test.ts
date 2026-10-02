@@ -419,9 +419,132 @@ describe('Ops workstation mapping', () => {
 			tone: 'idle',
 			status: 'History',
 			prefix: 'tv/show/season 4',
-			detail: 'could not find a viable sample'
+			progress: "Didn't finish",
+			detail: 'The sample stopped before it finished.'
 		});
 		expect(rowRecoveryLabel(rows[0])).toBe('Nothing to do');
+	});
+
+	it('says when a finished sample ended and how, in plain words', () => {
+		const dashboard = dashboardFixture();
+		dashboard.calibration_queue.sample.recent_failed = [
+			{
+				job_id: 'size-goal',
+				prefix: 'tv/House',
+				status: 'failed',
+				finished_at: '2026-09-09T03:42:33+00:00',
+				updated_at: '2026-09-10T08:00:00+00:00',
+				progress: { stage: 'searching_target' },
+				error:
+					'The approved target size was not reached before the configured search bound (largest_quality_safe_candidate_under_target_band); target=293777299 bytes.'
+			},
+			{
+				job_id: 'cleanup',
+				prefix: 'movies/Play Dirty (2025)',
+				status: 'failed',
+				finished_at: '2026-08-29T15:13:48+00:00',
+				progress: { stage: 'searching_target' },
+				error: 'Managed process containment cleanup is unproven.'
+			},
+			{
+				job_id: 'unknown',
+				prefix: 'tv/Suits/Season 2',
+				status: 'stopped',
+				updated_at: '2026-06-05T11:41:43+00:00',
+				error: 'worker_exit status=137 in run_calibration_job'
+			},
+			{
+				job_id: 'ledger',
+				prefix: 'tv/Raising Hope/Season 2',
+				status: 'failed',
+				finished_at: '2026-05-01T10:00:00+00:00',
+				error: 'The stream budget ledger does not contain a resolved target video budget.'
+			},
+			{
+				job_id: 'jargon',
+				prefix: 'tv/Raising Hope/Season 3',
+				status: 'failed',
+				finished_at: '2026-05-02T10:00:00+00:00',
+				error: 'Boundary compatibility uses an unsupported schema version'
+			},
+			{
+				job_id: 'other-ledger',
+				prefix: 'tv/Raising Hope/Season 5',
+				status: 'failed',
+				finished_at: '2026-05-02T12:00:00+00:00',
+				error: 'The stream budget ledger source fingerprint is stale.'
+			},
+			{
+				job_id: 'unmapped',
+				prefix: 'tv/Raising Hope/Season 4',
+				status: 'failed',
+				finished_at: '2026-05-03T10:00:00+00:00',
+				error: 'Target-size search requires sample-encode measurement support'
+			},
+			{
+				job_id: 'storage',
+				prefix: 'tv/The Expanse/Season 4',
+				status: 'failed',
+				finished_at: '2026-05-04T10:00:00+00:00',
+				error: 'Shared storage disconnected'
+			},
+			{
+				job_id: 'no-reason',
+				prefix: 'tv/Lucifer/Season 2',
+				status: 'failed',
+				created_at: '2026-04-25T18:28:35+00:00'
+			}
+		];
+
+		const rows = buildOpsHistoryRows(dashboard);
+
+		const shown = (value: string) =>
+			new Date(value).toLocaleString('en-US', {
+				month: 'short',
+				day: 'numeric',
+				hour: 'numeric',
+				minute: '2-digit'
+			});
+		expect(rows.map((row) => [row.progress, row.detail])).toEqual([
+			["Didn't finish", 'The size goal could not be reached at a quality that passes.'],
+			["Didn't finish", 'Mediaforce could not confirm the sample stopped cleanly.'],
+			['Stopped', 'The sample stopped before it finished.'],
+			["Didn't finish", 'Mediaforce could not work out the size to aim for.'],
+			["Didn't finish", 'The sample stopped before it finished.'],
+			["Didn't finish", 'The sample stopped before it finished.'],
+			["Didn't finish", 'The sample stopped before it finished.'],
+			["Didn't finish", 'The shared storage disconnected.'],
+			["Didn't finish", 'The sample stopped before it finished.']
+		]);
+		expect(rows.map((row) => row.scheduler)).toEqual([
+			shown('2026-09-09T03:42:33+00:00'),
+			shown('2026-08-29T15:13:48+00:00'),
+			shown('2026-06-05T11:41:43+00:00'),
+			shown('2026-05-01T10:00:00+00:00'),
+			shown('2026-05-02T10:00:00+00:00'),
+			shown('2026-05-02T12:00:00+00:00'),
+			shown('2026-05-03T10:00:00+00:00'),
+			shown('2026-05-04T10:00:00+00:00'),
+			'Earlier'
+		]);
+	});
+
+	it("leaves a current sample's note as it is", () => {
+		const dashboard = dashboardFixture();
+		dashboard.calibration_queue.sample.queued = [
+			{
+				job_id: 'waiting-sample',
+				prefix: 'tv/House',
+				status: 'queued',
+				notes: 'Managed process containment cleanup is unproven.'
+			}
+		];
+
+		const row = buildOpsQueueRows(dashboard).find(
+			(candidate) => candidate.key === 'sample:waiting-sample'
+		);
+
+		expect(row?.detail).toBe('Managed process containment cleanup is unproven.');
 	});
 
 	it('surfaces unavailable data and retryable encodes as attention items', () => {

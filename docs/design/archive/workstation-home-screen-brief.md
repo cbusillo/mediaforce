@@ -5,7 +5,7 @@
 > `docs/design/README.md`, and `docs/style/workstation-ui.md` instead.
 
 This brief defines the durable reset direction for the Mediaforce home screen
-as an operator workstation surface. It replaces the earlier prototype framing
+as a workstation surface. It replaces the earlier prototype framing
 with a stricter console model based on live browser review of the current home
 screen.
 
@@ -20,7 +20,7 @@ screen.
 ## Goal
 
 - Replace the remaining dashboard composition with a workstation console that
-  helps an operator scan fleet state, confirm the active queue context, compare
+  helps a user scan fleet state, confirm the active queue context, compare
   ranked folders quickly, and move directly into the next action.
 
 ## Output contract
@@ -30,7 +30,7 @@ screen.
 - Primary hierarchy decision: the ranked work queue is the main working
   surface, with one adjacent active-context panel tied directly to the current
   selection.
-- Operator task flow being optimized: scan system state, confirm what matters
+- User task flow being optimized: scan system state, confirm what matters
   now, compare queue candidates, then open or queue the next folder without
   bouncing between equal-weight cards.
 
@@ -92,7 +92,7 @@ screen.
 - The active folder/context must derive from the same source of truth as the
   ranked queue selection.
 - Sorting, filtering, and queue actions must remain explicit and visible.
-- The first operator action must win over delayed hydration or background state
+- The first user action must win over delayed hydration or background state
   replay.
 - Opening a folder, queueing a folder, and switching to ops/completed should
   feel like direct control-room actions, not navigation detours.
@@ -110,7 +110,7 @@ screen.
 - A user should be able to answer “what is happening right now?” at a glance.
 - The queue table should feel like the primary working surface, not a secondary
   section beneath a feature panel.
-- The active folder should feel like an operator context pane, not one more
+- The active folder should feel like a user context pane, not one more
   bordered block in a mosaic.
 - The shell should still feel credible if shadows and decorative styling are
   stripped away.

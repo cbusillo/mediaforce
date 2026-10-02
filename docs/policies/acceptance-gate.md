@@ -7,7 +7,7 @@ We do not stop at "it works." We stop when we fully like the result.
 - We should 100% love the code we are about to commit
 - Remove code smells, bad practices, stale naming, and obvious design issues
 - Run the full available test suite before commits or ending a session
-- Run browser validation for UI changes; for primary operator surfaces, read
+- Run browser validation for UI changes; for primary user surfaces, read
   `docs/style/workstation-ui.md` together with `docs/style/frontend.md`
 - Use `docs/development/browser-qa-matrix.md` for route, fixture, and narrow
   browser coverage expectations
@@ -23,7 +23,7 @@ We do not stop at "it works." We stop when we fully like the result.
 - `bash scripts/pre-commit-check.sh` runs the whole local gate in one step
 - Package-sensitive changes pass `uv build` and
   `scripts/verify_package_contents.py`
-- Docs are updated when behavior, workflow, operations, or operator-facing
+- Docs are updated when behavior, workflow, operations, or user-facing
   expectations change
 - The final code is something we would be happy to own long term
 

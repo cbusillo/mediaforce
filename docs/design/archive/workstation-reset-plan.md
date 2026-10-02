@@ -6,9 +6,9 @@
 
 ## Goal
 
-Replace the Mediaforce frontend from a clean operator-workstation contract. The
+Replace the Mediaforce frontend from a clean workstation contract. The
 reset is not a cosmetic pass over existing routes. It must make the next safe
-operator decision obvious while ensuring counted media objects are reachable
+user decision obvious while ensuring counted media objects are reachable
 without relying on search.
 
 ## Non-Goals
@@ -21,7 +21,7 @@ without relying on search.
 
 ## Durable Contract
 
-Every primary operator surface must show:
+Every primary user surface must show:
 
 - scope: the object level and library or prefix being acted on
 - reachable rows: counts, current range, total, and movement controls
@@ -36,7 +36,7 @@ Deliverables:
 
 - remove silent list caps from the current workbench path
 - add explicit pagination or complete scrolling with range and total copy
-- keep the selected-object inspector tied to a row the operator can reach
+- keep the selected-object inspector tied to a row the user can reach
 - expose scope and filter effects in the table header
 - add focused unit coverage for pagination/list mechanics
 - run frontend checks and browser validation
@@ -44,7 +44,7 @@ Deliverables:
 Acceptance:
 
 - a count such as `185 whole shows` has a visible path to all 185 rows
-- the operator can move through the list without search
+- the user can move through the list without search
 - the inspector never points at an invisible, unreachable object without saying
   how to reach it
 

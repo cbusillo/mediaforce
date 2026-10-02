@@ -42,7 +42,7 @@
 
 ## Docs as code
 
-- When behavior, workflows, or operator-facing expectations change, update the
+- When behavior, workflows, or user-facing expectations change, update the
   relevant docs in the same change
 - Keep cross-references current when style or workflow guidance moves
 

@@ -55,7 +55,7 @@ Noise and grain labels are advisory evidence, not cleanup orders. Low-confidence
 findings are listed under `low_confidence_advisories`, and the decision carries
 policy gates that explicitly prevent automatic destructive denoise/cleanup from
 the fingerprint alone. Unknown or low-coverage summaries remain available to the
-operator as explicit `unknown` evidence instead of disappearing from payloads.
+user as explicit `unknown` evidence instead of disappearing from payloads.
 
 The analyzer does not inspect or score path names, release years, genres, eras,
 or folder categories. Representative selection may cover measured fingerprint

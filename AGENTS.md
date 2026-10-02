@@ -30,7 +30,7 @@ and it wins over any issue, plan, or doc that disagrees.
   `~/Library/LaunchAgents/com.mediaforce.web.plist`. It may be disabled at
   session start when Mediaforce is not active work, so do not assume the local
   web server is running; enable it intentionally when needed.
-- Before changing primary operator surfaces, read
+- Before changing primary user surfaces, read
   `docs/style/workstation-ui.md` together with `docs/style/frontend.md`
 - For browser exploration by subagents, explicitly use the `browser-ui-review`
   skill and follow `docs/development/browser-review-guidance.md`.
@@ -60,8 +60,8 @@ and it wins over any issue, plan, or doc that disagrees.
 
 ## See also
 
-- `README.md`: durable operator and developer overview
+- `README.md`: durable user and developer overview
 - `docs/README.md`: docs table of contents
-- `docs/style/workstation-ui.md`: primary operator-surface design doctrine
+- `docs/style/workstation-ui.md`: primary user-surface design doctrine
 - `docs/architecture/module-boundaries.md`: durable backend/frontend module
   boundaries after the structural refactor pass

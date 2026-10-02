@@ -81,7 +81,7 @@ hard on repeated dark panels and bright borders. Future token work should:
 ## State Color
 
 Follow the semantic state contract in
-`docs/design/archive/operator-workstation-shell-brief.md`:
+`docs/design/archive/workstation-shell-brief.md`:
 
 - Blue: active, running, selected, or in progress.
 - Green: approved, healthy, ready, or completed successfully.

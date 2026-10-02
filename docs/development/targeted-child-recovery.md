@@ -1,6 +1,6 @@
 # Targeted recovery of terminal folder children
 
-Use this operator API when explicitly selected child jobs of a folder batch
+Use this API when explicitly selected child jobs of a folder batch
 failed for a reason that did not judge the source, policy or encode result. The
 parent may still be active, or may have aggregated to `needs_attention` after
 its last active child ended. It requeues those same
@@ -28,7 +28,7 @@ Recoverable classes include:
   errors (recovered as `storage_io`), controller database busy (as
   `controller_database_busy`), and a host that could not load a VMAF model (as
   `host_configuration`).
-- A child in `stopped` status: an operator stop ended it without judging the
+- A child in `stopped` status: a user stop ended it without judging the
   source, policy or result, and the stop already cleaned up its output.
 - `deterministic` with exactly the error `Mediaforce database identity changed
   during connection`: the controller lost its database connection while the
@@ -53,7 +53,7 @@ ineligible. Host isolation and retained-output reconciliation remain
 separate work under #593.
 
 Send a POST to `/api/encode-queue/recover-children/preview` on the running
-controller, using its normal trusted operator access:
+controller, using its normal trusted controller access:
 
 ```json
 {"parent_job_id":"<folder job>","child_ids":["<exact failed child>"]}
@@ -77,7 +77,7 @@ recovered; apply requeues only them.
 
 Approval is judged per child. The batch's production approval must still be
 current. A newer
-sample approval with the same policy and operator intent covers a child; a
+sample approval with the same policy and user intent covers a child; a
 changed policy, or an intent that differs from the one a child's files were
 resolved under, does not.
 
@@ -134,16 +134,16 @@ check of it, never counts as success.
 ab-av1's ffmpeg children write into the folder, so their own command lines
 name it. A process that neither names the folder nor descends from one that
 does is not seen. Confirming that ab-av1's children behave this way is part of
-the owner-watched session on a real encode computer.
+the Director-watched session on a real encode computer.
 
 - Shown stopped: the temp folder is removed as usual, and an encode records
   `remote_quality_timeout` and retries within its normal attempt limit. The
-  owner sees which computer, that the run was stopped, and that it will be
-  tried again. If the folder cannot be removed, the owner is told so in one
+  user sees which computer, that the run was stopped, and that it will be
+  tried again. If the folder cannot be removed, the user is told so in one
   plain sentence; the raw detail stays on the error as a diagnostic.
 - Not shown stopped (the step failed, timed out, found survivors, or the run
   had no scoped temp folder): the temp folder is kept, and an encode records
-  `containment_unproven` and waits for the owner, with a plain instruction to
+  `containment_unproven` and waits for the user, with a plain instruction to
   check that computer is idle and then try the file again.
 
 A sample job records the same kind, message and whether the run was stopped in
@@ -166,14 +166,14 @@ job, restarts, or loses the link, the watcher on the host ends the processes
 writing that job's partial output and removes the partial file. Before this, a
 stopped encode kept running on the host, competed with the host's next job and
 could leave a complete but unrecorded output (observed on 2026-09-19 and
-2026-09-20). A plain command-line encode is not watched. This can leave an output requiring operator review;
+2026-09-20). A plain command-line encode is not watched. This can leave an output requiring user review;
 existing output and failure checks still apply.
 
 When a running job's lease has expired, the controller ends its worker only
 after 10 minutes with no sign of life: no progress write, no heartbeat, and no
 recent start. Each size measured during the quality search writes progress, so
 a long search does not look silent. A worker ended this way retries as a stale
-lease, like a reclaimed job, instead of stopping for the owner. A worker whose
+lease, like a reclaimed job, instead of stopping for the user. A worker whose
 job another attempt now owns, or that a reclaim has already scheduled to
 retry, leaves that state alone. A real outcome it reached, such as a quality
 conflict, is still recorded.
