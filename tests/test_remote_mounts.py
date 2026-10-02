@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from mediaforce import remote
-from mediaforce.hosts.mount_runtime import ControllerSmbMount, RemoteSmbMount, _REDACT_SMB_ACCOUNT_SED, \
+from mediaforce.hosts.mount_runtime import ControllerSmbMount, RemoteSmbMount, \
     _remote_mount_script, controller_smb_mounts_from_output, load_controller_smb_mounts, mount_remote_smb_shares, \
     remote_smb_mounts_for_paths, save_controller_smb_mounts
 from mediaforce.remote import HostStatus
@@ -340,21 +340,66 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         for shell_text in (script, runner):
             self.assertEqual(subprocess.run(["/bin/sh", "-n"], input=shell_text, text=True).returncode, 0)
 
-    def test_helper_error_redaction_runs_before_any_cut(self) -> None:
+    def _generated_helper_scripts(self) -> tuple[str, str]:
+        script = _remote_mount_script(
+            RemoteSmbMount(Path("/Volumes/media"), "media", "smb://remote@NAS.local/media"),
+            token="d" * 32,
+            attempt_seconds=30,
+        )
+        runner_line = next(line for line in script.splitlines() if 'base64 -D >"$runner_path"' in line)
+        return script, base64.b64decode(runner_line.split()[2].strip("'")).decode()
+
+    def test_runner_saves_its_error_redacted_before_cutting_it(self) -> None:
+        _script, runner = self._generated_helper_scripts()
+        save_error = next(line for line in runner.splitlines() if '>"$result_dir/error"' in line)
         error = "x" * 3990 + " smb://remote@NAS.local/media could not be found. (-35)"
-
-        redacted = subprocess.run(
-            ["/bin/sh", "-c", f"{_REDACT_SMB_ACCOUNT_SED} | /usr/bin/head -c 4000"],
-            input=error,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-
         # Cutting first would keep "smb://rem", which no longer looks like an account to redact.
         self.assertTrue(error[:4000].endswith(" smb://rem"))
-        self.assertNotIn("rem", redacted.rsplit(" ", 1)[-1])
-        self.assertTrue(redacted.endswith(" smb://NAS"))
+
+        with tempfile.TemporaryDirectory() as temp:
+            Path(temp, "mount.err").write_text(error)
+            subprocess.run(
+                ["/bin/sh", "-c", f'stderr_path="$1/mount.err"; result_dir="$1"; {save_error}', "sh", temp],
+                check=True,
+            )
+            saved = Path(temp, "error").read_text()
+
+        self.assertNotIn("remote", saved)
+        self.assertTrue(saved.endswith(" smb://NAS"))
+
+    def test_report_prefers_the_saved_result_once_the_runner_has_finished(self) -> None:
+        script, _runner = self._generated_helper_scripts()
+        report_helper = script[script.index("report_helper() {"):script.index("\n}\n", script.index("report_helper() {")) + 2]
+        # launchd can still list the job for a moment after the runner saved its result and removed
+        # its folder; stand in for that with a launchctl that always succeeds.
+        self.assertIn("/bin/launchctl print", report_helper)
+        report_helper = report_helper.replace("/bin/launchctl print", "true")
+
+        with tempfile.TemporaryDirectory() as temp:
+            Path(temp, "status").write_text("1\n")
+            Path(temp, "error").write_text("Finder got an error: smb://NAS.local/media could not be found. (-35)\n")
+            # The runner already removed its folder, so the live error file is gone.
+            output = subprocess.run(
+                [
+                    "/bin/sh",
+                    "-c",
+                    f'set -u; uid=0; label=none; stderr_path="$1/gone/mount.err"; result_dir="$1"\n'
+                    f"{report_helper}\nreport_helper",
+                    "sh",
+                    temp,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+
+        self.assertEqual(
+            output.splitlines(),
+            [
+                "MEDIAFORCE_MOUNT_JOB=exited:1",
+                "MEDIAFORCE_MOUNT_ERR=Finder got an error: smb://NAS.local/media could not be found. (-35)",
+            ],
+        )
 
     def test_remote_mount_recovery_support_requires_clean_remote_macos_status(self) -> None:
         host = {"host": "remote@worker", "label": "Worker", "media_access": "mounted"}

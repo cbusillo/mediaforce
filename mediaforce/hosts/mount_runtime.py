@@ -403,11 +403,19 @@ mount_url="$(/usr/bin/printf '%s' {q_mount_url_payload} | /usr/bin/base64 -D)" |
 # Evidence for an attempt that did not mount: whether the Finder helper is still waiting (a dialog
 # can be open) and the end of its error output. The caller logs it; it never changes the outcome.
 report_helper() {{
-  if /bin/launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+  # The runner saves its status before it removes its folder, so a saved status wins over launchd,
+  # and a live read that finds the folder already gone falls back to the saved error.
+  if [ -s "$result_dir/status" ]; then
+    printf 'MEDIAFORCE_MOUNT_JOB=exited:%s\\n' "$(/bin/cat "$result_dir/status" 2>/dev/null)"
+    error_text=""
+  elif /bin/launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
     printf 'MEDIAFORCE_MOUNT_JOB=running\\n'
     error_text="$({_REDACT_SMB_ACCOUNT_SED} "$stderr_path" 2>/dev/null || true)"
   else
-    printf 'MEDIAFORCE_MOUNT_JOB=exited:%s\\n' "$(/bin/cat "$result_dir/status" 2>/dev/null || printf unknown)"
+    printf 'MEDIAFORCE_MOUNT_JOB=exited:unknown\\n'
+    error_text=""
+  fi
+  if [ -z "$error_text" ]; then
     error_text="$(/bin/cat "$result_dir/error" 2>/dev/null || true)"
   fi
   if [ -n "$error_text" ]; then
