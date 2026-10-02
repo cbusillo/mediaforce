@@ -531,7 +531,10 @@ const HISTORICAL_SAMPLE_REASONS: ReadonlyArray<[string, string]> = [
 		'largest_quality_safe_candidate_under_target_band',
 		'The size goal could not be reached at a quality that passes.'
 	],
-	['stream budget ledger', 'Mediaforce could not work out the size to aim for.'],
+	[
+		'stream budget ledger does not contain a resolved target video budget',
+		'Mediaforce could not work out the size to aim for.'
+	],
 	['containment cleanup is unproven', 'Mediaforce could not confirm the sample stopped cleanly.'],
 	['shared storage disconnected', 'The shared storage disconnected.'],
 	['failed to find a suitable crf', 'The sample did not find a usable quality setting.'],

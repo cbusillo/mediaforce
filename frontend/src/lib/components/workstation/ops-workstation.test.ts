@@ -468,6 +468,13 @@ describe('Ops workstation mapping', () => {
 				error: 'Boundary compatibility uses an unsupported schema version'
 			},
 			{
+				job_id: 'other-ledger',
+				prefix: 'tv/Raising Hope/Season 5',
+				status: 'failed',
+				finished_at: '2026-05-02T12:00:00+00:00',
+				error: 'The stream budget ledger source fingerprint is stale.'
+			},
+			{
 				job_id: 'unmapped',
 				prefix: 'tv/Raising Hope/Season 4',
 				status: 'failed',
@@ -505,6 +512,7 @@ describe('Ops workstation mapping', () => {
 			["Didn't finish", 'Mediaforce could not work out the size to aim for.'],
 			["Didn't finish", 'The sample stopped before it finished.'],
 			["Didn't finish", 'The sample stopped before it finished.'],
+			["Didn't finish", 'The sample stopped before it finished.'],
 			["Didn't finish", 'The shared storage disconnected.'],
 			["Didn't finish", 'The sample stopped before it finished.']
 		]);
@@ -514,6 +522,7 @@ describe('Ops workstation mapping', () => {
 			shown('2026-06-05T11:41:43+00:00'),
 			shown('2026-05-01T10:00:00+00:00'),
 			shown('2026-05-02T10:00:00+00:00'),
+			shown('2026-05-02T12:00:00+00:00'),
 			shown('2026-05-03T10:00:00+00:00'),
 			shown('2026-05-04T10:00:00+00:00'),
 			'Earlier'
