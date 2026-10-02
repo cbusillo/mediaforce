@@ -6536,7 +6536,8 @@
 		width: 150px;
 	}
 
-	.progress-ring::before {
+	/* The centre is the ring's inner element; the earlier, darker style set its background. */
+	.progress-ring > div {
 		background: var(--mf-bg-panel);
 	}
 
