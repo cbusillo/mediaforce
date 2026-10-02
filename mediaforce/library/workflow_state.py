@@ -623,12 +623,11 @@ def _wider_run_filter(
         overlapping_rows: list[DBRow],
         part_files: Mapping[str, tuple[str, ...]],
 ) -> Callable[[DBRow], bool]:
-    """Whether a job's work or problem belongs to the scope.
+    """Whether a job is working on the scope.
 
-    A run over a whole show is working on a season, or has a problem there, only while one of its
-    unfinished parts is for a file in that season. When any of the run's unfinished parts cannot be
-    traced to its files, it counts, as before. Rows are only ever judged, never removed, so the
-    newest run still decides whether an older run's failure is current.
+    A run over a whole show is working on a season only while one of its unfinished parts is for a
+    file in that season. When any of the run's unfinished parts cannot be traced to its files, it
+    counts, as before.
     """
     parts_by_parent: dict[str, list[DBRow]] = {}
     for row in overlapping_rows:
@@ -692,8 +691,8 @@ def _encode_job_workflow_state(
 
     Any active job, including a folder's queued or running part, keeps the scope working. Whether
     work needs the owner comes from the newest folder or single job, which summarizes its parts; a
-    part that just finished must not hide it. A job that does not count for the scope neither keeps
-    it working nor puts its problem on it, but as the newest job it still settles older ones.
+    part that just finished must not hide it. Only a job that counts for the scope keeps it working;
+    whether work needs the owner still comes from the newest job overall.
     """
     display_rows = [row for row in overlapping_rows if row["job_kind"] in DISPLAY_ENCODE_JOB_KINDS]
     active = next(
@@ -706,8 +705,6 @@ def _encode_job_workflow_state(
         None,
     )
     latest = display_rows[0] if display_rows else None
-    if latest is not None and not counts_for_scope(latest):
-        latest = None
     groups = unfinished_breakdown_groups(latest["progress_json"]) if latest is not None else []
     if active is not None:
         detail = f"Encode job is {active['status']} for {active['prefix']}."
