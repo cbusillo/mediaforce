@@ -1,7 +1,7 @@
 import json
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from sqlalchemy import or_, select
 
@@ -610,21 +610,25 @@ def _scope_job_states(
 ) -> ScopeJobStates:
     own_rows = [row for row in overlapping_rows if not _job_is_wider(scope, str(row["prefix"] or ""))]
     return ScopeJobStates(
-        overlapping=_encode_job_workflow_state(_rows_working_in_scope(scope, overlapping_rows, part_files)),
+        overlapping=_encode_job_workflow_state(
+            overlapping_rows,
+            counts_for_scope=_wider_run_filter(scope, overlapping_rows, part_files),
+        ),
         own=_encode_job_workflow_state(own_rows),
     )
 
 
-def _rows_working_in_scope(
+def _wider_run_filter(
         scope: MediaScope,
         overlapping_rows: list[DBRow],
         part_files: Mapping[str, tuple[str, ...]],
-) -> list[DBRow]:
-    """Drop an active wider folder run whose unfinished parts are all for files outside the scope.
+) -> Callable[[DBRow], bool]:
+    """Whether a job's work or problem belongs to the scope.
 
-    A run over a whole show is still working on a season only while one of its unfinished parts is
-    for a file in that season. When any of the run's unfinished parts cannot be traced to its files,
-    the run is kept, as before.
+    A run over a whole show is working on a season, or has a problem there, only while one of its
+    unfinished parts is for a file in that season. When any of the run's unfinished parts cannot be
+    traced to its files, it counts, as before. Rows are only ever judged, never removed, so the
+    newest run still decides whether an older run's failure is current.
     """
     parts_by_parent: dict[str, list[DBRow]] = {}
     for row in overlapping_rows:
@@ -637,29 +641,21 @@ def _rows_working_in_scope(
             return None
         return any(path_matches_scope(rel_path, scope) for rel_path in files)
 
-    def run_in_scope(parent_job_id: str) -> bool:
-        unfinished = [part for part in parts_by_parent.get(parent_job_id, []) if part["status"] in UNFINISHED_JOB_STATUSES]
-        answers = [part_in_scope(part) for part in unfinished]
-        return None in answers or any(answers)
-
-    kept: list[DBRow] = []
-    for row in overlapping_rows:
+    def counts_for_scope(row: DBRow) -> bool:
         if not _job_is_wider(scope, str(row["prefix"] or "")):
-            kept.append(row)
-        elif row["job_kind"] == "shard":
-            if row["status"] not in UNFINISHED_JOB_STATUSES or part_in_scope(row) is not False:
-                kept.append(row)
-        elif (
-                row["job_kind"] == "folder"
-                and row["status"] in UNFINISHED_JOB_STATUSES
-                and str(row["job_id"]) in parts_by_parent
-        ):
-            # A finished run stays: as the newest run it is what hides an older run's failure.
-            if run_in_scope(str(row["job_id"])):
-                kept.append(row)
-        else:
-            kept.append(row)
-    return kept
+            return True
+        if row["job_kind"] == "shard":
+            return part_in_scope(row) is not False
+        if row["job_kind"] == "folder" and str(row["job_id"]) in parts_by_parent:
+            answers = [
+                part_in_scope(part)
+                for part in parts_by_parent[str(row["job_id"])]
+                if part["status"] in UNFINISHED_JOB_STATUSES
+            ]
+            return None in answers or any(answers)
+        return True
+
+    return counts_for_scope
 
 
 def _job_is_wider(scope: MediaScope, job_prefix: str) -> bool:
@@ -687,19 +683,31 @@ def _workflow_encode_job_rows(connection: DBClient) -> list[DBRow]:
     ).mappings().fetchall())
 
 
-def _encode_job_workflow_state(overlapping_rows: list[DBRow]) -> tuple[WorkflowLane, str] | None:
+def _encode_job_workflow_state(
+        overlapping_rows: list[DBRow],
+        *,
+        counts_for_scope: Callable[[DBRow], bool] = lambda _row: True,
+) -> tuple[WorkflowLane, str] | None:
     """The scope's encode lane, naming every reason its files are not finished.
 
     Any active job, including a folder's queued or running part, keeps the scope working. Whether
     work needs the owner comes from the newest folder or single job, which summarizes its parts; a
-    part that just finished must not hide it.
+    part that just finished must not hide it. A job that does not count for the scope neither keeps
+    it working nor puts its problem on it, but as the newest job it still settles older ones.
     """
     display_rows = [row for row in overlapping_rows if row["job_kind"] in DISPLAY_ENCODE_JOB_KINDS]
     active = next(
-        (row for rows in (display_rows, overlapping_rows) for row in rows if row["status"] in PROCESSING_JOB_STATUSES),
+        (
+            row
+            for rows in (display_rows, overlapping_rows)
+            for row in rows
+            if row["status"] in PROCESSING_JOB_STATUSES and counts_for_scope(row)
+        ),
         None,
     )
     latest = display_rows[0] if display_rows else None
+    if latest is not None and not counts_for_scope(latest):
+        latest = None
     groups = unfinished_breakdown_groups(latest["progress_json"]) if latest is not None else []
     if active is not None:
         detail = f"Encode job is {active['status']} for {active['prefix']}."

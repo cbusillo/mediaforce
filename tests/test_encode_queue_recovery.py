@@ -8026,6 +8026,48 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertNotEqual(workflow.state, "needs_attention")
 
+    def test_folder_workflow_newer_unfinished_run_elsewhere_still_hides_an_older_runs_failure(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 1/episode.mkv"),
+                status="encoded",
+                rel_path="tv/show/Season 1/episode.mkv",
+            )
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 2/episode.mkv"),
+                rel_path="tv/show/Season 2/episode.mkv",
+            )
+            self._write_manifest("show-run.json", [
+                {"rel_path": "tv/show/Season 1/episode.mkv"},
+                {"rel_path": "tv/show/Season 2/episode.mkv"},
+            ])
+            self._save_show_run(connection, [("old-part", "needs_attention", 0)], manifest="show-run.json")
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id.in_(["show-run", "old-part"])).values(
+                status="needs_attention", updated_at="2026-10-01T00:00:00+00:00",
+            ))
+            # A later run over the whole library encoded Season 1's file and is still queued for Season 2.
+            self._save_show_job(connection, job_id="library-run", prefix="tv", status="queued")
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == "library-run").values(
+                job_kind="folder", updated_at="2026-10-02T00:00:00+00:00",
+            ))
+            for job_id, status, index in (("library-part-1", "completed", 0), ("library-part-2", "queued", 1)):
+                self._save_show_job(connection, job_id=job_id, prefix="tv", status=status)
+                connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == job_id).values(
+                    job_kind="shard",
+                    parent_job_id="library-run",
+                    manifest_path=str(self.root / "runs" / "show-run.json"),
+                    manifest_indexes_json=json.dumps([index]),
+                    updated_at="2026-10-02T00:00:00+00:00",
+                ))
+
+            season_1 = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 1")
+            season_2 = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertNotIn(season_1.state, {"processing", "needs_attention"})
+        self.assertEqual(season_2.state, "processing")
+
     def test_folder_workflow_keeps_a_show_run_whose_unfinished_part_cannot_be_traced(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._insert_library_item(
