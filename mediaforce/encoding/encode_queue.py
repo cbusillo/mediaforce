@@ -1,4 +1,6 @@
 import json
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Mapping
 
 from sqlalchemy import delete
@@ -573,3 +575,44 @@ def _loads_host_payload_for_repair(raw_payload: Any) -> tuple[dict[str, Any], bo
     if not isinstance(payload, dict):
         return {}, True
     return payload, False
+
+
+def encode_run_rel_paths(run: Mapping[str, Any]) -> list[str]:
+    """The files a run encodes, from its manifest, or from its own progress when the manifest is gone."""
+    manifest_rel_paths = _manifest_rel_paths(Path(str(run.get("manifest_path") or "")).expanduser())
+    if manifest_rel_paths:
+        indexes = run.get("manifest_indexes")
+        if isinstance(indexes, list):
+            chosen = [
+                manifest_rel_paths[index]
+                for index in indexes
+                if isinstance(index, int) and 0 <= index < len(manifest_rel_paths)
+            ]
+            if chosen:
+                return [rel_path for rel_path in chosen if rel_path]
+        return [rel_path for rel_path in manifest_rel_paths if rel_path]
+    progress = object_dict(run.get("progress"))
+    rel_path = str(
+        object_dict(progress.get("failure_analysis")).get("item_rel_path")
+        or progress.get("current_item_rel_path")
+        or ""
+    ).strip()
+    return [rel_path] if rel_path else []
+
+
+def _manifest_rel_paths(path: Path) -> tuple[str, ...]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return ()
+    return _read_manifest_rel_paths(str(path), stat.st_mtime_ns, stat.st_size)
+
+
+# Keyed on the file's modification time and size, so a rewritten manifest is read again.
+@lru_cache(maxsize=256)
+def _read_manifest_rel_paths(path: str, _mtime_ns: int, _size: int) -> tuple[str, ...]:
+    try:
+        payload = object_dict(json.loads(Path(path).read_text()))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    return tuple(str(object_dict(item).get("rel_path") or "").strip() for item in object_list(payload.get("items")))

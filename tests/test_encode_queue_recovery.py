@@ -7947,6 +7947,68 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(workflow.state, "processing")
 
+    def _save_show_run(self, connection: DBClient, parts: list[tuple[str, str, int]], *, manifest: str) -> None:
+        """A folder run over tv/show and its parts, each part for one manifest index."""
+        self._save_show_job(connection, job_id="show-run", prefix="tv/show", status="queued")
+        connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == "show-run").values(
+            job_kind="folder", manifest_path=str(self.root / "runs" / manifest),
+        ))
+        for job_id, status, index in parts:
+            self._save_show_job(connection, job_id=job_id, prefix="tv/show", status=status)
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == job_id).values(
+                job_kind="shard",
+                parent_job_id="show-run",
+                manifest_path=str(self.root / "runs" / manifest),
+                manifest_indexes_json=json.dumps([index]),
+            ))
+
+    def test_folder_workflow_season_follows_only_its_own_unfinished_parts_of_a_show_run(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 1/episode.mkv"),
+                rel_path="tv/show/Season 1/episode.mkv",
+            )
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 2/episode.mkv"),
+                rel_path="tv/show/Season 2/episode.mkv",
+            )
+            self._write_manifest("show-run.json", [
+                {"rel_path": "tv/show/Season 1/episode.mkv"},
+                {"rel_path": "tv/show/Season 2/episode.mkv"},
+            ])
+            self._save_show_run(
+                connection,
+                [("part-season-1", "queued", 0), ("part-season-2", "completed", 1)],
+                manifest="show-run.json",
+            )
+
+            working = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 1")
+            finished = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+            bulk = workflow_state_runtime.build_folder_workflow_states(
+                connection, ["tv/show/Season 1", "tv/show/Season 2"]
+            )
+
+        self.assertEqual(working.state, "processing")
+        self.assertNotEqual(finished.state, "processing")
+        self.assertEqual(bulk["tv/show/Season 1"].to_payload(), working.to_payload())
+        self.assertEqual(bulk["tv/show/Season 2"].to_payload(), finished.to_payload())
+
+    def test_folder_workflow_keeps_a_show_run_whose_unfinished_part_cannot_be_traced(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 2/episode.mkv"),
+                rel_path="tv/show/Season 2/episode.mkv",
+            )
+            # No manifest on disk, so the queued part's file is unknown.
+            self._save_show_run(connection, [("part-unknown", "queued", 0)], manifest="gone.json")
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertEqual(workflow.state, "processing")
+
     def test_folder_workflow_finished_season_ignores_its_shows_failed_job(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._insert_library_item(
