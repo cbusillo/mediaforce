@@ -7,8 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from mediaforce import remote
-from mediaforce.hosts.mount_runtime import ControllerSmbMount, RemoteSmbMount, _remote_mount_script, \
-    controller_smb_mounts_from_output, load_controller_smb_mounts, mount_remote_smb_shares, \
+from mediaforce.hosts.mount_runtime import ControllerSmbMount, RemoteSmbMount, _REDACT_SMB_ACCOUNT_SED, \
+    _remote_mount_script, controller_smb_mounts_from_output, load_controller_smb_mounts, mount_remote_smb_shares, \
     remote_smb_mounts_for_paths, save_controller_smb_mounts
 from mediaforce.remote import HostStatus
 
@@ -330,7 +330,31 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         self.assertTrue(timeout_tail.startswith("printf 'MEDIAFORCE_MOUNT=timeout\\n'\nreport_helper\nexit 42"))
         self.assertIn('/bin/launchctl print "gui/$uid/$label"', script)
         self.assertIn("MEDIAFORCE_MOUNT_ERR=", script)
-        self.assertEqual(subprocess.run(["/bin/sh", "-n"], input=script, text=True).returncode, 0)
+        # The runner removes its own folder when AppleScript exits, so it leaves its outcome in a
+        # separate folder the caller reads and then removes.
+        self.assertIn('ProgramArguments.9 -string "$result_dir"', script)
+        self.assertIn('if [ -n "$result_dir" ]; then /bin/rm -rf "$result_dir"; fi', script)
+        runner_line = next(line for line in script.splitlines() if 'base64 -D >"$runner_path"' in line)
+        runner = base64.b64decode(runner_line.split()[2].strip("'")).decode()
+        self.assertLess(runner.index('>"$result_dir/error"'), runner.index('/bin/rm -rf "$runner_dir"'))
+        for shell_text in (script, runner):
+            self.assertEqual(subprocess.run(["/bin/sh", "-n"], input=shell_text, text=True).returncode, 0)
+
+    def test_helper_error_redaction_runs_before_any_cut(self) -> None:
+        error = "x" * 3990 + " smb://remote@NAS.local/media could not be found. (-35)"
+
+        redacted = subprocess.run(
+            ["/bin/sh", "-c", f"{_REDACT_SMB_ACCOUNT_SED} | /usr/bin/head -c 4000"],
+            input=error,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+        # Cutting first would keep "smb://rem", which no longer looks like an account to redact.
+        self.assertTrue(error[:4000].endswith(" smb://rem"))
+        self.assertNotIn("rem", redacted.rsplit(" ", 1)[-1])
+        self.assertTrue(redacted.endswith(" smb://NAS"))
 
     def test_remote_mount_recovery_support_requires_clean_remote_macos_status(self) -> None:
         host = {"host": "remote@worker", "label": "Worker", "media_access": "mounted"}

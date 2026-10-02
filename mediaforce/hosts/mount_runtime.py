@@ -26,6 +26,8 @@ _MOUNT_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
 _SMB_SERVER_RE = re.compile(r"^[A-Za-z0-9._\-\[\]:]+$")
 _HELPER_MARKER_RE = re.compile(r"^MEDIAFORCE_MOUNT(?:_JOB|_ERR)?=.*$", re.MULTILINE)
 # The share URL names the account; an error echoing it must not put that in the log.
+# Applied to the helper's error text before it is cut, so a cut can never split an account from its URL.
+_REDACT_SMB_ACCOUNT_SED = "/usr/bin/sed -E 's#([Ss][Mm][Bb]://)[^@/[:space:]]+@#\\1#g'"
 _URL_ACCOUNT_RE = re.compile(r"(smb://)[^@\s/]+@", re.IGNORECASE)
 LOGGER = logging.getLogger(__name__)
 
@@ -277,6 +279,7 @@ def _remote_mount_script(mount: RemoteSmbMount, *, token: str, attempt_seconds: 
             'timeout_seconds="$5"',
             'lock_path="$6"',
             'service_label="$7"',
+            'result_dir="$8"',
             'uid="$(/usr/bin/id -u)"',
             'runner_dir="${0%/*}"',
             '/usr/bin/osascript "$script" "$mount_url" >"$stdout_path" 2>"$stderr_path" &',
@@ -290,6 +293,9 @@ def _remote_mount_script(mount: RemoteSmbMount, *, token: str, attempt_seconds: 
             'wait "$child_pid" || child_status=$?',
             '/bin/kill "$watchdog_pid" >/dev/null 2>&1 || true',
             'wait "$watchdog_pid" >/dev/null 2>&1 || true',
+            # Kept outside the runner's own folder so the caller can still report it after cleanup.
+            'printf \'%s\\n\' "$child_status" >"$result_dir/status" 2>/dev/null || true',
+            f'{_REDACT_SMB_ACCOUNT_SED} "$stderr_path" 2>/dev/null | /usr/bin/head -c 4000 >"$result_dir/error" || true',
             '/bin/rm -rf "$runner_dir"',
             '/bin/rmdir "$lock_path" >/dev/null 2>&1 || true',
             '/bin/launchctl bootout "gui/$uid/$service_label" >/dev/null 2>&1 || true',
@@ -355,14 +361,18 @@ if ! /bin/mkdir "$lock_path" 2>/dev/null; then
   exit {_MOUNT_BUSY_EXIT}
 fi
 tmp_dir=""
+result_dir=""
 cleanup() {{
   /bin/launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
   if [ -n "$tmp_dir" ]; then /bin/rm -rf "$tmp_dir"; fi
+  if [ -n "$result_dir" ]; then /bin/rm -rf "$result_dir"; fi
   /bin/rmdir "$lock_path" >/dev/null 2>&1 || true
 }}
 trap cleanup EXIT HUP INT TERM
 tmp_dir="$(/usr/bin/mktemp -d /tmp/mediaforce-mount.XXXXXX)" || exit {_MOUNT_HELPER_EXIT}
 /bin/chmod 700 "$tmp_dir" >/dev/null 2>&1 || true
+result_dir="$(/usr/bin/mktemp -d /tmp/mediaforce-mount-result.XXXXXX)" || exit {_MOUNT_HELPER_EXIT}
+/bin/chmod 700 "$result_dir" >/dev/null 2>&1 || true
 source_path="$tmp_dir/mount.applescript"
 script_path="$tmp_dir/mount.scpt"
 runner_path="$tmp_dir/run-mount.sh"
@@ -386,6 +396,7 @@ mount_url="$(/usr/bin/printf '%s' {q_mount_url_payload} | /usr/bin/base64 -D)" |
 /usr/bin/plutil -insert ProgramArguments.6 -string "$((attempt_seconds + 5))" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert ProgramArguments.7 -string "$lock_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert ProgramArguments.8 -string "$label" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
+/usr/bin/plutil -insert ProgramArguments.9 -string "$result_dir" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert RunAtLoad -bool YES "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert StandardOutPath -string "$stdout_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert StandardErrorPath -string "$stderr_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
@@ -394,11 +405,13 @@ mount_url="$(/usr/bin/printf '%s' {q_mount_url_payload} | /usr/bin/base64 -D)" |
 report_helper() {{
   if /bin/launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
     printf 'MEDIAFORCE_MOUNT_JOB=running\\n'
+    error_text="$({_REDACT_SMB_ACCOUNT_SED} "$stderr_path" 2>/dev/null || true)"
   else
-    printf 'MEDIAFORCE_MOUNT_JOB=exited\\n'
+    printf 'MEDIAFORCE_MOUNT_JOB=exited:%s\\n' "$(/bin/cat "$result_dir/status" 2>/dev/null || printf unknown)"
+    error_text="$(/bin/cat "$result_dir/error" 2>/dev/null || true)"
   fi
-  if [ -s "$stderr_path" ]; then
-    printf 'MEDIAFORCE_MOUNT_ERR=%s\\n' "$(/usr/bin/tail -c 400 "$stderr_path" 2>/dev/null | /usr/bin/tr '\\r\\n' '  ')"
+  if [ -n "$error_text" ]; then
+    printf 'MEDIAFORCE_MOUNT_ERR=%s\\n' "$(printf '%s' "$error_text" | /usr/bin/tr '\\r\\n' '  ' | /usr/bin/tail -c 400)"
   fi
 }}
 if ! /bin/launchctl bootstrap "gui/$uid" "$plist_path" >/dev/null 2>&1; then
