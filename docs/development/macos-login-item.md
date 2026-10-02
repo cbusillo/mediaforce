@@ -18,7 +18,7 @@ Learned SMB mappings remain in `controller-smb-mounts.json` beside runtime
 settings. Automatic connections use the system NetFS API with `UIOption=NoUI`;
 Mediaforce does not retrieve passwords or fall back to Finder dialogs. Clean
 connection failures retry with bounded backoff. An ambiguous timeout requires
-operator attention rather than another potentially overlapping mount request.
+user attention rather than another potentially overlapping mount request.
 The native helper reports its status code; a fresh check must confirm the exact
 expected mount path, saved SMB identity and required directory access. Merely finding a
 writable directory under `/Volumes` is not proof that the share is mounted.

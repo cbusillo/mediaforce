@@ -1,7 +1,7 @@
 # Content-Intent Boundary Evidence
 
 Mediaforce preserves explicit visual approvals and rejections as immutable local
-evidence about the size boundary that an operator accepted for measured content
+evidence about the size boundary that a user accepted for measured content
 under a confirmed compression intent. The evidence supports replayable local
 personalization without granting authority to inferred history, failed work, or
 mutable model state.
@@ -21,7 +21,7 @@ same completed sampled-calibration review:
 - the encoder, encoder runtime, quality tool, preset, pixel format, dimensions,
   frame rate, cadence transform, filters, grain parameters, metric, and
   container used for the reviewed artifact
-- an explicit operator approval or rejection
+- an explicit user approval or rejection
 
 The runtime records approvals from `save_profile_action` and rejections from
 the explicit post-test quality-risk feedback path. Both producers call the same
@@ -79,7 +79,7 @@ evidence can pass its freshness gate; older rows remain replayable but do not
 gain newly invented timestamp authority.
 
 The migration can downgrade while the table is empty. Once evidence exists it
-refuses downgrade rather than silently discarding immutable operator evidence.
+refuses downgrade rather than silently discarding immutable user evidence.
 
 ## Replay and local personalization
 
@@ -91,7 +91,7 @@ eligible, hash-valid rows. It then derives four nested local scopes:
 - folder: compatible content profiles under the same folder prefix
 - content class: the same measured multi-label profile outside the current
   folder, so the evidence is genuinely cross-folder
-- operator: all local evidence for the same profile, intent, and technical
+- `operator`: all local evidence for the same profile, intent, and technical
   contract
 
 An approval is an upper bound on the unknown minimum acceptable total size. A
@@ -101,7 +101,7 @@ pollute the encoder starting point. Audio-only rejection feedback is excluded.
 Crossing bounds are reported as conflicting and are not actionable. Broader
 scopes require at least three independent acceptable source IDs and bounded
 dispersion before becoming actionable; rejection-only sources and repeated
-observations from one item cannot unlock a folder, class, or operator prior.
+observations from one item cannot unlock a folder, class, or `operator` prior.
 
 The replay result is advisory starting-point state for bounded cold-start work.
 It does not authorize size growth, alter quality floors, or bypass measured
@@ -147,7 +147,7 @@ all of its approved review sizes. Any normalized rejection at or above the
 smallest approved bound is a conflict and prevents that scope's proposal.
 An item conflict prevents broader fallback, and a broader proposal cannot cross
 an exact item's rejected lower boundary. Rejection-only evidence cannot supply a
-target. There is no operator-wide target fallback or title/genre classification.
+target. There is no user-wide target fallback or title/genre classification.
 
 The report selects the narrowest passing scope and exposes the rule, observation
 IDs, a snapshot binding the rule version, thresholds, reference and scope
@@ -175,14 +175,14 @@ work; no production setting changes from a report.
 `mediaforce target-production-evidence <observation_id>` reports a separate,
 read-only production evidence contract. It does not change target proposals,
 confidence thresholds, settings, queue admission or automatic adoption. The
-empirical calibration and operator acceptance work remains outstanding.
+empirical calibration and user acceptance work remains outstanding.
 
 After existing queue admission gates pass, only the manifest item matching the
 current approved sample may receive a versioned, hashed lineage capsule. A
 folder approval cannot give its siblings this evidence. Duplicate matches,
 stale source/intent/policy/stream budgets, unavailable review context and
 unapproved samples produce no capsule. The capsule binds the boundary hash,
-sample job and review artifact, approved CRF, technical compatibility, operator
+sample job and review artifact, approved CRF, technical compatibility, user
 size contract, approval time, manifest run and item index.
 
 Linked encodes capture source identity and the actual execution host's encoder
@@ -227,7 +227,7 @@ production-derived defaults have been empirically calibrated.
 
 All observations stay in the configured runtime database outside the
 repository. They may contain local relative paths and hashed local identities,
-but never raw operator notes, media bytes, review clips, or automatic
+but never raw user notes, media bytes, review clips, or automatic
 cross-user exports. Review media remains in the configured runtime review
 directory and is represented only by a composite SHA-256 identity in the
 observation. The identity is recomputed from retained source and encoded clips

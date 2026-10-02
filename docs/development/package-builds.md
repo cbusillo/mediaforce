@@ -4,9 +4,9 @@
 build regenerates `frontend/`; neither archive may depend on stale local
 `frontend/build/` output.
 
-The sdist uses an explicit source allowlist in `pyproject.toml`. Operator
+The sdist uses an explicit source allowlist in `pyproject.toml`. User
 runtime config, including root `config/defaults.toml` and
-`config/folder-defaults.toml`, is excluded. This prevents operator folder
+`config/folder-defaults.toml`, is excluded. This prevents user folder
 rules, untracked IDE files, `.env`, `state/`, `scratch/`, runtime databases,
 review media, and machine-local paths from entering an archive merely because
 they exist in the checkout.

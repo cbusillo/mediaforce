@@ -1,11 +1,11 @@
-# Operator Workstation Shell Brief
+# Workstation Shell Brief
 
 > Status: Historical. Kept as evidence only; it is not current guidance.
 > Start with `DIRECTION.md`, `docs/design/README.md`, and
 > `docs/style/workstation-ui.md`.
 
 This brief captures the durable shell language that now ties Mediaforce's main
-operator routes together after the workstation reset and final consistency
+user routes together after the workstation reset and final consistency
 audit. It is the carry-forward reference for future changes to home, ops,
 completed, settings, and folder studio.
 
@@ -17,7 +17,7 @@ completed, settings, and folder studio.
   `home.png`, `ops.png`, `completed.png`, `settings.png`,
   `folder-workspace.png`, `ops-live-check.png`, and
   `settings-live-check.png`.
-- April 2026 verdict: the product read more like one operator workstation
+- April 2026 verdict: the product read more like one workstation
   family than a home page plus several adjacent dashboard-like tools.
 - May 2026 planning note: that family-level direction remains useful, but the
   current UI still needs a basic-user reset for route hierarchy, wording, and
@@ -25,7 +25,7 @@ completed, settings, and folder studio.
 
 ## Goal
 
-- Preserve a shared console-like shell across operator routes while allowing
+- Preserve a shared console-like shell across user routes while allowing
   each surface to stay honest about its job: queue triage, fleet control,
   completed cleanup, configuration, or folder-level review.
 
@@ -33,7 +33,7 @@ completed, settings, and folder studio.
 
 - Shared masthead and route navigation should make every primary route feel
   like part of the same workstation, not separate mini-products.
-- The first visible region on a route should answer the route's core operator
+- The first visible region on a route should answer the route's core user
   question quickly, without hero framing or decorative summary rows.
 - System state belongs in compact strips, alert bars, tables, and tightly
   related side rails rather than spacious dashboard cards.
@@ -50,17 +50,17 @@ completed, settings, and folder studio.
   list/table-first control surfaces rather than separate dashboard cards.
 - Completed: the archived-originals and history surface. Keep cleanup readiness,
   selected versus global destructive scope, archive-root health, and recent
-  processing/deletion events visible in one route so the operator can delete
+  processing/deletion events visible in one route so the user can delete
   archived originals without treating it like another active queue.
 - Settings: the runtime configuration surface. It may stay more utilitarian and
   form-heavy than the other routes, but it should still inherit the same shell,
   typography, and navigation language.
 - Folder studio: the active review workspace. It should feel like an in-flight
-  operator session, not a wizard with numbered steps.
+  user session, not a wizard with numbered steps.
 
 ## Canonical folder workflow
 
-- Folder studio is the canonical operator route because it contains the core
+- Folder studio is the canonical user route because it contains the core
   loop: run a representative sample, inspect the evidence, and approve the
   folder proposal.
 - The first viewport should make the folder, library, parent context, current
@@ -76,7 +76,7 @@ completed, settings, and folder studio.
   duration, and resolution are enough unless a warning changes the decision.
 - `Revise` should return naturally to the chat-led workflow and review posture;
   do not require a separate structured reason form.
-- After approval, leave the operator on the folder in a calm approved-and-
+- After approval, leave the user on the folder in a calm approved-and-
   processing state. Collapse chat and evidence by default, and lead the main
   body with one combined processing strip.
 - The approved-and-processing strip should lead with progress, ETA, and FPS,
@@ -96,18 +96,18 @@ completed, settings, and folder studio.
 - Gray: inactive, unavailable, not started, or intentionally disabled.
 - Color should communicate machine or workflow state before brand emphasis. Do
   not weaken contrast or blur these meanings for visual softness.
-- Judge severity by operator impact, not raw subsystem status. A single host
+- Judge severity by user impact, not raw subsystem status. A single host
   being unavailable, scheduled off, or not accepting work is not red when other
   hosts can still carry the workflow. Retryable work is amber unless the
   workflow is unsafe or no required capacity remains.
 - Keep old sample/proof failures out of current-work tables. Show them as
-  neutral history with operator-facing explanations unless they directly block
+  neutral history with user-facing explanations unless they directly block
   the next safe action.
 
-## Operator copy posture
+## User copy posture
 
 - Headings orient; labels name state directly.
-- Helper copy should appear only when it changes operator understanding or
+- Helper copy should appear only when it changes user understanding or
   prevents a bad action.
 - Factual values, statuses, and action placement should carry more meaning than
   paragraphs.
@@ -139,7 +139,7 @@ completed, settings, and folder studio.
 - A user can tell which route they are on and what needs attention in a few
   seconds.
 - Navigation, spacing, and state styling make the routes feel related.
-- Loading and error states are explicit enough that operators never confuse
+- Loading and error states are explicit enough that users never confuse
   transport delay with idle runtime state.
 - If decorative styling were removed, the product would still read as a clear,
-  credible operator workstation.
+  credible workstation.

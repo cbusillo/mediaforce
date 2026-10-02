@@ -17,7 +17,7 @@ private media titles.
   dashboard.
 - `/folders/[real-prefix]`: Folder Studio keeps the workflow visible: request a
   sample draft, review evidence, approve, then process.
-- `/ops`: Ops answers whether Mediaforce can work now and what needs operator
+- `/ops`: Ops answers whether Mediaforce can work now and what needs user
   attention.
 - `/completed`: Completed focuses on handled work and archive cleanup decisions.
 - `/settings`: Settings groups libraries, storage, schedules, workers, and
@@ -43,7 +43,7 @@ private media titles.
   to inspect. Search and folder cards should lead back to Folder Studio.
 - Folder Studio: follow the workflow strip from draft to sample, review,
   approval, and processing. The review assistant is there to produce or revise a
-  sample proposal; nothing queues until the operator confirms.
+  sample proposal; nothing queues until the user confirms.
 - Ops: use this to answer "can work run now?" and "what is blocking work?" The
   worker rail should be readable without understanding host internals.
 - Completed: use this to audit handled folders and decide whether cleanup is
@@ -53,7 +53,7 @@ private media titles.
 
 ## Current Judgment
 
-The app is now cohesive enough to use as the primary operator surface. The
+The app is now cohesive enough to use as the primary user surface. The
 visual system is calm, route roles are clearer, first-glance copy is substantially
 less internal, and the blank-page regression class is covered by smoke checks.
 Future improvements can be incremental rather than another reset: automated

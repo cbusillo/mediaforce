@@ -1,16 +1,16 @@
 # Workstation UI Guide
 
-Use this guide when changing Mediaforce's primary operator surfaces: the home
+Use this guide when changing Mediaforce's primary user surfaces: the home
 screen, folder workspace, queue views, review surfaces, and other screens where
-an operator scans state and makes repeated workflow decisions.
+a user scans state and makes repeated workflow decisions.
 
-This guide is the canonical contract for Mediaforce operator surfaces. Active
+This guide is the canonical contract for Mediaforce user surfaces. Active
 plans may apply it to a specific workflow, but they do not override it with a
 different visual or language model.
 
 ## Core stance
 
-- Mediaforce is an operator workstation, not a polished SaaS dashboard.
+- Mediaforce is a workstation, not a polished SaaS dashboard.
 - It is not a landing page, analytics dashboard, or conversational assistant.
 - This pivot stays on the existing SvelteKit frontend; redesign the workflow
   surface, not the framework stack.
@@ -77,7 +77,7 @@ different visual or language model.
 - The redesign started from the wrong reference class, so the UI still read as
   a refined dashboard instead of an operational tool.
 - Too much emphasis went to tasteful presentation over scan speed, persistent
-  state, and operator confidence.
+  state, and user confidence.
 - Operational data was softened into cards and spacious sections that looked
   presentable but slowed down comparison and triage.
 - Color and spacing were used decoratively instead of primarily to communicate
@@ -128,7 +128,7 @@ different visual or language model.
 - Prefer contrast and hierarchy that help scanning over softness that makes the
   product look friendly but vague.
 
-## Operator language
+## User language
 
 - Use ordinary media nouns and exact action verbs: movie, episode, season,
   original, sample, compress, checked file, replace, waiting, running, and
@@ -138,7 +138,7 @@ different visual or language model.
   cadence, shard, quality memory, or internal job IDs as interface language.
 - Button text names the actual effect and scope. A queued action says it queues;
   an immediate action says it starts now; replacement says which file changes.
-- Approval records an operator judgment. Compression admission is a separate
+- Approval records a user judgment. Compression admission is a separate
   commitment and action.
 - Put scope, consequence, and recovery or backup expectation beside each
   consequential action once. Do not repeat the same safety sentence throughout
@@ -161,7 +161,7 @@ different visual or language model.
 - Do not rely on subtle chroma changes alone for important state transitions.
 - Keep actions close to the data they affect.
 - Preserve user intent during hydration and migration work; the first explicit
-  operator action must win over delayed storage or background state replay.
+  user action must win over delayed storage or background state replay.
 - Keep familiar controls discoverable: fullscreen, playback, comparison layout,
   filtering, sorting, pagination, stop, retry, check, and replace.
 - Fullscreen review is for viewing only. It may contain playback, moments,
@@ -180,7 +180,7 @@ different visual or language model.
 - Keep ordinary review outcomes explicit: `Keep this version`, `Use less
   space`, and `Improve picture or sound`.
 - Show `Allow a larger file` only inside the improve-quality path when the
-  operator intentionally changes that constraint.
+  user intentionally changes that constraint.
 - On narrow screens, keep both pictures reachable, preserve the One/Both
   control, and provide a non-mutating jump to the review decision.
 - After a successful replacement, collapse the comparison into known completed
@@ -189,7 +189,7 @@ different visual or language model.
 
 ## Design evidence
 
-- Major operator-surface changes begin with at least two independent visual
+- Major user-surface changes begin with at least two independent visual
   directions based on one shared brief.
 - Proposals use real copy and include default, dense, loading, error, blocked,
   running, completed, and narrow states rather than only a polished happy path.
@@ -198,12 +198,12 @@ different visual or language model.
   credibility.
 - Compare proposals directly. Do not average incompatible ideas into a
   compromised layout.
-- Begin implementation only after the operator accepts a browser-viewable
+- Begin implementation only after the user accepts a browser-viewable
   direction.
 
 ## Anti-slop rules
 
-- No hero-first dashboard compositions for the main operator surface.
+- No hero-first dashboard compositions for the main user surface.
 - No card carousels or gallery-style presentations for operational queues.
 - No decorative gradients or glow treatments on primary workflow surfaces.
 - No single-accent neutral SaaS palette where most meaning depends on one brand
@@ -212,19 +212,19 @@ different visual or language model.
   be shown instead.
 - No hiding critical operational metadata that supports triage.
 - No hidden row caps.
-- No inspector state that points at an object the operator cannot reach from the
+- No inspector state that points at an object the user cannot reach from the
   visible list mechanics.
 
 ## Review checklist
 
 - Does this screen read like a workstation or like a startup dashboard?
-- Can an operator scan the current state in a few seconds?
+- Can a user scan the current state in a few seconds?
 - Are the highest-value comparisons shown in tables or dense lists when that is
   the natural form of the data?
 - Is color carrying operational meaning rather than decoration?
 - Is the active workspace persistent and obvious?
 - Do all displayed counts map to reachable rows?
-- Can the operator move through all counted media without using search?
+- Can the user move through all counted media without using search?
 - Does the next action explain why it is safe, blocked, or waiting?
 - Would this still feel credible if it were shown next to Resolve or a control
   room console?
@@ -235,7 +235,7 @@ different visual or language model.
 
 ## Process expectations
 
-- Before changing a primary operator surface, read this guide together with
+- Before changing a primary user surface, read this guide together with
   `docs/style/frontend.md`.
 - For major UI resets, write or update a short design brief before coding.
 - Validate in a real browser and critique the rendered result against this

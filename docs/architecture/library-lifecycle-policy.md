@@ -11,12 +11,12 @@ ranking, and queue execution so each layer remains explainable and recoverable.
 - Existing queued work remains FIFO; lifecycle policy does not reorder jobs.
 - A run manifest freezes selected membership and per-item decision provenance.
 - Retry and recovery reuse manifest membership instead of selecting again.
-- Retry recovery sends missing, unreadable, or invalid manifests to operator
-  attention instead of leaving the job in `retry_backoff`; only transient
+- Retry recovery sends missing, unreadable, or invalid manifests to the
+  user's attention instead of leaving the job in `retry_backoff`; only transient
   artifact cleanup failures wait for another backoff interval.
 - Retry cleanup treats a responsive remote `rm` failure or local/controller
   permission, read-only, malformed-path, or directory cleanup failure as a
-  deterministic operator issue and moves the job to `needs_attention`; SSH
+  deterministic issue for the user and moves the job to `needs_attention`; SSH
   transport/readiness failures remain deferred so the job can retry later.
 - Specials and Season 0 never identify a series' current season.
 - Provider failures preserve the last successful metadata.
@@ -95,7 +95,7 @@ tie breakers; they do not make an ineligible item runnable.
 ## Manual override
 
 An exact season prefix may bypass lifecycle holds from the season surface after
-the operator confirms the bypass. An exact TV episode may also borrow its
+the user confirms the bypass. An exact TV episode may also borrow its
 parent-season override; candidate selection still uses the season hold context,
 but the exact-item scope keeps the manifest bounded to that one episode. A
 separate show-level action may process older numbered seasons with one approved
@@ -122,7 +122,7 @@ The manifest also carries a top-level selection snapshot. These facts explain
 why work was selected at queue time and keep later retries independent from live
 metadata or policy changes.
 
-## Operator setup
+## User setup
 
 Use Settings to configure the Plex server URL and, when Plex reports different
 filesystem paths, one path root for each Mediaforce library. Set

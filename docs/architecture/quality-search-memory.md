@@ -29,7 +29,7 @@ Inferred guidance is:
 - confidence derived from sample count and scope
 - dispersion derived from interquartile range and median absolute deviation
 
-Inferred guidance is advisory. Current operator policy, persisted stream-budget
+Inferred guidance is advisory. Current user policy, persisted stream-budget
 and transform ledgers, quality floors, validation, and promotion rules remain
 authoritative.
 
@@ -326,7 +326,7 @@ Each group keeps three sections separate:
 The passive section also reports distinct passive units, distinct items, natural
 series/season/film-root clusters, and largest-cluster concentration. These are
 dependence diagnostics only and never gate eligibility. Acceptance reporting
-also carries global operator outcomes from current authoritative content-intent
+also carries global user outcomes from current authoritative content-intent
 boundary observations: rejection means current unacceptable/rejected visual
 evidence; additional attention conservatively includes rejection, correction,
 withdrawal, or approved evidence with concern tags. These outcomes stay global

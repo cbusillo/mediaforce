@@ -33,7 +33,7 @@ as implementation anchors.
   - Keep the domain state logic that loads dashboard and host data, but split it
     out of the route file into clearer helpers/components.
 - `frontend/src/routes/completed/+page.svelte`
-  - Keep as an adjacent route that should inherit the new operator shell later.
+  - Keep as an adjacent route that should inherit the new user shell later.
 - `frontend/src/routes/folders/[...prefix]/+page.svelte`
   - Keep the route structure and studio entry path intact.
 - Queue and toast action flows already wired into the home route.
@@ -53,7 +53,7 @@ for the workstation model.
     than a soft product header.
 - `frontend/src/lib/components/PageShell.svelte`
   - Rework page framing and width rhythm if needed to support a stronger
-    operator shell.
+    user shell.
 - `frontend/src/lib/components/FolderCard.svelte`
   - Keep only if needed outside the main home queue.
   - The home route should not rely on tile/card browsing as its primary queue
@@ -68,7 +68,7 @@ These pieces represented the old dashboard language and were removed after the
 workstation replacement stopped referencing them.
 
 - `frontend/src/lib/components/dashboard/DashboardHero.svelte`
-  - Hero framing is the wrong reference model for the operator home screen.
+  - Hero framing is the wrong reference model for the user home screen.
 - `frontend/src/lib/components/dashboard/DashboardFolderGrid.svelte`
   - Card-grid folder browsing is not the right primary queue surface.
 - `frontend/src/lib/components/HeroCard.svelte`
@@ -91,7 +91,7 @@ new design back into the old aesthetic.
 
 - `frontend/src/lib/components/Panel.svelte`
   - Current defaults are too soft and decorative for a workstation shell.
-  - Either introduce a stricter operator variant or reduce the global panel
+  - Either introduce a stricter user variant or reduce the global panel
     chrome.
 - `frontend/src/lib/components/SectionHead.svelte`
   - Keep if it can express tighter operational headings without marketing-like

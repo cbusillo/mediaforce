@@ -1,10 +1,10 @@
 # Movies Workflow Design Brief
 
 The Movies workflow extends Mediaforce's existing manifest-driven pipeline with
-movie-title projections and movie-specific operator language. It does not add a
+movie-title projections and movie-specific user language. It does not add a
 second encode path.
 
-## Operator model
+## User model
 
 - Library remains one workstation surface with TV and Movies as explicit views.
 - A root-level movie file is one exact-file title.
@@ -12,9 +12,9 @@ second encode path.
   edition files plus separately visible extras.
 - Editions remain distinct rows and distinct exact-file actions.
 - Extras stay visible but are excluded from title-wide production unless the
-  configured movie policy includes them or the operator opens the exact extra.
+  configured movie policy includes them or the user opens the exact extra.
 - Unknown nested files remain visible and blocked from title-wide production
-  until the operator deliberately opens the exact file.
+  until the user deliberately opens the exact file.
 
 ## Layout
 

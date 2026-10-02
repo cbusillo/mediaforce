@@ -14,7 +14,7 @@
 - `docs/policies/coding-standards.md`: project-wide coding rules and guardrails
 - `docs/style/python.md`: Python and FastAPI style
 - `docs/style/frontend.md`: Svelte, TypeScript, and UI style
-- `docs/style/workstation-ui.md`: doctrine for Mediaforce's primary operator
+- `docs/style/workstation-ui.md`: doctrine for Mediaforce's primary user
   surfaces
 - `docs/design/README.md`: source-of-truth routing for active reset docs and
   archived UI evidence

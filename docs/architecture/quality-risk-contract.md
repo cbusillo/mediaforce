@@ -16,9 +16,9 @@
 
 Quality-risk contract version 1 keeps four layers separate:
 
-- `facts`: immutable measured or operator-supplied inputs such as cadence,
+- `facts`: immutable measured or user-supplied inputs such as cadence,
   fingerprint findings, review moments, sample result, stream budget, and the
-  current operator request.
+  current user request.
 - `deterministic_gates`: cadence, allow-list, and budget checks that block or
   redirect work without model interpretation.
 - `interpretation`: optional model or artifact-reading output that may add
@@ -29,7 +29,7 @@ Quality-risk contract version 1 keeps four layers separate:
 
 The public route view exposes only safe typed data such as `verdict`, typed
 risks, blocking reasons, comparison reasons, safe provenance identifiers, and
-current operator authority. Raw prompt traces and internal contract JSON stay on
+current user authority. Raw prompt traces and internal contract JSON stay on
 the proposal trace path only.
 
 Current and preview policy hashes remain distinct. A review of the current
@@ -38,10 +38,10 @@ sample cannot authorize a pending preview whose policy hash differs.
 ## Non-queueable recovery
 
 Every non-queueable pending proposal publishes a bounded recovery object with a
-safe headline, detail, `nothing_queued: true`, one operator action, and whether
+safe headline, detail, `nothing_queued: true`, one user action, and whether
 the exact request can be retried. Assistant/provider and structured-output
 failures are separate from an unclear request and deterministic blockers; they
-never label the operator note unclear, expose raw diagnostics, or count as
+never label the user note unclear, expose raw diagnostics, or count as
 tuning-history evidence. Legacy saved proposals derive the same assistant
 recovery from recognized internal trace failure codes after restart.
 
@@ -55,11 +55,11 @@ recovery from recognized internal trace failure codes after restart.
   compilation unchanged; prior defaults are not upper bounds for an explicit
   absolute size goal.
 - Cadence `mixed`, `unknown`, or transform-less interlaced/telecine outcomes
-  block automatic reuse and remain explicit operator-visible gates.
+  block automatic reuse and remain explicit user-visible gates.
 - Arithmetic infeasibility remains deterministic and is never delegated to a
   model.
 - Target-size search traces are schema-checked, source-scoped, and bound to a
-  validated transform-plan identity. The operator route receives a compact
+  validated transform-plan identity. The UI route receives a compact
   typed summary instead of raw candidate arrays.
 - A blocked contract clears proposal queueability, and confirmation recomputes
   the contract against current source, policy, calibration, and failed-job state
@@ -95,7 +95,7 @@ review-moment indexes when the risk is tied to measured review moments.
   reviewed policy hash, sample job ID, and complete evidence-ID set match the
   current source-scoped contract. Referenced moment indexes must still exist.
 - Sibling seasons and unrelated folders may remain visible as contextual memory
-  or operator shortcuts, but they never gain authority for the current item.
+  or user shortcuts, but they never gain authority for the current item.
 - Historical same-folder approvals are also contextual only. Current authority
   comes from the exact source/policy/sample/evidence review record, not from a
   retrieved learning artifact.

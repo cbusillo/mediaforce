@@ -9,7 +9,7 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 - `docs/policies/acceptance-gate.md`: commit/session-finish bar
 - `docs/policies/coding-standards.md`: repo-wide coding expectations
 - `docs/style/index.md`: entry point for language and testing style guides
-- `docs/style/workstation-ui.md`: UI doctrine for operator-facing workstation
+- `docs/style/workstation-ui.md`: UI doctrine for user-facing workstation
   surfaces
 - `.github/github.json`: canonical repo commands, quality gates,
   workflow metadata, and cleanup policy
