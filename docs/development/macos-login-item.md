@@ -112,8 +112,9 @@ For ordinary non-disruptive verification:
 
 1. Run `uv run mediaforce service enable`.
 2. Run `uv run mediaforce service status` and confirm a PID is reported.
-3. Open the configured web URL and verify Settings shows controller storage
-   recovery when a required share is missing.
+3. Open the configured web URL and verify the computers list reports a
+   controller storage problem when a required share is missing
+   (`GET /api/hosts` returns it as `controller_storage`).
 4. Inspect both durable logs for restart loops or configuration errors.
 5. Run `uv run mediaforce service disable` when the service should remain off.
 

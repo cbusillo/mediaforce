@@ -147,9 +147,10 @@ Runtime-native selected observations now carry an immutable `shadow_json`
 payload. The payload records the first CRF that earlier compatible evidence
 would have suggested, its scope, confidence, sample count, dispersion, typed
 fallback reason, and a comparison with the search that actually ran. Passive
-shadow evaluation happens after the production search is complete. Active
-planning evaluates the same immutable history before search so it can authorize
-the isolated probe. Both paths use an explicit evidence cutoff at the current
+shadow evaluation happens after the production search is complete. An active
+mode would evaluate the same immutable history before search to authorize an
+isolated probe; today every plan is passive (`QualityWarmStartPlan.active` is
+false). Both paths use an explicit evidence cutoff at the current
 search's start time, so the current result cannot recommend itself.
 
 Shadow evidence comes from the highest-authority append-only revision that
@@ -331,7 +332,9 @@ evidence; additional attention conservatively includes rejection, correction,
 withdrawal, or approved evidence with concern tags. These outcomes stay global
 when exact quality-group attribution is unsafe.
 
-The issue #256 completion protocol is fixed before active evidence is reviewed:
+Issue #256 (the warm-start study) closed as not planned on 2026-09-01 with a
+null result, so warm start stays passive. Its completion protocol is kept below
+as the record of what an active mode would have had to meet:
 
 - one exact scope, signature, and policy group must remain passively eligible
 - at least 20 warm-arm attempts on 20 distinct items and ten full-search
@@ -358,7 +361,8 @@ runtime artifact.
 
 ## Narrowed-Window Decision
 
-Issue #262 remains an evidence-gated evaluation. Historical replay may report
+Issue #262 closed as not planned on 2026-08-11; narrowed bounds are not
+planned. The evaluation rules below are historical. Historical replay may report
 selected-CRF capture, in-window selectable candidates, edge hits, unknowns, and
 fallback rate, but it must not claim replayed wall-time savings because
 per-candidate sample durations are not persisted. Active narrowed bounds remain
@@ -371,18 +375,19 @@ a suitable crf`, confirming that an unsatisfied constrained search fails rather
 than silently selecting a boundary. This verifies the tool contract only; it
 does not justify implementing narrowed bounds.
 
-## Folder Studio Projection
+## Show Page Projection
 
-Folder Studio reads the newest current selected observation inside the active
+The show page reads the newest current selected observation inside the active
 media scope when it is either learning-eligible or an audited warm-start
 selection, then projects its immutable shadow record. The
 surface keeps the production result and the counterfactual recommendation
 separate: chosen CRF, measured quality, final size, candidate count, and search
 time describe what actually ran; the shadow first CRF, evidence scope, sample
 count, confidence, dispersion, and comparison describe what memory would have
-tried first.
+tried first. These are engineering facts; on screen they must use plain words,
+not internal terms such as CRF or shadow (`DIRECTION.md`).
 
-When no recommendation was safe, Folder Studio shows the stored typed fallback
+When no recommendation was safe, the show page shows the stored typed fallback
 as sparse, stale, or conflicting evidence instead of recomputing guidance in the
 web layer. A folder with no shadow-bearing observation gets a compact empty
 state. Every state says that the evidence is observation-only: quality floors,

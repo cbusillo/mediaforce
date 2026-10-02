@@ -14,6 +14,9 @@ stable package and component seams.
 
 ## Backend boundaries
 
+The module lists below name each package's main owners; they are not
+exhaustive. List a package directory before adding a module beside them.
+
 ### Keep thin at top level
 
 - `mediaforce/advisor.py`
@@ -31,7 +34,8 @@ after the package consolidation pass. Avoid growing them with new helper logic.
 - `config.py`
   - config loading, runtime settings, path resolution
 - `db.py`
-  - SQLite schema and DB open helpers
+  - SQLite DB open helpers; the schema lives in `db_tables.py` and the Alembic
+    migrations under `db_migration_scripts/`
 - `models.py`
   - small shared dataclasses such as `ProbeSummary`
 - `type_defs.py`
@@ -116,7 +120,11 @@ Guidance:
 - `app.py`
   - app factory
   - middleware/static mounting
-  - startup and compatibility wrappers for test-facing helpers
+  - startup, background workers, and compatibility wrappers for test-facing
+    helpers
+- `runtime_lock.py`
+  - shared process exclusivity for web and bounded operator runtimes
+  - stable parent-directory guard against lock-file unlink/recreate splits
 - `routes/`
   - `dashboard.py`
   - `folders.py`
@@ -144,9 +152,6 @@ Guidance:
       a matching or later database failure override contradictory legacy
       sidecar state
   - `calibration_runtime.py`
-  - `runtime_lock.py`
-    - shared process exclusivity for web and bounded operator runtimes
-    - stable parent-directory guard against lock-file unlink/recreate splits
   - `encode_runtime.py`
   - `folder_state.py`
   - `folder_actions.py`
@@ -158,13 +163,10 @@ Guidance:
   - `settings_payloads.py`
   - `tool_capabilities.py`
     - explicit-lifecycle ffmpeg capability snapshots used by read-only payloads
-- `serializers.py`
-  - shared API payload shaping across routes
 
 Guidance:
 
-- Treat the `web/` split as complete for the structural refactor baseline.
-- Add new route-specific behavior in `web/routes/` or `web/runtime/` rather
+- `web/app.py` is still large (over 5,000 lines). Add new route-specific behavior in `web/routes/` or `web/runtime/` rather
   than growing `web/app.py`.
 - Only trim more from `web/app.py` when a clearly mechanical helper cluster or
   removable compatibility wrapper appears.
@@ -184,17 +186,21 @@ Guidance:
   - host probe scripts, capability checks, and status parsing
   - successful status probes remain distinct from full encode readiness, so a
     reachable host with recoverable storage is not reported as unreachable
-- `lifecycle.py`
-  - wake/start/stop commands, cooldown behavior
+- `wake_helpers.py` and `wake_runtime.py`
+  - wake-on-LAN, MAC learning, and wake waits
 - `mount_runtime.py`
   - controller SMB mount parsing and password-free learned mapping persistence
   - one Finder mount script shared by local and SSH transports
   - bounded transient LaunchAgent execution, cleanup, and locking
   - Finder Keychain recovery messages without credential access
-- `setup.py`
+- `setup_runtime.py`
   - prepare/reset trust/bootstrap flows
-- `models.py`
+- `types.py`
   - host datatypes and constants
+- `config.py`
+  - host settings normalization: media access, capabilities, priority
+- `controller_mount.py`
+  - controller-side SMB mount checks
 
 `mediaforce.remote` remains the stable compatibility wrapper surface for direct
 test patch targets.
@@ -223,7 +229,7 @@ test patch targets.
 - `fingerprint.py`
   - bounded visual/audio complexity measurement, versioned media fingerprint
     evidence, advisory confidence gates, and safe source-scoped decisions
-- `paths.py`
+- `helpers.py`
   - mounted/stream source and staging resolution
 - `progress.py`
   - ffmpeg progress parsing and callback shaping
@@ -461,19 +467,27 @@ keeps growing materially.
 
 ### Route wrappers
 
-- `frontend/src/routes/+page.svelte`
-  - thin dashboard orchestrator
-  - delegates visual sections to `frontend/src/lib/components/dashboard/`
+- `frontend/src/routes/+page.svelte` and `frontend/src/routes/folders/+page.svelte`
+  - render the TV library
+    (`frontend/src/lib/components/season/SeasonLibraryPage.svelte`)
+- `frontend/src/routes/movies/` and `frontend/src/routes/other/`
+  - Movies and Other libraries (`components/workstation/MovieLibraryPage.svelte`,
+    `OtherLibraryPage.svelte`)
+- `frontend/src/routes/ops/` and `frontend/src/routes/completed/`
+  - Activity and Finished (`components/workstation/OpsWorkstationView.svelte`,
+    `CompletedWorkstationView.svelte`)
 - `frontend/src/routes/settings/+page.svelte`
   - thin wrapper around
     `frontend/src/lib/components/settings/SettingsEditor.svelte`
   - shared draft/action helpers live in
     `frontend/src/lib/settings/editor.ts`
 - `frontend/src/routes/folders/[...prefix]/+page.svelte`
-  - thin wrapper around
-    `frontend/src/lib/components/folders/FolderStudioView.svelte`
-  - shared folder workbench/display helpers live in
-    `frontend/src/lib/folders/studio.ts`
+  - loads one scope and dispatches to the show or season view
+    (`components/season/SeasonLibrary.svelte`,
+    `components/season/SeasonExperience.svelte`) or to
+    `components/workstation/MovieStudioView.svelte` /
+    `OtherStudioView.svelte`
+  - shared folder display helpers live in `frontend/src/lib/folders/`
 
 Guidance:
 
@@ -483,16 +497,9 @@ Guidance:
 
 ### Large extracted frontend views
 
-- `frontend/src/lib/components/folders/FolderStudioView.svelte`
-  - still the main decomposition target when folder feature work resumes
-  - likely follow-on splits:
-    - `FolderHeader`
-    - `FolderTelemetryCard`
-    - `FolderPolicyEditor`
-    - `FolderQueueActions`
-    - `FolderReviewPanel`
-    - `FolderApprovalPanel`
-    - folder modal components under `frontend/src/lib/components/folders/`
+- `frontend/src/lib/components/season/SeasonExperience.svelte`
+  - the TV season and show page; at over 7,000 lines, the main decomposition
+    target
 - `frontend/src/lib/components/settings/SettingsEditor.svelte`
   - split further only if settings UI grows again
 

@@ -43,9 +43,13 @@ Non-current reasons are compact and machine-readable:
 - `source_changed`
 - `policy_changed`
 
-Valid blocked or mixed cadence remains current measured evidence. An explicit
-unknown cadence or fingerprint result is non-current because it cannot satisfy
-the next decision that needs that evidence.
+Valid blocked or mixed cadence remains current measured evidence. A cadence
+`unknown` whose sampled ranges were all measured is also current: measuring
+again gives the same answer, so it waits on a decision, not on analysis. An
+`unknown` cadence with incomplete measurement, or an `unknown` fingerprint, is
+non-current (`analysis_required` / `unknown`). A stored cadence decision that
+the current classifier would derive differently is `classification_required` /
+`policy_changed`.
 
 ## Identities
 
