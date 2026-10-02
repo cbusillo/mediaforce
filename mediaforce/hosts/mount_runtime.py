@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import logging
 import os
 import re
 import shlex
@@ -23,6 +24,12 @@ _MOUNT_BUSY_EXIT = 43
 _MOUNT_HELPER_EXIT = 44
 _MOUNT_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
 _SMB_SERVER_RE = re.compile(r"^[A-Za-z0-9._\-\[\]:]+$")
+_HELPER_MARKER_RE = re.compile(r"^MEDIAFORCE_MOUNT(?:_JOB|_ERR)?=.*$", re.MULTILINE)
+# The share URL names the account; an error echoing it must not put that in the log.
+# Applied to the helper's error text before it is cut, so a cut can never split an account from its URL.
+_REDACT_SMB_ACCOUNT_SED = "/usr/bin/sed -E 's#([Ss][Mm][Bb]://)[^@/[:space:]]+@#\\1#g'"
+_URL_ACCOUNT_RE = re.compile(r"(smb://)[^@\s/]+@", re.IGNORECASE)
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +200,7 @@ def mount_smb_shares(
         if result.returncode == 0:
             mounted_names.append(mount.share_name)
             continue
+        _log_helper_failure(label, mount, result)
         if result.returncode == _NO_GUI_SESSION_EXIT:
             return HostSetupResult(
                 ok=False,
@@ -271,6 +279,7 @@ def _remote_mount_script(mount: RemoteSmbMount, *, token: str, attempt_seconds: 
             'timeout_seconds="$5"',
             'lock_path="$6"',
             'service_label="$7"',
+            'result_dir="$8"',
             'uid="$(/usr/bin/id -u)"',
             'runner_dir="${0%/*}"',
             '/usr/bin/osascript "$script" "$mount_url" >"$stdout_path" 2>"$stderr_path" &',
@@ -284,6 +293,11 @@ def _remote_mount_script(mount: RemoteSmbMount, *, token: str, attempt_seconds: 
             'wait "$child_pid" || child_status=$?',
             '/bin/kill "$watchdog_pid" >/dev/null 2>&1 || true',
             'wait "$watchdog_pid" >/dev/null 2>&1 || true',
+            # Kept outside the runner's own folder so the caller can still report it after cleanup. The
+            # status appears only once the error is saved, so a caller that sees it can rely on both.
+            f'{_REDACT_SMB_ACCOUNT_SED} "$stderr_path" 2>/dev/null | /usr/bin/head -c 4000 >"$result_dir/error" || true',
+            'printf \'%s\\n\' "$child_status" >"$result_dir/status.tmp" 2>/dev/null'
+            ' && /bin/mv -f "$result_dir/status.tmp" "$result_dir/status" 2>/dev/null || true',
             '/bin/rm -rf "$runner_dir"',
             '/bin/rmdir "$lock_path" >/dev/null 2>&1 || true',
             '/bin/launchctl bootout "gui/$uid/$service_label" >/dev/null 2>&1 || true',
@@ -349,14 +363,18 @@ if ! /bin/mkdir "$lock_path" 2>/dev/null; then
   exit {_MOUNT_BUSY_EXIT}
 fi
 tmp_dir=""
+result_dir=""
 cleanup() {{
   /bin/launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
   if [ -n "$tmp_dir" ]; then /bin/rm -rf "$tmp_dir"; fi
+  if [ -n "$result_dir" ]; then /bin/rm -rf "$result_dir"; fi
   /bin/rmdir "$lock_path" >/dev/null 2>&1 || true
 }}
 trap cleanup EXIT HUP INT TERM
 tmp_dir="$(/usr/bin/mktemp -d /tmp/mediaforce-mount.XXXXXX)" || exit {_MOUNT_HELPER_EXIT}
 /bin/chmod 700 "$tmp_dir" >/dev/null 2>&1 || true
+result_dir="$(/usr/bin/mktemp -d /tmp/mediaforce-mount-result.XXXXXX)" || exit {_MOUNT_HELPER_EXIT}
+/bin/chmod 700 "$result_dir" >/dev/null 2>&1 || true
 source_path="$tmp_dir/mount.applescript"
 script_path="$tmp_dir/mount.scpt"
 runner_path="$tmp_dir/run-mount.sh"
@@ -380,11 +398,35 @@ mount_url="$(/usr/bin/printf '%s' {q_mount_url_payload} | /usr/bin/base64 -D)" |
 /usr/bin/plutil -insert ProgramArguments.6 -string "$((attempt_seconds + 5))" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert ProgramArguments.7 -string "$lock_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert ProgramArguments.8 -string "$label" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
+/usr/bin/plutil -insert ProgramArguments.9 -string "$result_dir" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert RunAtLoad -bool YES "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert StandardOutPath -string "$stdout_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert StandardErrorPath -string "$stderr_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
+# Evidence for an attempt that did not mount: whether the Finder helper is still waiting (a dialog
+# can be open) and the end of its error output. The caller logs it; it never changes the outcome.
+report_helper() {{
+  # The runner saves its status before it removes its folder, so a saved status wins over launchd,
+  # and a live read that finds the folder already gone falls back to the saved error.
+  if [ -s "$result_dir/status" ]; then
+    printf 'MEDIAFORCE_MOUNT_JOB=exited:%s\\n' "$(/bin/cat "$result_dir/status" 2>/dev/null)"
+    error_text=""
+  elif /bin/launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+    printf 'MEDIAFORCE_MOUNT_JOB=running\\n'
+    error_text="$({_REDACT_SMB_ACCOUNT_SED} "$stderr_path" 2>/dev/null || true)"
+  else
+    printf 'MEDIAFORCE_MOUNT_JOB=exited:unknown\\n'
+    error_text=""
+  fi
+  if [ -z "$error_text" ]; then
+    error_text="$(/bin/cat "$result_dir/error" 2>/dev/null || true)"
+  fi
+  if [ -n "$error_text" ]; then
+    printf 'MEDIAFORCE_MOUNT_ERR=%s\\n' "$(printf '%s' "$error_text" | /usr/bin/tr '\\r\\n' '  ' | /usr/bin/tail -c 400)"
+  fi
+}}
 if ! /bin/launchctl bootstrap "gui/$uid" "$plist_path" >/dev/null 2>&1; then
   printf 'MEDIAFORCE_MOUNT=bootstrap-failed\\n'
+  report_helper
   exit {_MOUNT_HELPER_EXIT}
 fi
 waited=0
@@ -397,6 +439,7 @@ while [ "$waited" -lt "$attempt_seconds" ]; do
   /bin/sleep 1
 done
 printf 'MEDIAFORCE_MOUNT=timeout\\n'
+report_helper
 exit {_MOUNT_TIMEOUT_EXIT}
 """
 
@@ -430,6 +473,16 @@ def _remote_smb_mount(
         mount_point=controller_mount.mount_point,
         share_name=share_name,
         url=f"smb://{user_prefix}{server}/{share_path}",
+    )
+
+
+def _log_helper_failure(label: str, mount: RemoteSmbMount, result: subprocess.CompletedProcess[str]) -> None:
+    """Record what the Finder helper reported, so a failed connection can be told apart afterwards."""
+    markers = _HELPER_MARKER_RE.findall(str(result.stdout or ""))
+    evidence = _URL_ACCOUNT_RE.sub(r"\1", " ".join(marker.strip() for marker in markers)) or "no helper markers"
+    LOGGER.warning(
+        "Finder storage helper on %s did not connect %s: exit %s; %s",
+        label, mount.share_name, result.returncode, evidence,
     )
 
 
