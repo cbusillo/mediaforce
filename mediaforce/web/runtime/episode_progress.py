@@ -4,10 +4,7 @@ Each episode gets one stage. Its run in the season's latest encode run says what
 its library and staged state say what already happened or why nothing will.
 """
 
-import json
 from collections.abc import Iterable, Mapping
-from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -15,8 +12,9 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import staged_artifacts
-from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
-from mediaforce.encoding.encode_queue import list_child_encode_jobs_for_parents, list_encode_runs_for_prefix
+from mediaforce.core.type_defs import float_value, int_value, object_dict
+from mediaforce.encoding.encode_queue import encode_run_rel_paths, list_child_encode_jobs_for_parents, \
+    list_encode_runs_for_prefix
 from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
 from mediaforce.library.media_scopes import resolve_media_scope
 from mediaforce.library.staged_integrity import staged_validation_outcome
@@ -88,7 +86,7 @@ def load_season_episode_progress(
         parent_runs = children.get(str(parent["job_id"])) or [dict(parent)]
         # Within one run, a file's later part (a retry) replaces its earlier one.
         for run in reversed(parent_runs):
-            for rel_path in _run_rel_paths(run):
+            for rel_path in encode_run_rel_paths(run):
                 if rel_path in wanted and rel_path not in run_by_rel_path:
                     run_by_rel_path[rel_path] = run
     staged = _staged_rows(
@@ -186,47 +184,6 @@ def _episode(
         episode["stage"] = "needs_you"
         episode["detail"] = item.blocker
     return episode
-
-
-def _run_rel_paths(run: Mapping[str, Any]) -> list[str]:
-    """The files a run encodes, from its manifest, or from its own progress when the manifest is gone."""
-    manifest_rel_paths = _manifest_rel_paths(Path(str(run.get("manifest_path") or "")).expanduser())
-    if manifest_rel_paths:
-        indexes = run.get("manifest_indexes")
-        if isinstance(indexes, list):
-            chosen = [
-                manifest_rel_paths[index]
-                for index in indexes
-                if isinstance(index, int) and 0 <= index < len(manifest_rel_paths)
-            ]
-            if chosen:
-                return [rel_path for rel_path in chosen if rel_path]
-        return [rel_path for rel_path in manifest_rel_paths if rel_path]
-    progress = object_dict(run.get("progress"))
-    rel_path = str(
-        object_dict(progress.get("failure_analysis")).get("item_rel_path")
-        or progress.get("current_item_rel_path")
-        or ""
-    ).strip()
-    return [rel_path] if rel_path else []
-
-
-def _manifest_rel_paths(path: Path) -> tuple[str, ...]:
-    try:
-        stat = path.stat()
-    except OSError:
-        return ()
-    return _read_manifest_rel_paths(str(path), stat.st_mtime_ns, stat.st_size)
-
-
-# Keyed on the file's modification time and size, so a rewritten manifest is read again.
-@lru_cache(maxsize=256)
-def _read_manifest_rel_paths(path: str, _mtime_ns: int, _size: int) -> tuple[str, ...]:
-    try:
-        payload = object_dict(json.loads(Path(path).read_text()))
-    except (OSError, json.JSONDecodeError):
-        return ()
-    return tuple(str(object_dict(item).get("rel_path") or "").strip() for item in object_list(payload.get("items")))
 
 
 def _staged_rows(connection: DBClient, item_ids: list[int]) -> dict[int, Mapping[str, Any]]:
