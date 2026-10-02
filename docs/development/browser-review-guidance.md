@@ -12,8 +12,9 @@ visual and interaction judgment on top of that automated matrix, not replace it.
 - For the first browser-review subagent in a session, run a tiny smoke pass
   before the full critique: open the page, wait for a known selector, capture a
   screenshot, and confirm the page title/URL.
-- Launch browser-review subagents with `write: true` and explicitly mention the
-  `browser-ui-review` skill in the task prompt.
+- Launch browser-review subagents with permission to write screenshots under
+  `scratch/ui-checks/`, and explicitly mention the `browser-ui-review` skill in
+  the task prompt.
 - The prompt should require this exact order:
   1. open the live page in a browser
   2. wait for an app-specific ready selector
@@ -25,7 +26,8 @@ visual and interaction judgment on top of that automated matrix, not replace it.
 - If `BROWSER BLOCKED` occurs, fix the browser-launch problem and rerun the
   review. Do not present the blocked subagent's code-informed notes as the
   requested review.
-- For reviews of home, queue, review, or folder-workspace screens, require the
+- For reviews of the libraries (TV, Movies, Other), Activity, Finished, or a
+  show, season, or movie page, require the
   critique to call out any SaaS-dashboard drift against
   `docs/style/workstation-ui.md`.
 
