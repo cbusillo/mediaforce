@@ -433,6 +433,7 @@ describe('Ops workstation mapping', () => {
 				prefix: 'tv/House',
 				status: 'failed',
 				finished_at: '2026-09-09T03:42:33+00:00',
+				updated_at: '2026-09-10T08:00:00+00:00',
 				progress: { stage: 'searching_target' },
 				error:
 					'The approved target size was not reached before the configured search bound (largest_quality_safe_candidate_under_target_band); target=293777299 bytes.'
@@ -449,20 +450,38 @@ describe('Ops workstation mapping', () => {
 				job_id: 'unknown',
 				prefix: 'tv/Suits/Season 2',
 				status: 'stopped',
+				updated_at: '2026-06-05T11:41:43+00:00',
 				error: 'worker_exit status=137 in run_calibration_job'
+			},
+			{
+				job_id: 'no-reason',
+				prefix: 'tv/Lucifer/Season 2',
+				status: 'failed',
+				created_at: '2026-04-25T18:28:35+00:00'
 			}
 		];
 
 		const rows = buildOpsHistoryRows(dashboard);
 
+		const shown = (value: string) =>
+			new Date(value).toLocaleString('en-US', {
+				month: 'short',
+				day: 'numeric',
+				hour: 'numeric',
+				minute: '2-digit'
+			});
 		expect(rows.map((row) => [row.progress, row.detail])).toEqual([
 			["Didn't finish", 'The size goal could not be reached at a quality that passes.'],
 			["Didn't finish", 'Mediaforce could not confirm the sample stopped cleanly.'],
-			['Stopped', 'The sample stopped before it finished.']
+			['Stopped', 'The sample stopped before it finished.'],
+			["Didn't finish", 'The sample stopped before it finished.']
 		]);
-		expect(rows.map((row) => row.scheduler)).not.toContain('Waiting in queue');
-		expect(rows[0].scheduler).toMatch(/^Sep \d+, \d+:42 [AP]M$/);
-		expect(rows[2].scheduler).toBe('Earlier');
+		expect(rows.map((row) => row.scheduler)).toEqual([
+			shown('2026-09-09T03:42:33+00:00'),
+			shown('2026-08-29T15:13:48+00:00'),
+			shown('2026-06-05T11:41:43+00:00'),
+			'Earlier'
+		]);
 	});
 
 	it('surfaces unavailable data and retryable encodes as attention items', () => {

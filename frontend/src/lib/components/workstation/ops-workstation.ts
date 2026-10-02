@@ -531,9 +531,13 @@ function historicalSampleOutcome(job: CalibrationJob): string {
 }
 
 function historicalSampleDetail(job: CalibrationJob): string {
+	const fallback = 'The sample stopped before it finished.';
+	// Without a recorded reason, the shared detail falls back to times and placeholders.
+	if (!compactText(job.error) && !compactText(job.notes) && !compactText(job.operator_note))
+		return fallback;
 	const detail = calibrationDetail(job);
 	const sentence = detail.charAt(0).toUpperCase() + detail.slice(1);
-	return safeOperatorErrorCopy(sentence, 'The sample stopped before it finished.');
+	return safeOperatorErrorCopy(sentence, fallback);
 }
 
 function historicalSampleWhen(job: CalibrationJob): string {
