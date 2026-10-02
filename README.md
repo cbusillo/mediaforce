@@ -636,9 +636,17 @@ For first bootstrap, a private `controller_smb_mounts` list in runtime settings
 may supply the same `source` and `/Volumes/...` `mount_point` fields until a
 healthy mount can be observed and learned. Repeated automatic failures use a
 bounded cooldown, and a missing GUI session remains suppressed until the console
-login session changes. The user can use Prepare for an explicit retry. If
-Finder cannot use a saved credential, the action identifies the host and share
-that need one manual Finder connection with the password saved to Keychain.
+login session changes. The user can use Prepare for an explicit retry. Each
+host keeps at most one Finder request per share: a request Finder has not
+answered within the attempt, usually because a dialog is open, is left running
+rather than ended, since ending it would not close the dialog. Later attempts,
+explicit or automatic, report that request instead of opening another dialog
+until someone answers or cancels it on that Mac. A failed connection says what
+Finder or the helper reported: a sign-in failure, an unreachable server, a
+cancelled dialog, a missing desktop session, a share connected under a
+suffixed name such as `/Volumes/media-1`, a helper that could not start, or a
+timeout with no reason given. Only a sign-in failure asks for one manual Finder
+connection with the password saved to Keychain.
 
 Sampled calibration and AI note tuning can now run on any configured host with
 the `sample_calibration` capability. The folder page uses one AI-guided sample

@@ -5,7 +5,6 @@ import os
 import re
 import shlex
 import subprocess
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -22,13 +21,33 @@ _NO_GUI_SESSION_EXIT = 41
 _MOUNT_TIMEOUT_EXIT = 42
 _MOUNT_BUSY_EXIT = 43
 _MOUNT_HELPER_EXIT = 44
+_MOUNT_REQUEST_WAITING_EXIT = 45
+_MOUNT_ELSEWHERE_EXIT = 46
+_SSH_CONNECTION_EXIT = 255
 _MOUNT_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
 _SMB_SERVER_RE = re.compile(r"^[A-Za-z0-9._\-\[\]:]+$")
-_HELPER_MARKER_RE = re.compile(r"^MEDIAFORCE_MOUNT(?:_JOB|_ERR)?=.*$", re.MULTILINE)
+_HELPER_MARKER_RE = re.compile(r"^MEDIAFORCE_MOUNT(?:_JOB|_ERR|_AT)?=.*$", re.MULTILINE)
 # The share URL names the account; an error echoing it must not put that in the log.
 # Applied to the helper's error text before it is cut, so a cut can never split an account from its URL.
 _REDACT_SMB_ACCOUNT_SED = "/usr/bin/sed -E 's#([Ss][Mm][Bb]://)[^@/[:space:]]+@#\\1#g'"
 _URL_ACCOUNT_RE = re.compile(r"(smb://)[^@\s/]+@", re.IGNORECASE)
+# Finder's own words for why `mount volume` failed. A failure is put in a group only when its error
+# says so; anything else is reported in Finder's words without a guessed cause.
+_FINDER_CANCELLED_MARKERS = ("(-128)", "user canceled", "user cancelled")
+_FINDER_AUTHENTICATION_MARKERS = ("authenticat", "password", "credentials", "(-5023)")
+_FINDER_UNREACHABLE_MARKERS = (
+    "could not be found",
+    "couldn't be found",
+    "couldn\u2019t be found",
+    "can't be found",
+    "cannot be found",
+    "no route to host",
+    "host is down",
+    "network is unreachable",
+    "connection refused",
+    "timed out",
+)
+_FINDER_ERROR_SHOWN_CHARS = 300
 LOGGER = logging.getLogger(__name__)
 
 
@@ -179,8 +198,7 @@ def mount_smb_shares(
     )
     mounted_names: list[str] = []
     for mount in mounts:
-        token = uuid.uuid4().hex
-        script = _remote_mount_script(mount, token=token, attempt_seconds=attempt_seconds)
+        script = _remote_mount_script(mount, attempt_seconds=attempt_seconds)
         try:
             result = run_mount_script(script, attempt_seconds + 15)
         except subprocess.TimeoutExpired:
@@ -201,30 +219,19 @@ def mount_smb_shares(
             mounted_names.append(mount.share_name)
             continue
         _log_helper_failure(label, mount, result)
-        if result.returncode == _NO_GUI_SESSION_EXIT:
+        if is_ssh and result.returncode == _SSH_CONNECTION_EXIT:
             return HostSetupResult(
                 ok=False,
-                message=f"{label} needs a signed-in macOS desktop session to connect shared storage.",
-                detail=f"Sign in to {label} as {login_account}, then use Prepare to retry storage recovery.",
-                failure_kind="host_unavailable",
+                message=f"{label} did not finish the shared-storage connection request.",
+                detail="The SSH connection failed. Retry after the remote host connection is stable.",
+                failure_kind=transport_failure_kind,
             )
-        if result.returncode == _MOUNT_BUSY_EXIT:
-            return HostSetupResult(
-                ok=False,
-                message=f"{label} is already connecting the {mount.share_name} share.",
-                detail="Retry after the existing shared-storage connection attempt finishes.",
-                failure_kind="host_unavailable",
-            )
-        if result.returncode == _MOUNT_TIMEOUT_EXIT:
-            return _finder_recovery_result(label, mount)
-        return HostSetupResult(
-            ok=False,
-            message=f"{label} could not start the Finder storage helper.",
-            detail=(
-                "The temporary macOS launch service failed before Finder could connect shared storage. "
-                "Retry the request; if it keeps failing, inspect the remote macOS launch service."
-            ),
-            failure_kind="host_configuration",
+        return _failed_mount_result(
+            label,
+            mount,
+            result,
+            login_account=login_account,
+            attempt_seconds=attempt_seconds,
         )
     names = ", ".join(mounted_names)
     location = "remote " if is_ssh else ""
@@ -254,9 +261,11 @@ def mount_remote_smb_shares(
     )
 
 
-def _remote_mount_script(mount: RemoteSmbMount, *, token: str, attempt_seconds: int) -> str:
-    if not re.fullmatch(r"[a-f0-9]{32}", token):
-        raise ValueError("Remote mount token must be a lowercase UUID hex value.")
+def _remote_mount_script(
+        mount: RemoteSmbMount,
+        *,
+        attempt_seconds: int,
+) -> str:
     expected = str(mount.mount_point)
     if not _finder_mount_point_supported(mount.mount_point):
         raise ValueError("Finder SMB mounts must target one direct child of /Volumes.")
@@ -276,28 +285,23 @@ def _remote_mount_script(mount: RemoteSmbMount, *, token: str, attempt_seconds: 
             'mount_url="$2"',
             'stdout_path="$3"',
             'stderr_path="$4"',
-            'timeout_seconds="$5"',
-            'lock_path="$6"',
-            'service_label="$7"',
-            'result_dir="$8"',
+            'lock_path="$5"',
+            'service_label="$6"',
+            'result_dir="$7"',
             'uid="$(/usr/bin/id -u)"',
             'runner_dir="${0%/*}"',
-            '/usr/bin/osascript "$script" "$mount_url" >"$stdout_path" 2>"$stderr_path" &',
-            "child_pid=$!",
-            "(",
-            '  /bin/sleep "$timeout_seconds"',
-            '  /bin/kill "$child_pid" >/dev/null 2>&1 || true',
-            ") &",
-            "watchdog_pid=$!",
+            # No time limit: a request Finder has not answered usually has a dialog open, and ending
+            # the request would leave that dialog behind for the next one to stack on (#594). It ends
+            # when someone answers or cancels it, or when Finder gives up on its own.
             "child_status=0",
-            'wait "$child_pid" || child_status=$?',
-            '/bin/kill "$watchdog_pid" >/dev/null 2>&1 || true',
-            'wait "$watchdog_pid" >/dev/null 2>&1 || true',
+            '/usr/bin/osascript "$script" "$mount_url" >"$stdout_path" 2>"$stderr_path" || child_status=$?',
             # Kept outside the runner's own folder so the caller can still report it after cleanup. The
             # status appears only once the error is saved, so a caller that sees it can rely on both.
             f'{_REDACT_SMB_ACCOUNT_SED} "$stderr_path" 2>/dev/null | /usr/bin/head -c 4000 >"$result_dir/error" || true',
             'printf \'%s\\n\' "$child_status" >"$result_dir/status.tmp" 2>/dev/null'
             ' && /bin/mv -f "$result_dir/status.tmp" "$result_dir/status" 2>/dev/null || true',
+            # A caller that left while this request waited can no longer remove the result folder.
+            'if [ -e "$result_dir/caller-gone" ]; then /bin/rm -rf "$result_dir"; fi',
             '/bin/rm -rf "$runner_dir"',
             '/bin/rmdir "$lock_path" >/dev/null 2>&1 || true',
             '/bin/launchctl bootout "gui/$uid/$service_label" >/dev/null 2>&1 || true',
@@ -309,8 +313,10 @@ def _remote_mount_script(mount: RemoteSmbMount, *, token: str, attempt_seconds: 
     runner_payload = base64.b64encode(runner.encode()).decode()
     mount_url_payload = base64.b64encode(mount.url.encode()).decode()
     lock_hash = hashlib.sha256(expected.encode()).hexdigest()[:24]
-    label = f"com.mediaforce.mount.{token}"
+    # One launchd job name per share, so an attempt can see a request an earlier one left waiting.
+    label = f"com.mediaforce.mount.{lock_hash}"
     q_expected = shlex.quote(expected)
+    q_share_sources = shlex.quote("\n".join(_mount_output_sources(mount.url)))
     q_mount_output_path = shlex.quote(mount_output_field(expected))
     q_label = shlex.quote(label)
     q_applescript_payload = shlex.quote(applescript_payload)
@@ -319,6 +325,7 @@ def _remote_mount_script(mount: RemoteSmbMount, *, token: str, attempt_seconds: 
     return f"""set -u
 expected={q_expected}
 mount_output_path={q_mount_output_path}
+share_sources={q_share_sources}
 label={q_label}
 attempt_seconds={int(attempt_seconds)}
 mount_present() {{
@@ -332,6 +339,33 @@ mount_present() {{
   fi
   return 1
 }}
+# Finder connects a share at "<name>-1" when its usual folder is still taken, often by a stale
+# earlier connection. Prints the first such mount point, as `mount` writes it, of this same share:
+# another server's share with the same name is left alone.
+mounted_elsewhere() {{
+  /sbin/mount 2>/dev/null | while IFS= read -r line; do
+    case "$line" in //*" (smbfs,"*) ;; *) continue ;; esac
+    point="${{line#* on }}"
+    point="${{point%% (smbfs,*}}"
+    suffix="${{point#"$mount_output_path"-}}"
+    if [ "$suffix" = "$point" ]; then continue; fi
+    case "$suffix" in ""|*[!0-9]*) continue ;; esac
+    source="${{line%% on *}}"
+    source="${{source#//}}"
+    case "${{source%%/*}}" in *@*) source="${{source#*@}}" ;; esac
+    source="$(printf '%s' "$source" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+    if printf '%s\\n' "$share_sources" | /usr/bin/grep -F -x -q -- "$source"; then
+      printf '%s\\n' "$point"
+      break
+    fi
+  done
+}}
+report_mounted_elsewhere() {{
+  elsewhere="$(mounted_elsewhere)"
+  if [ -z "$elsewhere" ]; then return 1; fi
+  printf 'MEDIAFORCE_MOUNT=mounted-elsewhere\\n'
+  printf 'MEDIAFORCE_MOUNT_AT=%s\\n' "$elsewhere"
+}}
 if mount_present; then
   printf 'MEDIAFORCE_MOUNT=already-mounted\\n'
   exit 0
@@ -341,6 +375,18 @@ console_uid="$(/usr/bin/stat -f '%u' /dev/console 2>/dev/null || true)"
 if [ "$console_uid" != "$uid" ] || ! /bin/launchctl print "gui/$uid" >/dev/null 2>&1; then
   printf 'MEDIAFORCE_MOUNT=no-gui-session\\n'
   exit {_NO_GUI_SESSION_EXIT}
+fi
+if report_mounted_elsewhere; then
+  exit {_MOUNT_ELSEWHERE_EXIT}
+fi
+# A request still running from an earlier attempt may have a dialog open. Ending it would not close
+# that dialog, and a new request would open a second one (#594), so wait for that one instead.
+job_running() {{
+  /bin/launchctl print "gui/$uid/$label" 2>/dev/null | /usr/bin/grep -E -q '^[[:space:]]*state = running$'
+}}
+if job_running; then
+  printf 'MEDIAFORCE_MOUNT=request-waiting\\n'
+  exit {_MOUNT_REQUEST_WAITING_EXIT}
 fi
 lock_root="$HOME/Library/Caches/mediaforce"
 /bin/mkdir -p "$lock_root" || exit {_MOUNT_HELPER_EXIT}
@@ -362,9 +408,24 @@ if ! /bin/mkdir "$lock_path" 2>/dev/null; then
   printf 'MEDIAFORCE_MOUNT=busy-timeout\\n'
   exit {_MOUNT_BUSY_EXIT}
 fi
+if job_running; then
+  /bin/rmdir "$lock_path" >/dev/null 2>&1 || true
+  printf 'MEDIAFORCE_MOUNT=request-waiting\\n'
+  exit {_MOUNT_REQUEST_WAITING_EXIT}
+fi
+# A job left loaded after its runner ended would refuse the new one.
+/bin/launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
 tmp_dir=""
 result_dir=""
 cleanup() {{
+  if [ -n "$result_dir" ] && job_running; then
+    # Leave a request Finder has not answered: ending it would not close its dialog, and the next
+    # attempt finds it instead of opening another. Its runner removes its own folder and the lock
+    # when it ends, and the result folder too once this side has gone.
+    : >"$result_dir/caller-gone" 2>/dev/null || true
+    if [ -s "$result_dir/status" ]; then /bin/rm -rf "$result_dir"; fi
+    return 0
+  fi
   /bin/launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
   if [ -n "$tmp_dir" ]; then /bin/rm -rf "$tmp_dir"; fi
   if [ -n "$result_dir" ]; then /bin/rm -rf "$result_dir"; fi
@@ -395,10 +456,9 @@ mount_url="$(/usr/bin/printf '%s' {q_mount_url_payload} | /usr/bin/base64 -D)" |
 /usr/bin/plutil -insert ProgramArguments.3 -string "$mount_url" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert ProgramArguments.4 -string "$stdout_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert ProgramArguments.5 -string "$stderr_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
-/usr/bin/plutil -insert ProgramArguments.6 -string "$((attempt_seconds + 5))" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
-/usr/bin/plutil -insert ProgramArguments.7 -string "$lock_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
-/usr/bin/plutil -insert ProgramArguments.8 -string "$label" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
-/usr/bin/plutil -insert ProgramArguments.9 -string "$result_dir" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
+/usr/bin/plutil -insert ProgramArguments.6 -string "$lock_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
+/usr/bin/plutil -insert ProgramArguments.7 -string "$label" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
+/usr/bin/plutil -insert ProgramArguments.8 -string "$result_dir" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert RunAtLoad -bool YES "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert StandardOutPath -string "$stdout_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert StandardErrorPath -string "$stderr_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
@@ -410,7 +470,7 @@ report_helper() {{
   if [ -s "$result_dir/status" ]; then
     printf 'MEDIAFORCE_MOUNT_JOB=exited:%s\\n' "$(/bin/cat "$result_dir/status" 2>/dev/null)"
     error_text=""
-  elif /bin/launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+  elif job_running; then
     printf 'MEDIAFORCE_MOUNT_JOB=running\\n'
     error_text="$({_REDACT_SMB_ACCOUNT_SED} "$stderr_path" 2>/dev/null || true)"
   else
@@ -434,6 +494,10 @@ while [ "$waited" -lt "$attempt_seconds" ]; do
   if mount_present; then
     printf 'MEDIAFORCE_MOUNT=mounted\\n'
     exit 0
+  fi
+  if report_mounted_elsewhere; then
+    report_helper
+    exit {_MOUNT_ELSEWHERE_EXIT}
   fi
   waited=$((waited + 1))
   /bin/sleep 1
@@ -486,14 +550,145 @@ def _log_helper_failure(label: str, mount: RemoteSmbMount, result: subprocess.Co
     )
 
 
-def _finder_recovery_result(label: str, mount: RemoteSmbMount) -> HostSetupResult:
+def _mount_output_sources(url: str) -> list[str]:
+    """The ways `mount` may write this share's source, without the account and in lower case."""
+    authority, _separator, share_path = url.removeprefix("smb://").partition("/")
+    server = authority.rsplit("@", 1)[-1]
+    decoded = unquote(share_path)
+    forms = {f"{server}/{share_path}", f"{server}/{mount_output_field(decoded)}", f"{server}/{decoded}"}
+    return sorted(form.lower() for form in forms)
+
+
+def _helper_markers(result: subprocess.CompletedProcess[str]) -> dict[str, str]:
+    markers: dict[str, str] = {}
+    for line in _HELPER_MARKER_RE.findall(str(result.stdout or "")):
+        key, _separator, value = line.strip().partition("=")
+        markers.setdefault(key, value)
+    return markers
+
+
+def _failed_mount_result(
+        label: str,
+        mount: RemoteSmbMount,
+        result: subprocess.CompletedProcess[str],
+        *,
+        login_account: str,
+        attempt_seconds: int,
+) -> HostSetupResult:
+    """Say why a share did not connect using only what the helper and Finder reported."""
+    share = mount.share_name
+    markers = _helper_markers(result)
+    still_waiting_detail = (
+        f"It may be showing a dialog on {label}'s screen. Answer or cancel it there, then use Prepare "
+        "to retry. Mediaforce won't send another request for this share while that one waits."
+    )
+    if result.returncode == _NO_GUI_SESSION_EXIT:
+        return HostSetupResult(
+            ok=False,
+            message=f"{label} needs a signed-in macOS desktop session to connect shared storage.",
+            detail=f"Sign in to {label} as {login_account}, then use Prepare to retry storage recovery.",
+            failure_kind="host_unavailable",
+        )
+    if result.returncode == _MOUNT_BUSY_EXIT:
+        return HostSetupResult(
+            ok=False,
+            message=f"{label} is already connecting the {share} share.",
+            detail="Retry after the existing shared-storage connection attempt finishes.",
+            failure_kind="host_unavailable",
+        )
+    if result.returncode == _MOUNT_REQUEST_WAITING_EXIT:
+        return HostSetupResult(
+            ok=False,
+            message=f"{label} is still waiting on an earlier request to connect the {share} share.",
+            detail=still_waiting_detail,
+            failure_kind="host_configuration",
+        )
+    if result.returncode == _MOUNT_ELSEWHERE_EXIT:
+        elsewhere = _decode_mount_field(markers.get("MEDIAFORCE_MOUNT_AT", "")) or "another folder"
+        return HostSetupResult(
+            ok=False,
+            message=f"{label} has a share connected at {elsewhere} instead of {mount.mount_point}.",
+            detail=(
+                f"Finder uses a name like that when {mount.mount_point} is still taken, often by a stale "
+                f"earlier connection. Eject {elsewhere} on {label}, then use Prepare to retry."
+            ),
+            failure_kind="host_configuration",
+        )
+    if result.returncode == _MOUNT_HELPER_EXIT:
+        return HostSetupResult(
+            ok=False,
+            message=f"{label} could not start the Finder storage helper.",
+            detail=(
+                "The temporary macOS launch service failed before Finder could connect shared storage. "
+                "Retry the request; if it keeps failing, inspect the remote macOS launch service."
+            ),
+            failure_kind="host_configuration",
+        )
+    if result.returncode != _MOUNT_TIMEOUT_EXIT:
+        return HostSetupResult(
+            ok=False,
+            message=f"{label} could not connect the {share} share.",
+            detail=(
+                f"The storage connection request ended unexpectedly (exit {result.returncode}). "
+                "Use Prepare to retry."
+            ),
+            failure_kind="host_configuration",
+        )
+    if markers.get("MEDIAFORCE_MOUNT_JOB") == "running":
+        return HostSetupResult(
+            ok=False,
+            message=(
+                f"{label} did not connect the {share} share within {attempt_seconds} seconds, "
+                "and the request is still waiting."
+            ),
+            detail=still_waiting_detail,
+            failure_kind="host_configuration",
+        )
+    return _finder_error_result(label, share, markers.get("MEDIAFORCE_MOUNT_ERR", ""), attempt_seconds=attempt_seconds)
+
+
+def _finder_error_result(label: str, share: str, error: str, *, attempt_seconds: int) -> HostSetupResult:
+    error = _URL_ACCOUNT_RE.sub(r"\1", error).strip()
+    if not error:
+        return HostSetupResult(
+            ok=False,
+            message=f"{label} did not connect the {share} share within {attempt_seconds} seconds.",
+            detail=(
+                f"Finder gave no reason. Use Prepare to retry; if it keeps failing, connect {share} "
+                f"in Finder on {label} to see what happens."
+            ),
+            failure_kind="host_configuration",
+        )
+    lowered = error.lower()
+    reported = f"Finder reported: \u201c{error[-_FINDER_ERROR_SHOWN_CHARS:]}\u201d"
+    if any(marker in lowered for marker in _FINDER_CANCELLED_MARKERS):
+        return HostSetupResult(
+            ok=False,
+            message=f"The request to connect the {share} share on {label} was cancelled.",
+            detail=f"Someone cancelled the connection dialog on {label}. Use Prepare to try again.",
+            failure_kind="host_configuration",
+        )
+    if any(marker in lowered for marker in _FINDER_AUTHENTICATION_MARKERS):
+        return HostSetupResult(
+            ok=False,
+            message=f"{label} could not sign in to the {share} share.",
+            detail=(
+                f"{reported}. On {label}, connect to {share} once in Finder and save the password to "
+                "Keychain, then use Prepare to retry."
+            ),
+            failure_kind="host_configuration",
+        )
+    if any(marker in lowered for marker in _FINDER_UNREACHABLE_MARKERS):
+        return HostSetupResult(
+            ok=False,
+            message=f"{label} could not reach the server for the {share} share.",
+            detail=f"{reported}. Check that the server is on and reachable from {label}, then use Prepare to retry.",
+            failure_kind="host_unavailable",
+        )
     return HostSetupResult(
         ok=False,
-        message=f"{label} could not connect the {mount.share_name} share with Finder.",
-        detail=(
-            f"On {label}, connect to {mount.share_name} once in Finder, "
-            "save the password to Keychain, then retry."
-        ),
+        message=f"{label} could not connect the {share} share with Finder.",
+        detail=f"{reported}. Use Prepare to retry.",
         failure_kind="host_configuration",
     )
 
