@@ -577,20 +577,28 @@ def _loads_host_payload_for_repair(raw_payload: Any) -> tuple[dict[str, Any], bo
     return payload, False
 
 
+def encode_run_manifest_rel_paths(run: Mapping[str, Any]) -> list[str]:
+    """Every file a run encodes, from its manifest only; empty when the manifest cannot be read."""
+    manifest_rel_paths = _manifest_rel_paths(Path(str(run.get("manifest_path") or "")).expanduser())
+    if not manifest_rel_paths:
+        return []
+    indexes = run.get("manifest_indexes")
+    if isinstance(indexes, list):
+        chosen = [
+            manifest_rel_paths[index]
+            for index in indexes
+            if isinstance(index, int) and 0 <= index < len(manifest_rel_paths)
+        ]
+        if chosen:
+            return [rel_path for rel_path in chosen if rel_path]
+    return [rel_path for rel_path in manifest_rel_paths if rel_path]
+
+
 def encode_run_rel_paths(run: Mapping[str, Any]) -> list[str]:
     """The files a run encodes, from its manifest, or from its own progress when the manifest is gone."""
-    manifest_rel_paths = _manifest_rel_paths(Path(str(run.get("manifest_path") or "")).expanduser())
+    manifest_rel_paths = encode_run_manifest_rel_paths(run)
     if manifest_rel_paths:
-        indexes = run.get("manifest_indexes")
-        if isinstance(indexes, list):
-            chosen = [
-                manifest_rel_paths[index]
-                for index in indexes
-                if isinstance(index, int) and 0 <= index < len(manifest_rel_paths)
-            ]
-            if chosen:
-                return [rel_path for rel_path in chosen if rel_path]
-        return [rel_path for rel_path in manifest_rel_paths if rel_path]
+        return manifest_rel_paths
     progress = object_dict(run.get("progress"))
     rel_path = str(
         object_dict(progress.get("failure_analysis")).get("item_rel_path")

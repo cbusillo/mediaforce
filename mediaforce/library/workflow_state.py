@@ -10,7 +10,7 @@ from mediaforce.core.db import DBRow
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
-from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, encode_run_rel_paths, \
+from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, encode_run_manifest_rel_paths, \
     unfinished_breakdown_groups, unfinished_breakdown_summary
 from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, normalize_scope_prefix, \
     path_matches_scope, resolve_media_scope, resolve_media_scopes, scope_rel_path_filter, scopes_overlap
@@ -574,13 +574,13 @@ def _load_encode_job_states(connection: DBClient, scopes: list[MediaScope]) -> d
 def _unfinished_part_files(rows: list[DBRow]) -> dict[str, tuple[str, ...]]:
     """The files each unfinished part of a folder run is for, read once for every scope.
 
-    A part whose files cannot be read maps to no files, which keeps the older, wider reading.
+    Only the manifest says everything a part covers; the file its progress names may be one of
+    several. A part without a readable manifest maps to no files, which keeps the older, wider reading.
     """
     return {
-        str(row["job_id"]): tuple(encode_run_rel_paths({
+        str(row["job_id"]): tuple(encode_run_manifest_rel_paths({
             "manifest_path": row["manifest_path"],
             "manifest_indexes": _json_list(row["manifest_indexes_json"]),
-            "progress": _json_object(row["progress_json"]),
         }))
         for row in rows
         if row["job_kind"] == "shard" and row["status"] in UNFINISHED_JOB_STATUSES
@@ -593,14 +593,6 @@ def _json_list(raw: Any) -> list[Any] | None:
     except json.JSONDecodeError:
         return None
     return value if isinstance(value, list) else None
-
-
-def _json_object(raw: Any) -> dict[str, Any]:
-    try:
-        value = json.loads(str(raw)) if raw else {}
-    except json.JSONDecodeError:
-        return {}
-    return value if isinstance(value, dict) else {}
 
 
 def _scope_job_states(

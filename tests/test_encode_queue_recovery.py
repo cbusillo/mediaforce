@@ -8075,8 +8075,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self._create_source_file("Season 2/episode.mkv"),
                 rel_path="tv/show/Season 2/episode.mkv",
             )
-            # No manifest on disk, so the queued part's file is unknown.
+            # No manifest on disk, so the queued part's files are unknown. Its progress names one file in
+            # another season, but a part may cover several files, so that proves nothing about this one.
             self._save_show_run(connection, [("part-unknown", "queued", 0)], manifest="gone.json")
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == "part-unknown").values(
+                progress_json=json.dumps({"current_item_rel_path": "tv/show/Season 1/episode.mkv"}),
+            ))
 
             workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
 
