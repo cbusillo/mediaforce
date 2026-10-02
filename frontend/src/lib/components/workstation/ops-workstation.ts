@@ -524,28 +524,28 @@ function historicalSampleOutcome(job: CalibrationJob): string {
 	return "Didn't finish";
 }
 
-// Words from Mediaforce's internals that mean nothing on the Activity page.
-const INTERNAL_TERMS =
-	/\b(?:schema|ledger|budgets?|observations?|boundary|backfill|shadow|fingerprint|revision|quarantine|replay|trace|preset|manifest|shards?|lease|crf|vmaf)\b/i;
+// A finished sample's reason, said only in words Mediaforce knows are plain; any other recorded
+// text is internal and gives way to the general sentence.
+const HISTORICAL_SAMPLE_REASONS: ReadonlyArray<[string, string]> = [
+	[
+		'largest_quality_safe_candidate_under_target_band',
+		'The size goal could not be reached at a quality that passes.'
+	],
+	['stream budget ledger', 'Mediaforce could not work out the size to aim for.'],
+	['containment cleanup is unproven', 'Mediaforce could not confirm the sample stopped cleanly.'],
+	['shared storage disconnected', 'The shared storage disconnected.'],
+	['failed to find a suitable crf', 'The sample did not find a usable quality setting.'],
+	['interrupted by a web process restart', 'The sample was interrupted before it finished.'],
+	['queue job was stopped', 'The sample was stopped and cleaned up.']
+];
 
 function historicalSampleDetail(job: CalibrationJob): string {
-	const fallback = 'The sample stopped before it finished.';
-	// Without a recorded reason, the shared detail falls back to times and placeholders.
-	if (!compactText(job.error) && !compactText(job.notes) && !compactText(job.operator_note))
-		return fallback;
-	const detail = calibrationDetail(job);
-	const normalized = detail.toLowerCase();
-	if (normalized.includes('largest_quality_safe_candidate_under_target_band')) {
-		return 'The size goal could not be reached at a quality that passes.';
-	}
-	if (normalized.includes('containment cleanup is unproven')) {
-		return 'Mediaforce could not confirm the sample stopped cleanly.';
-	}
-	if (normalized.includes('stream budget ledger')) {
-		return 'Mediaforce could not work out the size to aim for.';
-	}
-	const sentence = detail.charAt(0).toUpperCase() + detail.slice(1);
-	return INTERNAL_TERMS.test(sentence) ? fallback : safeOperatorErrorCopy(sentence, fallback);
+	const recorded = [job.error, job.notes, job.operator_note]
+		.map(compactText)
+		.join(' ')
+		.toLowerCase();
+	const reason = HISTORICAL_SAMPLE_REASONS.find(([needle]) => recorded.includes(needle));
+	return reason?.[1] ?? 'The sample stopped before it finished.';
 }
 
 function historicalSampleWhen(job: CalibrationJob): string {

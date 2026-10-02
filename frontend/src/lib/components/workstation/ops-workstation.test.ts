@@ -420,7 +420,7 @@ describe('Ops workstation mapping', () => {
 			status: 'History',
 			prefix: 'tv/show/season 4',
 			progress: "Didn't finish",
-			detail: 'Could not find a viable sample'
+			detail: 'The sample stopped before it finished.'
 		});
 		expect(rowRecoveryLabel(rows[0])).toBe('Nothing to do');
 	});
@@ -468,6 +468,20 @@ describe('Ops workstation mapping', () => {
 				error: 'Boundary compatibility uses an unsupported schema version'
 			},
 			{
+				job_id: 'unmapped',
+				prefix: 'tv/Raising Hope/Season 4',
+				status: 'failed',
+				finished_at: '2026-05-03T10:00:00+00:00',
+				error: 'Target-size search requires sample-encode measurement support'
+			},
+			{
+				job_id: 'storage',
+				prefix: 'tv/The Expanse/Season 4',
+				status: 'failed',
+				finished_at: '2026-05-04T10:00:00+00:00',
+				error: 'Shared storage disconnected'
+			},
+			{
 				job_id: 'no-reason',
 				prefix: 'tv/Lucifer/Season 2',
 				status: 'failed',
@@ -490,6 +504,8 @@ describe('Ops workstation mapping', () => {
 			['Stopped', 'The sample stopped before it finished.'],
 			["Didn't finish", 'Mediaforce could not work out the size to aim for.'],
 			["Didn't finish", 'The sample stopped before it finished.'],
+			["Didn't finish", 'The sample stopped before it finished.'],
+			["Didn't finish", 'The shared storage disconnected.'],
 			["Didn't finish", 'The sample stopped before it finished.']
 		]);
 		expect(rows.map((row) => row.scheduler)).toEqual([
@@ -498,6 +514,8 @@ describe('Ops workstation mapping', () => {
 			shown('2026-06-05T11:41:43+00:00'),
 			shown('2026-05-01T10:00:00+00:00'),
 			shown('2026-05-02T10:00:00+00:00'),
+			shown('2026-05-03T10:00:00+00:00'),
+			shown('2026-05-04T10:00:00+00:00'),
 			'Earlier'
 		]);
 	});
