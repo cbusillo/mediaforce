@@ -516,6 +516,52 @@ function calibrationDetail(job: CalibrationJob): string {
 	return detail.replace(/^error:\s*/i, '');
 }
 
+/** A finished sample's outcome, not the last step it reported while it ran. */
+function historicalSampleOutcome(job: CalibrationJob): string {
+	const status = String(job.status ?? '').toLowerCase();
+	if (status === 'stopped' || status === 'cancelled') return 'Stopped';
+	if (status === 'completed') return 'Finished';
+	return "Didn't finish";
+}
+
+// A finished sample's reason, said only in words Mediaforce knows are plain; any other recorded
+// text is internal and gives way to the general sentence.
+const HISTORICAL_SAMPLE_REASONS: ReadonlyArray<[string, string]> = [
+	[
+		'largest_quality_safe_candidate_under_target_band',
+		'The size goal could not be reached at a quality that passes.'
+	],
+	[
+		'stream budget ledger does not contain a resolved target video budget',
+		'Mediaforce could not work out the size to aim for.'
+	],
+	['containment cleanup is unproven', 'Mediaforce could not confirm the sample stopped cleanly.'],
+	['shared storage disconnected', 'The shared storage disconnected.'],
+	['failed to find a suitable crf', 'The sample did not find a usable quality setting.'],
+	['interrupted by a web process restart', 'The sample was interrupted before it finished.'],
+	['queue job was stopped', 'The sample was stopped and cleaned up.']
+];
+
+function historicalSampleDetail(job: CalibrationJob): string {
+	const recorded = [job.error, job.notes, job.operator_note]
+		.map(compactText)
+		.join(' ')
+		.toLowerCase();
+	const reason = HISTORICAL_SAMPLE_REASONS.find(([needle]) => recorded.includes(needle));
+	return reason?.[1] ?? 'The sample stopped before it finished.';
+}
+
+function historicalSampleWhen(job: CalibrationJob): string {
+	const parsed = new Date(compactText(job.finished_at) || compactText(job.updated_at));
+	if (Number.isNaN(parsed.getTime())) return 'Earlier';
+	return parsed.toLocaleString('en-US', {
+		month: 'short',
+		day: 'numeric',
+		hour: 'numeric',
+		minute: '2-digit'
+	});
+}
+
 function statusTone(status: string): ShellTone {
 	if (['failed', 'needs_attention', 'stopped', 'error'].includes(status)) return 'fail';
 	if (['running', 'processing', 'active'].includes(status)) return 'active';
@@ -746,19 +792,28 @@ function buildCalibrationLaneRows(
 			prefix: calibrationPrefix(job),
 			host: calibrationHostCopy(job),
 			phase: '',
-			progress: waitingForReview ? 'Complete' : calibrationProgressCopy(job, status),
-			scheduler: waitingForReview
-				? reviewUnavailable
-					? 'Review unavailable'
-					: 'Finished'
-				: activityScheduleDetailCopy(compactText(job.scheduler_status_copy)) || 'Waiting in queue',
+			progress: options.historical
+				? historicalSampleOutcome(job)
+				: waitingForReview
+					? 'Complete'
+					: calibrationProgressCopy(job, status),
+			scheduler: options.historical
+				? historicalSampleWhen(job)
+				: waitingForReview
+					? reviewUnavailable
+						? 'Review unavailable'
+						: 'Finished'
+					: activityScheduleDetailCopy(compactText(job.scheduler_status_copy)) ||
+						'Waiting in queue',
 			schedulerDetail: '',
 			schedulerTone: 'idle',
-			detail: waitingForReview
-				? reviewUnavailable
-					? 'Comparison clips are unavailable. Mediaforce kept the completed sample visible for diagnosis.'
-					: 'Open the item to compare the sample.'
-				: calibrationDetail(job)
+			detail: options.historical
+				? historicalSampleDetail(job)
+				: waitingForReview
+					? reviewUnavailable
+						? 'Comparison clips are unavailable. Mediaforce kept the completed sample visible for diagnosis.'
+						: 'Open the item to compare the sample.'
+					: calibrationDetail(job)
 		};
 	});
 }
