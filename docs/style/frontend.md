@@ -15,8 +15,8 @@ Frontend changes should feel intentional and production-ready.
 - After a successful action removes or renames the exact file in the current
   route, continue at the action response's surviving `target_prefix` instead of
   rehydrating the stale file URL.
-- For workbench, review, worker, completed, and settings redesigns, follow
-  `docs/style/workstation-ui.md` and `docs/design/workstation-reset-plan.md`
+- For library, review, Activity, Finished, and Settings redesigns, follow
+  `docs/style/workstation-ui.md` and `docs/design/basic-user-vocabulary.md`
 - Build the TV, Movies, and Other landing modes through the shared
   `LibraryLayout.svelte` composition and `library-layout.ts` summary helpers.
   Do not duplicate metric-strip, notice, current-work, toolbar, or responsive

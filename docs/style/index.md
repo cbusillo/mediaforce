@@ -18,7 +18,7 @@
   surfaces
 - `docs/design/README.md`: source-of-truth routing for active reset docs and
   archived UI evidence
-- `docs/design/workstation-reset-plan.md`: active frontend replacement plan
+- `docs/design/movies-workflow.md`: Movies Library and movie page contract
 - `docs/design/basic-user-vocabulary.md`: user-facing term and workflow state
   reference for UI copy
 - `docs/style/testing.md`: test scope and validation expectations
