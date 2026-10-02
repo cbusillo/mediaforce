@@ -7995,6 +7995,37 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(bulk["tv/show/Season 1"].to_payload(), working.to_payload())
         self.assertEqual(bulk["tv/show/Season 2"].to_payload(), finished.to_payload())
 
+    def test_folder_workflow_newer_finished_run_still_hides_an_older_runs_failure(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                self._create_source_file("Season 1/episode.mkv"),
+                status="encoded",
+                rel_path="tv/show/Season 1/episode.mkv",
+            )
+            self._write_manifest("show-run.json", [{"rel_path": "tv/show/Season 1/episode.mkv"}])
+            self._save_show_run(connection, [("old-part", "needs_attention", 0)], manifest="show-run.json")
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id.in_(["show-run", "old-part"])).values(
+                status="needs_attention", updated_at="2026-10-01T00:00:00+00:00",
+            ))
+            # A later run over the whole library encoded the same file.
+            self._save_show_job(connection, job_id="library-run", prefix="tv", status="completed")
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == "library-run").values(
+                job_kind="folder", updated_at="2026-10-02T00:00:00+00:00",
+            ))
+            self._save_show_job(connection, job_id="library-part", prefix="tv", status="completed")
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == "library-part").values(
+                job_kind="shard",
+                parent_job_id="library-run",
+                manifest_path=str(self.root / "runs" / "show-run.json"),
+                manifest_indexes_json=json.dumps([0]),
+                updated_at="2026-10-02T00:00:00+00:00",
+            ))
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 1")
+
+        self.assertNotEqual(workflow.state, "needs_attention")
+
     def test_folder_workflow_keeps_a_show_run_whose_unfinished_part_cannot_be_traced(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._insert_library_item(

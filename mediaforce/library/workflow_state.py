@@ -620,7 +620,7 @@ def _rows_working_in_scope(
         overlapping_rows: list[DBRow],
         part_files: Mapping[str, tuple[str, ...]],
 ) -> list[DBRow]:
-    """Drop a wider folder run whose unfinished parts are all for files outside the scope.
+    """Drop an active wider folder run whose unfinished parts are all for files outside the scope.
 
     A run over a whole show is still working on a season only while one of its unfinished parts is
     for a file in that season. When any of the run's unfinished parts cannot be traced to its files,
@@ -649,7 +649,12 @@ def _rows_working_in_scope(
         elif row["job_kind"] == "shard":
             if row["status"] not in UNFINISHED_JOB_STATUSES or part_in_scope(row) is not False:
                 kept.append(row)
-        elif row["job_kind"] == "folder" and str(row["job_id"]) in parts_by_parent:
+        elif (
+                row["job_kind"] == "folder"
+                and row["status"] in UNFINISHED_JOB_STATUSES
+                and str(row["job_id"]) in parts_by_parent
+        ):
+            # A finished run stays: as the newest run it is what hides an older run's failure.
             if run_in_scope(str(row["job_id"])):
                 kept.append(row)
         else:
