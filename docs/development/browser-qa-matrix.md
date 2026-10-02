@@ -169,7 +169,7 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   original outside the configured archive root, so `/completed` exposes a
   blocked cleanup state.
 - Empty library: the second managed pass clears seeded rows and jobs, then
-  reloads `/`, `/folders`, `/ops`, and `/completed`.
+  reloads `/`, `/folders`, `/movies`, `/other`, `/ops`, and `/completed`.
 
 Seeded rows use `last_scan_id = web-smoke-fixtures` and are replaced on each
 managed smoke run. Runtime state remains under `state/web-smoke/` and
@@ -209,9 +209,9 @@ real browser at desktop and 390px widths:
 
 Every browser QA pass should cover these routes:
 
-- `/`: Queue worklist and selected folder context.
-- `/folders`: Folder queue entry point.
-- `/folders/tv/Example%20Show/Season%201`: representative Folder Studio state.
+- `/`: TV library (shows, seasons, savings, and selection detail).
+- `/folders`: compatibility alias that renders the TV library.
+- `/folders/tv/Example%20Show/Season%201`: representative season page state.
 - `/folders/tv/Sampling%20Show/Season%201`: active sample queue state.
 - `/folders/tv/Retry%20Show/Season%201`: retryable sample state.
 - `/folders/tv/Review%20Ready/Season%201`: review-pack-ready sample state.
@@ -277,10 +277,6 @@ Those checks are intentionally short and mechanical. For visual redesign or
 interaction work, add a manual browser review with screenshots under
 `scratch/ui-checks/` and inspect the actual starting viewport, post-interaction
 state, and narrow layout.
-
-On the Work screen, discovered source items without approved review evidence
-must remain in `Sample and approval` with a `Needs sample` state. Only folders
-with an approved draft may enter the `Encode backlog` lane.
 
 Review-assistant submissions may run multiple bounded inference steps. The
 browser must remain pending instead of aborting before those backend limits,

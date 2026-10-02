@@ -20,6 +20,14 @@ Recoverable classes include:
 - `host_configuration`.
 - `unreadable_output`: the encode removed its own header-only output and used
   up its automatic retries (#620).
+- `storage_io`, `stale_lease`, `worker_restart`, and
+  `controller_database_busy`: the share or the controller failed and the
+  automatic retries ran out; nothing judged the item.
+- `unknown`: an unrecognised error used up its automatic retries.
+- `deterministic` failures recorded before their kind existed: storage I/O
+  errors (recovered as `storage_io`), controller database busy (as
+  `controller_database_busy`), and a host that could not load a VMAF model (as
+  `host_configuration`).
 - A child in `stopped` status: an operator stop ended it without judging the
   source, policy or result, and the stop already cleaned up its output.
 - `deterministic` with exactly the error `Mediaforce database identity changed
@@ -67,14 +75,16 @@ above, a current policy or motion-pattern blocker on one of its items, or an
 approval that no longer covers its settings. The remaining children are still
 recovered; apply requeues only them.
 
-Approval is judged per child. The show must still be approved now. A newer
+Approval is judged per child. The batch's production approval must still be
+current. A newer
 sample approval with the same policy and operator intent covers a child; a
 changed policy, or an intent that differs from the one a child's files were
 resolved under, does not.
 
 The whole request is rejected for missing, duplicate or foreign IDs, a
 completed, stopped or failed parent, an unreadable manifest, an active or
-completed sibling with invalid indexes, no current show approval, or when no
+completed sibling with invalid indexes, a production approval that changed or
+is missing, or when no
 selected child is eligible.
 Storage must be visible to the controller; inaccessible paths are a blocker,
 not proof of absence. No media decode, content hash, deletion, promotion or

@@ -61,7 +61,9 @@ defaults to preservation.
 
 ## Advisor Boundary
 
-The LLM-backed advisor may rank and explain one candidate from deterministic
+No advisor takes part in cold start today, and the recommendation is not wired
+into the search. If one is added, the LLM-backed advisor may only rank and
+explain one candidate from deterministic
 facts and compatible local memory. It cannot invent numeric authority or bypass
 the search engine. The recommendation payload stays schema-bound and records
 its local source, confidence, compatibility, fallback reason, bounded

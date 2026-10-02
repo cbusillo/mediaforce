@@ -176,8 +176,10 @@ compatibility without deleting historical evidence.
 
 ## Operator surface
 
-The Folder Studio exposes a compact four-choice compression-goal selector next
-to the numeric size choice. The selected value is sent in operator-intent schema
+The show page offers three compression goals next to the numeric size choice:
+`reference`, `balanced`, and `perceptual_floor`. `transparent` remains a valid
+stored identifier but is no longer offered; it displays as the
+`perceptual_floor` choice. The selected value is sent in operator-intent schema
 version 2, displayed as retained state, and frozen into the queued test.
 
 For `transparent` and `perceptual_floor`, an under-target result is presented as
