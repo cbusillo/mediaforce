@@ -1,52 +1,44 @@
 # Mediaforce
 
-Mediaforce is the standalone v2 home for this media encoding workflow.
+Mediaforce reclaims space on a media library by re-encoding it to AV1 video
+and Opus audio with minimal, acceptable quality loss, while asking the owner
+for as little as possible. `DIRECTION.md` sets what it is for and where work
+stops; it wins over this README.
 
-This project is the first-pass replacement for the old ad hoc AV1 helper
-scripts. It is built for a semi-automated workflow:
-
-- scan the configured source roots
-- keep durable state in SQLite
-- apply media-wide defaults with per-folder overrides
-- generate run manifests from eligible media, oldest catalog additions first
-- stage outputs under the configured transcode root
-- validate and promote after review
-
-The current implementation focuses on discovery and planning. It does not yet
-assume fully unattended execution. Encoding, machine validation, and promotion
-are implemented, but promotion is still an explicit operator action after
-review.
+The aim: the owner decides once, in plain words, how each kind of content
+should look, and Mediaforce applies that across the library in the background,
+one file at a time. Each episode or movie is encoded, checked, and published on
+its own, and a problem with one file stays with that file.
 
 ## Scope
 
 - Source roots: taken from checked-in defaults plus runtime settings
 - Staging root: taken from checked-in defaults plus runtime settings
-- Ignored roots: `downloads`, `books`, and the contents of `transcode`
+- Only configured library roots are scanned; a library path may not contain or
+  sit inside the working (transcode) folder
 
 The current checked-in defaults point at `/Volumes/media/movies`,
 `/Volumes/media/tv`, and `/Volumes/media/transcode`, but those are config
 defaults rather than product-level invariants.
 
-## Current approach
-
-- Use the Mac Studio as the primary AV1 encode host.
-- Keep durable library state in SQLite and manifest files outside the repo.
-- Use human-edited policy manifests with per-folder overrides.
-- Protect active and newly acquired TV seasons before generating run manifests,
-  then rank eligible media by catalog age rather than attempting a full,
-  unattended library rewrite.
-- Review staged outputs before promotion.
-
 ## Status
 
 The current implementation covers:
 
-- discovery and inventory into SQLite
-- run-manifest generation
-- staged encode execution
-- machine validation
-- side-by-side compare clip generation for approval
-- explicit promotion with original-file archival under the transcode root
+- discovery and inventory into SQLite, refreshed in the background
+- the web app: TV, Movies, and Other libraries, Activity, Finished, and
+  Settings
+- per-file sample, encode, and machine validation across configured encode
+  hosts, with work-window schedules
+- measured evidence (motion pattern, media fingerprint) checked automatically
+  for files production is waiting on
+- side-by-side compare clips for sample review
+- per-file publishing with original-file archival under the transcode root,
+  and owner-approved cleanup of those rollback copies
+
+Two gaps remain against that aim: a sample is still approved per show (the
+`One approval covers many shows` milestone), and publishing a checked file is
+still an explicit owner action (#734).
 
 ## Runtime state
 
@@ -100,16 +92,18 @@ changes and normal formula upgrades. You can override either binary with
 `MEDIAFORCE_FFMPEG` or `MEDIAFORCE_FFPROBE`.
 
 Web and API reads only report persisted catalog and job state; opening or
-polling a page does not start scans, host probes, or media analysis. Save a
-library-path change in Settings or run `mediaforce scan` when inventory should
-be reconciled. A full scan also refreshes configured Plex and TMDB metadata;
+polling a page does not start scans, host probes, or media analysis. Catalog
+inventory refreshes in the background every `media.catalog_refresh_hours`
+(default 6; 0 turns it off). Save a library-path change in Settings or run
+`mediaforce scan` to reconcile sooner. A full scan also refreshes configured Plex and TMDB metadata;
 provider failures leave the last successful metadata in place and surface a
 warning instead of blocking the catalog scan.
 
 Scans update inventory with `ffprobe` metadata only. Cadence and media
 fingerprint analysis is remembered as canonical evidence and refreshed through
-an explicit paused batch; it is never launched by web startup or an idle scan.
-For a small folder pilot:
+bounded evidence batches. A background worker runs unpaused batches, such as
+the checks production is waiting on; a batch prepared by hand starts paused,
+and a catalog scan never starts analysis. For a small folder pilot:
 
 ```bash
 uv run mediaforce evidence start "tv/Futurama/Season 1" --limit 10
@@ -122,9 +116,8 @@ Repeat the final command to resume durable progress. `evidence pause` prevents
 the next claim, while `evidence cancel` terminates the active managed process
 and cancels the remainder. See `docs/architecture/evidence-worker.md`.
 
-The `/folders` index can browse either season folders or whole TV series
-prefixes. Use the Scope control there when an operation should cover an entire
-series instead of one season.
+The TV library (`/` or `/folders`) lists shows. Open a show for show-wide
+actions, or a season for season actions.
 
 Folder calibration now uses a size-first review flow by default. The checked-in
 defaults aim for roughly 300 MB per 45-minute episode at up to 1080p, then use
@@ -138,12 +131,12 @@ follow-up target lands above the band, the next sample draft carries the learned
 size ceiling forward instead of repeating the oversized run. The current fast
 sample engine is still `ab-av1`; scene-aware engine work is tracked separately so
 host orchestration and review workflow can stay stable while that bakeoff happens.
-Once the current sampled draft has been explicitly saved to the folder profile,
-`Queue Folder Encode` is unlocked so the real folder job can enter the encode
-queue without letting a stale unsaved preview slip into production work.
+Once a sample is approved, the show or season page offers the compress action
+(for example `Compress the season`), which queues the real encode from that
+approval rather than from an unsaved preview.
 
 For this personal workflow, source-resolution 1080p AV1 around 200–300 MB per
-40 minutes is an established operator-approved baseline, including conventional
+45 minutes is an established operator-approved baseline, including conventional
 and dark or stylized TV material. Direct operator instructions and accepted
 visual samples outrank generic bitrate guidance; real sample evidence decides
 whether a particular folder needs adjustment.
@@ -236,7 +229,8 @@ uv run mediaforce campaign \
   "tv/Suits/Season 5"
 ```
 
-For the simplest operator flow, start a run instead:
+The web app is the normal way to run Mediaforce. For a manual one-off or
+debugging run from the CLI, start a run instead:
 
 ```bash
 uv run mediaforce run \
@@ -371,8 +365,9 @@ Without explicit timestamps, `compare` now tries to pick scene-change moments
 from the source automatically and falls back to evenly spaced review points if
 scene analysis does not yield useful candidates.
 
-By default `compare` renders three evenly spaced visual review clips. You can
-override that with explicit timestamps, for example:
+For episodes short enough to scan, it tries high-complexity moments before
+scene changes. You can override the choice with explicit timestamps, for
+example:
 
 ```bash
 uv run mediaforce compare \
@@ -429,9 +424,9 @@ into `config/folder-defaults.toml` intentionally.
 Use the web Settings page for ordered typed library roots, the transcode folder,
 remote host definitions, the Plex server URL, and Plex-to-Mediaforce path
 mappings so those environment details stay off the checked-in repo. Library
-labels are editable while root IDs remain stable. TV can run in Production;
-Movies, 3D/VR, and Other can be configured as Browse only until their dedicated
-workflow and safety plans land. Changing an existing type requires an explicit
+labels are editable while root IDs remain stable. TV, Movies, and Other can
+run in Production; 3D/VR stays Browse only until its workflow and safety plans
+land. Changing an existing type requires an explicit
 compatibility preview and never moves media files. See
 `docs/architecture/typed-library-settings.md` for the durable config contract.
 
@@ -544,7 +539,8 @@ git config core.hooksPath .githooks
 
 That pre-commit hook runs `scripts/pre-commit-check.sh`, which executes the
 full backend pytest suite, CLI smoke, frontend type checks, frontend lint,
-frontend unit tests, and frontend build.
+frontend unit tests, frontend build, and the managed web route smoke
+(`npm --prefix frontend run smoke:web`).
 
 For frontend development, let `scripts/mediaforce-dev.sh start` run the Svelte
 app. The Vite dev server proxies `/api/*` and `/review-media/*` back to the
@@ -594,12 +590,13 @@ that exceeds every compatible configured window receives an actionable waiting
 reason. The hard close deadline remains the correctness backstop when an
 estimate is wrong, and `Bypass scheduler` skips duration admission entirely.
 
-Activity and Folder Studio present those schedule outcomes directly. Worker rows
+Activity and the show and season pages present those schedule outcomes
+directly. Worker rows
 show exact host-local open/close transitions, active episodes show their hard
 stop time, and draining is distinct from off-schedule or unavailable. An episode
-stopped at close is labeled `Paused by schedule` with its automatic whole-episode
-restart expectation, while an explicit bypass is labeled `Bypassing schedule`
-and a job that cannot fit any configured window links to the work-window
+stopped at close is labeled `Paused until the next work window` with its
+automatic whole-episode restart expectation, while an explicit bypass is
+labeled `Not limited by the work window` and a job that cannot fit any configured window links to the work-window
 settings that need attention.
 
 Transient SSH transport failures, including a remote host reboot or an OpenSSH
@@ -608,7 +605,9 @@ requiring a new encode request. Mediaforce preserves unverified remote artifacts
 while the host is unreachable, removes the interrupted partial output once the
 host is available again, and then requeues the same episode from the beginning.
 It does not resume a partial media stream or promote interrupted output.
-Deterministic encode and policy failures continue to stop for operator review.
+A measured quality-floor conflict within the automatic allowance retries that
+one file with an item-local size exception; other deterministic encode and
+policy failures stop and ask about that file.
 
 Starting a folder again while some of its episodes are still queued, retrying,
 or encoding never removes that work. Only the episodes that ended are retried,
@@ -644,7 +643,7 @@ that need one manual Finder connection with the password saved to Keychain.
 Sampled calibration and AI note tuning can now run on any configured host with
 the `sample_calibration` capability. The folder page uses one AI-guided sample
 note box instead of separate baseline/tuning actions, lets the operator choose
-the sample host, and still keeps `Queue Folder Encode` hostless so the encode
+the sample host, and still keeps the compress action hostless so the encode
 queue can dispatch it automatically. For mounted-media remote sample hosts,
 source and encoded review excerpts are rendered where the selected host can
 read the media, then copied back as small browser-ready clips; the controller

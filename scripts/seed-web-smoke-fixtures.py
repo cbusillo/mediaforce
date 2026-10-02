@@ -2861,7 +2861,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         ],
         "completedPrefix": COMPLETED_PREFIX,
         "libraryItems": len(rows),
-        "encodeJobs": 6,
+        "encodeJobs": len(encode_rows),
     }
 
 
