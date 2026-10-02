@@ -513,7 +513,38 @@ function calibrationDetail(job: CalibrationJob): string {
 	if (normalized.includes('queue job was stopped')) {
 		return 'The sample was stopped and cleaned up.';
 	}
+	if (normalized.includes('largest_quality_safe_candidate_under_target_band')) {
+		return 'The size goal could not be reached at a quality that passes.';
+	}
+	if (normalized.includes('containment cleanup is unproven')) {
+		return 'Mediaforce could not confirm the sample stopped cleanly.';
+	}
 	return detail.replace(/^error:\s*/i, '');
+}
+
+/** A finished sample's outcome, not the last step it reported while it ran. */
+function historicalSampleOutcome(job: CalibrationJob): string {
+	const status = String(job.status ?? '').toLowerCase();
+	if (status === 'stopped' || status === 'cancelled') return 'Stopped';
+	if (status === 'completed') return 'Finished';
+	return "Didn't finish";
+}
+
+function historicalSampleDetail(job: CalibrationJob): string {
+	const detail = calibrationDetail(job);
+	const sentence = detail.charAt(0).toUpperCase() + detail.slice(1);
+	return safeOperatorErrorCopy(sentence, 'The sample stopped before it finished.');
+}
+
+function historicalSampleWhen(job: CalibrationJob): string {
+	const parsed = new Date(compactText(job.finished_at) || compactText(job.updated_at));
+	if (Number.isNaN(parsed.getTime())) return 'Earlier';
+	return parsed.toLocaleString('en-US', {
+		month: 'short',
+		day: 'numeric',
+		hour: 'numeric',
+		minute: '2-digit'
+	});
 }
 
 function statusTone(status: string): ShellTone {
@@ -746,19 +777,28 @@ function buildCalibrationLaneRows(
 			prefix: calibrationPrefix(job),
 			host: calibrationHostCopy(job),
 			phase: '',
-			progress: waitingForReview ? 'Complete' : calibrationProgressCopy(job, status),
-			scheduler: waitingForReview
-				? reviewUnavailable
-					? 'Review unavailable'
-					: 'Finished'
-				: activityScheduleDetailCopy(compactText(job.scheduler_status_copy)) || 'Waiting in queue',
+			progress: options.historical
+				? historicalSampleOutcome(job)
+				: waitingForReview
+					? 'Complete'
+					: calibrationProgressCopy(job, status),
+			scheduler: options.historical
+				? historicalSampleWhen(job)
+				: waitingForReview
+					? reviewUnavailable
+						? 'Review unavailable'
+						: 'Finished'
+					: activityScheduleDetailCopy(compactText(job.scheduler_status_copy)) ||
+						'Waiting in queue',
 			schedulerDetail: '',
 			schedulerTone: 'idle',
-			detail: waitingForReview
-				? reviewUnavailable
-					? 'Comparison clips are unavailable. Mediaforce kept the completed sample visible for diagnosis.'
-					: 'Open the item to compare the sample.'
-				: calibrationDetail(job)
+			detail: options.historical
+				? historicalSampleDetail(job)
+				: waitingForReview
+					? reviewUnavailable
+						? 'Comparison clips are unavailable. Mediaforce kept the completed sample visible for diagnosis.'
+						: 'Open the item to compare the sample.'
+					: calibrationDetail(job)
 		};
 	});
 }

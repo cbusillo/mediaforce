@@ -419,9 +419,50 @@ describe('Ops workstation mapping', () => {
 			tone: 'idle',
 			status: 'History',
 			prefix: 'tv/show/season 4',
-			detail: 'could not find a viable sample'
+			progress: "Didn't finish",
+			detail: 'Could not find a viable sample'
 		});
 		expect(rowRecoveryLabel(rows[0])).toBe('Nothing to do');
+	});
+
+	it('says when a finished sample ended and how, in plain words', () => {
+		const dashboard = dashboardFixture();
+		dashboard.calibration_queue.sample.recent_failed = [
+			{
+				job_id: 'size-goal',
+				prefix: 'tv/House',
+				status: 'failed',
+				finished_at: '2026-09-09T03:42:33+00:00',
+				progress: { stage: 'searching_target' },
+				error:
+					'The approved target size was not reached before the configured search bound (largest_quality_safe_candidate_under_target_band); target=293777299 bytes.'
+			},
+			{
+				job_id: 'cleanup',
+				prefix: 'movies/Play Dirty (2025)',
+				status: 'failed',
+				finished_at: '2026-08-29T15:13:48+00:00',
+				progress: { stage: 'searching_target' },
+				error: 'Managed process containment cleanup is unproven.'
+			},
+			{
+				job_id: 'unknown',
+				prefix: 'tv/Suits/Season 2',
+				status: 'stopped',
+				error: 'worker_exit status=137 in run_calibration_job'
+			}
+		];
+
+		const rows = buildOpsHistoryRows(dashboard);
+
+		expect(rows.map((row) => [row.progress, row.detail])).toEqual([
+			["Didn't finish", 'The size goal could not be reached at a quality that passes.'],
+			["Didn't finish", 'Mediaforce could not confirm the sample stopped cleanly.'],
+			['Stopped', 'The sample stopped before it finished.']
+		]);
+		expect(rows.map((row) => row.scheduler)).not.toContain('Waiting in queue');
+		expect(rows[0].scheduler).toMatch(/^Sep \d+, \d+:42 [AP]M$/);
+		expect(rows[2].scheduler).toBe('Earlier');
 	});
 
 	it('surfaces unavailable data and retryable encodes as attention items', () => {
