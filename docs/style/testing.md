@@ -14,6 +14,15 @@ Tests should prove the behavior that changed, not just exercise code paths.
 - Frontend unit tests: `cd frontend && npm test`
 - Frontend build: `cd frontend && npm run build`
 - CLI smoke: `uv run mediaforce --help`
+- Web route smoke: `npm --prefix frontend run smoke:web`
+- Whole local gate: `bash scripts/pre-commit-check.sh`
+
+`.github/github.json` `qualityGate` is the canonical command list.
+
+## Rules
+
+Follow the "Tests" section of `AGENTS.md`: what a test must prove, and what it
+must not assert or depend on.
 
 ## Expectations
 

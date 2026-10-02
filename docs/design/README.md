@@ -1,18 +1,16 @@
 # Mediaforce UI Design Sources
 
 This directory now separates active reset guidance from historical artifacts.
-For frontend reset work, start with the active sources below and treat archived
-briefs as evidence only.
+Start with `DIRECTION.md`, which wins over every doc here, then the active
+sources below. Treat archived briefs as evidence only.
 
 ## Active Reset Sources
 
-- `docs/design/workstation-reset-plan.md`: implementation plan for replacing
-  the frontend from a workstation contract.
 - `docs/design/basic-user-vocabulary.md`: user-facing term and workflow-state
   reference. Use the vocabulary as product language, not as proof that old route
   layouts are valid.
-- `docs/design/movies-workflow.md`: active Movies Library and movie-specific
-  Folder Studio contract.
+- `docs/design/movies-workflow.md`: active Movies Library and movie page
+  contract.
 - `docs/style/workstation-ui.md`: operator-workstation doctrine.
 - `docs/style/frontend.md`: Svelte/frontend implementation and validation
   expectations.
@@ -29,6 +27,7 @@ Archived files include:
 - `final-love-pass-qa.md`
 - `full-frontend-reset-brief.md`
 - `operator-workstation-shell-brief.md`
+- `workstation-reset-plan.md` (the June 2026 frontend reset plan)
 - `workstation-home-screen-brief.md`
 - `workstation-home-screen-inventory.md`
 

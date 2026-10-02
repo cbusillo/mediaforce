@@ -1,5 +1,9 @@
 # Workstation Reset Plan
 
+> Status: Historical. Kept as evidence only; it is not current guidance.
+> Start with `DIRECTION.md`, `docs/design/README.md`, and
+> `docs/style/workstation-ui.md`.
+
 ## Goal
 
 Replace the Mediaforce frontend from a clean operator-workstation contract. The

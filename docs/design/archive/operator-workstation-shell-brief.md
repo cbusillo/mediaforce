@@ -1,9 +1,8 @@
 # Operator Workstation Shell Brief
 
-> Status: Current shell doctrine, with active execution tracked in GitHub issue
-> `#62` and its sub-issues. The May 2026 UI/UX reset plan keeps this shell
-> direction but treats route workflows, basic-user language, and visual polish
-> as active work, not settled implementation.
+> Status: Historical. Kept as evidence only; it is not current guidance.
+> Start with `DIRECTION.md`, `docs/design/README.md`, and
+> `docs/style/workstation-ui.md`.
 
 This brief captures the durable shell language that now ties Mediaforce's main
 operator routes together after the workstation reset and final consistency

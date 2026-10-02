@@ -19,7 +19,7 @@
     "design": [
       "docs/design/README.md",
       "docs/design/basic-user-vocabulary.md",
-      "docs/design/workstation-reset-plan.md"
+      "docs/design/movies-workflow.md"
     ]
   },
   "qualityGate": {

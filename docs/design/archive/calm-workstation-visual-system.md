@@ -1,5 +1,9 @@
 # Calm Workstation Visual System
 
+> Status: Historical. Kept as evidence only; it is not current guidance.
+> Start with `DIRECTION.md`, `docs/design/README.md`, and
+> `docs/style/workstation-ui.md`.
+
 Use this reference when making Mediaforce easier to look at without drifting
 into a generic SaaS dashboard. The target is a dense, durable workstation that
 is calmer because hierarchy is clearer, not because it is softer or emptier.
@@ -77,7 +81,7 @@ hard on repeated dark panels and bright borders. Future token work should:
 ## State Color
 
 Follow the semantic state contract in
-`docs/design/operator-workstation-shell-brief.md`:
+`docs/design/archive/operator-workstation-shell-brief.md`:
 
 - Blue: active, running, selected, or in progress.
 - Green: approved, healthy, ready, or completed successfully.
