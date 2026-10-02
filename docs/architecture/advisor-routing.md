@@ -9,23 +9,23 @@ configuration, and activated only when the media-safe evaluation suite passes.
 Models may interpret ambiguous language, combine supplied evidence, propose an
 allow-listed policy fragment, and explain tradeoffs. They never become the
 authority for measurements, stream budgets, cadence transforms, target-size
-search, quality floors, or operator approval.
+search, quality floors, or user approval.
 
 The following paths are deterministic and do not invoke a model:
 
-- explicit operator-note patterns that the local parser can classify safely
+- explicit user-note patterns that the local parser can classify safely
 - non-positive video-budget rejection
 - run-verdict summaries derived from typed size and quality results
 - structural tuning self-checks and audio-tradeoff guardrails
 
-If a model request fails, Mediaforce returns a non-queueable operator-visible
+If a model request fails, Mediaforce returns a non-queueable user-visible
 failure. It never accepts unvalidated text as an executable policy.
 
 ## Default routes
 
 | Task                     | Primary         | Bounded fallback | Notes                                                                                                    |
 | ------------------------ | --------------- | ---------------- | -------------------------------------------------------------------------------------------------------- |
-| Operator-note parse      | `gpt-5.6-luna`  | `gpt-5.6-terra`  | Used only after deterministic extraction cannot classify the note. This low-risk route cannot reach Sol. |
+| User-note parse      | `gpt-5.6-luna`  | `gpt-5.6-terra`  | Used only after deterministic extraction cannot classify the note. This low-risk route cannot reach Sol. |
 | Seed policy              | `gpt-5.6-terra` | `gpt-5.6-sol`    | Sol is recorded escalation for a failed Terra attempt, not the default.                                  |
 | Note tuning              | `gpt-5.6-terra` | `gpt-5.6-sol`    | Deterministic policy normalization and review gates remain authoritative.                                |
 | Review-artifact critique | `gpt-5.6-terra` | `gpt-5.6-sol`    | Receives only bounded review artifacts and supplied metadata.                                            |
@@ -119,12 +119,12 @@ handling plus proof that agent/tool context overhead is acceptably bounded.
 
 Before prompt assembly, Mediaforce removes machine-local path fields, relative
 media names, raw fingerprint envelopes, raw prior responses, and image lists.
-Absolute paths and email addresses embedded in necessary operator text are
+Absolute paths and email addresses embedded in necessary user text are
 redacted. Images are supplied only as temporary generic copies.
 
 Local advisor telemetry contains task/model/prompt version, status, latency,
 token usage, optional estimated cost, fallback reason, image count, input size,
-and sanitized evidence field names. It does not contain prompts, operator-note
+and sanitized evidence field names. It does not contain prompts, user-note
 text, model output, raw frames, audio, image paths, or machine-local media paths.
 The bounded JSONL file is written under the configured web-state directory as
 `advisor-routing.jsonl` and defaults to the most recent 5,000 attempts.
@@ -150,7 +150,7 @@ intent, runtime and absolute sizing, explicit constraint preservation,
 grain/noise, cadence, dark gradients, motion, animation cues, audio priorities,
 measured retries, arithmetic infeasibility, multimodal critique, and
 deterministic outcome summaries. Synthetic review images are generated at run
-time; no runtime media or historical operator text is checked in.
+time; no runtime media or historical user text is checked in.
 
 Activation requires a 100% pass rate for the recommended suite. Checks cover
 schema-valid completion, required response fields, explicit constraint
@@ -162,7 +162,7 @@ fallback; a nonzero count must be reviewed before changing a primary mapping,
 even when the bounded route still passes.
 
 The report stores check outcomes and aggregate telemetry only. It intentionally
-does not retain prompts, operator notes, model responses, or generated images.
+does not retain prompts, user notes, model responses, or generated images.
 
 ## Activated evaluation
 

@@ -52,11 +52,11 @@ New ledgers distinguish three deterministic states:
 Historical ledgers may still contain `aggressive_but_measurable`. New ledgers
 do not infer likely damage from source-size percentages or generic bitrate
 thresholds: any known positive video budget is `feasible`, and the measured
-quality search plus operator review decides whether the requested tradeoff is
+quality search plus user review decides whether the requested tradeoff is
 acceptable.
 
 Arithmetic infeasibility is never delegated to an LLM. Quality risk remains a
-separate measured outcome for target-size search and operator review.
+separate measured outcome for target-size search and user review.
 
 `stream_budget_projection_blocker()` exposes the same deterministic arithmetic
 for planning surfaces. Movie candidate projection and CLI/web start actions use
@@ -86,7 +86,7 @@ and whether expansion was measured or selected. Legacy saved jobs without the
 explicit ceiling retain their original `max_crf` as the hard replay bound.
 
 The search does not relax max size caps, lower quality floors, pick cadence
-transforms, change stream selection, or rewrite an operator's size goal.
+transforms, change stream selection, or rewrite a user's size goal.
 Monotonic curves select a
 candidate inside the sample band when one exists. Arithmetic impossibility,
 quality-floor conflict, and exhausted or noisy non-monotonic searches surface as
@@ -95,7 +95,7 @@ Target-size search never changes the goal itself. When a measured
 quality-floor violation shows the goal is too small for one file, encode
 recovery records an item-local size exception at the smallest quality-safe
 size within the automatic allowance and queues only that file again; beyond
-the allowance it asks the owner about that one file
+the allowance it asks the user about that one file
 (`mediaforce/web/runtime/size_exception.py`).
 
 Production encodes verify actual output bytes against the resolved final band
@@ -132,9 +132,9 @@ reusing the same reviewed contract for the items that missed. When the failure
 analysis names those items, a requeue leaves out only them, keeps their
 artifacts, and queues their siblings; when it cannot place a miss on an item,
 the whole requeue fails closed. Queue admission records the approved sample
-identity and a normalized operator-intent contract covering size, compression,
+identity and a normalized user-intent contract covering size, compression,
 quality, resolution, and retained streams. Recovery requires both a new
-representative sample and a changed operator-intent contract; a new approval
+representative sample and a changed user-intent contract; a new approval
 timestamp, unrelated policy edit, lifecycle override, schedule bypass, or raw
 policy-hash change is not sufficient. Missing or malformed historical contract
 evidence fails closed and requires another sampled review. For a legacy

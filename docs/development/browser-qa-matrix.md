@@ -1,6 +1,6 @@
 # Browser QA Matrix
 
-Use this matrix when signing off operator-facing UI work. The goal is to prove
+Use this matrix when signing off user-facing UI work. The goal is to prove
 the app fully loads and remains usable across route and workflow states, not just
 that a single live machine state happens to render.
 
@@ -88,7 +88,7 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   separate path to choose different settings.
 - Search-limit state: `/folders/tv/Search%20Limit/Season%201`, with a
   deterministic target-search-bound failure that explains why the saved retry
-  would repeat and routes the operator to a fresh settings review.
+  would repeat and routes the user to a fresh settings review.
 - Review-ready state: `/folders/tv/Review%20Ready/Season%201`, with retained
   review media, explicit target/band/sample-byte facts, picture/sound risk, and
   trustworthy sound metadata for the shared review comparison workspace. Verify
@@ -158,7 +158,7 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   destructive cleanup, and every disabled cleanup command exposes its reason
   beside the command through `aria-describedby`.
 - Completed history: the completed fixtures include earlier failed and
-  operator-stopped encode events so History must distinguish the two outcomes.
+  user-stopped encode events so History must distinguish the two outcomes.
   Item events use media-aware labels such as `Movie failed` or `Episode
   finished`; season wording is reserved for folder-level summaries. The History
   tab reports visible and total events and renders every returned event rather
@@ -281,7 +281,7 @@ state, and narrow layout.
 Review-assistant submissions may run multiple bounded inference steps. The
 browser must remain pending instead of aborting before those backend limits,
 and the pending state must explain that the request can take a few minutes and
-nothing queues until the operator reviews the plan.
+nothing queues until the user reviews the plan.
 
 For a direct size request, the reviewed draft, queued sample, and technical
 details must agree on the requested total episode target. In particular, a
@@ -303,7 +303,7 @@ must say that the size goal was not met before presenting review media. It must
 distinguish review-clip byte savings from the full-episode estimate, make another
 same-target measured test the primary action, and require an explicit warning
 that accepting the tradeoff records the profile decision while production
-remains separate until the operator chooses the exact compression action.
+remains separate until the user chooses the exact compression action.
 
 When valid browser-ready review pairs are available, the Original/Sample stage
 must remain visible with playback paused in `Side by side` and `Fit`. `Full
@@ -353,7 +353,7 @@ Folder Studio viewport must show a prominent live-operation state with the
 current action, worker, and elapsed/status copy. It must distinguish the
 configured normalized goal, whole-episode target, and representative-test band,
 show progress only for a bounded measurable stage, and label historical ETA as
-an estimate. Operators must not need to scroll past old evidence to learn
+an estimate. Users must not need to scroll past old evidence to learn
 whether work is still running.
 
 On Activity, `Working now` must own or begin the first viewport at desktop and

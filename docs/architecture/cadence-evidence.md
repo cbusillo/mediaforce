@@ -64,9 +64,9 @@ The evidence state separates two kinds of `unknown`. When some sampled range
 could not be measured, or too few frames were read, the file still needs
 analysis. When every sampled range was measured and the result is still
 ambiguous, measuring again gives the same answer, so the file is current evidence
-with a blocked decision: a judgment for the owner, not more analysis.
+with a blocked decision: a judgment for the user, not more analysis.
 
-The owner can answer that judgment once per show: `Encode as-is` on the show
+The user can answer that judgment once per show: `Encode as-is` on the show
 page accepts every such file in the show whose measured frames are at most 2%
 interlaced-looking. The acceptance is written into the file's stored cadence
 summary as `owner_acceptance`, bound to the source fingerprint and a hash of the

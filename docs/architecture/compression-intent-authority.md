@@ -38,16 +38,16 @@ Policy resolution follows the existing scope precedence:
 3. the workstation video default
 4. `legacy_unconfirmed`
 
-New sample and production work stores both the resolved operator intent and a
+New sample and production work stores both the resolved user intent and a
 top-level compression-intent snapshot. Jobs, retries, recovery, pending
 proposals, and quality-search signatures consume that frozen identity rather
 than re-reading a later default.
 
 The shipped workstation default is a confirmed `balanced` starting point for
-new work. That configured default is deliberate and gives new operators a
+new work. That configured default is deliberate and gives new users a
 usable first run. A persisted calibration, job, or item that predates the
 contract does not inherit that later default: missing frozen metadata remains
-`legacy_unconfirmed` until the operator chooses a goal.
+`legacy_unconfirmed` until the user chooses a goal.
 
 Pending proposals retain both their base and proposed semantic identities. A
 proposal made before either intent changes is stale and must be refreshed before
@@ -71,7 +71,7 @@ returns a non-mutating decision.
 
 Approved visual evidence never authorizes growth. A typed rejection, measured
 quality-floor violation, measured item variance, arithmetic infeasibility, or
-explicit operator override may authorize an item-local exception when its
+explicit user override may authorize an item-local exception when its
 intent, source, policy, and job identities all match.
 
 ## Candidate and retry behavior
@@ -127,7 +127,7 @@ enlarging results that already cleared the target (#578).
 
 ## Size limit
 
-The size goal is a budget. The operator sets one "size limit over goal"
+The size goal is a budget. The user sets one "size limit over goal"
 percentage; Settings writes it to both stored tolerances. The sample search may
 not accept a candidate predicted above the final limit, because that candidate
 would be re-encoded even if its prediction were exact. On one production show
@@ -147,9 +147,9 @@ When the target-size search proves that every size inside the goal breaks the
 quality floor, that measurement is `measured_quality_floor_violation` evidence.
 The item retries with an absolute item-local goal at the smallest quality-safe
 size, up to 1.5x the original goal. A larger gap, or an unconfirmed intent,
-waits for the operator.
+waits for the user.
 
-Operator-approved measured recovery also writes only exact file overrides. The
+User-approved measured recovery also writes only exact file overrides. The
 folder calibration policy and sibling items remain unchanged. Its saved
 recovery record carries the source, policy, intent, job, evidence, and decision
 identities. Aggregating repeated item exceptions into a folder default belongs
@@ -159,10 +159,10 @@ to the later cross-run learning layer and is not performed here.
 
 Advisor schemas and policy application treat compression intent, numeric size
 targets, size-goal mode, quality floors, guard authorization, and protected
-caps as operator-owned. A model response that includes those keys is rejected
+caps as user-owned. A model response that includes those keys is rejected
 instead of clamped or silently treated as authority.
 
-Operator-note parsing may recover an explicit requested experiment, but it
+User-note parsing may recover an explicit requested experiment, but it
 always emits `evidence_authority = none`. Approval and rejection authority come
 only from the typed review workflow or deterministic measured evidence. Prose
 such as “more headroom” cannot repair an unauthorized proposal.
@@ -174,12 +174,12 @@ Legacy observations are retained with the legacy identity, but they cannot
 qualify a named-intent warm-start cohort. Changing intent therefore invalidates
 compatibility without deleting historical evidence.
 
-## Operator surface
+## User surface
 
 The show page offers three compression goals next to the numeric size choice:
 `reference`, `balanced`, and `perceptual_floor`. `transparent` remains a valid
 stored identifier but is no longer offered; it displays as the
-`perceptual_floor` choice. The selected value is sent in operator-intent schema
+`perceptual_floor` choice. The selected value is sent in `operator_intent` schema
 version 2, displayed as retained state, and frozen into the queued test.
 
 For `transparent` and `perceptual_floor`, an under-target result is presented as

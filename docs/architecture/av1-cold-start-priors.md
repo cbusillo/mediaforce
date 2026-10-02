@@ -14,7 +14,7 @@ The current live path is:
 4. Return one bounded first-probe recommendation or a no-recommendation reason.
 5. Record explicit passive execution evidence and run the normal measured
    target-size search with unchanged quality and size safeguards.
-6. Let the operator compare and approve the measured result before it becomes
+6. Let the user compare and approve the measured result before it becomes
    reusable local evidence.
 
 The recommendation never changes target bytes, quality floors, stream budgets,
@@ -22,15 +22,15 @@ resolution, cadence, transforms, audio, subtitles, promotion, or saved policy.
 
 ## Evidence Source
 
-The predictor uses only append-only accepted and rejected operator outcomes
+The predictor uses only append-only accepted and rejected user outcomes
 from the runtime database. The observation loader filters by the request's
 content-intent compatibility identity before replay, and the planner further
 restricts rows to the requested item, content profile, or selected local
 cohort. No public prior, checked-in bundle, or package resource participates in
 the recommendation.
 
-The planner evaluates item, folder, content-class, and operator scopes from
-narrow to broad. Each scope independently has to pass freshness and versioned
+The planner evaluates item, folder, content-class, and `operator`
+(all local evidence) scopes from narrow to broad. Each scope independently has to pass freshness and versioned
 timestamps, conflict checks, confidence/actionability, CRF completeness, target
 compatibility, dispersion, and configured candidate bounds. A weak or stale
 narrow cohort therefore cannot suppress an eligible broader cohort. Missing,
@@ -49,14 +49,14 @@ Recommendations may use deterministic, measured inputs such as:
 - stream-budget constraints
 - compatible accepted local outcomes
 
-Names, genres, eras, and folder paths may provide operator context but cannot
+Names, genres, eras, and folder paths may provide user context but cannot
 replace measured facts or independently choose a transform.
 
 Animation and grain/noise are priors, not universal rules. Animation may often
 support a more aggressive first probe, but measurement decides. Grain/noise may
 consume substantial bitrate or obscure compression damage, but Mediaforce does
 not automatically denoise or remove grain. Any cleanup treatment requires a
-separate measured comparison and explicit operator approval; uncertain evidence
+separate measured comparison and explicit user approval; uncertain evidence
 defaults to preservation.
 
 ## Advisor Boundary
@@ -71,7 +71,7 @@ narrow-to-broad scope-trial diagnostics, and passive execution evidence.
 
 Accepted and rejected outcomes remain explicit records rather than hidden
 mutable model state. This keeps later recommendations explainable and allows
-the operator to understand why Mediaforce started at a particular probe.
+the user to understand why Mediaforce started at a particular probe.
 
 ## Success Measures
 
@@ -82,9 +82,9 @@ Future tuning work should measure ordinary product outcomes:
 - automatic full-search fallback rate
 - final-size misses
 - quality-floor violations
-- operator rejection and additional-attention rate
+- user rejection and additional-attention rate
 
 Narrower CRF bounds are not justified until first-probe recommendations prove
 useful on compatible repeated work. Diagnostic failures must retain readable,
-actionable reasons; immutable failure proof is not a substitute for operator
+actionable reasons; immutable failure proof is not a substitute for user
 diagnosability.

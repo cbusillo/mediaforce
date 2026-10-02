@@ -24,7 +24,7 @@ a computer`, `Needs sample`, `Safe to delete`.
 - Calibration: use `Sample` in Folder Studio, Activity sample queue, and route
   summaries.
 - Calibration queue: use `Sample queue` in Activity and global status strips.
-- Proof: use `Comparison clips` for the media the operator watches. Keep
+- Proof: use `Comparison clips` for the media the user watches. Keep
   `proof`, `review evidence`, and analyzer terminology in Technical details.
 - Host: use `Computer` in Library, Activity, Folder Studio, and Settings.
 - Remote host: use `Remote computer` in Settings and computer setup.
@@ -34,7 +34,7 @@ a computer`, `Needs sample`, `Safe to delete`.
 - Draft: use `Proposal` in user-visible review and approval copy.
 - Pending proposal: use `Proposal ready for review` in Folder Studio decision
   state.
-- Encode: use `Compress` for operator actions and exact-scope progress. Use
+- Encode: use `Compress` for user actions and exact-scope progress. Use
   `Processing` only for a mixed-media running-state summary; keep `encode` in
   technical job tables.
 - Exact TV item: use singular `episode` language through recovery, processing,
@@ -42,13 +42,13 @@ a computer`, `Needs sample`, `Safe to delete`.
   a route that targets one episode.
 - Exact TV approval: use `Sample approved` for the settled review state and
   `Compress the full episode` for the separate production action. Approval
-  records the operator's judgment and does not queue work. Name the episode and
+  records the user's judgment and does not queue work. Name the episode and
   file, show the expected size change, and state that compression creates a
   separate file; checking and the explicit replace decision happen later.
 - Movie scope: use `Action covers` with `Only this file` or `The whole title`.
   Keep `scope`, `exact selection`, and `title-wide` in technical details only.
 - Movie validation: use `Check compressed file` and `checked file` instead of
-  `validate outputs` and `validated output` on the primary operator path.
+  `validate outputs` and `validated output` on the primary user path.
 - Movie promotion: use `Replace original now` when the checked replacement is
   ready. State beside the action that it runs immediately and that Mediaforce
   keeps an original backup first.
@@ -58,7 +58,7 @@ a computer`, `Needs sample`, `Safe to delete`.
   subfolders; unsupported or excluded files remain untouched.
 - Other membership: require confirmation only when Mediaforce can show the
   complete file list. If the folder exceeds the safe membership limit, direct
-  the operator to one-file-at-a-time work or a smaller source folder instead of
+  the user to one-file-at-a-time work or a smaller source folder instead of
   offering an all-files confirmation.
 - Other replacement: use `Replace original file` or `Replace original files`.
   State before the action that it runs immediately, original backups go to the
@@ -101,7 +101,7 @@ already names unrelated media and payload concepts. Multi-file replacement must
 name the consequence (`Replace original episodes` or `Replace original files`),
 not soften it to `Finish`.
 
-Operator-facing size copy uses decimal `KB`, `MB`, `GB`, and `TB` consistently.
+User-facing size copy uses decimal `KB`, `MB`, `GB`, and `TB` consistently.
 Use `Current size`, `Estimated output`, and `Estimated space saved`; keep exact
 bytes in Technical details.
 
@@ -122,7 +122,7 @@ bytes in Technical details.
   Using less space requests a smaller target and clears prior picture/sound
   judgments so the new evidence is judged fresh. Improving picture or sound
   keeps the current target by default; `Allow a larger file` is a separate,
-  explicit choice when the operator wants more room for quality.
+  explicit choice when the user wants more room for quality.
 - Proposal warning exists: `Review warning`. The user must inspect the warning
   before approving.
 - Proposal accepted: `Approved`. The folder settings are accepted, and that
@@ -142,7 +142,7 @@ remain unchanged` while memory is observation-only.
 
 ### Activity
 
-- Activity answers three questions in order: what needs the operator, what is
+- Activity answers three questions in order: what needs the user, what is
   working now, and what finished recently. Catalog, analysis, computer, and
   schedule maintenance stay behind explicit disclosures.
 - Every attention count maps to one visible review row and an exact owning
@@ -179,7 +179,7 @@ remain unchanged` while memory is observation-only.
 - Explicit schedule exception: `Not limited by the work window`. State clearly that work
   may continue past the normal close time.
 - Episode longer than every compatible work window: `Waiting for a longer work window`. Route
-  the operator to widen a work window or intentionally bypass the schedule.
+  the user to widen a work window or intentionally bypass the schedule.
 - The shipped labels live in `scheduleLabels`
   (`frontend/src/lib/hosts/schedule.ts`); keep this list in step with it.
 - Computer setup missing: `Needs setup`. The computer needs setup before it
@@ -227,7 +227,7 @@ remain unchanged` while memory is observation-only.
 - Folder state unknown: `Check before deleting`. The user should not remove
   originals until Mediaforce can verify scope.
 - Original backups already gone: `Backups already gone`. After checking the
-  finished files, the operator can `Mark handled`; nothing is deleted.
+  finished files, the user can `Mark handled`; nothing is deleted.
 - Cleanup already handled: `Nothing to delete`. No original backups are
   waiting in the cleanup folder.
 
@@ -251,7 +251,7 @@ remain unchanged` while memory is observation-only.
 - Show and movie pages should say `sample`, `approved`, and `processing`.
   Describe what actually encoded, and what earlier results suggested trying
   first, in plain words. Do not put `CRF`, `VMAF`, `shadow`, `quality memory`,
-  or `Bench` on screen; `DIRECTION.md` treats a term the owner has to look up
+  or `Bench` on screen; `DIRECTION.md` treats a term the Director has to look up
   as a defect.
 - When a saved sample plan no longer matches the current compression goal, say
   `Sample plan is out of date`, hide the Start action, and put `Prepare again`
@@ -321,5 +321,5 @@ or `archive_cleanup.has_cleanup` in visible UI.
 Use this file for product language and workflow-state naming only. It does not
 validate the old route structure, old component hierarchy, or previous
 issue-backed cleanup plan. During the frontend reset, prefer these terms when
-they clarify the operator's next safe decision, and revise them when the clean
+they clarify the user's next safe decision, and revise them when the clean
 workstation contract exposes a better product noun.

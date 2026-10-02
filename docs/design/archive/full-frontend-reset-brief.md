@@ -19,11 +19,11 @@ draft from the GitHub branch alone.
 ## Product Context
 
 - Product: Mediaforce.
-- Audience: one technical operator managing local media operations.
+- Audience: one technical user managing local media operations.
 - Job: scan libraries, sample folders, inspect encode evidence, approve or
   revise settings, queue full encodes, monitor hosts, recover blocked work, and
   clean up completed backups.
-- Desired feel: a blunt, dense, credible operator workstation. Not a SaaS
+- Desired feel: a blunt, dense, credible workstation. Not a SaaS
   dashboard, landing page, media gallery, or analytics product.
 
 ## What Was Removed
@@ -61,11 +61,11 @@ Keep these unless a specific product decision requires changing them.
 - Folder Studio: the detailed workspace for one folder. This is the core screen.
 - Representative sample: a short encode candidate used to test settings before
   approving a whole folder.
-- Review pack: downloadable media/evidence package the operator opens to judge
+- Review pack: downloadable media/evidence package the user opens to judge
   whether the sample is acceptable.
 - Proposal: suggested encode settings and rationale for the folder.
-- Approval: the operator accepts the proposal and allows full-folder work.
-- Revision: the operator asks for a new sample/proposal instead of approving.
+- Approval: the user accepts the proposal and allows full-folder work.
+- Revision: the user asks for a new sample/proposal instead of approving.
 - Encode queue: approved full-folder encoding work waiting or running on hosts.
 - Calibration queue: sample/review work waiting or running before approval.
 - Host: a machine that can run sampling or full encode jobs.
@@ -77,7 +77,7 @@ Keep these unless a specific product decision requires changing them.
 
 ## Design Goal
 
-Create the right first draft for a new Mediaforce operator workstation UI.
+Create the right first draft for a new Mediaforce workstation UI.
 Preserve workflows and data constraints, but do not recreate the old component
 structure or dashboard/card composition.
 
@@ -87,7 +87,7 @@ not use them as a layout foundation.
 
 ## Primary Surface: Folder Studio
 
-Folder Studio is the canonical operator workflow.
+Folder Studio is the canonical user workflow.
 
 Primary loop:
 
@@ -127,7 +127,7 @@ Content that may exist:
 - current sample status, sample host, full encode host, and host readiness
 - proposal summary and changed settings
 - metrics such as VMAF, XPSNR, and SSIM
-- operator note/request thread and suggested follow-up
+- user note/request thread and suggested follow-up
 - download/open review pack action
 - approve, revise, queue, retry, recover, or open Ops actions
 - raw diagnostics that should be secondary or collapsible
@@ -156,7 +156,7 @@ blockers, and recovery state in dense operational surfaces, not cards.
 
 ### Completed
 
-The archive cleanup surface. It should help the operator decide which completed
+The archive cleanup surface. It should help the user decide which completed
 backups can be removed and which are blocked.
 
 ### Settings

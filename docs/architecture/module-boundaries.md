@@ -123,7 +123,7 @@ Guidance:
   - startup, background workers, and compatibility wrappers for test-facing
     helpers
 - `runtime_lock.py`
-  - shared process exclusivity for web and bounded operator runtimes
+  - shared process exclusivity for web and bounded command-line runtimes
   - stable parent-directory guard against lock-file unlink/recreate splits
 - `routes/`
   - `dashboard.py`
@@ -277,7 +277,7 @@ Guidance:
   - foreground bounded execution, heartbeat-managed subprocess cancellation,
     policy-only reclassification, retry backoff, and source-safe canonical commits
 - `media_scopes.py`
-  - canonical operator grouping for TV, movie, and generic media roots
+  - canonical user grouping for TV, movie, and generic media roots
   - exact-item versus descendant matching, SQL-safe boundaries, and API scope payloads
 - `library_settings.py`
   - ordered typed-root schema, legacy inference, safe availability defaults,
@@ -306,7 +306,7 @@ Guidance:
 - Keep scan, probe, planning, and manifest orchestration logic under
   `mediaforce/library/` instead of spreading it back across the top-level
   package.
-- Resolve operator paths through `MediaScope` before selecting items, loading
+- Resolve user paths through `MediaScope` before selecting items, loading
   staged artifacts, or comparing queue jobs. File scopes match one exact
   `rel_path`; folder scopes match case-sensitive, `/`-bounded descendants.
 - TV item grouping remains series/season oriented, while an explicitly
@@ -332,14 +332,14 @@ Guidance:
 - `tuning_memory.py`
   - learned-memory session recording and artifact promotion helpers
 - `quality_risk.py`
-  - versioned quality-risk facts/gates/interpretation/operator-decision
+  - versioned quality-risk facts/gates/interpretation/user-decision
     contract
   - allow-listed transform compilation checks, typed risk shaping, and
     evidence-bound review-record precedence
 - `content_intent_observations.py`
   - append-only approved/rejected content-by-intent size boundaries,
     correction-safe persistence, compatibility identities, and deterministic
-    local item/folder/content-class/operator replay
+    local item/folder/content-class/`operator` replay
 - `av1_cold_start.py`
   - request/runtime compatibility, compatible local content-intent replay,
     bounded passive CRF prediction, narrow-to-broad scope eligibility,
@@ -347,7 +347,7 @@ Guidance:
 - `target_defaults.py`
   - read-only total-byte target proposals from current visual boundaries,
     normalized duration, independent-source thresholds, conflict/dispersion
-    gates, and operator-visible evidence and fallback reporting
+    gates, and user-visible evidence and fallback reporting
   - no CRF posterior input, settings writes, or production target authority
 - `target_default_context.py`
   - fail-closed current source, calibration, intent, policy and stream-ledger
@@ -394,7 +394,7 @@ Guidance:
   or public evidence state machine; local replay remains read-only and ordinary
   calibration records its recommendation without injecting it into search.
 - Keep install-safe package defaults under `mediaforce/package_defaults/`.
-  Operator config, folder overrides, and machine-local paths remain under root
+  User config, folder overrides, and machine-local paths remain under root
   `config/` and never become package data.
 - Keep quality-memory retrieval read-only and under
   `mediaforce/tuning/quality_memory.py`; keep passive persistence under
@@ -412,7 +412,7 @@ Guidance:
 - Target-size search consumes an already validated stream budget ledger and
   already resolved transform plan. It may choose only CRF candidates inside the
   approved policy range; cadence, cleanup, stream selection, quality floors, and
-  size caps remain upstream operator or ledger decisions.
+  size caps remain upstream user or ledger decisions.
 
 ### `mediaforce/reviewing/`
 
@@ -426,7 +426,7 @@ Guidance:
   - review timestamp and measured review-moment recommendation
 - `artifact_identity.py`
   - exact SHA-256 identity for the source and encoded clips bound to an
-    operator review decision
+    user review decision
 
 `mediaforce.review` remains the stable compatibility wrapper surface.
 
@@ -454,8 +454,8 @@ Guidance:
 - Keep model identifiers and fallback order in routing configuration, not in
   prompts or web handlers.
 - Keep deterministic measurements, constraints, quality-risk gates, and current
-  operator authority outside the model boundary.
-- Do not retain prompts, model output, operator-note text, review media, or
+  user authority outside the model boundary.
+- Do not retain prompts, model output, user-note text, review media, or
   machine-local paths in advisor telemetry.
 
 ### `mediaforce/cli.py`

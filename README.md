@@ -1,11 +1,11 @@
 # Mediaforce
 
 Mediaforce reclaims space on a media library by re-encoding it to AV1 video
-and Opus audio with minimal, acceptable quality loss, while asking the owner
+and Opus audio with minimal, acceptable quality loss, while asking the user
 for as little as possible. `DIRECTION.md` sets what it is for and where work
 stops; it wins over this README.
 
-The aim: the owner decides once, in plain words, how each kind of content
+The aim: the user decides once, in plain words, how each kind of content
 should look, and Mediaforce applies that across the library in the background,
 one file at a time. Each episode or movie is encoded, checked, and published on
 its own, and a problem with one file stays with that file.
@@ -34,11 +34,11 @@ The current implementation covers:
   for files production is waiting on
 - side-by-side compare clips for sample review
 - per-file publishing with original-file archival under the transcode root,
-  and owner-approved cleanup of those rollback copies
+  and user-approved cleanup of those rollback copies
 
 Two gaps remain against that aim: a sample is still approved per show (the
 `One approval covers many shows` milestone), and publishing a checked file is
-still an explicit owner action (#734).
+still an explicit user action (#734).
 
 ## Runtime state
 
@@ -122,7 +122,7 @@ actions, or a season for season actions.
 Folder calibration now uses a size-first review flow by default. The checked-in
 defaults aim for roughly 300 MB per 45-minute episode at up to 1080p, then use
 sampled metrics as guardrails and representative picture-and-sound clips as the
-operator decision point. The comparison can open in a focused full-screen
+user decision point. The comparison can open in a focused full-screen
 workspace with side-by-side and instant Original/New views, shared playback,
 and actual-size inspection. Technical encoding evidence remains under Details,
 and approval stays on the calm folder page. The first size note is measured
@@ -136,15 +136,15 @@ Once a sample is approved, the show or season page offers the compress action
 approval rather than from an unsaved preview.
 
 For this personal workflow, source-resolution 1080p AV1 around 200–300 MB per
-45 minutes is an established operator-approved baseline, including conventional
-and dark or stylized TV material. Direct operator instructions and accepted
+45 minutes is an established user-approved baseline, including conventional
+and dark or stylized TV material. Direct user instructions and accepted
 visual samples outrank generic bitrate guidance; real sample evidence decides
 whether a particular folder needs adjustment.
 
 `video.max_crf` is the initial quality-search range, not a hidden veto on an
 approved size goal. Size-directed tests may expand in measured steps up to
 `video.target_search_max_crf` (63 by default) while still enforcing the metric
-floor and requiring operator review. Saved jobs created before that ceiling was
+floor and requiring user review. Saved jobs created before that ceiling was
 recorded replay their original CRF range exactly; make a fresh test to use the
 new search contract.
 
@@ -189,7 +189,7 @@ media work. Exact-item Studio pages also expose this evidence when the saved
 review still matches the current source, calibration, intent and budget.
 Suggestions remain review-only; sample approvals do not establish promoted
 production evidence. See [target-default rules](docs/architecture/content-intent-boundary-evidence.md#target-default-proposals)
-for the evidence thresholds and required operator confirmation.
+for the evidence thresholds and required user confirmation.
 
 Inspect the separately captured production lineage for an approved boundary:
 
@@ -389,7 +389,7 @@ in this order:
 1. Global defaults
 2. Matching per-folder overrides from `config/folder-defaults.toml` in
    declaration order
-3. Matching operator-local folder overrides saved into
+3. Matching local folder overrides saved into
    `~/Library/Application Support/mediaforce/runtime-settings.json`
 4. Runtime environment overrides from
    `~/Library/Application Support/mediaforce/runtime-settings.json`
@@ -400,10 +400,10 @@ seasons remain visible with their hold reason, do not enter automatic manifests,
 and can only be bypassed through an explicit season-level confirmation. The
 underlying lifecycle status and the existing runnable queue order do not change.
 
-The checked-in video defaults are intentionally operator-taste defaults, not a
+The checked-in video defaults are intentionally tuned to the user's taste, not a
 near-transparent archival preset. The baseline AV1 policy uses a size-first
 review model: 300 MB per 45-minute episode, VMAF 85 with an 80 floor as a
-guardrail, and max 1080p output unless the operator explicitly asks for another
+guardrail, and max 1080p output unless the user explicitly asks for another
 resolution. Raise the metric floors or add a folder override when a class needs
 a more conservative pass; use an explicit scale request when downsampling is
 desired.
@@ -443,7 +443,7 @@ Specials and Season 0 never identify the current season. A protected current
 season releases when a higher numbered season appears or after 365 days without
 a newly added or replaced episode. Independently, every season waits 30 days
 after its newest addition or replacement before automatic encoding. A manual
-override applies only to the exact season the operator confirms. An explicitly
+override applies only to the exact season the user confirms. An explicitly
 selected episode may use that same parent-season override while its manifest
 remains bounded to that one file. The resulting manifest records both the hold
 reasons and the override.
@@ -473,7 +473,7 @@ precedence is explicit CLI arguments, then shell environment variables, then
 `.env`, then built-in defaults. Prefer the `MEDIAFORCE_WEB_*` variable names
 for local defaults.
 
-The macOS launch item is a long-running operator service, not a development
+The macOS launch item is a long-running user service, not a development
 reloader. Give it an explicit `--no-reload` argument even when `.env` enables
 reload for an active development session; otherwise Uvicorn `StatReload`
 continuously walks the checkout and consumes CPU while the app appears idle.
@@ -567,7 +567,7 @@ state. Those windows are evaluated in the local time of the host that is
 actually running the work. Host probes retain an IANA timezone when the
 operating system exposes one, use fixed UTC offsets only as a compatibility
 fallback, and publish exact UTC close and next-open transitions for runtime
-enforcement and operator surfaces.
+enforcement and user surfaces.
 
 Bounded host schedules are hard execution windows. A non-bypassed quality
 search or episode encode receives the selected host's absolute UTC close
@@ -636,13 +636,13 @@ For first bootstrap, a private `controller_smb_mounts` list in runtime settings
 may supply the same `source` and `/Volumes/...` `mount_point` fields until a
 healthy mount can be observed and learned. Repeated automatic failures use a
 bounded cooldown, and a missing GUI session remains suppressed until the console
-login session changes. The operator can use Prepare for an explicit retry. If
+login session changes. The user can use Prepare for an explicit retry. If
 Finder cannot use a saved credential, the action identifies the host and share
 that need one manual Finder connection with the password saved to Keychain.
 
 Sampled calibration and AI note tuning can now run on any configured host with
 the `sample_calibration` capability. The folder page uses one AI-guided sample
-note box instead of separate baseline/tuning actions, lets the operator choose
+note box instead of separate baseline/tuning actions, lets the user choose
 the sample host, and still keeps the compress action hostless so the encode
 queue can dispatch it automatically. For mounted-media remote sample hosts,
 source and encoded review excerpts are rendered where the selected host can
