@@ -15,9 +15,6 @@ from mediaforce.hosts.types import HostSetupResult
 
 
 REMOTE_MOUNT_ATTEMPT_SECONDS = 30
-# How long a request Finder has not answered may keep waiting, usually on a dialog, before its helper
-# gives up. Ending it does not close the dialog (#594), so it is left to the person who answers it.
-REMOTE_MOUNT_REQUEST_HOLD_SECONDS = 12 * 60 * 60
 CONTROLLER_SMB_MOUNTS_FILE_NAME = "controller-smb-mounts.json"
 
 _NO_GUI_SESSION_EXIT = 41
@@ -268,7 +265,6 @@ def _remote_mount_script(
         mount: RemoteSmbMount,
         *,
         attempt_seconds: int,
-        request_hold_seconds: int = REMOTE_MOUNT_REQUEST_HOLD_SECONDS,
 ) -> str:
     expected = str(mount.mount_point)
     if not _finder_mount_point_supported(mount.mount_point):
@@ -289,23 +285,16 @@ def _remote_mount_script(
             'mount_url="$2"',
             'stdout_path="$3"',
             'stderr_path="$4"',
-            'timeout_seconds="$5"',
-            'lock_path="$6"',
-            'service_label="$7"',
-            'result_dir="$8"',
+            'lock_path="$5"',
+            'service_label="$6"',
+            'result_dir="$7"',
             'uid="$(/usr/bin/id -u)"',
             'runner_dir="${0%/*}"',
-            '/usr/bin/osascript "$script" "$mount_url" >"$stdout_path" 2>"$stderr_path" &',
-            "child_pid=$!",
-            "(",
-            '  /bin/sleep "$timeout_seconds"',
-            '  /bin/kill "$child_pid" >/dev/null 2>&1 || true',
-            ") &",
-            "watchdog_pid=$!",
+            # No time limit: a request Finder has not answered usually has a dialog open, and ending
+            # the request would leave that dialog behind for the next one to stack on (#594). It ends
+            # when someone answers or cancels it, or when Finder gives up on its own.
             "child_status=0",
-            'wait "$child_pid" || child_status=$?',
-            '/bin/kill "$watchdog_pid" >/dev/null 2>&1 || true',
-            'wait "$watchdog_pid" >/dev/null 2>&1 || true',
+            '/usr/bin/osascript "$script" "$mount_url" >"$stdout_path" 2>"$stderr_path" || child_status=$?',
             # Kept outside the runner's own folder so the caller can still report it after cleanup. The
             # status appears only once the error is saved, so a caller that sees it can rely on both.
             f'{_REDACT_SMB_ACCOUNT_SED} "$stderr_path" 2>/dev/null | /usr/bin/head -c 4000 >"$result_dir/error" || true',
@@ -327,6 +316,7 @@ def _remote_mount_script(
     # One launchd job name per share, so an attempt can see a request an earlier one left waiting.
     label = f"com.mediaforce.mount.{lock_hash}"
     q_expected = shlex.quote(expected)
+    q_share_sources = shlex.quote("\n".join(_mount_output_sources(mount.url)))
     q_mount_output_path = shlex.quote(mount_output_field(expected))
     q_label = shlex.quote(label)
     q_applescript_payload = shlex.quote(applescript_payload)
@@ -335,9 +325,9 @@ def _remote_mount_script(
     return f"""set -u
 expected={q_expected}
 mount_output_path={q_mount_output_path}
+share_sources={q_share_sources}
 label={q_label}
 attempt_seconds={int(attempt_seconds)}
-request_hold_seconds={int(request_hold_seconds)}
 mount_present() {{
   mount_output="$(/sbin/mount 2>/dev/null || true)"
   if printf '%s\\n' "$mount_output" | /usr/bin/grep -F -- " on $expected (smbfs," >/dev/null 2>&1; then
@@ -350,17 +340,24 @@ mount_present() {{
   return 1
 }}
 # Finder connects a share at "<name>-1" when its usual folder is still taken, often by a stale
-# earlier connection. Prints the first such SMB mount point, as `mount` writes it.
+# earlier connection. Prints the first such mount point, as `mount` writes it, of this same share:
+# another server's share with the same name is left alone.
 mounted_elsewhere() {{
   /sbin/mount 2>/dev/null | while IFS= read -r line; do
-    case "$line" in *" (smbfs,"*) ;; *) continue ;; esac
+    case "$line" in //*" (smbfs,"*) ;; *) continue ;; esac
     point="${{line#* on }}"
     point="${{point%% (smbfs,*}}"
     suffix="${{point#"$mount_output_path"-}}"
     if [ "$suffix" = "$point" ]; then continue; fi
     case "$suffix" in ""|*[!0-9]*) continue ;; esac
-    printf '%s\\n' "$point"
-    break
+    source="${{line%% on *}}"
+    source="${{source#//}}"
+    case "${{source%%/*}}" in *@*) source="${{source#*@}}" ;; esac
+    source="$(printf '%s' "$source" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+    if printf '%s\\n' "$share_sources" | /usr/bin/grep -F -x -q -- "$source"; then
+      printf '%s\\n' "$point"
+      break
+    fi
   done
 }}
 report_mounted_elsewhere() {{
@@ -459,10 +456,9 @@ mount_url="$(/usr/bin/printf '%s' {q_mount_url_payload} | /usr/bin/base64 -D)" |
 /usr/bin/plutil -insert ProgramArguments.3 -string "$mount_url" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert ProgramArguments.4 -string "$stdout_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert ProgramArguments.5 -string "$stderr_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
-/usr/bin/plutil -insert ProgramArguments.6 -string "$request_hold_seconds" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
-/usr/bin/plutil -insert ProgramArguments.7 -string "$lock_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
-/usr/bin/plutil -insert ProgramArguments.8 -string "$label" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
-/usr/bin/plutil -insert ProgramArguments.9 -string "$result_dir" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
+/usr/bin/plutil -insert ProgramArguments.6 -string "$lock_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
+/usr/bin/plutil -insert ProgramArguments.7 -string "$label" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
+/usr/bin/plutil -insert ProgramArguments.8 -string "$result_dir" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert RunAtLoad -bool YES "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert StandardOutPath -string "$stdout_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert StandardErrorPath -string "$stderr_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
@@ -552,6 +548,15 @@ def _log_helper_failure(label: str, mount: RemoteSmbMount, result: subprocess.Co
         "Finder storage helper on %s did not connect %s: exit %s; %s",
         label, mount.share_name, result.returncode, evidence,
     )
+
+
+def _mount_output_sources(url: str) -> list[str]:
+    """The ways `mount` may write this share's source, without the account and in lower case."""
+    authority, _separator, share_path = url.removeprefix("smb://").partition("/")
+    server = authority.rsplit("@", 1)[-1]
+    decoded = unquote(share_path)
+    forms = {f"{server}/{share_path}", f"{server}/{mount_output_field(decoded)}", f"{server}/{decoded}"}
+    return sorted(form.lower() for form in forms)
 
 
 def _helper_markers(result: subprocess.CompletedProcess[str]) -> dict[str, str]:
@@ -763,7 +768,6 @@ __all__ = [
     "CONTROLLER_SMB_MOUNTS_FILE_NAME",
     "ControllerSmbMount",
     "REMOTE_MOUNT_ATTEMPT_SECONDS",
-    "REMOTE_MOUNT_REQUEST_HOLD_SECONDS",
     "RemoteSmbMount",
     "controller_smb_mounts_from_output",
     "controller_smb_mounts_from_payload",

@@ -392,7 +392,7 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         self.assertIn("MEDIAFORCE_MOUNT_ERR=", script)
         # The runner removes its own folder when AppleScript exits, so it leaves its outcome in a
         # separate folder the caller reads and then removes.
-        self.assertIn('ProgramArguments.9 -string "$result_dir"', script)
+        self.assertIn('ProgramArguments.8 -string "$result_dir"', script)
         self.assertIn('if [ -n "$result_dir" ]; then /bin/rm -rf "$result_dir"; fi', script)
         runner_line = next(line for line in script.splitlines() if 'base64 -D >"$runner_path"' in line)
         runner = base64.b64decode(runner_line.split()[2].strip("'")).decode()
@@ -682,9 +682,13 @@ class GeneratedMountScriptTests(unittest.TestCase):
             shell_text = shell_text.replace(system_path, str(self.stubs / Path(system_path).name))
         return shell_text.replace("/tmp/mediaforce-mount", str(self.root / "mediaforce-mount"))
 
-    def _run(self, mount_point: str = "/Volumes/media") -> subprocess.CompletedProcess[str]:
+    def _run(
+            self,
+            mount_point: str = "/Volumes/media",
+            url: str = "smb://remote@NAS.local/media",
+    ) -> subprocess.CompletedProcess[str]:
         script = _remote_mount_script(
-            RemoteSmbMount(Path(mount_point), Path(mount_point).name, "smb://remote@NAS.local/media"),
+            RemoteSmbMount(Path(mount_point), Path(mount_point).name, url),
             attempt_seconds=1,
         )
         return subprocess.run(
@@ -755,7 +759,7 @@ class GeneratedMountScriptTests(unittest.TestCase):
             "//remote@NAS.local/My%20media on /Volumes/My\\040media-1 (smbfs, nodev, nosuid, mounted by remote)\n"
         )
 
-        result = self._run("/Volumes/My media")
+        result = self._run("/Volumes/My media", "smb://remote@nas.local/My%20media")
 
         self.assertEqual(result.returncode, 46, result.stdout + result.stderr)
         self.assertIn("MEDIAFORCE_MOUNT_AT=/Volumes/My\\040media-1\n", result.stdout)
@@ -765,6 +769,8 @@ class GeneratedMountScriptTests(unittest.TestCase):
         (self.root / "mount-output").write_text(
             "//remote@NAS.local/backup on /Volumes/media-backup (smbfs, nodev, nosuid, mounted by remote)\n"
             "/dev/disk3s1 on /Volumes/media-2 (apfs, local, journaled)\n"
+            # Another server's share that happens to be called media too.
+            "//remote@Archive.local/media on /Volumes/media-1 (smbfs, nodev, nosuid, mounted by remote)\n"
         )
 
         result = self._run()
@@ -790,7 +796,7 @@ class GeneratedMountScriptTests(unittest.TestCase):
         runner_path.write_text(self._stubbed(runner))
         subprocess.run(
             ["/bin/sh", str(runner_path), "unused.scpt", "smb://NAS.local/media", str(runner_dir / "out"),
-             str(runner_dir / "err"), "30", str(lock_dir), "com.mediaforce.mount.test", str(result_dir)],
+             str(runner_dir / "err"), str(lock_dir), "com.mediaforce.mount.test", str(result_dir)],
             env={"STUB_DIR": str(self.root), "PATH": "/usr/bin:/bin"},
             check=False,
             timeout=30,
