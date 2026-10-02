@@ -502,6 +502,24 @@ describe('Ops workstation mapping', () => {
 		]);
 	});
 
+	it("leaves a current sample's note as it is", () => {
+		const dashboard = dashboardFixture();
+		dashboard.calibration_queue.sample.queued = [
+			{
+				job_id: 'waiting-sample',
+				prefix: 'tv/House',
+				status: 'queued',
+				notes: 'Managed process containment cleanup is unproven.'
+			}
+		];
+
+		const row = buildOpsQueueRows(dashboard).find(
+			(candidate) => candidate.key === 'sample:waiting-sample'
+		);
+
+		expect(row?.detail).toBe('Managed process containment cleanup is unproven.');
+	});
+
 	it('surfaces unavailable data and retryable encodes as attention items', () => {
 		const blockers = buildOpsBlockers(dashboardFixture(), hostsFixture(), 'Dashboard unavailable');
 

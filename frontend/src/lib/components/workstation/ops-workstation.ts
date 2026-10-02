@@ -513,15 +513,6 @@ function calibrationDetail(job: CalibrationJob): string {
 	if (normalized.includes('queue job was stopped')) {
 		return 'The sample was stopped and cleaned up.';
 	}
-	if (normalized.includes('largest_quality_safe_candidate_under_target_band')) {
-		return 'The size goal could not be reached at a quality that passes.';
-	}
-	if (normalized.includes('containment cleanup is unproven')) {
-		return 'Mediaforce could not confirm the sample stopped cleanly.';
-	}
-	if (normalized.includes('stream budget ledger')) {
-		return 'Mediaforce could not work out the size to aim for.';
-	}
 	return detail.replace(/^error:\s*/i, '');
 }
 
@@ -543,6 +534,16 @@ function historicalSampleDetail(job: CalibrationJob): string {
 	if (!compactText(job.error) && !compactText(job.notes) && !compactText(job.operator_note))
 		return fallback;
 	const detail = calibrationDetail(job);
+	const normalized = detail.toLowerCase();
+	if (normalized.includes('largest_quality_safe_candidate_under_target_band')) {
+		return 'The size goal could not be reached at a quality that passes.';
+	}
+	if (normalized.includes('containment cleanup is unproven')) {
+		return 'Mediaforce could not confirm the sample stopped cleanly.';
+	}
+	if (normalized.includes('stream budget ledger')) {
+		return 'Mediaforce could not work out the size to aim for.';
+	}
 	const sentence = detail.charAt(0).toUpperCase() + detail.slice(1);
 	return INTERNAL_TERMS.test(sentence) ? fallback : safeOperatorErrorCopy(sentence, fallback);
 }
