@@ -454,6 +454,20 @@ describe('Ops workstation mapping', () => {
 				error: 'worker_exit status=137 in run_calibration_job'
 			},
 			{
+				job_id: 'ledger',
+				prefix: 'tv/Raising Hope/Season 2',
+				status: 'failed',
+				finished_at: '2026-05-01T10:00:00+00:00',
+				error: 'The stream budget ledger does not contain a resolved target video budget.'
+			},
+			{
+				job_id: 'jargon',
+				prefix: 'tv/Raising Hope/Season 3',
+				status: 'failed',
+				finished_at: '2026-05-02T10:00:00+00:00',
+				error: 'Boundary compatibility uses an unsupported schema version'
+			},
+			{
 				job_id: 'no-reason',
 				prefix: 'tv/Lucifer/Season 2',
 				status: 'failed',
@@ -474,12 +488,16 @@ describe('Ops workstation mapping', () => {
 			["Didn't finish", 'The size goal could not be reached at a quality that passes.'],
 			["Didn't finish", 'Mediaforce could not confirm the sample stopped cleanly.'],
 			['Stopped', 'The sample stopped before it finished.'],
+			["Didn't finish", 'Mediaforce could not work out the size to aim for.'],
+			["Didn't finish", 'The sample stopped before it finished.'],
 			["Didn't finish", 'The sample stopped before it finished.']
 		]);
 		expect(rows.map((row) => row.scheduler)).toEqual([
 			shown('2026-09-09T03:42:33+00:00'),
 			shown('2026-08-29T15:13:48+00:00'),
 			shown('2026-06-05T11:41:43+00:00'),
+			shown('2026-05-01T10:00:00+00:00'),
+			shown('2026-05-02T10:00:00+00:00'),
 			'Earlier'
 		]);
 	});

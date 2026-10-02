@@ -519,6 +519,9 @@ function calibrationDetail(job: CalibrationJob): string {
 	if (normalized.includes('containment cleanup is unproven')) {
 		return 'Mediaforce could not confirm the sample stopped cleanly.';
 	}
+	if (normalized.includes('stream budget ledger')) {
+		return 'Mediaforce could not work out the size to aim for.';
+	}
 	return detail.replace(/^error:\s*/i, '');
 }
 
@@ -530,6 +533,10 @@ function historicalSampleOutcome(job: CalibrationJob): string {
 	return "Didn't finish";
 }
 
+// Words from Mediaforce's internals that mean nothing on the Activity page.
+const INTERNAL_TERMS =
+	/\b(?:schema|ledger|budgets?|observations?|boundary|backfill|shadow|fingerprint|revision|quarantine|replay|trace|preset|manifest|shards?|lease|crf|vmaf)\b/i;
+
 function historicalSampleDetail(job: CalibrationJob): string {
 	const fallback = 'The sample stopped before it finished.';
 	// Without a recorded reason, the shared detail falls back to times and placeholders.
@@ -537,7 +544,7 @@ function historicalSampleDetail(job: CalibrationJob): string {
 		return fallback;
 	const detail = calibrationDetail(job);
 	const sentence = detail.charAt(0).toUpperCase() + detail.slice(1);
-	return safeOperatorErrorCopy(sentence, fallback);
+	return INTERNAL_TERMS.test(sentence) ? fallback : safeOperatorErrorCopy(sentence, fallback);
 }
 
 function historicalSampleWhen(job: CalibrationJob): string {
