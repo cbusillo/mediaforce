@@ -293,6 +293,45 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         self.assertIn("could not connect the media share with Finder", result.message)
         self.assertIn("save the password to Keychain", result.detail or "")
 
+    def test_mount_remote_smb_shares_logs_finder_helper_evidence_without_the_account(self) -> None:
+        stdout = (
+            "MEDIAFORCE_MOUNT=timeout\n"
+            "MEDIAFORCE_MOUNT_JOB=running\n"
+            "MEDIAFORCE_MOUNT_ERR=Finder got an error: smb://remote@NAS.local/media could not be found. (-35)\n"
+        )
+
+        with self.assertLogs("mediaforce.hosts.mount_runtime", level="WARNING") as logs:
+            result = mount_remote_smb_shares(
+                {"host": "remote@worker", "label": "Worker"},
+                [RemoteSmbMount(Path("/Volumes/media"), "media", "smb://remote@NAS.local/media")],
+                run_remote_ssh=Mock(
+                    return_value=subprocess.CompletedProcess(args=["ssh"], returncode=42, stdout=stdout, stderr="")
+                ),
+            )
+
+        self.assertEqual(result.failure_kind, "host_configuration")
+        self.assertIn("save the password to Keychain", result.detail or "")
+        self.assertNotIn("MEDIAFORCE_MOUNT", (result.message or "") + (result.detail or ""))
+        [line] = logs.output
+        self.assertIn("Worker did not connect media: exit 42", line)
+        self.assertIn("MEDIAFORCE_MOUNT=timeout", line)
+        self.assertIn("MEDIAFORCE_MOUNT_JOB=running", line)
+        self.assertIn("smb://NAS.local/media could not be found. (-35)", line)
+        self.assertNotIn("remote@", line)
+
+    def test_remote_mount_script_reports_helper_state_after_a_timeout(self) -> None:
+        script = _remote_mount_script(
+            RemoteSmbMount(Path("/Volumes/media"), "media", "smb://remote@NAS.local/media"),
+            token="c" * 32,
+            attempt_seconds=30,
+        )
+
+        timeout_tail = script[script.index("printf 'MEDIAFORCE_MOUNT=timeout\\n'"):]
+        self.assertTrue(timeout_tail.startswith("printf 'MEDIAFORCE_MOUNT=timeout\\n'\nreport_helper\nexit 42"))
+        self.assertIn('/bin/launchctl print "gui/$uid/$label"', script)
+        self.assertIn("MEDIAFORCE_MOUNT_ERR=", script)
+        self.assertEqual(subprocess.run(["/bin/sh", "-n"], input=script, text=True).returncode, 0)
+
     def test_remote_mount_recovery_support_requires_clean_remote_macos_status(self) -> None:
         host = {"host": "remote@worker", "label": "Worker", "media_access": "mounted"}
         status = HostStatus(

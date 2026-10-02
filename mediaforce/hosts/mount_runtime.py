@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import logging
 import os
 import re
 import shlex
@@ -23,6 +24,10 @@ _MOUNT_BUSY_EXIT = 43
 _MOUNT_HELPER_EXIT = 44
 _MOUNT_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
 _SMB_SERVER_RE = re.compile(r"^[A-Za-z0-9._\-\[\]:]+$")
+_HELPER_MARKER_RE = re.compile(r"^MEDIAFORCE_MOUNT(?:_JOB|_ERR)?=.*$", re.MULTILINE)
+# The share URL names the account; an error echoing it must not put that in the log.
+_URL_ACCOUNT_RE = re.compile(r"(smb://)[^@\s/]+@", re.IGNORECASE)
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +198,7 @@ def mount_smb_shares(
         if result.returncode == 0:
             mounted_names.append(mount.share_name)
             continue
+        _log_helper_failure(label, mount, result)
         if result.returncode == _NO_GUI_SESSION_EXIT:
             return HostSetupResult(
                 ok=False,
@@ -383,8 +389,21 @@ mount_url="$(/usr/bin/printf '%s' {q_mount_url_payload} | /usr/bin/base64 -D)" |
 /usr/bin/plutil -insert RunAtLoad -bool YES "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert StandardOutPath -string "$stdout_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert StandardErrorPath -string "$stderr_path" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
+# Evidence for an attempt that did not mount: whether the Finder helper is still waiting (a dialog
+# can be open) and the end of its error output. The caller logs it; it never changes the outcome.
+report_helper() {{
+  if /bin/launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+    printf 'MEDIAFORCE_MOUNT_JOB=running\\n'
+  else
+    printf 'MEDIAFORCE_MOUNT_JOB=exited\\n'
+  fi
+  if [ -s "$stderr_path" ]; then
+    printf 'MEDIAFORCE_MOUNT_ERR=%s\\n' "$(/usr/bin/tail -c 400 "$stderr_path" 2>/dev/null | /usr/bin/tr '\\r\\n' '  ')"
+  fi
+}}
 if ! /bin/launchctl bootstrap "gui/$uid" "$plist_path" >/dev/null 2>&1; then
   printf 'MEDIAFORCE_MOUNT=bootstrap-failed\\n'
+  report_helper
   exit {_MOUNT_HELPER_EXIT}
 fi
 waited=0
@@ -397,6 +416,7 @@ while [ "$waited" -lt "$attempt_seconds" ]; do
   /bin/sleep 1
 done
 printf 'MEDIAFORCE_MOUNT=timeout\\n'
+report_helper
 exit {_MOUNT_TIMEOUT_EXIT}
 """
 
@@ -430,6 +450,16 @@ def _remote_smb_mount(
         mount_point=controller_mount.mount_point,
         share_name=share_name,
         url=f"smb://{user_prefix}{server}/{share_path}",
+    )
+
+
+def _log_helper_failure(label: str, mount: RemoteSmbMount, result: subprocess.CompletedProcess[str]) -> None:
+    """Record what the Finder helper reported, so a failed connection can be told apart afterwards."""
+    markers = _HELPER_MARKER_RE.findall(str(result.stdout or ""))
+    evidence = _URL_ACCOUNT_RE.sub(r"\1", " ".join(marker.strip() for marker in markers)) or "no helper markers"
+    LOGGER.warning(
+        "Finder storage helper on %s did not connect %s: exit %s; %s",
+        label, mount.share_name, result.returncode, evidence,
     )
 
 
