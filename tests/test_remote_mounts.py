@@ -1,5 +1,6 @@
 import base64
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from mediaforce import remote
 from mediaforce.hosts.mount_runtime import ControllerSmbMount, RemoteSmbMount, \
     _remote_mount_script, controller_smb_mounts_from_output, load_controller_smb_mounts, mount_remote_smb_shares, \
     remote_smb_mounts_for_paths, save_controller_smb_mounts
+from mediaforce.hosts.types import HostSetupResult
 from mediaforce.remote import HostStatus
 
 
@@ -197,7 +199,6 @@ class RemoteMountRuntimeTests(unittest.TestCase):
                 share_name="media",
                 url='smb://remote@NAS.local/share%22%20&%20do%20shell%20script%20%22unsafe',
             ),
-            token="a" * 32,
             attempt_seconds=30,
         )
 
@@ -226,7 +227,6 @@ class RemoteMountRuntimeTests(unittest.TestCase):
                 share_name="My Share",
                 url="smb://remote@NAS.local/My%20Share",
             ),
-            token="e" * 32,
             attempt_seconds=30,
         )
 
@@ -244,12 +244,11 @@ class RemoteMountRuntimeTests(unittest.TestCase):
             url="smb://remote@NAS.local/media",
         )
 
-        with patch("mediaforce.hosts.mount_runtime.uuid.uuid4", return_value=Mock(hex="b" * 32)):
-            result = mount_remote_smb_shares(
-                {"host": "remote@worker", "label": "Worker"},
-                [mount],
-                run_remote_ssh=run_remote_ssh,
-            )
+        result = mount_remote_smb_shares(
+            {"host": "remote@worker", "label": "Worker"},
+            [mount],
+            run_remote_ssh=run_remote_ssh,
+        )
 
         self.assertTrue(result.ok)
         self.assertEqual(result.message, "Connected shared storage on Worker.")
@@ -280,18 +279,80 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         self.assertEqual(result.failure_kind, "ssh_transport")
         self.assertIn("SSH request timed out", result.detail or "")
 
-    def test_mount_remote_smb_shares_reports_finder_keychain_recovery(self) -> None:
-        result = mount_remote_smb_shares(
-            {"host": "remote@worker", "label": "Worker"},
-            [RemoteSmbMount(Path("/Volumes/media"), "media", "smb://remote@NAS.local/media")],
-            run_remote_ssh=Mock(
-                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=42, stdout="", stderr="")
-            ),
-        )
+    def test_timeout_without_a_reason_does_not_guess_one(self) -> None:
+        result = _mount_result(42, "MEDIAFORCE_MOUNT=timeout\nMEDIAFORCE_MOUNT_JOB=exited:unknown\n")
 
         self.assertFalse(result.ok)
-        self.assertIn("could not connect the media share with Finder", result.message)
-        self.assertIn("save the password to Keychain", result.detail or "")
+        self.assertEqual(result.message, "Worker did not connect the media share within 30 seconds.")
+        self.assertIn("Finder gave no reason", result.detail or "")
+        self.assertNotIn("Keychain", result.detail or "")
+        self.assertEqual(result.failure_kind, "host_configuration")
+
+    def test_timed_out_request_still_waiting_says_to_answer_the_dialog(self) -> None:
+        result = _mount_result(42, "MEDIAFORCE_MOUNT=timeout\nMEDIAFORCE_MOUNT_JOB=running\n")
+
+        self.assertIn("within 30 seconds, and the request is still waiting", result.message)
+        self.assertIn("Answer or cancel it there", result.detail or "")
+        self.assertIn("won't send another request", result.detail or "")
+        self.assertNotIn("Keychain", result.detail or "")
+        self.assertEqual(result.failure_kind, "host_configuration")
+
+    def test_request_left_by_an_earlier_attempt_is_reported(self) -> None:
+        result = _mount_result(45, "MEDIAFORCE_MOUNT=request-waiting\n")
+
+        self.assertEqual(result.message, "Worker is still waiting on an earlier request to connect the media share.")
+        self.assertIn("Answer or cancel it there", result.detail or "")
+        self.assertEqual(result.failure_kind, "host_configuration")
+
+    def test_share_connected_under_another_name_is_reported_as_stale(self) -> None:
+        result = _mount_result(
+            46,
+            "MEDIAFORCE_MOUNT=mounted-elsewhere\nMEDIAFORCE_MOUNT_AT=/Volumes/My\\040Share-1\n",
+            mount=RemoteSmbMount(Path("/Volumes/My Share"), "My Share", "smb://remote@NAS.local/My%20Share"),
+        )
+
+        self.assertEqual(result.message, "Worker has a share connected at /Volumes/My Share-1 instead of /Volumes/My Share.")
+        self.assertIn("Eject /Volumes/My Share-1 on Worker", result.detail or "")
+        self.assertEqual(result.failure_kind, "host_configuration")
+
+    def test_finder_errors_are_grouped_only_by_what_they_say(self) -> None:
+        cases = [
+            ("Finder got an error: User canceled. (-128)", "was cancelled", "host_configuration"),
+            ("Finder got an error: Authentication error (-5023)", "could not sign in", "host_configuration"),
+            (
+                "Finder got an error: The server smb://remote@NAS.local/media could not be found. (-35)",
+                "could not reach the server",
+                "host_unavailable",
+            ),
+            ("Finder got an error: Something new happened. (-1)", "could not connect the media share with Finder", "host_configuration"),
+        ]
+        for error, message, failure_kind in cases:
+            with self.subTest(error=error):
+                result = _mount_result(
+                    42,
+                    f"MEDIAFORCE_MOUNT=timeout\nMEDIAFORCE_MOUNT_JOB=exited:1\nMEDIAFORCE_MOUNT_ERR={error}\n",
+                )
+
+                self.assertIn(message, result.message)
+                self.assertEqual(result.failure_kind, failure_kind)
+                self.assertNotIn("remote@", result.detail or "")
+        self.assertIn("save the password to Keychain", _mount_result(
+            42, "MEDIAFORCE_MOUNT_JOB=exited:1\nMEDIAFORCE_MOUNT_ERR=Authentication error\n",
+        ).detail or "")
+        unknown = _mount_result(42, "MEDIAFORCE_MOUNT_JOB=exited:1\nMEDIAFORCE_MOUNT_ERR=Something new happened. (-1)\n")
+        self.assertIn("Finder reported: \u201cSomething new happened. (-1)\u201d", unknown.detail or "")
+        self.assertNotIn("Keychain", unknown.detail or "")
+
+    def test_launch_helper_ssh_and_unexpected_failures_stay_apart(self) -> None:
+        helper = _mount_result(44, "MEDIAFORCE_MOUNT=bootstrap-failed\n")
+        ssh = _mount_result(255, "")
+        unexpected = _mount_result(7, "")
+
+        self.assertEqual(helper.message, "Worker could not start the Finder storage helper.")
+        self.assertEqual(ssh.failure_kind, "ssh_transport")
+        self.assertIn("SSH connection failed", ssh.detail or "")
+        self.assertIn("ended unexpectedly (exit 7)", unexpected.detail or "")
+        self.assertNotIn("launch service", unexpected.detail or "")
 
     def test_mount_remote_smb_shares_logs_finder_helper_evidence_without_the_account(self) -> None:
         stdout = (
@@ -310,7 +371,7 @@ class RemoteMountRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(result.failure_kind, "host_configuration")
-        self.assertIn("save the password to Keychain", result.detail or "")
+        self.assertIn("still waiting", result.message)
         self.assertNotIn("MEDIAFORCE_MOUNT", (result.message or "") + (result.detail or ""))
         [line] = logs.output
         self.assertIn("Worker did not connect media: exit 42", line)
@@ -322,7 +383,6 @@ class RemoteMountRuntimeTests(unittest.TestCase):
     def test_remote_mount_script_reports_helper_state_after_a_timeout(self) -> None:
         script = _remote_mount_script(
             RemoteSmbMount(Path("/Volumes/media"), "media", "smb://remote@NAS.local/media"),
-            token="c" * 32,
             attempt_seconds=30,
         )
 
@@ -343,7 +403,6 @@ class RemoteMountRuntimeTests(unittest.TestCase):
     def _generated_helper_scripts(self) -> tuple[str, str]:
         script = _remote_mount_script(
             RemoteSmbMount(Path("/Volumes/media"), "media", "smb://remote@NAS.local/media"),
-            token="d" * 32,
             attempt_seconds=30,
         )
         runner_line = next(line for line in script.splitlines() if 'base64 -D >"$runner_path"' in line)
@@ -374,10 +433,9 @@ class RemoteMountRuntimeTests(unittest.TestCase):
     def test_report_prefers_the_saved_result_once_the_runner_has_finished(self) -> None:
         script, _runner = self._generated_helper_scripts()
         report_helper = script[script.index("report_helper() {"):script.index("\n}\n", script.index("report_helper() {")) + 2]
-        # launchd can still list the job for a moment after the runner saved its result and removed
-        # its folder; stand in for that with a launchctl that always succeeds.
-        self.assertIn("/bin/launchctl print", report_helper)
-        report_helper = report_helper.replace("/bin/launchctl print", "true")
+        # launchd can still list the job as running for a moment after the runner saved its result
+        # and removed its folder; stand in for that with a job that always reads as running.
+        self.assertIn("job_running", report_helper)
 
         with tempfile.TemporaryDirectory() as temp:
             Path(temp, "status").write_text("1\n")
@@ -387,7 +445,7 @@ class RemoteMountRuntimeTests(unittest.TestCase):
                 [
                     "/bin/sh",
                     "-c",
-                    f'set -u; uid=0; label=none; stderr_path="$1/gone/mount.err"; result_dir="$1"\n'
+                    f'set -u; job_running() {{ true; }}; stderr_path="$1/gone/mount.err"; result_dir="$1"\n'
                     f"{report_helper}\nreport_helper",
                     "sh",
                     temp,
@@ -554,6 +612,201 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         self.assertIn("signed-in macOS desktop session", same_session.message)
         self.assertTrue(next_session.ok)
         self.assertEqual(run_local.call_count, 2)
+
+
+def _mount_result(
+        returncode: int,
+        stdout: str,
+        *,
+        mount: RemoteSmbMount | None = None,
+) -> HostSetupResult:
+    return mount_remote_smb_shares(
+        {"host": "remote@worker", "label": "Worker"},
+        [mount or RemoteSmbMount(Path("/Volumes/media"), "media", "smb://remote@NAS.local/media")],
+        run_remote_ssh=Mock(
+            return_value=subprocess.CompletedProcess(args=["ssh"], returncode=returncode, stdout=stdout, stderr="")
+        ),
+        attempt_seconds=30,
+    )
+
+
+# Stand-ins for the macOS-only commands the generated helper calls, so the real script can run
+# here. launchctl keeps the job's state in files: a job "runs" while job-running exists.
+_LAUNCHCTL_STUB = """#!/bin/sh
+printf '%s\\n' "$*" >>"$STUB_DIR/launchctl.log"
+case "$1" in
+  print)
+    case "$2" in
+      */com.mediaforce.mount.*)
+        if [ -e "$STUB_DIR/job-running" ]; then printf '\\tstate = running\\n'; exit 0; fi
+        exit 113 ;;
+    esac
+    exit 0 ;;
+  bootstrap)
+    if [ -e "$STUB_DIR/bootstrap-starts-job" ]; then : >"$STUB_DIR/job-running"; fi
+    exit 0 ;;
+  bootout)
+    rm -f "$STUB_DIR/job-running"
+    exit 0 ;;
+esac
+exit 0
+"""
+_BASE64_STUB = "#!" + sys.executable + "\nimport base64, sys\nsys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))\n"
+
+
+class GeneratedMountScriptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.stubs = self.root / "stubs"
+        self.stubs.mkdir()
+        (self.root / "home").mkdir()
+        stub_bodies = {
+            "launchctl": _LAUNCHCTL_STUB,
+            "mount": '#!/bin/sh\ncat "$STUB_DIR/mount-output" 2>/dev/null\nexit 0\n',
+            "stat": "#!/bin/sh\nid -u\n",
+            "base64": _BASE64_STUB,
+            "osacompile": "#!/bin/sh\nexit 0\n",
+            "plutil": "#!/bin/sh\nexit 0\n",
+            "osascript": '#!/bin/sh\nprintf "Finder got an error: User canceled. (-128)\\n" >&2\nexit 1\n',
+        }
+        for name, body in stub_bodies.items():
+            path = self.stubs / name
+            path.write_text(body)
+            path.chmod(0o755)
+
+    def _stubbed(self, shell_text: str) -> str:
+        for system_path in ("/bin/launchctl", "/sbin/mount", "/usr/bin/stat", "/usr/bin/base64",
+                            "/usr/bin/osacompile", "/usr/bin/plutil", "/usr/bin/osascript"):
+            shell_text = shell_text.replace(system_path, str(self.stubs / Path(system_path).name))
+        return shell_text.replace("/tmp/mediaforce-mount", str(self.root / "mediaforce-mount"))
+
+    def _run(self, mount_point: str = "/Volumes/media") -> subprocess.CompletedProcess[str]:
+        script = _remote_mount_script(
+            RemoteSmbMount(Path(mount_point), Path(mount_point).name, "smb://remote@NAS.local/media"),
+            attempt_seconds=1,
+        )
+        return subprocess.run(
+            ["/bin/sh", "-s"],
+            input=self._stubbed(script),
+            capture_output=True,
+            text=True,
+            env={"HOME": str(self.root / "home"), "STUB_DIR": str(self.root), "PATH": "/usr/bin:/bin"},
+            timeout=30,
+        )
+
+    def _launchctl_calls(self, verb: str) -> list[str]:
+        log = self.root / "launchctl.log"
+        lines = log.read_text().splitlines() if log.exists() else []
+        return [line for line in lines if line.startswith(verb + " ")]
+
+    def _lock_dirs(self) -> list[Path]:
+        return list((self.root / "home" / "Library" / "Caches" / "mediaforce").glob("mount-*.lock"))
+
+    def test_a_timed_out_request_still_waiting_is_left_and_blocks_a_second_one(self) -> None:
+        # MF-594-D0: two explicit attempts each left a dialog, because the first attempt's cleanup
+        # ended its request (which does not close the dialog) and the second sent a new one.
+        (self.root / "bootstrap-starts-job").touch()
+
+        first = self._run()
+
+        self.assertEqual(first.returncode, 42, first.stdout + first.stderr)
+        self.assertIn("MEDIAFORCE_MOUNT_JOB=running", first.stdout)
+        calls = [line.split(" ", 1)[0] for line in (self.root / "launchctl.log").read_text().splitlines()]
+        self.assertNotIn("bootout", calls[calls.index("bootstrap"):], "the waiting request must not be ended")
+        self.assertTrue((self.root / "job-running").exists())
+        self.assertEqual(len(self._lock_dirs()), 1, "the runner removes the lock when the request ends")
+        [result_dir] = list(self.root.glob("mediaforce-mount-result.*"))
+        self.assertTrue((result_dir / "caller-gone").exists())
+
+        second = self._run()
+
+        self.assertEqual(second.returncode, 45, second.stdout + second.stderr)
+        self.assertIn("MEDIAFORCE_MOUNT=request-waiting", second.stdout)
+        self.assertEqual(len(self._launchctl_calls("bootstrap")), 1, "no second request while one waits")
+
+    def test_a_new_attempt_starts_once_the_earlier_request_ends(self) -> None:
+        (self.root / "bootstrap-starts-job").touch()
+        self._run()
+        # Someone answered or cancelled the dialog: the request's runner ends and cleans up.
+        (self.root / "job-running").unlink()
+        for lock in self._lock_dirs():
+            lock.rmdir()
+
+        again = self._run()
+
+        self.assertEqual(again.returncode, 42, again.stdout + again.stderr)
+        self.assertEqual(len(self._launchctl_calls("bootstrap")), 2)
+
+    def test_a_timed_out_request_that_already_ended_is_cleaned_up(self) -> None:
+        result = self._run()
+
+        self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
+        self.assertIn("MEDIAFORCE_MOUNT_JOB=exited:unknown", result.stdout)
+        self.assertEqual(len(self._launchctl_calls("bootout")), 2, "once before the request, once after")
+        self.assertEqual(self._lock_dirs(), [])
+        self.assertEqual(list(self.root.glob("mediaforce-mount*")), [])
+
+    def test_a_share_connected_under_another_name_is_reported_without_a_request(self) -> None:
+        (self.root / "mount-output").write_text(
+            "//remote@NAS.local/backup on /Volumes/media-backup (smbfs, nodev, nosuid, mounted by remote)\n"
+            "/dev/disk3s1 on /Volumes/media-2 (apfs, local, journaled)\n"
+            "//remote@NAS.local/My%20media on /Volumes/My\\040media-1 (smbfs, nodev, nosuid, mounted by remote)\n"
+        )
+
+        result = self._run("/Volumes/My media")
+
+        self.assertEqual(result.returncode, 46, result.stdout + result.stderr)
+        self.assertIn("MEDIAFORCE_MOUNT_AT=/Volumes/My\\040media-1\n", result.stdout)
+        self.assertEqual(self._launchctl_calls("bootstrap"), [])
+
+    def test_a_share_with_only_unrelated_mounts_still_tries_to_connect(self) -> None:
+        (self.root / "mount-output").write_text(
+            "//remote@NAS.local/backup on /Volumes/media-backup (smbfs, nodev, nosuid, mounted by remote)\n"
+            "/dev/disk3s1 on /Volumes/media-2 (apfs, local, journaled)\n"
+        )
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
+        self.assertEqual(len(self._launchctl_calls("bootstrap")), 1)
+
+    def _run_runner(self, *, caller_gone: bool) -> Path:
+        script = _remote_mount_script(
+            RemoteSmbMount(Path("/Volumes/media"), "media", "smb://remote@NAS.local/media"),
+            attempt_seconds=1,
+        )
+        runner_line = next(line for line in script.splitlines() if 'base64 -D >"$runner_path"' in line)
+        runner = base64.b64decode(runner_line.split()[2].strip("'")).decode()
+        runner_dir = self.root / "runner"
+        result_dir = self.root / "result"
+        lock_dir = self.root / "lock"
+        for folder in (runner_dir, result_dir, lock_dir):
+            folder.mkdir()
+        if caller_gone:
+            (result_dir / "caller-gone").touch()
+        runner_path = runner_dir / "run-mount.sh"
+        runner_path.write_text(self._stubbed(runner))
+        subprocess.run(
+            ["/bin/sh", str(runner_path), "unused.scpt", "smb://NAS.local/media", str(runner_dir / "out"),
+             str(runner_dir / "err"), "30", str(lock_dir), "com.mediaforce.mount.test", str(result_dir)],
+            env={"STUB_DIR": str(self.root), "PATH": "/usr/bin:/bin"},
+            check=False,
+            timeout=30,
+        )
+        self.assertFalse(runner_dir.exists())
+        self.assertFalse(lock_dir.exists())
+        return result_dir
+
+    def test_runner_keeps_its_result_for_a_caller_that_is_still_reading(self) -> None:
+        result_dir = self._run_runner(caller_gone=False)
+
+        self.assertEqual((result_dir / "status").read_text(), "1\n")
+        self.assertIn("(-128)", (result_dir / "error").read_text())
+
+    def test_runner_removes_its_result_once_the_caller_has_gone(self) -> None:
+        self.assertFalse(self._run_runner(caller_gone=True).exists())
 
 
 if __name__ == "__main__":

@@ -192,7 +192,9 @@ Guidance:
   - controller SMB mount parsing and password-free learned mapping persistence
   - one Finder mount script shared by local and SSH transports
   - bounded transient LaunchAgent execution, cleanup, and locking
-  - Finder Keychain recovery messages without credential access
+  - at most one Finder request per share, left running while Finder waits
+  - failure messages grouped only by what the helper and Finder reported,
+    without credential access
 - `setup_runtime.py`
   - prepare/reset trust/bootstrap flows
 - `types.py`
