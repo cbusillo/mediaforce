@@ -1,5 +1,9 @@
 # Final Love Pass QA
 
+> Status: Historical. Kept as evidence only; it is not current guidance.
+> Start with `DIRECTION.md`, `docs/design/README.md`, and
+> `docs/style/workstation-ui.md`.
+
 This is the final visual and basic-user confidence pass for GitHub issue `#87`.
 The screenshot artifacts are intentionally local-only under
 `scratch/ui-checks/final-love-pass/` because live Folder Studio data can include

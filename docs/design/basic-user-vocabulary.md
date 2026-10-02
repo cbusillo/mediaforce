@@ -65,15 +65,15 @@ a computer`, `Needs sample`, `Safe to delete`.
   cleanup folder first, and files left out remain untouched.
 - Transcode root: use `Working folder` in the Settings storage section.
 - Archive cleanup: use `Delete original backup` or `Delete original backups`
-  for Completed and Settings destructive actions. The final confirmation must
+  for Finished and Settings destructive actions. The final confirmation must
   say `This cannot be undone` beside the final delete control.
-- Archive root: use `Cleanup folder` in Completed and Settings storage copy.
+- Archive root: use `Cleanup folder` in Finished and Settings storage copy.
 - Cleanup: use `Delete` for files that still exist and `Mark handled` when the
   original backups are already gone. Mark-handled confirmation must say
   `Nothing is deleted`.
-- Missing sample: use `Needs sample` in Queue and Folder Studio blockers.
+- Missing sample: use `Needs sample` in Library and show page blockers.
 - Polling: use `Checking for updates` in loading and refresh states.
-- Scheduler: use `Work schedule` in Ops and Settings.
+- Scheduler: use `Work schedule` in Activity and Settings.
 - Schedule profile: use `Work window` in Settings basic labels.
 - Staging root: use `Computer staging folder` in advanced computer settings.
 
@@ -107,7 +107,7 @@ bytes in Technical details.
 
 ## Workflow State Names
 
-### Queue And Folder Studio
+### Library And Show Pages
 
 - No sample exists: `Needs sample`. Mediaforce needs one representative file
   before settings can be approved.
@@ -172,14 +172,16 @@ remain unchanged` while memory is observation-only.
   processing. Show the exact host-local close time beside the state.
 - Computer has time left but no queued episode safely fits: `Draining`. Work
   resumes automatically in the next compatible full window.
-- Episode stopped at a schedule boundary: `Paused by schedule`. Explain that
+- Episode stopped at a schedule boundary: `Paused until the next work window`. Explain that
   the whole episode restarts automatically and no failure attempt was used.
-- Active episode with a hard boundary: `Stops at close`. Show the exact
+- Active episode with a hard boundary: `Stops when the work window closes`. Show the exact
   host-local deadline and remaining time.
-- Explicit schedule exception: `Bypassing schedule`. State clearly that work
+- Explicit schedule exception: `Not limited by the work window`. State clearly that work
   may continue past the normal close time.
-- Episode longer than every compatible work window: `Window too short`. Route
+- Episode longer than every compatible work window: `Waiting for a longer work window`. Route
   the operator to widen a work window or intentionally bypass the schedule.
+- The shipped labels live in `scheduleLabels`
+  (`frontend/src/lib/hosts/schedule.ts`); keep this list in step with it.
 - Computer setup missing: `Needs setup`. The computer needs setup before it
   can run work.
 - Queue paused: `Paused`. Mediaforce will not start new processing work.
@@ -208,7 +210,7 @@ remain unchanged` while memory is observation-only.
 - No catalog or evidence work is active: `Quiet`. Do not imply a computer is
   polling in the background.
 
-### Completed
+### Finished
 
 - Item history: use `Movie`, `Episode`, or `File` for item-level processing,
   checking, and promotion events. Use `Season` only for a folder-level summary,
@@ -243,14 +245,14 @@ remain unchanged` while memory is observation-only.
 
 ## Route Copy Direction
 
-- Queue/Home should lead with `worklist`, `folder`, `sample`, `review`,
+- The Library should lead with `show`, `season`, `sample`, `review`,
   `computer`, and `next action`. Avoid `calibration`, `proof`, and `host` in
   basic table columns.
-- Folder Studio should say `Review assistant`, `sample`, `proposal`, `approved`,
-  `processing`, and `quality memory`. Use `measured production run` for what
-  actually encoded and `shadow recommendation` for the observation-only first
-  CRF suggestion. Keep `Bench` out of visible labels unless a product naming
-  decision intentionally keeps it.
+- Show and movie pages should say `sample`, `approved`, and `processing`.
+  Describe what actually encoded, and what earlier results suggested trying
+  first, in plain words. Do not put `CRF`, `VMAF`, `shadow`, `quality memory`,
+  or `Bench` on screen; `DIRECTION.md` treats a term the owner has to look up
+  as a defect.
 - When a saved sample plan no longer matches the current compression goal, say
   `Sample plan is out of date`, hide the Start action, and put `Prepare again`
   in the first decision viewport. Explain that nothing was queued.
@@ -271,7 +273,7 @@ remain unchanged` while memory is observation-only.
   sound`), and follow the shared compress/check/replace phase verbs.
 - Activity may expose more technical detail, but first-level headings should
   still use `computers`, `sample queue`, `compression queue`, and `retry available`.
-- Completed should use destructive language directly: `Delete original
+- Finished should use destructive language directly: `Delete original
 backups`, `selected original backups`, `Cleanup folder`, and `ready to delete`.
   Its global headings and lists must remain media-neutral because movie, episode,
   season, and file rows can appear together.

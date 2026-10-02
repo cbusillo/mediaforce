@@ -131,11 +131,11 @@ different visual or language model.
 ## Operator language
 
 - Use ordinary media nouns and exact action verbs: movie, episode, season,
-  original, sample, full encode, checked output, replacement, waiting, running,
-  and stopped.
+  original, sample, compress, checked file, replace, waiting, running, and
+  stopped.
 - Do not expose implementation terms such as artifact, manifest, promotion,
-  prefix, lane, calibration, worker lease, scheduler, or internal job IDs as
-  primary interface language.
+  prefix, lane, calibration, worker lease, scheduler, CRF, VMAF, ledger,
+  cadence, shard, quality memory, or internal job IDs as interface language.
 - Button text names the actual effect and scope. A queued action says it queues;
   an immediate action says it starts now; replacement says which file changes.
 - Approval records an operator judgment. Compression admission is a separate

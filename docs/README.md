@@ -4,6 +4,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 ## Start here
 
+- `DIRECTION.md` (repository root): what Mediaforce is for and where work
+  stops; it wins over any doc here
 - `docs/policies/acceptance-gate.md`: commit/session-finish bar
 - `docs/policies/coding-standards.md`: repo-wide coding expectations
 - `docs/style/index.md`: entry point for language and testing style guides
@@ -53,7 +55,7 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 - `docs/design/README.md`: source-of-truth routing for current versus
   historical UI reset guidance
-- `docs/design/workstation-reset-plan.md`: active frontend replacement plan
+- `docs/design/movies-workflow.md`: Movies Library and movie page contract
 - `docs/design/basic-user-vocabulary.md`: user-facing vocabulary and workflow
   state reference for the UI/UX reset
 - Historical/superseded briefs live in `docs/design/archive/`; read

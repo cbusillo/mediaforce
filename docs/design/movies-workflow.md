@@ -18,18 +18,19 @@ second encode path.
 
 ## Layout
 
-- Movies uses a dense title list with a persistent inspector, not a poster wall.
+- Movies uses the shared Library list, not a poster wall: one inline detail
+  opens directly after the selected title, with an explicit Collapse.
 - The list exposes state, title, file membership, size, reclaim estimate, age
   provenance, and the next action.
 - Reclaim is evidence-backed: an unmeasured movie reports no estimate rather
   than borrowing TV or generic codec history. Known staged savings remain
   visible independently.
-- The inspector exposes every feature, edition, extra, and uncertain member as
+- The detail exposes every feature, edition, extra, and uncertain member as
   a reachable row.
-- Narrow layouts stack the inspector below the selected title without horizontal
-  page overflow.
+- Narrow layouts open the detail with an explicit Inspect control, without
+  horizontal page overflow.
 
-## Folder Studio
+## Movie Page
 
 - Movie scopes reuse the existing folder APIs, calibration, manifests, queue,
   validation, promotion, and recovery machinery.
