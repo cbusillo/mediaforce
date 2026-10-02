@@ -352,6 +352,10 @@ class RemoteMountRuntimeTests(unittest.TestCase):
     def test_runner_saves_its_error_redacted_before_cutting_it(self) -> None:
         _script, runner = self._generated_helper_scripts()
         save_error = next(line for line in runner.splitlines() if '>"$result_dir/error"' in line)
+        publish_status = next(line for line in runner.splitlines() if '"$result_dir/status"' in line)
+        # A caller that sees the status trusts the saved error, so the error must be complete first.
+        self.assertLess(runner.index(save_error), runner.index(publish_status))
+        self.assertIn('/bin/mv -f "$result_dir/status.tmp" "$result_dir/status"', publish_status)
         error = "x" * 3990 + " smb://remote@NAS.local/media could not be found. (-35)"
         # Cutting first would keep "smb://rem", which no longer looks like an account to redact.
         self.assertTrue(error[:4000].endswith(" smb://rem"))

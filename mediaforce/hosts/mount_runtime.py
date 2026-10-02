@@ -293,9 +293,11 @@ def _remote_mount_script(mount: RemoteSmbMount, *, token: str, attempt_seconds: 
             'wait "$child_pid" || child_status=$?',
             '/bin/kill "$watchdog_pid" >/dev/null 2>&1 || true',
             'wait "$watchdog_pid" >/dev/null 2>&1 || true',
-            # Kept outside the runner's own folder so the caller can still report it after cleanup.
-            'printf \'%s\\n\' "$child_status" >"$result_dir/status" 2>/dev/null || true',
+            # Kept outside the runner's own folder so the caller can still report it after cleanup. The
+            # status appears only once the error is saved, so a caller that sees it can rely on both.
             f'{_REDACT_SMB_ACCOUNT_SED} "$stderr_path" 2>/dev/null | /usr/bin/head -c 4000 >"$result_dir/error" || true',
+            'printf \'%s\\n\' "$child_status" >"$result_dir/status.tmp" 2>/dev/null'
+            ' && /bin/mv -f "$result_dir/status.tmp" "$result_dir/status" 2>/dev/null || true',
             '/bin/rm -rf "$runner_dir"',
             '/bin/rmdir "$lock_path" >/dev/null 2>&1 || true',
             '/bin/launchctl bootout "gui/$uid/$service_label" >/dev/null 2>&1 || true',
