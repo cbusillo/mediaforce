@@ -2085,11 +2085,17 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
     for (const width of [1440, 390]) {
       const page = await browser.newPage({ viewport: { width, height: 900 } });
       let waitingCount = 10;
+      let paused = false;
       await page.route(/\/api\/dashboard(?:\?.*)?$/, async (route) => {
         const response = await route.fetch();
         const payload = await response.json();
         payload.encode_queue.state.scheduler_summary = "runs anytime";
-        payload.encode_queue.queued_waiting_count = 12;
+        payload.encode_queue.state.is_paused = paused;
+        payload.encode_queue.queued = [];
+        payload.encode_queue.queued_count = 0;
+        payload.encode_queue.running = [];
+        payload.encode_queue.running_count = 0;
+        payload.encode_queue.queued_waiting_count = 2;
         payload.encode_queue.queued_schedule_waiting_count = waitingCount;
         await route.fulfill({ response, json: payload });
       });
@@ -2119,6 +2125,19 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
         await expect(schedule).toContainText("Off schedule", {
           timeout: timeoutMs,
         });
+        const windowNotice = page.getByText(
+          /^\d+ (file is|files are) waiting for a work window$/,
+        );
+        if (waitingCount > 0) {
+          await expect(windowNotice).toHaveText(
+            `${waitingCount} ${waitingCount === 1 ? "file is" : "files are"} waiting for a work window`,
+          );
+        } else {
+          await expect(windowNotice).toHaveCount(0);
+        }
+        await expect(page.locator(".blocker-list")).not.toContainText(
+          "Work runs anytime",
+        );
         const text = await schedule.innerText();
         if (
           !text.toLocaleLowerCase().includes("queue-wide schedule") ||
@@ -2150,6 +2169,29 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
         await page.keyboard.press("Enter");
         await schedule.waitFor({ state: "hidden", timeout: timeoutMs });
       }
+      waitingCount = 10;
+      paused = true;
+      await openRoute(page, baseUrl, "/ops", timeoutMs);
+      await page.locator(".system-details summary").focus();
+      await page.keyboard.press("Enter");
+      const pausedSchedule = page.locator(".schedule-list");
+      await expect(pausedSchedule).toContainText(
+        "Work is paused. Window waits update when it resumes.",
+        { timeout: timeoutMs },
+      );
+      await expect(pausedSchedule).not.toContainText("10 files waiting");
+      await expect(
+        page.getByText(/^\d+ (file is|files are) waiting for a work window$/),
+      ).toHaveCount(0);
+      await pausedSchedule.scrollIntoViewIfNeeded();
+      const pausedDirectory = path.join(rootDir, "scratch", "ui-checks");
+      await mkdir(pausedDirectory, { recursive: true });
+      await page.screenshot({
+        path: path.join(
+          pausedDirectory,
+          `731-work-windows-paused-${width}.png`,
+        ),
+      });
       await page.unrouteAll({ behavior: "wait" });
       await page.close();
     }

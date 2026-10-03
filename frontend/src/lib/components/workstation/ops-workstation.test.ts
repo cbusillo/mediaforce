@@ -183,6 +183,47 @@ function quietDashboardFixture(): DashboardSummaryPayload {
 	return dashboard;
 }
 
+describe('Activity work-window totals', () => {
+	it('does not describe retry delays as window waits when no encode computer is configured', () => {
+		const dashboard = quietDashboardFixture();
+		const queue = dashboard.encode_queue;
+		queue.recent = [];
+		queue.needs_attention = [];
+		queue.needs_attention_count = 0;
+		queue.queued = [1, 2].map((number) => ({
+			job_id: `retry-${number}`,
+			prefix: `tv/show/season ${number}`,
+			status: 'retry_backoff',
+			waiting_reason: 'Waiting before retrying',
+			schedule_state: 'none' as const
+		}));
+		queue.queued_count = queue.queued.length;
+		queue.queued_waiting_count = queue.queued.length;
+		queue.queued_schedule_waiting_count = 0;
+		queue.state.scheduler_summary = 'runs anytime';
+		const hosts = hostsFixture();
+		hosts.hosts = [];
+		expect(
+			buildOpsBlockers(dashboard, hosts, null).some((row) => row.key === 'schedule-waiting')
+		).toBe(false);
+		expect(buildOpsReadinessSummary(dashboard, hosts, null).title).not.toMatch(/scheduled time/);
+	});
+
+	it('counts the waiting files of a show needing attention in the Activity blocker', () => {
+		const dashboard = quietDashboardFixture();
+		dashboard.encode_queue.queued_waiting_count = 0;
+		dashboard.encode_queue.queued_schedule_waiting_count = 10;
+		dashboard.encode_queue.state.scheduler_summary = 'runs anytime';
+		const hosts = hostsFixture();
+		hosts.hosts = [];
+		const blocker = buildOpsBlockers(dashboard, hosts, null).find(
+			(row) => row.key === 'schedule-waiting'
+		);
+		expect(blocker?.title).toMatch(/10 files.*work window/);
+		expect(blocker?.detail).not.toMatch(/runs anytime/);
+	});
+});
+
 function hostsFixture(): HostsPayload {
 	return {
 		compact: true,

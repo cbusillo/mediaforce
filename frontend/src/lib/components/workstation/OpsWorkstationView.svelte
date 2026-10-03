@@ -691,8 +691,12 @@
 										'Work schedule is unavailable'}
 								</strong>
 								<small>
-									{queuedWaitingCount.toLocaleString('en-US')}
-									{queuedWaitingCount === 1 ? 'file' : 'files'} waiting for a work window
+									{#if encodeQueue?.state.is_paused}
+										Work is paused. Window waits update when it resumes.
+									{:else}
+										{queuedWaitingCount.toLocaleString('en-US')}
+										{queuedWaitingCount === 1 ? 'file' : 'files'} waiting for a work window
+									{/if}
 								</small>
 								<a class="inline-link" href={resolve('/settings')}>Edit work schedule</a>
 							</div>
