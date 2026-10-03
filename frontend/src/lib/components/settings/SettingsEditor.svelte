@@ -423,9 +423,10 @@
 	function metricDefaultsCopy(defaults: SettingsPayload['video_defaults']) {
 		const target = `${defaults.target_size_mb} MB / ${defaults.target_runtime_minutes} min normalized`;
 		const metric = defaults.quality_metric.trim().toLowerCase();
-		if (metric === 'xpsnr') return `${target} · XPSNR floor ${defaults.min_target_xpsnr}`;
+		if (metric === 'xpsnr')
+			return `${target} · Minimum picture detail score ${defaults.min_target_xpsnr}`;
 		if (metric === 'auto') return `${target} · Auto metric guardrails`;
-		return `${target} · VMAF floor ${defaults.min_target_vmaf}`;
+		return `${target} · Minimum picture appearance score ${defaults.min_target_vmaf}`;
 	}
 
 	function libraryTypeLabel(libraryType: LibraryType): string {
@@ -853,19 +854,19 @@
 									</select>
 								</label>
 								<label class="stacked-field">
-									<span>Quality metric</span>
+									<span>Picture quality measurement</span>
 									<select
 										class="field"
 										bind:value={draft.video_defaults.quality_metric}
 										onchange={(event) => updateVideoDefault('quality_metric', selectValue(event))}
 									>
-										<option value="vmaf">VMAF</option>
+										<option value="vmaf">Appearance</option>
 										<option value="auto">Auto</option>
-										<option value="xpsnr">XPSNR</option>
+										<option value="xpsnr">Detail</option>
 									</select>
 								</label>
 								<label class="stacked-field">
-									<span>VMAF target</span>
+									<span>Picture appearance score target</span>
 									<input
 										class="field field--number"
 										type="number"
@@ -877,7 +878,7 @@
 									/>
 								</label>
 								<label class="stacked-field">
-									<span>VMAF floor</span>
+									<span>Minimum picture appearance score</span>
 									<input
 										class="field field--number"
 										type="number"
@@ -889,7 +890,7 @@
 									/>
 								</label>
 								<label class="stacked-field">
-									<span>XPSNR target</span>
+									<span>Picture detail score target</span>
 									<input
 										class="field field--number"
 										type="number"
@@ -901,7 +902,7 @@
 									/>
 								</label>
 								<label class="stacked-field">
-									<span>XPSNR floor</span>
+									<span>Minimum picture detail score</span>
 									<input
 										class="field field--number"
 										type="number"

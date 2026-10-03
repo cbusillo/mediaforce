@@ -15,10 +15,21 @@ import {
 	prepareAgainRequest,
 	proposalRecoveryView,
 	resolveBenchDraftNote,
+	resolveMetricLabel,
 	summarizeCalibrationFailureDetail,
 	summarizeVideoTransformPolicy,
 	type ComparisonRow
 } from './studio';
+
+describe('picture quality labels', () => {
+	it('names the supported automatic measurement without leaking internal values', () => {
+		const support = { vmaf: true, xpsnr: true, ssim: false };
+		expect(resolveMetricLabel('auto', support)).toBe('Picture appearance score');
+		expect(resolveMetricLabel('auto', { ...support, vmaf: false })).toBe('Picture detail score');
+		expect(resolveMetricLabel('XPSNR', support)).toBe('Picture detail score');
+		expect(resolveMetricLabel('internal_metric_name', support)).toBe('Picture quality score');
+	});
+});
 
 describe('folderActionResponseCopy', () => {
 	it('surfaces partial validation failures as attention', () => {
@@ -441,7 +452,7 @@ describe('calibration failure copy', () => {
 				'stopped'
 			)
 		).toBe(
-			'Host: M4 Studio · Stopped while ab-av1 was encoding sample 1/8 at CRF 31. No specific error line was recorded.'
+			'Host: M4 Studio · Stopped while ab-av1 was encoding sample 1/8 at compression setting 31. No specific error line was recorded.'
 		);
 	});
 
@@ -467,7 +478,7 @@ describe('calibration failure copy', () => {
 				'failed'
 			)
 		).toBe(
-			'Host: M4 Studio · No CRF satisfied both the quality target and size limit. Search tried CRF 31 at VMAF 97.48 / 33% and CRF 44 at VMAF 90.55 / 14%.'
+			'Host: M4 Studio · No compression setting met both the picture quality target and size limit. Search tried Setting 31 at Picture appearance score 97.48 / 33% and Setting 44 at Picture appearance score 90.55 / 14%.'
 		);
 	});
 
@@ -482,7 +493,7 @@ describe('calibration failure copy', () => {
 				'failed'
 			)
 		).toBe(
-			'Host: M4 Studio · ab-av1 was still encoding when the run ended sample 1/8 at CRF 31. No specific error line was recorded.'
+			'Host: M4 Studio · ab-av1 was still encoding when the run ended sample 1/8 at compression setting 31. No specific error line was recorded.'
 		);
 	});
 
