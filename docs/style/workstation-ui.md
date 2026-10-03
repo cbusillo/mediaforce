@@ -2,7 +2,7 @@
 
 Use this guide when changing Mediaforce's primary user surfaces: the home
 screen, folder workspace, queue views, review surfaces, and other screens where
-a user scans state and makes repeated workflow decisions.
+the Director scans state and decides what to do.
 
 This guide is the canonical contract for Mediaforce user surfaces. Active
 plans may apply it to a specific workflow, but they do not override it with a
@@ -10,18 +10,22 @@ different visual or language model.
 
 ## Core stance
 
-- Mediaforce is a workstation, not a polished SaaS dashboard.
-- It is not a landing page, analytics dashboard, or conversational assistant.
-- This pivot stays on the existing SvelteKit frontend; redesign the workflow
-  surface, not the framework stack.
-- Design against references like Resolve, Avid, broadcast control rooms, and
-  dense internal tools.
-- Do not design against references like Notion, Linear, or generic startup
-  analytics dashboards.
-- Design for repeated decisions, fast scanning, stable spatial memory, and
-  confidence under operational risk.
-- Preserve useful density. Simplicity means fewer competing ideas, not less
-  evidence.
+`DIRECTION.md` sets the goal: the app is something the Director enjoys using,
+beautiful, obvious at a glance, and written in plain words. A term the Director
+has to look up is a defect.
+
+- Plain and calm comes first. Show what matters now and put the rest one step
+  away.
+- Each screen answers two questions at a glance: what is happening, and what
+  is the Director's to do.
+- Mediaforce is not a landing page, analytics dashboard, or conversational
+  assistant.
+- Stay on the existing SvelteKit frontend; redesign the workflow surface, not
+  the framework stack.
+- Keep regions stable so things are where the Director saw them last time.
+- Every count maps to reachable rows through visible browsing, pagination,
+  filtering, or complete scrolling. Search may narrow a list, but it is never
+  the only route to counted objects.
 
 ## First-view hierarchy
 
@@ -72,33 +76,6 @@ different visual or language model.
   row keeps the register stable; an explicit Inspect control opens its inline
   detail, and Close returns to the row without a page jump.
 
-## What went wrong in the reset pass
-
-- The redesign started from the wrong reference class, so the UI still read as
-  a refined dashboard instead of an operational tool.
-- Too much emphasis went to tasteful presentation over scan speed, persistent
-  state, and user confidence.
-- Operational data was softened into cards and spacious sections that looked
-  presentable but slowed down comparison and triage.
-- Color and spacing were used decoratively instead of primarily to communicate
-  machine state, priority, and risk.
-- The layout lacked enough spatial persistence, so the screen felt composed for
-  browsing rather than for repeated high-frequency use.
-
-## The right model
-
-- Treat the application like a control console for ongoing media operations.
-- Optimize for fast scanning, confidence, explicit state, and repeatable muscle
-  memory.
-- Default to a dense workspace with stable regions, not a hero-first landing
-  page.
-- Make the active folder or queue feel like the current workstation context,
-  not one card among many.
-- Every count must map to reachable rows through visible browsing, pagination,
-  filtering, or complete scrolling.
-- Search may narrow a list, but it must never be the only route to counted
-  objects.
-
 ## Layout rules
 
 - Prefer a persistent system bar or status bar for global machine state,
@@ -118,7 +95,7 @@ different visual or language model.
 
 ## Visual rules
 
-- Dense by default: avoid hero whitespace and oversized marketing spacing.
+- Avoid hero whitespace and oversized marketing spacing.
 - Use sharper edges and restrained radius; do not round every surface.
 - Use color for status, warning, selection, and machine meaning first, not
   brand emphasis.
@@ -189,16 +166,15 @@ different visual or language model.
 
 ## Design evidence
 
-- Major user-surface changes begin with at least two independent visual
-  directions based on one shared brief.
-- Proposals use real copy and include default, dense, loading, error, blocked,
-  running, completed, and narrow states rather than only a polished happy path.
-- Evaluate proposals for workflow clarity, visual quality, language, state
-  coverage, accessibility, implementation feasibility, and workstation
-  credibility.
-- Compare proposals directly. Do not average incompatible ideas into a
-  compromised layout.
-- Begin implementation only after the user accepts a browser-viewable
+- Major user-surface changes begin with a short brief and a
+  browser-viewable proposal.
+- Proposals use real copy and include default, long-list, loading, error,
+  blocked, running, completed, and narrow states rather than only a polished
+  happy path.
+- Evaluate proposals for workflow clarity, visual quality, plain language,
+  state coverage, accessibility, implementation feasibility, and whether the
+  Director would enjoy using them.
+- Begin implementation only after the Director accepts a browser-viewable
   direction.
 
 ## Anti-slop rules
@@ -217,17 +193,18 @@ different visual or language model.
 
 ## Review checklist
 
-- Does this screen read like a workstation or like a startup dashboard?
+- Is this screen plain, calm, and obvious at a glance, rather than a startup
+  dashboard or a crowded console?
+- Can the Director say what this screen means and what is theirs to do,
+  without looking up a term?
 - Can a user scan the current state in a few seconds?
-- Are the highest-value comparisons shown in tables or dense lists when that is
-  the natural form of the data?
+- Are the highest-value comparisons shown in tables or lists when that is the
+  natural form of the data?
 - Is color carrying operational meaning rather than decoration?
 - Is the active workspace persistent and obvious?
 - Do all displayed counts map to reachable rows?
 - Can the user move through all counted media without using search?
 - Does the next action explain why it is safe, blocked, or waiting?
-- Would this still feel credible if it were shown next to Resolve or a control
-  room console?
 - Does every visible sentence earn its place under the copy budget?
 - Does fullscreen contain viewing controls only?
 - Are approval, compression, checking, and replacement visibly separate
@@ -242,9 +219,9 @@ different visual or language model.
   guide, not just against the component code.
 - Reach the surface through ordinary navigation, and test functional behavior
   separately from visual quality.
-- Test desktop and 390px, keyboard focus, dense data, blockers, failure
+- Test desktop and 390px, keyboard focus, long lists, blockers, failure
   recovery, important transitions, and destructive-action safety.
 - Reject implementations that are technically correct but still ugly,
   exhausting, narratively verbose, or dependent on developer knowledge.
-- If a proposal mostly changes vibes rather than improving scan speed,
-  statefulness, or workflow confidence, stop and rethink the model.
+- If a proposal mostly changes vibes rather than making the screen clearer,
+  calmer, or easier to trust, stop and rethink the model.
