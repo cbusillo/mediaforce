@@ -4279,7 +4279,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                         self.config, summarize_encode_queue(connection),
                     )
                     self.assertEqual(queue["pending_work_count"], 10)
-                    self.assertEqual(queue["queued_waiting_count"], 10)
+                    self.assertEqual(queue["queued_waiting_count"], 0)
                     self.assertEqual(queue["queued_schedule_waiting_count"], 10)
                     self.assertNotIn("pending", queue)
 
@@ -4288,6 +4288,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             {"status": "queued", "host": {"schedule_profile": "never"}},
             {"status": "queued", "waiting_reason": "waiting for a host schedule window"},
             {"status": "queued", "progress": {"progress_state": "schedule_waiting"}},
+            {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
+             "waiting_reason": "Waiting for shared storage."},
+            {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
+             "waiting_reason": "waiting for an available encode host"},
             {"status": "retry_backoff", "waiting_reason": "waiting before retrying"},
             {"status": "queued", "waiting_reason": "Waiting for shared storage."},
             {"status": "queued", "waiting_reason": "Waiting for an encode computer."},

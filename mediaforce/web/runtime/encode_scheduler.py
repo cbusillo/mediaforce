@@ -84,8 +84,11 @@ def schedule_profile_policy_for_host(
         config: MediaforceConfig,
         host_payload: dict[str, Any] | None,
         deps: EncodeSchedulerDeps,
+        *,
+        profiles: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    profiles = encode_queue_schedule_profiles(config, deps)
+    if profiles is None:
+        profiles = encode_queue_schedule_profiles(config, deps)
     host_data = object_dict(host_payload)
     profile_key = deps.canonical_schedule_profile_key(
         host_data.get("schedule_profile") or deps.default_host_schedule_profile
@@ -479,12 +482,13 @@ def decorate_encode_job_for_scheduler(
         deps: EncodeSchedulerDeps,
         *,
         include_telemetry: bool = True,
+        schedule_profiles: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     if job is None:
         return None
     decorated = dict(job)
     host_payload = object_dict(decorated.get("host"))
-    policy = schedule_profile_policy_for_host(config, host_payload, deps)
+    policy = schedule_profile_policy_for_host(config, host_payload, deps, profiles=schedule_profiles)
     status = str(decorated.get("status") or "")
     bypass_schedule = bool(decorated.get("bypass_schedule"))
     attempt_count = int_value(decorated.get("attempt_count"))
@@ -584,37 +588,40 @@ def decorate_encode_queue_for_scheduler(
         deps: EncodeSchedulerDeps,
 ) -> dict[str, Any]:
     policy = encode_queue_scheduler_policy(config, deps)
+    profiles = encode_queue_schedule_profiles(config, deps)
     queue_state = object_dict(encode_queue.get("state"))
     queue_state["scheduler"] = policy
     queue_state["scheduler_summary"] = str(policy["summary"])
-    queue_state["schedule_profiles"] = list(encode_queue_schedule_profiles(config, deps).values())
+    queue_state["schedule_profiles"] = list(profiles.values())
     decorated = dict(encode_queue)
     decorated["state"] = queue_state
     decorated["running"] = [
-        decorate_encode_job_for_scheduler(config, job, deps) or job
+        decorate_encode_job_for_scheduler(config, job, deps, schedule_profiles=profiles) or job
         for job in object_list(encode_queue.get("running"))
     ]
     decorated["queued"] = [
-        decorate_encode_job_for_scheduler(config, job, deps) or job
+        decorate_encode_job_for_scheduler(config, job, deps, schedule_profiles=profiles) or job
         for job in object_list(encode_queue.get("queued"))
     ]
     decorated["recent"] = [
-        decorate_encode_job_for_scheduler(config, job, deps) or job
+        decorate_encode_job_for_scheduler(config, job, deps, schedule_profiles=profiles) or job
         for job in object_list(encode_queue.get("recent"))
     ]
     decorated["needs_attention"] = [
-        decorate_encode_job_for_scheduler(config, job, deps) or job
+        decorate_encode_job_for_scheduler(config, job, deps, schedule_profiles=profiles) or job
         for job in object_list(encode_queue.get("needs_attention"))
     ]
     # Display rows can hide queued episodes under a show that needs attention.
     # Consume the complete runnable inventory without returning it in the dashboard.
     pending = [
-        decorate_encode_job_for_scheduler(config, job, deps, include_telemetry=False) or job
+        decorate_encode_job_for_scheduler(
+            config, job, deps, include_telemetry=False, schedule_profiles=profiles,
+        ) or job
         for job in object_list(decorated.pop("pending", decorated["queued"]))
     ]
     decorated["queued_waiting_count"] = sum(
         1
-        for job in pending
+        for job in decorated["queued"]
         if (
             bool(job.get("schedule_waiting"))
             or str(job.get("status") or "") == "retry_backoff"
@@ -628,7 +635,11 @@ def decorate_encode_queue_for_scheduler(
             str(job.get("status") or "") == "queued"
             and not job.get("bypass_schedule")
             and (
-                job.get("schedule_state") in {"off_schedule", "schedule_interrupted", "draining_no_fit"}
+                job.get("schedule_state") in {"off_schedule", "draining_no_fit"}
+                or (
+                    job.get("schedule_state") == "schedule_interrupted"
+                    and not str(job.get("waiting_reason") or "").strip()
+                )
                 or "waiting for a host schedule window" in str(job.get("waiting_reason") or "").casefold()
             )
         )
