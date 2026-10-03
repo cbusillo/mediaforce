@@ -358,8 +358,10 @@ whether work is still running.
 
 In Activity's System details, the schedule panel distinguishes the queue-wide
 schedule from computer windows. Its waiting count includes queued episodes in
-shows that need attention, counts files rather than show rows, and excludes
-retry delays and storage waits from the work-window count. An unrestricted
+shows that need attention and counts files rather than show rows. It excludes
+retry delays, and storage/computer waits when the work window is already open.
+An old interruption marker must not hide a current wait for a longer window.
+An unrestricted
 queue reads `No queue-wide time limit` even when computers are off schedule.
 
 On Activity, `Working now` must own or begin the first viewport at desktop and

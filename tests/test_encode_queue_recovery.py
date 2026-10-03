@@ -4292,6 +4292,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
              "waiting_reason": "Waiting for shared storage."},
             {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
              "waiting_reason": "waiting for an available encode host"},
+            {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
+             "waiting_reason": "Estimated runtime about 1h 25m; waiting for a host window with enough time remaining."},
+            {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
+             "host": {"schedule_profile": "never"}, "waiting_reason": "Waiting for shared storage."},
             {"status": "retry_backoff", "waiting_reason": "waiting before retrying"},
             {"status": "queued", "waiting_reason": "Waiting for shared storage."},
             {"status": "queued", "waiting_reason": "Waiting for an encode computer."},
@@ -4305,7 +4309,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self.config, {"pending": pending, "queued": [], "state": {}},
             )
         read_totals.assert_not_called()
-        self.assertEqual(queue["queued_schedule_waiting_count"], 3)
+        self.assertEqual(queue["queued_schedule_waiting_count"], 5)
 
     def test_permission_denied_ssh_failure_still_needs_attention_after_attempt_cap(self) -> None:
         source_path = self._create_source_file("episode-host-permission.mkv")

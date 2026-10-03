@@ -635,12 +635,14 @@ def decorate_encode_queue_for_scheduler(
             str(job.get("status") or "") == "queued"
             and not job.get("bypass_schedule")
             and (
-                job.get("schedule_state") in {"off_schedule", "draining_no_fit"}
+                bool(job.get("schedule_waiting"))
+                or job.get("schedule_state") == "draining_no_fit"
                 or (
                     job.get("schedule_state") == "schedule_interrupted"
                     and not str(job.get("waiting_reason") or "").strip()
                 )
                 or "waiting for a host schedule window" in str(job.get("waiting_reason") or "").casefold()
+                or HOST_WINDOW_TOO_SHORT_REASON in str(job.get("waiting_reason") or "").casefold()
             )
         )
     )
