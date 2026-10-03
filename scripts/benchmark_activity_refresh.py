@@ -5,7 +5,6 @@ import hashlib
 import json
 import platform
 import statistics
-import subprocess
 import tempfile
 import time
 import tracemalloc
@@ -149,13 +148,19 @@ def run_benchmark(pending_count: int, *, iterations: int = 5) -> dict[str, Any]:
                     queue, sample = _refresh(config)
                     _assert_counts(queue, pending_count, expected_waiting)
                     samples.append(sample)
-                tracemalloc.start()
+                was_tracing = tracemalloc.is_tracing()
+                if not was_tracing:
+                    tracemalloc.start()
+                baseline_bytes, _ = tracemalloc.get_traced_memory()
+                tracemalloc.reset_peak()
                 try:
                     queue, _ = _refresh(config)
                     _assert_counts(queue, pending_count, expected_waiting)
-                    _, peak_bytes = tracemalloc.get_traced_memory()
+                    _, total_peak_bytes = tracemalloc.get_traced_memory()
+                    peak_bytes = max(0, total_peak_bytes - baseline_bytes)
                 finally:
-                    tracemalloc.stop()
+                    if not was_tracing:
+                        tracemalloc.stop()
                 queries: list[str] = []
 
                 def record_query(_connection: Any, _cursor: Any, statement: str, _parameters: Any,

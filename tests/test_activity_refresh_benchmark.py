@@ -30,3 +30,16 @@ def test_benchmark_rejects_a_wrong_schedule_count() -> None:
     with patch.object(benchmark.web_app, "_decorate_encode_queue_for_scheduler", side_effect=wrong_count):
         with pytest.raises(AssertionError, match="Count mismatch"):
             benchmark.run_benchmark(36, iterations=1)
+
+
+def test_benchmark_keeps_callers_allocation_tracing_enabled() -> None:
+    was_tracing = benchmark.tracemalloc.is_tracing()
+    benchmark.tracemalloc.start()
+    try:
+        benchmark.run_benchmark(36, iterations=1)
+        assert benchmark.tracemalloc.is_tracing()
+    finally:
+        if was_tracing:
+            benchmark.tracemalloc.start()
+        else:
+            benchmark.tracemalloc.stop()

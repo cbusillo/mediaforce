@@ -29,16 +29,21 @@ Setup and one warm refresh are excluded. Five untraced timing samples, one separ
 tracemalloc allocation pass and one separate SQL/profile instrumentation pass avoid
 mixing tracing overhead into request-component timing. `python_peak_bytes` measures
 incremental traced Python allocations for one warm refresh, not total RSS or native
-SQLite allocations. SQL text and counts, profile builds, decorated jobs and bounded
+SQLite allocations. SQLAlchemy-observed SQL text and counts (excluding raw-driver connection PRAGMAs), profile builds, decorated jobs and bounded
 display manifest-total calls are included in the JSON. The supplied source SHA and
 the script's SHA-256 fingerprint identify what was measured.
+
+If allocation tracing is already enabled, the benchmark subtracts live baseline
+allocations, resets the tracer's peak before the refresh and leaves tracing enabled
+on return. This resets the caller's peak history. Timing samples in that invocation
+also carry tracing overhead; use the normal untraced CLI for timing comparisons.
 
 This is a shared request **component**, not end-to-end HTTP or complete Activity or
 folder-route latency. It excludes transport, other dashboard/folder work, manifest
 telemetry cost and media inventory. Display telemetry totals are stubbed to an
 empty mapping, with calls counted; pending file classification still uses the real
 code and skips telemetry. No manifests or real media exist, no runtime server starts,
-and unexpected subprocesses fail the experiment. Other queue layouts, larger stored
+and calls through subprocess.run/Popen fail the experiment. Other queue layouts, larger stored
 JSON payloads, cold storage and concurrent writes may cost differently.
 
 ## October 3, 2026 experiment
@@ -46,9 +51,17 @@ JSON payloads, cold storage and concurrent writes may cost differently.
 The [raw measurement](evidence/activity-refresh-755.json) preserves every timing sample
 and SQL statement.
 
+Measured benchmark revision: `86e9303cabdf87e27d0598b1640f5e5f5a625f6e`; tracing was
+initially disabled. A later fix supports callers that already have tracing enabled;
+the immutable evidence below was produced by the recorded original fingerprint.
+
 Product source: `0e82b844dd19aee034428eb116fd0eb41df06392` (includes PR #754).
 Benchmark fingerprint: `3f3171372045baf93b17ff8ddaca8804669533cc96dd629b94930f8fe0562fbd`.
 Python 3.13.7, macOS ARM64, local fixture SQLite on the host's temporary filesystem.
+Each row contains 1,104 bytes of synthetic notes, wider than empty/short operator
+notes. The allocation number includes that padding; an optimization comparison
+must also run short/empty notes before estimating its benefit for real queues.
+
 The host was running an overnight capacity batch and the local acceptance suite;
 these results describe this environment, not a universal latency guarantee or an
 isolated hardware comparison.
@@ -76,9 +89,14 @@ show bounded query/profile work and roughly linear pending-inventory allocations
 
 Recommendation: pursue a focused compact-column/streaming inventory experiment in a
 separate item. The 10,000-file fixture already consumes about 39 MiB of traced Python
-allocations and seconds of shared refresh time here. Measure a projection containing
+allocations in this deliberately wide-row fixture. The timing samples include connection
+opening, all summary queries and media-scope reads; they do not isolate the pending
+query and cannot establish its latency or justify priority on timing alone.
+Base the follow-up on the demonstrated allocation scaling, first compare short/empty
+notes, and isolate pending-query work before claiming a timing win. Measure a projection containing
 only classification inputs, while retaining the full display rows and per-file
-classification. Compare exact counts across this case matrix before adopting it;
+classification. Compare exact counts across this closed-window case matrix before adopting it,
+and retain the existing scheduler tests for open windows and the Never profile;
 do not replace classification with parent-row counts or introduce cached counts
 without a correctness design. The current production read remains unchanged by
 this measurement. There is no demonstrated production incident or numeric latency
