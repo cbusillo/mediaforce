@@ -9,6 +9,7 @@ import { folderRoutePath } from '$lib/folder-display';
 import {
 	hostSchedulePresentation,
 	jobSchedulePresentation,
+	queueScheduleSummaryCopy,
 	scheduleLabels,
 	workScheduleSummaryCopy,
 	type SchedulePresentation
@@ -927,7 +928,7 @@ export function buildOpsBlockers(
 	const capacity = hostCapacityCounts(hosts, queue);
 	const runningCount = queue?.running_count ?? 0;
 	const queuedWork = (queue?.queued_count ?? 0) + (queue?.running_count ?? 0);
-	const scheduleWaiting = queue?.queued_waiting_count ?? 0;
+	const scheduleWaiting = queue?.queued_schedule_waiting_count ?? 0;
 	if (loadError) {
 		blockers.push({
 			key: 'runtime-load',
@@ -961,7 +962,7 @@ export function buildOpsBlockers(
 			tone: 'wait',
 			title: `${encodeWorkLabel(activeJobs, queuedWork)} is paused`,
 			detail:
-				activityScheduleDetailCopy(queue.state.scheduler_summary) ||
+				queueScheduleSummaryCopy(queue.state.scheduler_summary) ||
 				'No new media work will start until you resume it.',
 			action: 'resume-encode'
 		});
@@ -1038,15 +1039,16 @@ export function buildOpsBlockers(
 		});
 	} else if (
 		impossibleWindowJobs.length === 0 &&
+		!queue?.state.is_paused &&
 		scheduleWaiting > 0 &&
 		capacity.encodeReady === 0
 	) {
 		blockers.push({
 			key: 'schedule-waiting',
 			tone: 'wait',
-			title: `${encodeCountLabel(queue?.queued ?? [], scheduleWaiting)} ${scheduleWaiting === 1 ? 'is' : 'are'} waiting for the scheduled time`,
+			title: `${scheduleWaiting} ${scheduleWaiting === 1 ? 'file is' : 'files are'} waiting for a work window`,
 			detail:
-				activityScheduleDetailCopy(queue?.state.scheduler_summary) ||
+				queueScheduleSummaryCopy(queue?.state.scheduler_summary) ||
 				'Work will start when its allowed time begins.'
 		});
 	}
@@ -1065,7 +1067,7 @@ export function buildOpsReadinessSummary(
 	const visibleRunningJobs = visibleEncodeJobs(queue?.running ?? [], shadowEncodeJobKeys);
 	const visibleQueuedJobs = visibleEncodeJobs(queue?.queued ?? [], shadowEncodeJobKeys);
 	const { running: runningCount, queued: queuedCount } = visibleEncodeQueueCounts(dashboard);
-	const queuedWaiting = queue?.queued_waiting_count ?? 0;
+	const queuedWaiting = queue?.queued_schedule_waiting_count ?? 0;
 	const storageWaitingJobs = controllerStorageWaitingJobs(dashboard);
 	const activeJobs = [...visibleRunningJobs, ...visibleQueuedJobs];
 	const attentionJobs = encodeAttentionJobs(queue);
@@ -1104,7 +1106,7 @@ export function buildOpsReadinessSummary(
 			tone: 'wait',
 			title: `${encodeWorkLabel(activeJobs, queuedWork)} is paused`,
 			detail:
-				activityScheduleDetailCopy(queue.state.scheduler_summary) ||
+				queueScheduleSummaryCopy(queue.state.scheduler_summary) ||
 				'Resume when media work should continue.',
 			metricLabel: 'Queued',
 			metricValue: String(queuedCount)
@@ -1226,11 +1228,11 @@ export function buildOpsReadinessSummary(
 	if (queuedWaiting > 0 && capacity.encodeReady === 0) {
 		return {
 			tone: 'wait',
-			title: 'Waiting for scheduled time',
+			title: 'Waiting for a work window',
 			detail:
-				activityScheduleDetailCopy(queue?.state.scheduler_summary) ||
+				queueScheduleSummaryCopy(queue?.state.scheduler_summary) ||
 				'Waiting work will start when its allowed time begins.',
-			metricLabel: 'Waiting',
+			metricLabel: 'Files waiting',
 			metricValue: String(queuedWaiting)
 		};
 	}
@@ -1296,7 +1298,7 @@ export function buildOpsStatusTiles(
 					? 'stopping'
 					: 'ready',
 			detail:
-				activityScheduleDetailCopy(encode?.state.scheduler_summary) ||
+				queueScheduleSummaryCopy(encode?.state.scheduler_summary) ||
 				(loadError ? 'Activity data is unavailable' : 'No work window reported'),
 			tone: loadError
 				? 'fail'
