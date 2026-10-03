@@ -157,7 +157,7 @@ uv run mediaforce bakeoff path/to/run-manifest.json --all \
 ```
 
 The bakeoff plan carries the same size-first defaults and per-item resolved
-policy used by Folder Studio, then lays out candidate commands and tool
+policy used by the TV season page, then lays out candidate commands and tool
 requirements for the current `ab-av1` path plus Av1an, Xav, and Auto-Boost. Use
 the plan to collect output size, runtime, selected CRF or quantizer, metric
 score, and review artifacts before choosing a production engine migration.
