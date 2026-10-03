@@ -13,12 +13,12 @@ from sqlalchemy import delete, or_, select, update
 
 from mediaforce.core.config import MediaforceConfig, load_config, with_folder_policy_override
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
+from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
-    load_active_encode_jobs_for_prefix, load_latest_terminal_encode_job_for_prefix
+    list_terminal_encode_jobs_for_prefix, load_active_encode_jobs_for_prefix, load_latest_terminal_encode_job_for_prefix
 from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.staging import partial_output_path
 from mediaforce.execution import HeldFile, PromotionResult
@@ -87,6 +87,16 @@ _FINAL_SIZE_RECOVERY_BLOCKER_MESSAGE = (
     "The latest production encode missed its approved final-size target under the same reviewed settings. "
     "Run and approve a fresh representative sample with a changed size, compression, quality, resolution, "
     "or retained-stream contract before retrying."
+)
+# A file's final-size miss, kept on the file so it outlasts the run that recorded it.
+FINAL_SIZE_MISS_EVENT = "final_size_miss"
+_FINAL_SIZE_MISSED_REASON = (
+    "Missed its approved final size under the same reviewed settings. "
+    "Approve a fresh test with a changed goal before retrying it."
+)
+_FINAL_SIZE_POSSIBLY_MISSED_REASON = (
+    "Part of its run missed the approved final size, and Mediaforce cannot tell which file. "
+    "Approve a fresh test with a changed goal before retrying it."
 )
 
 
@@ -264,6 +274,89 @@ def _final_size_miss_item_ids_by_index(job: JobPayload | None) -> tuple[dict[int
     if not item_ids:
         return None
     return item_ids, covered_indexes - named_indexes
+
+
+def _record_final_size_misses(connection: DBClient, prefix: str, *, now: str) -> None:
+    """Keep each ended run's final-size misses on its files, with the approval they missed under.
+
+    A requeue deletes the folder's ended runs, and a newer run can hide an older one; the files'
+    own records keep a miss from being retried under the same approval either way.
+    """
+    for job in list_terminal_encode_jobs_for_prefix(connection, prefix):
+        failure_analysis = object_dict(object_dict(job.get("progress")).get("failure_analysis"))
+        if str(failure_analysis.get("kind") or "") != "final_size_target_miss":
+            continue
+        contract = _terminal_production_approval_contract(job)
+        misses = _final_size_miss_item_ids_by_index(job)
+        if contract is None or misses is None:
+            continue  # Only the run itself can be checked; the latest-run check covers it.
+        item_ids, covered_indexes = misses
+        in_library = set(connection.execute(
+            select(library_items.c.id).where(library_items.c.id.in_(sorted(set(item_ids.values()))))
+        ).scalars())
+        job_id = str(job.get("job_id") or "")
+        already_recorded = {
+            int(row["library_item_id"])
+            for row in connection.execute(
+                select(item_events.c.library_item_id, item_events.c.details_json)
+                .where(item_events.c.event_type == FINAL_SIZE_MISS_EVENT)
+                .where(item_events.c.library_item_id.in_(sorted(set(item_ids.values()))))
+            ).mappings()
+            if object_dict(json.loads(row["details_json"] or "{}")).get("job_id") == job_id
+        }
+        for index, item_id in sorted(item_ids.items()):
+            if item_id in already_recorded or item_id not in in_library:
+                continue
+            already_recorded.add(item_id)
+            connection.execute(
+                item_events.insert().values(
+                    library_item_id=item_id,
+                    created_at=now,
+                    event_type=FINAL_SIZE_MISS_EVENT,
+                    details_json=json.dumps({
+                        "job_id": job_id,
+                        "sample_job_id": contract.get("sample_job_id"),
+                        "operator_intent_hash": contract.get("operator_intent_hash"),
+                        "named": index not in covered_indexes,
+                    }, separators=(",", ":")),
+                )
+            )
+
+
+def _recorded_final_size_miss_left_out(
+        connection: DBClient,
+        items: list[ActionPayload],
+        current_contract: ActionPayload | None,
+) -> list[LeftOutFile]:
+    """Files whose latest recorded final-size miss was under an approval that has not been replaced.
+
+    As with the run itself, only a new sample together with a changed intent lets the file retry.
+    """
+    rel_paths = {int(item.get("library_item_id") or 0): str(item.get("rel_path") or "") for item in items}
+    latest: dict[int, ActionPayload] = {}
+    for row in connection.execute(
+            select(item_events.c.library_item_id, item_events.c.details_json)
+            .where(item_events.c.event_type == FINAL_SIZE_MISS_EVENT)
+            .where(item_events.c.library_item_id.in_(sorted(item_id for item_id in rel_paths if item_id > 0)))
+            .order_by(item_events.c.id.asc())
+    ).mappings():
+        latest[int(row["library_item_id"])] = object_dict(json.loads(row["details_json"] or "{}"))
+    current = _valid_production_approval_contract(current_contract)
+    left_out: list[LeftOutFile] = []
+    for item_id, details in sorted(latest.items()):
+        if (
+                current is not None
+                and str(details.get("sample_job_id")) != str(current.get("sample_job_id"))
+                and str(details.get("operator_intent_hash")) != str(current.get("operator_intent_hash"))
+        ):
+            continue
+        left_out.append(LeftOutFile(
+            item_id,
+            rel_paths[item_id],
+            _FINAL_SIZE_RECOVERY_BLOCKER_CODE,
+            _FINAL_SIZE_MISSED_REASON if details.get("named") else _FINAL_SIZE_POSSIBLY_MISSED_REASON,
+        ))
+    return left_out
 
 
 def _normalized_number(value: Any) -> float | None:
@@ -947,6 +1040,7 @@ def queue_folder_encode_action(
                 status_code=400,
                 detail=f"No encode candidates were found for this folder. Next action: {action_label}.",
             )
+        _record_final_size_misses(connection, normalized_prefix, now=now_iso())
         final_size_requeue_blocker = _final_size_requeue_contract_blocker(
             latest_encode_job,
             production_approval_contract,
@@ -975,18 +1069,16 @@ def queue_folder_encode_action(
                     item_id,
                     rel_paths.get(item_id, ""),
                     _FINAL_SIZE_RECOVERY_BLOCKER_CODE,
-                    (
-                        "Missed its approved final size under the same reviewed settings. "
-                        "Approve a fresh test with a changed goal before retrying it."
-                        if item_id in named_miss_ids
-                        else (
-                            "Part of its run missed the approved final size, and Mediaforce cannot tell which file. "
-                            "Approve a fresh test with a changed goal before retrying it."
-                        )
-                    ),
+                    _FINAL_SIZE_MISSED_REASON if item_id in named_miss_ids else _FINAL_SIZE_POSSIBLY_MISSED_REASON,
                 )
                 for item_id in sorted(named_miss_ids | covered_miss_ids)
             )
+        left_out_ids = {file.library_item_id for file in left_out}
+        left_out.extend(
+            file
+            for file in _recorded_final_size_miss_left_out(connection, manifest["items"], production_approval_contract)
+            if file.library_item_id not in left_out_ids
+        )
         selection = object_dict(manifest.get("selection"))
         # Files accepted later can join this run under the same mode; see ambiguous_motion.
         selection["queue_mode"] = hold_mode

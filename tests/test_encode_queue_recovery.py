@@ -23998,6 +23998,120 @@ raise SystemExit(0)
         self.assertTrue(all("cannot tell which file" in entry["reason"] for entry in result["left_out"]))
         self.assertEqual(prepared, [])
 
+    def _missed_run_then_queue(
+            self,
+            analysis: dict[str, Any],
+            *,
+            newer_completed_run: bool = False,
+    ) -> tuple[MediaforceConfig, dict[str, int], list[dict[str, Any]], dict[str, Any]]:
+        """Episodes 1 and 2 ran under the approved contract and missed final size; Episode 3 never ran."""
+        queue_config = self._complete_queue_config()
+        calibration = self._accepted_calibration_contract(sample_job_id="sample-original")
+        contract = folder_actions_runtime._production_approval_contract(calibration)
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv", "Episode 3.mkv")
+            manifest_path = self._write_manifest("manifest-final-size-recorded.json", [])
+            manifest_path.write_text(json.dumps({
+                "selection": {"production_approval_contract": contract},
+                "items": [
+                    {"library_item_id": item_ids["Episode 1.mkv"], "rel_path": "tv/show/Season 1/Episode 1.mkv"},
+                    {"library_item_id": item_ids["Episode 2.mkv"], "rel_path": "tv/show/Season 1/Episode 2.mkv"},
+                ],
+            }))
+            self._save_job(
+                connection,
+                job_id="missed-run",
+                manifest_name=manifest_path.name,
+                host={},
+                status="needs_attention",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "missed-run")
+                .values(prefix="tv/show/Season 1", job_kind="folder", progress_json=json.dumps({
+                    "failure_analysis": analysis,
+                }))
+            )
+            if newer_completed_run:
+                newer_manifest = self._write_manifest("manifest-newer-run.json", [])
+                self._save_job(
+                    connection,
+                    job_id="newer-run",
+                    manifest_name=newer_manifest.name,
+                    host={},
+                    status="completed",
+                    attempt_count=1,
+                )
+                connection.execute(
+                    update(encode_jobs)
+                    .where(encode_jobs.c.job_id == "newer-run")
+                    .values(prefix="tv/show/Season 1", job_kind="folder", created_at="2999-01-01T00:00:00+00:00")
+                )
+        saved_jobs: list[dict[str, Any]] = []
+        result = self._queue_show_folder(
+            queue_config,
+            saved_jobs,
+            calibration=calibration,
+            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+        )
+        return queue_config, item_ids, saved_jobs, result
+
+    def _assert_miss_outlasts_the_cleared_run(self, analysis: dict[str, Any], missed_names: set[str]) -> None:
+        queue_config, item_ids, first_jobs, first = self._missed_run_then_queue(analysis)
+        self.assertTrue(first["ok"], first)
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertIsNone(load_encode_job(connection, "missed-run"))
+            for job in first_jobs:
+                save_encode_job(connection, {**job, "status": "completed"})
+
+        second_jobs: list[dict[str, Any]] = []
+        second = self._queue_show_folder(
+            queue_config,
+            second_jobs,
+            calibration=self._accepted_calibration_contract(sample_job_id="sample-original"),
+            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+        )
+
+        missed = {item_ids[name] for name in missed_names}
+        queued = set(self._queued_manifest_item_ids(second_jobs)) if second["ok"] else set()
+        self.assertFalse(queued & missed, second)
+        self.assertEqual(
+            {
+                entry["library_item_id"]
+                for entry in second["left_out"]
+                if entry["code"] == "final_size_recovery_contract_unchanged"
+            },
+            missed,
+        )
+
+    def test_named_final_size_miss_still_holds_its_file_after_the_run_record_is_cleared(self) -> None:
+        self._assert_miss_outlasts_the_cleared_run(
+            {"kind": "final_size_target_miss", "item_analyses": [{"kind": "final_size_target_miss", "manifest_index": 0}]},
+            {"Episode 1.mkv"},
+        )
+
+    def test_unnamed_final_size_miss_still_holds_its_runs_files_after_the_run_record_is_cleared(self) -> None:
+        self._assert_miss_outlasts_the_cleared_run(
+            {"kind": "final_size_target_miss"},
+            {"Episode 1.mkv", "Episode 2.mkv"},
+        )
+
+    def test_final_size_miss_hidden_behind_a_newer_finished_run_still_holds_its_files(self) -> None:
+        _config, item_ids, saved_jobs, result = self._missed_run_then_queue(
+            {"kind": "final_size_target_miss"}, newer_completed_run=True,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self._queued_manifest_item_ids(saved_jobs), [item_ids["Episode 3.mkv"]])
+        self.assertEqual(
+            {(entry["library_item_id"], entry["code"]) for entry in result["left_out"]},
+            {
+                (item_ids["Episode 1.mkv"], "final_size_recovery_contract_unchanged"),
+                (item_ids["Episode 2.mkv"], "final_size_recovery_contract_unchanged"),
+            },
+        )
+
     def test_final_size_miss_on_a_file_without_a_library_item_still_blocks_the_requeue(self) -> None:
         manifest_path = self._write_manifest("manifest-final-size-nameless.json", [{"rel_path": "tv/show/a.mkv"}])
         job = {
