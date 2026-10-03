@@ -138,7 +138,9 @@ file has no library item to name, or every queued file is covered, does the
 whole requeue fail closed. Before a requeue clears the folder's ended runs,
 each miss is also kept on its files as an item event with the approval it
 missed under, so a later requeue, or a newer run that finished after it, cannot
-let those files retry under the same approval. Queue admission records the
+let those files retry under the same approval. A run saved without its
+approval keeps its miss under the approval current at that requeue, so it
+still needs another sampled review. Queue admission records the
 approved sample identity and a normalized user-intent contract covering size,
 compression, quality, resolution, and retained streams. Recovery requires both a new
 representative sample and a changed user-intent contract; a new approval

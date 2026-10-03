@@ -276,20 +276,31 @@ def _final_size_miss_item_ids_by_index(job: JobPayload | None) -> tuple[dict[int
     return item_ids, covered_indexes - named_indexes
 
 
-def _record_final_size_misses(connection: DBClient, prefix: str, *, now: str) -> None:
+def _record_final_size_misses(
+        connection: DBClient,
+        prefix: str,
+        current_contract: ActionPayload | None,
+        *,
+        now: str,
+) -> None:
     """Keep each ended run's final-size misses on its files, with the approval they missed under.
 
     A requeue deletes the folder's ended runs, and a newer run can hide an older one; the files'
-    own records keep a miss from being retried under the same approval either way.
+    own records keep a miss from being retried under the same approval either way. A run saved
+    without its approval still blocks, so its miss is kept under the approval current now.
     """
     for job in list_terminal_encode_jobs_for_prefix(connection, prefix):
         failure_analysis = object_dict(object_dict(job.get("progress")).get("failure_analysis"))
         if str(failure_analysis.get("kind") or "") != "final_size_target_miss":
             continue
-        contract = _terminal_production_approval_contract(job)
         misses = _final_size_miss_item_ids_by_index(job)
-        if contract is None or misses is None:
-            continue  # Only the run itself can be checked; the latest-run check covers it.
+        if misses is None:
+            continue  # No file can be named; the latest-run check refuses the whole requeue.
+        contract = _terminal_production_approval_contract(job)
+        if contract is None:
+            if _final_size_requeue_contract_blocker(job, current_contract) is None:
+                continue  # A legacy run whose size goal has since changed may retry.
+            contract = _valid_production_approval_contract(current_contract) or {}
         item_ids, covered_indexes = misses
         in_library = set(connection.execute(
             select(library_items.c.id).where(library_items.c.id.in_(sorted(set(item_ids.values()))))
@@ -346,6 +357,7 @@ def _recorded_final_size_miss_left_out(
     for item_id, details in sorted(latest.items()):
         if (
                 current is not None
+                and details.get("sample_job_id") is not None
                 and str(details.get("sample_job_id")) != str(current.get("sample_job_id"))
                 and str(details.get("operator_intent_hash")) != str(current.get("operator_intent_hash"))
         ):
@@ -1040,7 +1052,7 @@ def queue_folder_encode_action(
                 status_code=400,
                 detail=f"No encode candidates were found for this folder. Next action: {action_label}.",
             )
-        _record_final_size_misses(connection, normalized_prefix, now=now_iso())
+        _record_final_size_misses(connection, normalized_prefix, production_approval_contract, now=now_iso())
         final_size_requeue_blocker = _final_size_requeue_contract_blocker(
             latest_encode_job,
             production_approval_contract,

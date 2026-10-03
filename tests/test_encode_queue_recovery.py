@@ -24003,6 +24003,7 @@ raise SystemExit(0)
             analysis: dict[str, Any],
             *,
             newer_completed_run: bool = False,
+            saved_contract: bool = True,
     ) -> tuple[MediaforceConfig, dict[str, int], list[dict[str, Any]], dict[str, Any]]:
         """Episodes 1 and 2 ran under the approved contract and missed final size; Episode 3 never ran."""
         queue_config = self._complete_queue_config()
@@ -24012,7 +24013,7 @@ raise SystemExit(0)
             item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv", "Episode 3.mkv")
             manifest_path = self._write_manifest("manifest-final-size-recorded.json", [])
             manifest_path.write_text(json.dumps({
-                "selection": {"production_approval_contract": contract},
+                "selection": {"production_approval_contract": contract} if saved_contract else {},
                 "items": [
                     {"library_item_id": item_ids["Episode 1.mkv"], "rel_path": "tv/show/Season 1/Episode 1.mkv"},
                     {"library_item_id": item_ids["Episode 2.mkv"], "rel_path": "tv/show/Season 1/Episode 2.mkv"},
@@ -24057,8 +24058,16 @@ raise SystemExit(0)
         )
         return queue_config, item_ids, saved_jobs, result
 
-    def _assert_miss_outlasts_the_cleared_run(self, analysis: dict[str, Any], missed_names: set[str]) -> None:
-        queue_config, item_ids, first_jobs, first = self._missed_run_then_queue(analysis)
+    def _assert_miss_outlasts_the_cleared_run(
+            self,
+            analysis: dict[str, Any],
+            missed_names: set[str],
+            *,
+            saved_contract: bool = True,
+    ) -> None:
+        queue_config, item_ids, first_jobs, first = self._missed_run_then_queue(
+            analysis, saved_contract=saved_contract,
+        )
         self.assertTrue(first["ok"], first)
         with open_db(self.config.paths.db_path) as connection:
             self.assertIsNone(load_encode_job(connection, "missed-run"))
@@ -24095,6 +24104,13 @@ raise SystemExit(0)
         self._assert_miss_outlasts_the_cleared_run(
             {"kind": "final_size_target_miss"},
             {"Episode 1.mkv", "Episode 2.mkv"},
+        )
+
+    def test_miss_from_a_run_saved_without_its_approval_still_holds_its_file_after_the_run_is_cleared(self) -> None:
+        self._assert_miss_outlasts_the_cleared_run(
+            {"kind": "final_size_target_miss", "item_analyses": [{"kind": "final_size_target_miss", "manifest_index": 0}]},
+            {"Episode 1.mkv"},
+            saved_contract=False,
         )
 
     def test_final_size_miss_hidden_behind_a_newer_finished_run_still_holds_its_files(self) -> None:
