@@ -84,8 +84,11 @@ def schedule_profile_policy_for_host(
         config: MediaforceConfig,
         host_payload: dict[str, Any] | None,
         deps: EncodeSchedulerDeps,
+        *,
+        profiles: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    profiles = encode_queue_schedule_profiles(config, deps)
+    if profiles is None:
+        profiles = encode_queue_schedule_profiles(config, deps)
     host_data = object_dict(host_payload)
     profile_key = deps.canonical_schedule_profile_key(
         host_data.get("schedule_profile") or deps.default_host_schedule_profile
@@ -477,12 +480,15 @@ def decorate_encode_job_for_scheduler(
         config: MediaforceConfig,
         job: dict[str, Any] | None,
         deps: EncodeSchedulerDeps,
+        *,
+        include_telemetry: bool = True,
+        schedule_profiles: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     if job is None:
         return None
     decorated = dict(job)
     host_payload = object_dict(decorated.get("host"))
-    policy = schedule_profile_policy_for_host(config, host_payload, deps)
+    policy = schedule_profile_policy_for_host(config, host_payload, deps, profiles=schedule_profiles)
     status = str(decorated.get("status") or "")
     bypass_schedule = bool(decorated.get("bypass_schedule"))
     attempt_count = int_value(decorated.get("attempt_count"))
@@ -536,7 +542,9 @@ def decorate_encode_job_for_scheduler(
         decorated["scheduler_status_copy"] = f"waiting for {policy['summary']}"
     else:
         decorated["scheduler_status_copy"] = "ready when a worker is free"
-    return decorate_encode_job_telemetry(decorated, encode_job_manifest_totals=deps.encode_job_manifest_totals)
+    if include_telemetry:
+        return decorate_encode_job_telemetry(decorated, encode_job_manifest_totals=deps.encode_job_manifest_totals)
+    return decorated
 
 
 def _encode_job_schedule_state(
@@ -580,27 +588,36 @@ def decorate_encode_queue_for_scheduler(
         deps: EncodeSchedulerDeps,
 ) -> dict[str, Any]:
     policy = encode_queue_scheduler_policy(config, deps)
+    profiles = encode_queue_schedule_profiles(config, deps)
     queue_state = object_dict(encode_queue.get("state"))
     queue_state["scheduler"] = policy
     queue_state["scheduler_summary"] = str(policy["summary"])
-    queue_state["schedule_profiles"] = list(encode_queue_schedule_profiles(config, deps).values())
+    queue_state["schedule_profiles"] = list(profiles.values())
     decorated = dict(encode_queue)
     decorated["state"] = queue_state
     decorated["running"] = [
-        decorate_encode_job_for_scheduler(config, job, deps) or job
+        decorate_encode_job_for_scheduler(config, job, deps, schedule_profiles=profiles) or job
         for job in object_list(encode_queue.get("running"))
     ]
     decorated["queued"] = [
-        decorate_encode_job_for_scheduler(config, job, deps) or job
+        decorate_encode_job_for_scheduler(config, job, deps, schedule_profiles=profiles) or job
         for job in object_list(encode_queue.get("queued"))
     ]
     decorated["recent"] = [
-        decorate_encode_job_for_scheduler(config, job, deps) or job
+        decorate_encode_job_for_scheduler(config, job, deps, schedule_profiles=profiles) or job
         for job in object_list(encode_queue.get("recent"))
     ]
     decorated["needs_attention"] = [
-        decorate_encode_job_for_scheduler(config, job, deps) or job
+        decorate_encode_job_for_scheduler(config, job, deps, schedule_profiles=profiles) or job
         for job in object_list(encode_queue.get("needs_attention"))
+    ]
+    # Display rows can hide queued episodes under a show that needs attention.
+    # Consume the complete runnable inventory without returning it in the dashboard.
+    pending = [
+        decorate_encode_job_for_scheduler(
+            config, job, deps, include_telemetry=False, schedule_profiles=profiles,
+        ) or job
+        for job in object_list(decorated.pop("pending", decorated["queued"]))
     ]
     decorated["queued_waiting_count"] = sum(
         1
@@ -609,6 +626,24 @@ def decorate_encode_queue_for_scheduler(
             bool(job.get("schedule_waiting"))
             or str(job.get("status") or "") == "retry_backoff"
             or bool(str(job.get("waiting_reason") or "").strip())
+        )
+    )
+    decorated["queued_schedule_waiting_count"] = sum(
+        1
+        for job in pending
+        if (
+            str(job.get("status") or "") == "queued"
+            and not job.get("bypass_schedule")
+            and (
+                bool(job.get("schedule_waiting"))
+                or job.get("schedule_state") == "draining_no_fit"
+                or (
+                    job.get("schedule_state") == "schedule_interrupted"
+                    and not str(job.get("waiting_reason") or "").strip()
+                )
+                or "waiting for a host schedule window" in str(job.get("waiting_reason") or "").casefold()
+                or HOST_WINDOW_TOO_SHORT_REASON in str(job.get("waiting_reason") or "").casefold()
+            )
         )
     )
     decorated["telemetry"] = encode_queue_telemetry(decorated)

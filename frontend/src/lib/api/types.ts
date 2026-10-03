@@ -622,6 +622,7 @@ export interface EncodeQueueSummary {
 	running_count: number;
 	queued_count: number;
 	queued_waiting_count?: number;
+	queued_schedule_waiting_count?: number;
 	needs_attention_count?: number;
 	// Queued or retrying episodes and files, including those inside a show that needs attention.
 	pending_work_count?: number;

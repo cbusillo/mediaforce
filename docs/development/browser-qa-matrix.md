@@ -356,6 +356,16 @@ show progress only for a bounded measurable stage, and label historical ETA as
 an estimate. Users must not need to scroll past old evidence to learn
 whether work is still running.
 
+In Activity's System details, the schedule panel distinguishes the queue-wide
+schedule from computer windows. Its waiting count includes queued episodes in
+shows that need attention and counts files rather than show rows. It excludes
+retry delays, and storage/computer waits when the work window is already open.
+An old interruption marker must not hide a current wait for a longer window.
+An unrestricted queue reads `No queue-wide time limit` even when computers are
+off schedule. Activity's window-wait badge and notice use the same file count,
+rather than retry/storage waits or show-row counts. While the queue is paused,
+the panel says window waits update on resume instead of presenting stale counts.
+
 On Activity, `Working now` must own or begin the first viewport at desktop and
 390px widths; do not place a visible hero or separate dashboard summary ahead of
 the current queue. At wide desktop widths, the collapsed System details rail

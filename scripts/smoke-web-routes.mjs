@@ -2081,6 +2081,135 @@ async function checkUnderTargetSampleRecovery(baseUrl, timeoutMs) {
   }
 }
 
+async function checkActivityWorkWindows(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  try {
+    for (const width of [1440, 390]) {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      let waitingCount = 10;
+      let paused = false;
+      await page.route(/\/api\/dashboard(?:\?.*)?$/, async (route) => {
+        const response = await route.fetch();
+        const payload = await response.json();
+        payload.encode_queue.state.scheduler_summary = "runs anytime";
+        payload.encode_queue.state.is_paused = paused;
+        payload.encode_queue.queued = [];
+        payload.encode_queue.queued_count = 0;
+        payload.encode_queue.running = [];
+        payload.encode_queue.running_count = 0;
+        payload.encode_queue.queued_waiting_count = 2;
+        payload.encode_queue.queued_schedule_waiting_count = waitingCount;
+        await route.fulfill({ response, json: payload });
+      });
+      await page.route(/\/api\/hosts(?:\?.*)?$/, async (route) => {
+        const response = await route.fetch();
+        const payload = await response.json();
+        for (const host of payload.hosts) {
+          host.available = true;
+          host.schedule_open = false;
+          host.schedule_profile_label = "Night";
+          host.active_encode_count = 0;
+        }
+        await route.fulfill({ response, json: payload });
+      });
+      for (waitingCount of [10, 1, 0]) {
+        await openRoute(page, baseUrl, "/ops", timeoutMs);
+        const details = page.locator(".system-details");
+        const toggle = details.locator("summary");
+        await toggle.focus();
+        await page.keyboard.press("Enter");
+        const schedule = page.locator(".schedule-list");
+        await schedule.waitFor({ state: "visible", timeout: timeoutMs });
+        const expectedCount = `${waitingCount} ${waitingCount === 1 ? "file" : "files"} waiting for a work window`;
+        await expect(schedule).toContainText(expectedCount, {
+          timeout: timeoutMs,
+        });
+        await expect(schedule).toContainText("Off schedule", {
+          timeout: timeoutMs,
+        });
+        const windowNotice = page.getByText(
+          /^\d+ (file is|files are) waiting for a work window$/,
+        );
+        if (waitingCount > 0) {
+          await expect(windowNotice).toHaveText(
+            `${waitingCount} ${waitingCount === 1 ? "file is" : "files are"} waiting for a work window`,
+          );
+        } else {
+          await expect(windowNotice).toHaveCount(0);
+        }
+        await expect(page.locator(".blocker-list")).not.toContainText(
+          "Work runs anytime",
+        );
+        const text = await schedule.innerText();
+        if (
+          !text.toLocaleLowerCase().includes("queue-wide schedule") ||
+          !text.includes("No queue-wide time limit") ||
+          !text.includes(expectedCount) ||
+          !text.includes("Off schedule") ||
+          text.includes("Work runs anytime")
+        ) {
+          throw new Error(`Activity work-window panel at ${width}px: ${text}`);
+        }
+        if (
+          await page.evaluate(
+            () =>
+              document.documentElement.scrollWidth >
+              document.documentElement.clientWidth,
+          )
+        ) {
+          throw new Error(`Activity work-window panel overflows at ${width}px`);
+        }
+        if (waitingCount === 10) {
+          await schedule.scrollIntoViewIfNeeded();
+          const directory = path.join(rootDir, "scratch", "ui-checks");
+          await mkdir(directory, { recursive: true });
+          await page.screenshot({
+            path: path.join(directory, `731-work-windows-${width}.png`),
+          });
+        }
+        await toggle.focus();
+        await page.keyboard.press("Enter");
+        await schedule.waitFor({ state: "hidden", timeout: timeoutMs });
+      }
+      waitingCount = 10;
+      paused = true;
+      await openRoute(page, baseUrl, "/ops", timeoutMs);
+      await page.locator(".system-details summary").focus();
+      await page.keyboard.press("Enter");
+      const pausedSchedule = page.locator(".schedule-list");
+      await expect(pausedSchedule).toContainText(
+        "Work is paused. Window waits update when it resumes.",
+        { timeout: timeoutMs },
+      );
+      await expect(pausedSchedule).not.toContainText("10 files waiting");
+      await expect(
+        page.getByText(/^\d+ (file is|files are) waiting for a work window$/),
+      ).toHaveCount(0);
+      await pausedSchedule.scrollIntoViewIfNeeded();
+      const pausedDirectory = path.join(rootDir, "scratch", "ui-checks");
+      await mkdir(pausedDirectory, { recursive: true });
+      await page.screenshot({
+        path: path.join(
+          pausedDirectory,
+          `731-work-windows-paused-${width}.png`,
+        ),
+      });
+      await page.unrouteAll({ behavior: "wait" });
+      await page.close();
+    }
+    console.log(
+      "route ok: Activity counts work-window waits separately from other waits",
+    );
+  } finally {
+    for (const context of browser.contexts()) {
+      for (const page of context.pages()) {
+        await page.unrouteAll({ behavior: "wait" });
+      }
+    }
+    await browser.close();
+  }
+}
+
 async function checkReviewTransitionDedupe(baseUrl, timeoutMs) {
   const browser = await launchSmokeBrowser();
   try {
@@ -3603,6 +3732,7 @@ async function main() {
       await checkLifecyclePolicyShowIsolation(targetUrl, args.routeTimeoutMs);
       await checkOlderSeasonConfirmation(targetUrl, args.routeTimeoutMs);
       await checkReviewTransitionDedupe(targetUrl, args.routeTimeoutMs);
+      await checkActivityWorkWindows(targetUrl, args.routeTimeoutMs);
       await checkUnderTargetSampleRecovery(targetUrl, args.routeTimeoutMs);
       const reviewReadyFixture = folderRoutes.find(
         (fixtureRoute) =>
