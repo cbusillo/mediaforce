@@ -2037,7 +2037,9 @@ async function checkUnderTargetSampleRecovery(baseUrl, timeoutMs) {
         exact: true,
       }),
     ).toBeVisible();
-    await expect(page.getByText(/219 MB with VMAF 90.8/).first()).toBeVisible();
+    await expect(
+      page.getByText(/219 MB with Picture appearance score 90.8/).first(),
+    ).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Keep this version", exact: true }),
     ).toHaveCount(0);
@@ -3364,6 +3366,137 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
   }
 }
 
+async function checkPlainQualityCopy(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  const page = await browser.newPage();
+  const folderPath = "/folders/tv/Approved%20Show/Season%201";
+  const recommendation = {
+    first_crf: 50,
+    scope: "season",
+    confidence: "high",
+    sample_count: 12,
+    evidence_count: 12,
+    minimum_crf: 48,
+    maximum_crf: 52,
+    iqr: 2,
+    median_absolute_deviation: 1,
+  };
+  const memory = {
+    schema_version: 1,
+    algorithm_version: "qsh2",
+    observation_id: "ui-copy-fixture",
+    source_rel_path: "tv/Approved Show/Season 1/Episode 01.mkv",
+    recorded_at: null,
+    evidence_cutoff_at: null,
+    measured: {
+      selected_crf: 51,
+      quality_metric: "VMAF",
+      quality_score: 86.5,
+      quality_target: 85,
+      quality_floor: 84,
+      quality_margin: 2.5,
+      output_bytes: 510000000,
+      size_error_percent: 2,
+      candidate_count: 5,
+      search_duration_seconds: 100,
+    },
+    recommendation,
+    comparison: { crf_delta: 1, within_one_crf: true },
+    fallback_reason: null,
+    reason: "Shadow quality-memory recommendation: CRF 50 at VMAF 85",
+    production_search_changed: false,
+    warm_start: null,
+  };
+  await page.route("**/api/folders/**", async (route) => {
+    if (
+      decodeURIComponent(new URL(route.request().url()).pathname) !==
+      decodeURIComponent(`/api${folderPath}`)
+    ) {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({
+      response,
+      json: { ...body, quality_memory: memory },
+    });
+  });
+  try {
+    for (const width of [1024, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      for (const [reason, badge] of [
+        [null, "High confidence"],
+        ["sparse_cohort", "More results needed"],
+        ["stale_evidence", "Earlier results out of date"],
+        ["shadow_evaluation_error", "Earlier results unavailable"],
+      ]) {
+        memory.recommendation = reason ? null : recommendation;
+        memory.fallback_reason = reason;
+        await openRoute(page, baseUrl, folderPath, timeoutMs);
+        await expect(page.locator(".quality-memory__badge")).toHaveText(badge);
+        await page.locator(".details-drawer summary").click();
+        const visible = await page.locator("body").innerText();
+        if (
+          /\b(CRF|VMAF|shadow|quality.memory|sparse memory)\b/i.test(visible)
+        ) {
+          throw new Error(
+            `Internal quality terms reached the screen at ${width}px.`,
+          );
+        }
+        const state = await readRouteState(
+          page,
+          routeExpectation(folderPath, "Approved Show", "", [], ""),
+          true,
+        );
+        if (state.pageOverflow || state.visibleWideTables.length)
+          throw new Error(`Past results overflowed at ${width}px.`);
+      }
+      await page.goto(`${baseUrl}/settings`, { waitUntil: "domcontentloaded" });
+      const measurement = page.getByRole("combobox", {
+        name: "Picture quality measurement",
+        exact: true,
+      });
+      const savedMetric = await measurement.inputValue();
+      await measurement.selectOption("xpsnr");
+      await expect(measurement).toHaveValue("xpsnr");
+      await expect(measurement.locator("option:checked")).toHaveText("Detail");
+      const target = page.getByRole("spinbutton", {
+        name: "Picture appearance score target",
+        exact: true,
+      });
+      const savedTarget = await target.inputValue();
+      const changedTarget = String(Number(savedTarget) + 1);
+      await target.fill(changedTarget);
+      await expect(target).toHaveValue(changedTarget);
+      await page.getByRole("button", { name: "Discard", exact: true }).click();
+      await expect(target).toHaveValue(savedTarget);
+      await expect(measurement).toHaveValue(savedMetric);
+      if (
+        /\b(CRF|VMAF|shadow|quality.memory)\b/i.test(
+          await page.locator("body").innerText(),
+        )
+      ) {
+        throw new Error(
+          `Settings exposed internal quality terms at ${width}px.`,
+        );
+      }
+      const state = await readRouteState(
+        page,
+        routeExpectation("/settings", "Settings", "", [], ""),
+        true,
+      );
+      if (state.pageOverflow || state.visibleWideTables.length)
+        throw new Error(`Settings overflowed at ${width}px.`);
+    }
+    console.log(
+      "route ok: plain quality copy, populated past results and settings values at 1024px and 390px",
+    );
+  } finally {
+    await browser.close();
+  }
+}
+
 async function checkTargetDefaultEvidence(baseUrl, timeoutMs) {
   const browser = await launchSmokeBrowser();
   const page = await browser.newPage();
@@ -3574,6 +3707,7 @@ async function main() {
     await checkEndpoints(targetUrl, args.endpointTimeoutMs);
     await checkRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
     if (folderRoutes.length) {
+      await checkPlainQualityCopy(targetUrl, args.routeTimeoutMs);
       await checkTargetDefaultEvidence(targetUrl, args.routeTimeoutMs);
       await checkLibraryModeLayout(targetUrl, args.routeTimeoutMs);
       await checkLibraryStateReachability(targetUrl, args.routeTimeoutMs);

@@ -404,6 +404,34 @@ function qualityMemoryPayload(): FolderQualityMemoryPayload {
 }
 
 describe('quality memory explanation', () => {
+	it.each([
+		'no_history',
+		'stale_evidence',
+		'high_dispersion',
+		'shadow_evaluation_error',
+		null
+	] as const)('keeps backend jargon out of the rendered facts for %s', (reason) => {
+		const payload = qualityMemoryPayload();
+		payload.reason = 'Shadow quality-memory recommendation: CRF 50 at VMAF 85';
+		for (const recommended of [true, false]) {
+			payload.fallback_reason = reason;
+			if (!recommended) payload.recommendation = null;
+			const view = qualityMemoryView(folder({ quality_memory: payload }));
+			const displayed = [
+				view.title,
+				view.badge,
+				view.reason,
+				view.policyCopy,
+				view.evidence,
+				view.dispersion,
+				view.comparison,
+				...view.measured.flatMap((fact) => [fact.label, fact.value, fact.detail]),
+				...Object.values(view.recommendation)
+			].join(' ');
+			expect(displayed).not.toMatch(/\b(CRF|VMAF|shadow|quality.memory|sparse memory)\b/i);
+		}
+	});
+
 	it('keeps the empty state compact and explicit about unchanged policy', () => {
 		const view = qualityMemoryView(folder({ quality_memory: null }));
 
@@ -426,19 +454,19 @@ describe('quality memory explanation', () => {
 			badge: 'High confidence',
 			source: 'Episode 03',
 			recommendation: {
-				label: 'Shadow first CRF',
+				label: 'Suggested first setting',
 				value: '50.0',
-				detail: '12 observations · season · high confidence'
+				detail: '12 results · season · high confidence'
 			},
-			comparison: 'Within 1 CRF · Δ +1.0',
-			dispersion: 'CRF 48.0–52.0 · IQR 2.0 · MAD 1.0'
+			comparison: 'Within 1 compression step · difference +1.0',
+			dispersion: 'Compression settings 48.0–52.0 · middle spread 2.0 · typical difference 1.0'
 		});
 		expect(view.measured).toEqual([
-			{ label: 'Chosen CRF', value: '51.0', detail: '5 candidates · 1m 40s' },
+			{ label: 'Compression setting', value: '51.0', detail: '5 candidates · 1m 40s' },
 			{
-				label: 'Measured VMAF',
+				label: 'Measured Picture appearance score',
 				value: '86.5',
-				detail: 'target 85.0 · floor 84.0 · margin +2.5'
+				detail: 'target 85.0 · minimum 84.0 · margin +2.5'
 			},
 			{ label: 'Final size', value: '510 MB', detail: '2% over saved size target' }
 		]);
@@ -452,7 +480,7 @@ describe('quality memory explanation', () => {
 
 		expect(view.tone).toBe('attention');
 		expect(view.badge).toBe('High confidence · differed');
-		expect(view.comparison).toBe('Outside 1 CRF · Δ +3.0');
+		expect(view.comparison).toBe('More than 1 compression step apart · difference +3.0');
 	});
 
 	it('explains an accepted warm start without claiming observation-only behavior', () => {
@@ -484,11 +512,11 @@ describe('quality memory explanation', () => {
 
 		const view = qualityMemoryView(folder({ quality_memory: payload }));
 
-		expect(view.badge).toBe('Warm start accepted');
-		expect(view.title).toBe('Measured run used trusted memory');
-		expect(view.recommendation.label).toBe('Tried first CRF');
-		expect(view.comparison).toBe('Accepted first candidate · estimated 80% fewer candidate passes');
-		expect(view.policyCopy).toContain('full baseline search was not needed');
+		expect(view.badge).toBe('Starting suggestion worked');
+		expect(view.title).toBe('Earlier results helped this run');
+		expect(view.recommendation.label).toBe('First setting tried');
+		expect(view.comparison).toBe('Starting setting passed · estimated 80% fewer attempts');
+		expect(view.policyCopy).toContain('normal search was not needed');
 		expect(view.policyCopy).not.toContain('observation-only');
 	});
 
@@ -552,12 +580,12 @@ describe('quality memory explanation', () => {
 
 		const view = qualityMemoryView(folder({ quality_memory: payload }));
 
-		expect(view.title).toBe('Memory tried first; baseline selected');
+		expect(view.title).toBe('Earlier results tried; normal search used');
 		expect(view.recommendation).toMatchObject({
-			label: 'Tried first CRF',
+			label: 'First setting tried',
 			value: '49.0'
 		});
-		expect(view.recommendation.detail).toContain('Measured memory candidate');
+		expect(view.recommendation.detail).toContain('Suggested starting setting');
 		expect(view.recommendation.detail).toContain('adjusted from 50.0');
 		expect(view.reason).toContain('missed the strict quality target');
 	});
@@ -590,19 +618,19 @@ describe('quality memory explanation', () => {
 
 		const view = qualityMemoryView(folder({ quality_memory: payload }));
 
-		expect(view.badge).toBe('Warm start fell back');
-		expect(view.title).toBe('Memory tried first; baseline selected');
-		expect(view.comparison).toBe('Full baseline fallback · 6 candidates total');
+		expect(view.badge).toBe('Normal search used');
+		expect(view.title).toBe('Earlier results tried; normal search used');
+		expect(view.comparison).toBe('Normal search used · 6 candidates total');
 		expect(view.reason).toContain('missed the saved size band');
-		expect(view.policyCopy).toContain('full baseline search ran normally');
+		expect(view.policyCopy).toContain('normal search ran');
 	});
 
 	it.each([
-		['sparse_cohort', 'sparse', 'Sparse memory'],
-		['final_retry_terminal', 'sparse', 'Sparse memory'],
-		['stale_signature', 'stale', 'Memory invalidated'],
-		['shadow_evaluation_error', 'unavailable', 'Memory unavailable'],
-		['conflicting_quality_evidence', 'conflicting', 'Evidence conflict']
+		['sparse_cohort', 'sparse', 'More results needed'],
+		['final_retry_terminal', 'sparse', 'More results needed'],
+		['stale_signature', 'stale', 'Earlier results out of date'],
+		['shadow_evaluation_error', 'unavailable', 'Earlier results unavailable'],
+		['conflicting_quality_evidence', 'conflicting', 'Results disagree']
 	] as const)('maps %s into a compact %s state', (fallbackReason, state, badge) => {
 		const payload = qualityMemoryPayload();
 		payload.recommendation = null;
@@ -615,7 +643,7 @@ describe('quality memory explanation', () => {
 		expect(view.badge).toBe(badge);
 		expect(view.recommendation.value).toBe('Held back');
 		expect(view.reason.length).toBeGreaterThan(20);
-		expect(view.policyCopy).toContain('saved policy remain unchanged');
+		expect(view.policyCopy).toContain('saved settings stayed unchanged');
 	});
 });
 
@@ -1955,7 +1983,7 @@ describe('season experience translation', () => {
 		).toMatchObject({
 			kind: 'quality_conflict',
 			recoveryLabel: 'Choose a roomier goal',
-			detail: expect.stringContaining('VMAF floor of 93')
+			detail: expect.stringContaining('minimum Picture appearance score of 93')
 		});
 
 		const floorError =
@@ -2024,7 +2052,7 @@ describe('season experience translation', () => {
 		expect(targetConstraintSummary(failed)).toMatchObject({
 			canReviewSmaller: true,
 			recoveryLabel: 'Allow smaller and create review sample',
-			detail: expect.stringContaining('219 MB with VMAF 90.8')
+			detail: expect.stringContaining('219 MB with Picture appearance score 90.8')
 		});
 		expect(targetConstraintSummary(failed)?.detail).toContain('selected candidate may change');
 		expect(

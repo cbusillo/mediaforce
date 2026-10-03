@@ -806,7 +806,7 @@ def _write_review_sample_state(
         "review_media_ready": True,
         "browser_review_ready": True,
     }
-    advice_payload = {
+    advice_payload: dict[str, Any] = {
         "summary": "Fixture review pack is ready for operator inspection.",
         "confidence": "high",
         "run_verdict": run_verdict,
@@ -1810,8 +1810,6 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 recommendation="already_optimized",
                 recommendation_reason="Fixture file far smaller than its sample predicted waits for the owner.",
             ),
-        ]
-        rows.append(
             _library_item(
                 project_root=project_root,
                 media_root="movies",
@@ -1822,8 +1820,8 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 priority_score=8,
                 recommendation="priority_encode",
                 recommendation_reason="Fixture already-missing original backup state.",
-            )
-        )
+            ),
+        ]
         rows.extend(
             _library_item(
                 project_root=project_root,
@@ -2814,7 +2812,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio quality-conflict fixture",
                 "route": "/folders/tv/Quality%20Conflict/Season%201",
                 "marker": "Quality Conflict",
-                "stageMarker": "This size conflicts with the quality floor",
+                "stageMarker": "This size conflicts with the minimum picture quality",
             },
             {
                 "label": "Folder Studio target-search-bound fixture",
