@@ -4,9 +4,8 @@ import type {
 	CompletedHistoryEvent,
 	CompletedPayload
 } from '$lib/api/types';
-import { normalizeFileSizeCopy } from '$lib/format';
+import { formatFileSize, normalizeFileSizeCopy } from '$lib/format';
 import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
-import { formatBytes } from './folder-studio-view';
 
 export type CleanupState = 'ready' | 'blocked' | 'unknown' | 'cleaned';
 export type CompletedCleanupScope = 'selected' | 'global';
@@ -212,7 +211,7 @@ export function buildDeleteConfirmCopy(
 	return scope === 'selected'
 		? {
 				title: `Delete original backups for ${folderCount.toLocaleString('en-US')} selected ${folderNoun}?`,
-				scope: `Deletes ${backupCount.toLocaleString('en-US')} ${fileNoun} (${formatBytes(input.backupSizeBytes)}) from ${location}.`,
+				scope: `Deletes ${backupCount.toLocaleString('en-US')} ${fileNoun} (${formatFileSize(input.backupSizeBytes)}) from ${location}.`,
 				safety:
 					'Your finished files are not touched. Only the original backups in the Cleanup folder are deleted.',
 				warning: 'This cannot be undone.',
@@ -220,7 +219,7 @@ export function buildDeleteConfirmCopy(
 			}
 		: {
 				title: 'Delete all original backups in the Cleanup folder?',
-				scope: `Deletes all ${backupCount.toLocaleString('en-US')} ${fileNoun} (${formatBytes(input.backupSizeBytes)}) in ${location}, including folders hidden by your current filters.`,
+				scope: `Deletes all ${backupCount.toLocaleString('en-US')} ${fileNoun} (${formatFileSize(input.backupSizeBytes)}) in ${location}, including folders hidden by your current filters.`,
 				safety:
 					'Your finished files are not touched. Only the original backups in the Cleanup folder are deleted.',
 				warning: 'This cannot be undone.',
@@ -321,7 +320,7 @@ export function buildCompletedStatusTiles(
 		},
 		{
 			label: finishedCopy.spaceToFree,
-			value: formatBytes(archive.total_size_bytes),
+			value: formatFileSize(archive.total_size_bytes),
 			detail: archive.has_cleanup ? 'in the Cleanup folder' : 'nothing to delete',
 			tone: archive.has_cleanup ? 'ready' : 'idle',
 			mono: true
@@ -362,7 +361,7 @@ export function buildCompletedFooterSignals(payload: CompletedPayload | null): F
 		},
 		{
 			label: finishedCopy.spaceToFree,
-			value: formatBytes(payload.archive_cleanup.total_size_bytes),
+			value: formatFileSize(payload.archive_cleanup.total_size_bytes),
 			tone: 'ready'
 		}
 	];
@@ -450,7 +449,7 @@ export function buildCompletedHistoryRows(payload: CompletedPayload): CompletedH
 			subtitle: folder.subtitle,
 			scope_label: folder.scope_label,
 			created_at: folder.latest_promoted_at ?? '',
-			detail: `${folder.promoted_item_count.toLocaleString('en-US')} promoted items · ${formatBytes(folder.total_bytes_saved)} saved`,
+			detail: `${folder.promoted_item_count.toLocaleString('en-US')} promoted items · ${formatFileSize(folder.total_bytes_saved)} saved`,
 			size_bytes: folder.total_bytes_saved,
 			source: 'folder'
 		}));

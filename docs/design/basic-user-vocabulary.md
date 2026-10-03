@@ -19,17 +19,17 @@ a computer`, `Needs sample`, `Safe to delete`.
 
 ## Preferred User-Facing Terms
 
-- Bench: use `Review assistant` in Folder Studio chat, sample requests, and
+- Bench: use `Review assistant` in TV season review requests, sample requests, and
   revision requests.
-- Calibration: use `Sample` in Folder Studio, Activity sample queue, and route
+- Calibration: use `Sample` in TV season pages, Activity sample queue, and route
   summaries.
 - Calibration queue: use `Sample queue` in Activity and global status strips.
 - Proof: use `Comparison clips` for the media the user watches. Keep
   `proof`, `review evidence`, and analyzer terminology in Technical details.
-- Host: use `Computer` in Library, Activity, Folder Studio, and Settings.
+- Host: use `Computer` in Library, Activity, TV season pages, and Settings.
 - Remote host: use `Remote computer` in Settings and computer setup.
 - SSH host: use `SSH address` in advanced computer settings only.
-- Policy: use `Settings` or `proposed settings` in Folder Studio proposal rows
+- Policy: use `Settings` or `proposed settings` in TV season proposal rows
   and approval copy.
 - Draft: use `Proposal` in user-visible review and approval copy.
 - Encode: use `Compress` for user actions and exact-scope progress. Use

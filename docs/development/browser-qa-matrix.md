@@ -67,7 +67,7 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   `Open exact file in Studio`; that exact route offers `Review title sample` for
   pending review and `Open title workspace` for other applicable title work,
   without exposing a duplicate sample action.
-- Folder Studio: `/folders/tv/Example%20Show/Season%201`, including enough item
+- TV season page: `/folders/tv/Example%20Show/Season%201`, including enough item
   metadata to render policy comparison, sample facts, queue state, and side
   context.
 - Quality contract: `/folders/tv/Example%20Show/Season%201` exposes visible
@@ -349,7 +349,7 @@ Browser review proxies must exclude data streams and inherited chapters so a
 bounded review moment cannot appear to be the length of the source episode.
 
 While the review assistant or a representative sample is active, the first
-Folder Studio viewport must show a prominent live-operation state with the
+TV season page viewport must show a prominent live-operation state with the
 current action, worker, and elapsed/status copy. It must distinguish the
 configured normalized goal, whole-episode target, and representative-test band,
 show progress only for a bounded measurable stage, and label historical ETA as
@@ -460,7 +460,7 @@ these display fixtures do not establish real production evidence or media qualit
 
 ## State Gaps
 
-The current fixture covers non-empty queue, empty queue, waiting Folder Studio,
+The current fixture covers non-empty queue, empty queue, waiting TV season page,
 queued sample, retryable sample, review-pack-ready sample, protected current and
 recently acquired seasons, active encode, retryable processing, cleanup-ready
 Completed, blocked Completed, unavailable host Ops, idle Ops, and narrow layout.
