@@ -2,8 +2,8 @@
 
 A queue action records a hold for each file it leaves out for motion-pattern evidence, together with
 the run's mode and approval. A background sweep queues held files whose evidence has since cleared,
-under that same approval and without touching the run's other jobs. When the approval has changed,
-nothing is queued and the hold says so.
+under that same approval, without touching the run's other jobs or waiting for them to finish.
+When the approval has changed, nothing is queued and the hold says so.
 """
 
 from collections.abc import Callable, Collection, Iterable
@@ -17,7 +17,6 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import production_holds
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.type_defs import object_dict
-from mediaforce.encoding.encode_queue import load_active_encode_job_for_prefix
 from mediaforce.web.runtime.decision_evidence import cadence_safety_partition
 from mediaforce.web.runtime.left_out_files import LeftOutFile
 
@@ -98,7 +97,7 @@ class ClearedHoldGroup:
 
 
 def cleared_hold_groups(connection: DBClient) -> list[ClearedHoldGroup]:
-    """Waiting holds whose evidence has cleared and whose scope has no encode running."""
+    """Waiting holds whose evidence has cleared, whether or not their scope's run is still going."""
     rows = connection.execute(
         select(production_holds).where(production_holds.c.status == HOLD_WAITING)
     ).mappings().fetchall()
@@ -109,7 +108,7 @@ def cleared_hold_groups(connection: DBClient) -> list[ClearedHoldGroup]:
     groups: list[ClearedHoldGroup] = []
     for (prefix, mode, approval), item_ids in sorted(grouped.items()):
         cleared = cadence_safety_partition(connection, library_item_ids=item_ids, synchronize=True).cleared_item_ids
-        if not cleared or load_active_encode_job_for_prefix(connection, prefix) is not None:
+        if not cleared:
             continue
         groups.append(ClearedHoldGroup(prefix, mode, approval, tuple(sorted(cleared))))
     return groups

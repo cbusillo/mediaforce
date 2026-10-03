@@ -553,13 +553,13 @@ def _load_encode_job_state(connection: DBClient, scope: MediaScope) -> ScopeJobS
     return _scope_job_states(
         scope,
         [row for row in rows if scopes_overlap(scope, str(row["prefix"] or ""))],
-        _unfinished_part_files(rows),
+        _manifest_files_lookup(),
     )
 
 
 def _load_encode_job_states(connection: DBClient, scopes: list[MediaScope]) -> dict[str, ScopeJobStates]:
     rows = _workflow_encode_job_rows(connection)
-    part_files = _unfinished_part_files(rows)
+    part_files = _manifest_files_lookup()
     scoped_rows = [(row, media_scope_from_prefix(str(row["prefix"] or ""), match="descendants")) for row in rows]
     return {
         scope.prefix: _scope_job_states(
@@ -571,20 +571,24 @@ def _load_encode_job_states(connection: DBClient, scopes: list[MediaScope]) -> d
     }
 
 
-def _unfinished_part_files(rows: list[DBRow]) -> dict[str, tuple[str, ...]]:
-    """The files each unfinished part of a folder run is for, read once for every scope.
+def _manifest_files_lookup() -> Callable[[DBRow], tuple[str, ...]]:
+    """The files a job is for, read once per job for every scope.
 
     Only the manifest says everything a part covers; the file its progress names may be one of
-    several. A part without a readable manifest maps to no files, which keeps the older, wider reading.
+    several. A job without a readable manifest maps to no files, which keeps the older, wider reading.
     """
-    return {
-        str(row["job_id"]): tuple(encode_run_manifest_rel_paths({
-            "manifest_path": row["manifest_path"],
-            "manifest_indexes": _json_list(row["manifest_indexes_json"]),
-        }))
-        for row in rows
-        if row["job_kind"] == "shard" and row["status"] in UNFINISHED_JOB_STATUSES
-    }
+    files_by_job: dict[str, tuple[str, ...]] = {}
+
+    def files(row: DBRow) -> tuple[str, ...]:
+        job_id = str(row["job_id"])
+        if job_id not in files_by_job:
+            files_by_job[job_id] = tuple(encode_run_manifest_rel_paths({
+                "manifest_path": row["manifest_path"],
+                "manifest_indexes": _json_list(row["manifest_indexes_json"]),
+            }))
+        return files_by_job[job_id]
+
+    return files
 
 
 def _json_list(raw: Any) -> list[Any] | None:
@@ -598,13 +602,14 @@ def _json_list(raw: Any) -> list[Any] | None:
 def _scope_job_states(
         scope: MediaScope,
         overlapping_rows: list[DBRow],
-        part_files: Mapping[str, tuple[str, ...]],
+        part_files: Callable[[DBRow], tuple[str, ...]],
 ) -> ScopeJobStates:
     own_rows = [row for row in overlapping_rows if not _job_is_wider(scope, str(row["prefix"] or ""))]
     return ScopeJobStates(
         overlapping=_encode_job_workflow_state(
             overlapping_rows,
             counts_for_scope=_wider_run_filter(scope, overlapping_rows, part_files),
+            attention_for_scope=_wider_run_attention(scope, overlapping_rows, part_files),
         ),
         own=_encode_job_workflow_state(own_rows),
     )
@@ -613,7 +618,7 @@ def _scope_job_states(
 def _wider_run_filter(
         scope: MediaScope,
         overlapping_rows: list[DBRow],
-        part_files: Mapping[str, tuple[str, ...]],
+        part_files: Callable[[DBRow], tuple[str, ...]],
 ) -> Callable[[DBRow], bool]:
     """Whether a job is working on the scope.
 
@@ -621,13 +626,10 @@ def _wider_run_filter(
     file in that season. When any of the run's unfinished parts cannot be traced to its files, it
     counts, as before.
     """
-    parts_by_parent: dict[str, list[DBRow]] = {}
-    for row in overlapping_rows:
-        if row["job_kind"] == "shard" and row["parent_job_id"]:
-            parts_by_parent.setdefault(str(row["parent_job_id"]), []).append(row)
+    parts_by_parent = _parts_by_parent(overlapping_rows)
 
     def part_in_scope(part: DBRow) -> bool | None:
-        files = part_files.get(str(part["job_id"]), ())
+        files = part_files(part)
         if not files:
             return None
         return any(path_matches_scope(rel_path, scope) for rel_path in files)
@@ -647,6 +649,50 @@ def _wider_run_filter(
         return True
 
     return counts_for_scope
+
+
+def _wider_run_attention(
+        scope: MediaScope,
+        overlapping_rows: list[DBRow],
+        part_files: Callable[[DBRow], tuple[str, ...]],
+) -> Callable[[DBRow], DBRow | None]:
+    """Which run's problem the scope shows, given the newest run, which needs attention.
+
+    A run over a whole show needs attention for a season only while one of the season's files still
+    has a problem in it. Each file takes its own newest part across runs, as on the Episodes list, so
+    a newer run that encoded the file settles an older run's problem with it, and a newer run that
+    never reached the file leaves that problem showing. When any part in question cannot be traced to
+    its files, the newest run speaks for the scope, as before.
+    """
+
+    def attention_run(latest: DBRow) -> DBRow | None:
+        if not _job_is_wider(scope, str(latest["prefix"] or "")):
+            return latest
+        runs = [row for row in overlapping_rows if row["job_kind"] in DISPLAY_ENCODE_JOB_KINDS]
+        # Runs older than the oldest one that needs attention cannot bring a problem back.
+        oldest = max(index for index, run in enumerate(runs) if run["status"] in ATTENTION_JOB_STATUSES)
+        parts_by_parent = _parts_by_parent(overlapping_rows)
+        newest_by_file: dict[str, tuple[str, DBRow]] = {}
+        for run in runs[:oldest + 1]:
+            # Within a run, a file's later part (a retry) comes first and replaces its earlier one.
+            for part in parts_by_parent.get(str(run["job_id"])) or [run]:
+                files = part_files(part)
+                if not files:
+                    return latest
+                for rel_path in files:
+                    if path_matches_scope(rel_path, scope):
+                        newest_by_file.setdefault(rel_path, (str(part["status"]), run))
+        return next((run for status, run in newest_by_file.values() if status in ATTENTION_JOB_STATUSES), None)
+
+    return attention_run
+
+
+def _parts_by_parent(rows: list[DBRow]) -> dict[str, list[DBRow]]:
+    parts_by_parent: dict[str, list[DBRow]] = {}
+    for row in rows:
+        if row["job_kind"] == "shard" and row["parent_job_id"]:
+            parts_by_parent.setdefault(str(row["parent_job_id"]), []).append(row)
+    return parts_by_parent
 
 
 def _job_is_wider(scope: MediaScope, job_prefix: str) -> bool:
@@ -678,13 +724,15 @@ def _encode_job_workflow_state(
         overlapping_rows: list[DBRow],
         *,
         counts_for_scope: Callable[[DBRow], bool] = lambda _row: True,
+        attention_for_scope: Callable[[DBRow], DBRow | None] = lambda latest: latest,
 ) -> tuple[WorkflowLane, str] | None:
     """The scope's encode lane, naming every reason its files are not finished.
 
     Any active job, including a folder's queued or running part, keeps the scope working. Whether
     work needs the owner comes from the newest folder or single job, which summarizes its parts; a
-    part that just finished must not hide it. Only a job that counts for the scope keeps it working;
-    whether work needs the owner still comes from the newest job overall.
+    part that just finished must not hide it. Only a job that counts for the scope keeps it working.
+    When the newest job needs the owner, `attention_for_scope` names the job whose problem the scope
+    shows, or None when none of its files has one.
     """
     display_rows = [row for row in overlapping_rows if row["job_kind"] in DISPLAY_ENCODE_JOB_KINDS]
     active = next(
@@ -705,6 +753,10 @@ def _encode_job_workflow_state(
             detail = f"{detail} Needs you: {unfinished_breakdown_summary(owner_groups)}."
         return "processing", detail
     if latest is not None and latest["status"] in ATTENTION_JOB_STATUSES:
-        error = unfinished_breakdown_summary(groups) or str(latest["error"] or "Encode job needs operator attention.")
-        return "attention", f"Encode job is {latest['status']} for {latest['prefix']}: {error}"
+        run = attention_for_scope(latest)
+        if run is None:
+            return None
+        groups = unfinished_breakdown_groups(run["progress_json"])
+        error = unfinished_breakdown_summary(groups) or str(run["error"] or "Encode job needs operator attention.")
+        return "attention", f"Encode job is {run['status']} for {run['prefix']}: {error}"
     return None

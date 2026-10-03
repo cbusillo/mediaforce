@@ -306,6 +306,18 @@ def clear_terminal_encode_jobs_for_prefix(connection: DBClient, prefix: str) -> 
     )
 
 
+def list_terminal_encode_jobs_for_prefix(connection: DBClient, prefix: str) -> list[dict[str, Any]]:
+    """Every ended run of exactly this prefix still on record, newest first."""
+    rows = connection.execute(
+        _encode_job_select()
+        .where(encode_jobs.c.prefix == prefix)
+        .where(encode_jobs.c.status.in_(RECENT_ENCODE_JOB_STATUSES))
+        .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
+        .order_by(encode_jobs.c.created_at.desc(), _rowid_column().desc())
+    ).mappings().fetchall()
+    return [_hydrate_job(row) for row in rows]
+
+
 def load_latest_terminal_encode_job_for_prefix(connection: DBClient, prefix: str) -> dict[str, Any] | None:
     row = connection.execute(
         _encode_job_select()

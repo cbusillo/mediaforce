@@ -8147,6 +8147,172 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(workflow.state, "processing")
 
+    def _save_run(
+            self,
+            connection: DBClient,
+            run_id: str,
+            *,
+            prefix: str,
+            status: str,
+            parts: list[tuple[str, str, int]],
+            manifest: str,
+            updated_at: str,
+    ) -> None:
+        """A folder run and its parts, each part for one manifest index, all last updated at `updated_at`."""
+        self._save_show_job(connection, job_id=run_id, prefix=prefix, status=status)
+        connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == run_id).values(
+            job_kind="folder", manifest_path=str(self.root / "runs" / manifest), updated_at=updated_at,
+        ))
+        for job_id, part_status, index in parts:
+            self._save_show_job(connection, job_id=job_id, prefix=prefix, status=part_status)
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == job_id).values(
+                job_kind="shard",
+                parent_job_id=run_id,
+                manifest_path=str(self.root / "runs" / manifest),
+                manifest_indexes_json=json.dumps([index]),
+                updated_at=updated_at,
+            ))
+
+    def _insert_season_episodes(self, connection: DBClient, seasons: list[int]) -> None:
+        for season in seasons:
+            self._insert_library_item(
+                connection,
+                self._create_source_file(f"Season {season}/episode.mkv"),
+                rel_path=f"tv/show/Season {season}/episode.mkv",
+            )
+
+    def test_folder_workflow_season_needs_attention_only_for_its_own_problems_in_a_show_run(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_season_episodes(connection, [1, 2])
+            self._write_manifest("show-run.json", [
+                {"rel_path": "tv/show/Season 1/episode.mkv"},
+                {"rel_path": "tv/show/Season 2/episode.mkv"},
+            ])
+            self._save_run(
+                connection,
+                "show-run",
+                prefix="tv/show",
+                status="needs_attention",
+                parts=[("part-season-1", "needs_attention", 0), ("part-season-2", "completed", 1)],
+                manifest="show-run.json",
+                updated_at="2026-10-01T00:00:00+00:00",
+            )
+
+            asking = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 1")
+            settled = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+            show = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show")
+            bulk = workflow_state_runtime.build_folder_workflow_states(
+                connection, ["tv/show/Season 1", "tv/show/Season 2"]
+            )
+
+        self.assertEqual(asking.state, "needs_attention")
+        self.assertNotEqual(settled.state, "needs_attention")
+        self.assertEqual(show.state, "needs_attention")
+        self.assertEqual(bulk["tv/show/Season 1"].to_payload(), asking.to_payload())
+        self.assertEqual(bulk["tv/show/Season 2"].to_payload(), settled.to_payload())
+
+    def test_folder_workflow_season_keeps_an_older_runs_problem_a_newer_run_never_reached(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_season_episodes(connection, [1, 2])
+            self._write_manifest("old-run.json", [
+                {"rel_path": "tv/show/Season 1/episode.mkv"},
+                {"rel_path": "tv/show/Season 2/episode.mkv"},
+            ])
+            self._save_run(
+                connection,
+                "old-run",
+                prefix="tv/show",
+                status="needs_attention",
+                parts=[("old-part-1", "completed", 0), ("old-part-2", "needs_attention", 1)],
+                manifest="old-run.json",
+                updated_at="2026-10-01T00:00:00+00:00",
+            )
+            # The newer run covered only Season 1, and one of its files needs the owner too.
+            self._write_manifest("new-run.json", [{"rel_path": "tv/show/Season 1/episode.mkv"}])
+            self._save_run(
+                connection,
+                "new-run",
+                prefix="tv/show",
+                status="needs_attention",
+                parts=[("new-part-1", "needs_attention", 0)],
+                manifest="new-run.json",
+                updated_at="2026-10-02T00:00:00+00:00",
+            )
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == "old-run").values(
+                progress_json=json.dumps({"unfinished_breakdown": [
+                    {"reason": "quality_floor_size_conflict", "label": "older question", "count": 1},
+                ]}),
+            ))
+
+            season_2 = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+            bulk = workflow_state_runtime.build_folder_workflow_states(connection, ["tv/show/Season 2"])
+
+        self.assertEqual(season_2.state, "needs_attention")
+        self.assertIn("older question", season_2.detail)
+        self.assertEqual(bulk["tv/show/Season 2"].to_payload(), season_2.to_payload())
+
+    def test_folder_workflow_newer_run_needing_attention_elsewhere_settles_an_older_problem(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_season_episodes(connection, [1, 2])
+            self._write_manifest("show-run.json", [
+                {"rel_path": "tv/show/Season 1/episode.mkv"},
+                {"rel_path": "tv/show/Season 2/episode.mkv"},
+            ])
+            self._save_run(
+                connection,
+                "old-run",
+                prefix="tv/show",
+                status="needs_attention",
+                parts=[("old-part-1", "needs_attention", 0)],
+                manifest="show-run.json",
+                updated_at="2026-10-01T00:00:00+00:00",
+            )
+            # The newer run encoded Season 1's file, and only Season 2's file needs the owner.
+            self._save_run(
+                connection,
+                "new-run",
+                prefix="tv/show",
+                status="needs_attention",
+                parts=[("new-part-1", "completed", 0), ("new-part-2", "needs_attention", 1)],
+                manifest="show-run.json",
+                updated_at="2026-10-02T00:00:00+00:00",
+            )
+
+            season_1 = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 1")
+            season_2 = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertNotEqual(season_1.state, "needs_attention")
+        self.assertEqual(season_2.state, "needs_attention")
+
+    def test_folder_workflow_season_keeps_attention_when_a_part_cannot_be_traced(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_season_episodes(connection, [1, 2])
+            self._write_manifest("show-run.json", [
+                {"rel_path": "tv/show/Season 1/episode.mkv"},
+                {"rel_path": "tv/show/Season 2/episode.mkv"},
+            ])
+            self._save_run(
+                connection,
+                "show-run",
+                prefix="tv/show",
+                status="needs_attention",
+                parts=[("part-season-1", "needs_attention", 0), ("part-season-2", "completed", 1)],
+                manifest="show-run.json",
+                updated_at="2026-10-01T00:00:00+00:00",
+            )
+            # A part whose manifest is gone could be for any file, Season 2's included.
+            self._save_show_job(connection, job_id="part-unknown", prefix="tv/show", status="needs_attention")
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == "part-unknown").values(
+                job_kind="shard",
+                parent_job_id="show-run",
+                manifest_path=str(self.root / "runs" / "gone.json"),
+                updated_at="2026-10-01T00:00:00+00:00",
+            ))
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertEqual(workflow.state, "needs_attention")
+
     def test_folder_workflow_finished_season_ignores_its_shows_failed_job(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._insert_library_item(
@@ -24005,6 +24171,199 @@ raise SystemExit(0)
         )
         self.assertEqual([job["manifest_indexes"] for job in prepared], [[1]])
 
+    def test_final_size_miss_no_file_was_named_for_leaves_out_only_that_runs_files(self) -> None:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv", "Episode 3.mkv")
+            manifest_path = self._write_manifest(
+                "manifest-final-size-unplaced.json",
+                [
+                    {"library_item_id": item_ids["Episode 1.mkv"], "rel_path": "tv/show/Season 1/Episode 1.mkv"},
+                    {"library_item_id": item_ids["Episode 2.mkv"], "rel_path": "tv/show/Season 1/Episode 2.mkv"},
+                ],
+            )
+            self._save_job(
+                connection,
+                job_id="terminal-final-size-unplaced",
+                manifest_name=manifest_path.name,
+                host={},
+                status="needs_attention",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "terminal-final-size-unplaced")
+                .values(
+                    prefix="tv/show/Season 1",
+                    # The miss names no file.
+                    progress_json=json.dumps({
+                        "failure_analysis": {
+                            "kind": "final_size_target_miss",
+                            "retry_strategy": "fresh_goal_required",
+                        }
+                    }),
+                )
+            )
+
+        saved_jobs: list[dict[str, Any]] = []
+        prepared: list[dict[str, Any]] = []
+        result = self._queue_show_folder(
+            queue_config,
+            saved_jobs,
+            prepare_terminal_encode_job_for_requeue_fn=lambda _connection, job: prepared.append(dict(job)),
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self._queued_manifest_item_ids(saved_jobs), [item_ids["Episode 3.mkv"]])
+        self.assertEqual(
+            [(entry["library_item_id"], entry["code"]) for entry in result["left_out"]],
+            [
+                (item_ids["Episode 1.mkv"], "final_size_recovery_contract_unchanged"),
+                (item_ids["Episode 2.mkv"], "final_size_recovery_contract_unchanged"),
+            ],
+        )
+        self.assertTrue(all("cannot tell which file" in entry["reason"] for entry in result["left_out"]))
+        self.assertEqual(prepared, [])
+
+    def _missed_run_then_queue(
+            self,
+            analysis: dict[str, Any],
+            *,
+            newer_completed_run: bool = False,
+            saved_contract: bool = True,
+    ) -> tuple[MediaforceConfig, dict[str, int], list[dict[str, Any]], dict[str, Any]]:
+        """Episodes 1 and 2 ran under the approved contract and missed final size; Episode 3 never ran."""
+        queue_config = self._complete_queue_config()
+        calibration = self._accepted_calibration_contract(sample_job_id="sample-original")
+        contract = folder_actions_runtime._production_approval_contract(calibration)
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv", "Episode 3.mkv")
+            manifest_path = self._write_manifest("manifest-final-size-recorded.json", [])
+            manifest_path.write_text(json.dumps({
+                "selection": {"production_approval_contract": contract} if saved_contract else {},
+                "items": [
+                    {"library_item_id": item_ids["Episode 1.mkv"], "rel_path": "tv/show/Season 1/Episode 1.mkv"},
+                    {"library_item_id": item_ids["Episode 2.mkv"], "rel_path": "tv/show/Season 1/Episode 2.mkv"},
+                ],
+            }))
+            self._save_job(
+                connection,
+                job_id="missed-run",
+                manifest_name=manifest_path.name,
+                host={},
+                status="needs_attention",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "missed-run")
+                .values(prefix="tv/show/Season 1", job_kind="folder", progress_json=json.dumps({
+                    "failure_analysis": analysis,
+                }))
+            )
+            if newer_completed_run:
+                newer_manifest = self._write_manifest("manifest-newer-run.json", [])
+                self._save_job(
+                    connection,
+                    job_id="newer-run",
+                    manifest_name=newer_manifest.name,
+                    host={},
+                    status="completed",
+                    attempt_count=1,
+                )
+                connection.execute(
+                    update(encode_jobs)
+                    .where(encode_jobs.c.job_id == "newer-run")
+                    .values(prefix="tv/show/Season 1", job_kind="folder", created_at="2999-01-01T00:00:00+00:00")
+                )
+        saved_jobs: list[dict[str, Any]] = []
+        result = self._queue_show_folder(
+            queue_config,
+            saved_jobs,
+            calibration=calibration,
+            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+        )
+        return queue_config, item_ids, saved_jobs, result
+
+    def _assert_miss_outlasts_the_cleared_run(
+            self,
+            analysis: dict[str, Any],
+            missed_names: set[str],
+            *,
+            saved_contract: bool = True,
+    ) -> None:
+        queue_config, item_ids, first_jobs, first = self._missed_run_then_queue(
+            analysis, saved_contract=saved_contract,
+        )
+        self.assertTrue(first["ok"], first)
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertIsNone(load_encode_job(connection, "missed-run"))
+            for job in first_jobs:
+                save_encode_job(connection, {**job, "status": "completed"})
+
+        second_jobs: list[dict[str, Any]] = []
+        second = self._queue_show_folder(
+            queue_config,
+            second_jobs,
+            calibration=self._accepted_calibration_contract(sample_job_id="sample-original"),
+            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+        )
+
+        missed = {item_ids[name] for name in missed_names}
+        queued = set(self._queued_manifest_item_ids(second_jobs)) if second["ok"] else set()
+        self.assertFalse(queued & missed, second)
+        self.assertEqual(
+            {
+                entry["library_item_id"]
+                for entry in second["left_out"]
+                if entry["code"] == "final_size_recovery_contract_unchanged"
+            },
+            missed,
+        )
+
+    def test_named_final_size_miss_still_holds_its_file_after_the_run_record_is_cleared(self) -> None:
+        self._assert_miss_outlasts_the_cleared_run(
+            {"kind": "final_size_target_miss", "item_analyses": [{"kind": "final_size_target_miss", "manifest_index": 0}]},
+            {"Episode 1.mkv"},
+        )
+
+    def test_unnamed_final_size_miss_still_holds_its_runs_files_after_the_run_record_is_cleared(self) -> None:
+        self._assert_miss_outlasts_the_cleared_run(
+            {"kind": "final_size_target_miss"},
+            {"Episode 1.mkv", "Episode 2.mkv"},
+        )
+
+    def test_miss_from_a_run_saved_without_its_approval_still_holds_its_file_after_the_run_is_cleared(self) -> None:
+        self._assert_miss_outlasts_the_cleared_run(
+            {"kind": "final_size_target_miss", "item_analyses": [{"kind": "final_size_target_miss", "manifest_index": 0}]},
+            {"Episode 1.mkv"},
+            saved_contract=False,
+        )
+
+    def test_final_size_miss_hidden_behind_a_newer_finished_run_still_holds_its_files(self) -> None:
+        _config, item_ids, saved_jobs, result = self._missed_run_then_queue(
+            {"kind": "final_size_target_miss"}, newer_completed_run=True,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self._queued_manifest_item_ids(saved_jobs), [item_ids["Episode 3.mkv"]])
+        self.assertEqual(
+            {(entry["library_item_id"], entry["code"]) for entry in result["left_out"]},
+            {
+                (item_ids["Episode 1.mkv"], "final_size_recovery_contract_unchanged"),
+                (item_ids["Episode 2.mkv"], "final_size_recovery_contract_unchanged"),
+            },
+        )
+
+    def test_final_size_miss_on_a_file_without_a_library_item_still_blocks_the_requeue(self) -> None:
+        manifest_path = self._write_manifest("manifest-final-size-nameless.json", [{"rel_path": "tv/show/a.mkv"}])
+        job = {
+            "manifest_path": str(manifest_path),
+            "progress": {"failure_analysis": {"kind": "final_size_target_miss", "manifest_index": 0}},
+        }
+
+        self.assertIsNone(folder_actions_runtime._final_size_miss_item_ids_by_index(job))
+
     def test_quality_risk_refusal_names_every_blocking_reason(self) -> None:
         reason = folder_actions_runtime._quality_risk_blocking_reason({
             "deterministic_gates": {
@@ -24148,6 +24507,70 @@ raise SystemExit(0)
         self.assertEqual(cleared_terminal, [])
         self.assertEqual(self._hold_rows(), {})
 
+    def _save_jobs_as_active(self, jobs: list[dict[str, Any]]) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for job in jobs:
+                save_encode_job(connection, job)
+
+    def test_held_file_joins_production_while_its_scopes_run_is_still_going(self) -> None:
+        queue_config, item_ids, calibration, first_jobs = self._held_episode_fixture()
+        self._save_jobs_as_active(first_jobs)
+        self._clear_cadence(item_ids["Episode 2.mkv"])
+        joined_jobs: list[dict[str, Any]] = []
+
+        results = production_holds_runtime.join_cleared_held_files(
+            lambda: open_db(self.config.paths.db_path),
+            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
+            queue_held_files=lambda group: self._queue_show_folder(
+                queue_config,
+                joined_jobs,
+                calibration=calibration,
+                only_library_item_ids=group.library_item_ids,
+            ),
+            now_iso=web_app._now_iso,
+        )
+
+        self.assertEqual([result["ok"] for result in results], [True], results)
+        self.assertEqual(self._queued_manifest_item_ids(joined_jobs), [item_ids["Episode 2.mkv"]])
+        with open_db(self.config.paths.db_path) as connection:
+            first_run = load_encode_job(connection, str(first_jobs[0]["job_id"]))
+        self.assertEqual(str(object_dict(first_run).get("status")), "queued")
+        self.assertEqual(self._hold_rows(), {})
+
+    def test_held_file_a_running_encode_is_making_keeps_waiting(self) -> None:
+        queue_config, item_ids, calibration, _first_jobs = self._held_episode_fixture()
+        manifest_path = self._write_manifest(
+            "manifest-held-file-running.json",
+            [{"library_item_id": item_ids["Episode 2.mkv"], "rel_path": "tv/show/Season 1/Episode 2.mkv"}],
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(
+                connection,
+                job_id="running-held-file",
+                manifest_name=manifest_path.name,
+                host={},
+                status="running",
+                attempt_count=1,
+            )
+        self._clear_cadence(item_ids["Episode 2.mkv"])
+        joined_jobs: list[dict[str, Any]] = []
+
+        results = production_holds_runtime.join_cleared_held_files(
+            lambda: open_db(self.config.paths.db_path),
+            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
+            queue_held_files=lambda group: self._queue_show_folder(
+                queue_config,
+                joined_jobs,
+                calibration=calibration,
+                only_library_item_ids=group.library_item_ids,
+            ),
+            now_iso=web_app._now_iso,
+        )
+
+        self.assertEqual([result["code"] for result in results], ["encode_already_active"])
+        self.assertEqual(joined_jobs, [])
+        self.assertEqual(self._hold_rows()[item_ids["Episode 2.mkv"]]["status"], "waiting")
+
     def test_held_file_waits_when_its_approval_has_changed(self) -> None:
         _config, item_ids, _calibration, _jobs = self._held_episode_fixture()
         self._clear_cadence(item_ids["Episode 2.mkv"])
@@ -24286,7 +24709,7 @@ raise SystemExit(0)
         )
 
         self.assertEqual(accepted["accepted_count"], 1)
-        self.assertIn("It joins production once nothing else is encoding in the show.", accepted["message"])
+        self.assertIn("It joins production on its own, without waiting for the show's current run.", accepted["message"])
         hold = holds[item_ids["Episode 2.mkv"]]
         self.assertEqual(
             (hold["prefix"], hold["mode"], hold["approval_identity"], hold["status"]),
@@ -24330,7 +24753,7 @@ raise SystemExit(0)
             queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: "approval",
         )
 
-        self.assertIn("It joins production once nothing else is encoding", accepted["message"])
+        self.assertIn("It joins production on its own", accepted["message"])
         self.assertEqual(self._hold_rows()[item_ids["Episode 2.mkv"]]["prefix"], "tv/show/Season 1")
 
     def test_accepted_episode_joins_an_older_seasons_run_only_for_a_season_it_included(self) -> None:
