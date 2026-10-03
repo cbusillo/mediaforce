@@ -203,9 +203,9 @@ function summarizeFailedCrfSearch(lines: string[]): string | null {
 	const probes = lines.map(parseCrfSearchProbe).filter((probe): probe is string => Boolean(probe));
 	const uniqueProbes = Array.from(new Set(probes));
 	if (uniqueProbes.length === 0) {
-		return 'No CRF satisfied both the quality target and size limit. Try relaxing the target, raising the size cap, or adjusting the sample note.';
+		return 'No compression setting met both the picture quality target and size limit. Try relaxing the target, raising the size cap, or adjusting the sample note.';
 	}
-	return `No CRF satisfied both the quality target and size limit. Search tried ${uniqueProbes.join(
+	return `No compression setting met both the picture quality target and size limit. Search tried ${uniqueProbes.join(
 		' and '
 	)}.`;
 }
@@ -215,7 +215,7 @@ function parseCrfSearchProbe(line: string): string | null {
 		/\bcrf\s+([\d.]+)\s+([A-Z0-9]+)\s+([\d.]+)(?:\s+predicted\b.*?)?\s+\((\d+(?:\.\d+)?)%\)/i
 	);
 	if (!match) return null;
-	return `CRF ${match[1]} at ${match[2].toUpperCase()} ${match[3]} / ${match[4]}%`;
+	return `Setting ${match[1]} at ${resolveMetricLabel(match[2], { vmaf: false, xpsnr: false, ssim: false })} ${match[3]} / ${match[4]}%`;
 }
 
 function isActionableFailureLine(line: string): boolean {
@@ -227,7 +227,7 @@ function isActionableFailureLine(line: string): boolean {
 function parseAbAv1SampleProgress(line: string): string | null {
 	const match = line.match(/encoding sample\s+(\d+)\/(\d+)\s+crf\s+([\d.]+)/i);
 	if (!match) return null;
-	return `sample ${match[1]}/${match[2]} at CRF ${match[3]}`;
+	return `sample ${match[1]}/${match[2]} at compression setting ${match[3]}`;
 }
 
 export type FolderReviewClip = {
@@ -855,9 +855,15 @@ export function resolveMetricLabel(
 		.trim()
 		.toLowerCase();
 	if (raw === 'auto') {
-		return metricSupport.vmaf ? 'VMAF' : 'XPSNR';
+		return metricSupport.vmaf ? 'Picture appearance score' : 'Picture detail score';
 	}
-	return raw.toUpperCase();
+	return (
+		{
+			vmaf: 'Picture appearance score',
+			xpsnr: 'Picture detail score',
+			ssim: 'Picture similarity score'
+		}[raw] ?? 'Picture quality score'
+	);
 }
 
 function summarizeBlackBarHandling(value: string | null | undefined): string | null {
@@ -912,18 +918,18 @@ export function policyRowLabel(path: string): string {
 		'video.encoder': 'Video encoder',
 		'video.pixel_format': 'Pixel format',
 		'video.preset': 'Preset',
-		'video.crf_search': 'CRF search',
+		'video.crf_search': 'Find a compression setting',
 		'video.quality_metric': 'Quality metric',
-		'video.target_vmaf': 'Target VMAF',
-		'video.min_target_vmaf': 'VMAF floor',
-		'video.target_xpsnr': 'Target XPSNR',
-		'video.min_target_xpsnr': 'XPSNR floor',
-		'video.target_relax_step_vmaf': 'VMAF relax step',
-		'video.target_relax_step_xpsnr': 'XPSNR relax step',
+		'video.target_vmaf': 'Picture appearance score target',
+		'video.min_target_vmaf': 'Minimum picture appearance score',
+		'video.target_xpsnr': 'Picture detail score target',
+		'video.min_target_xpsnr': 'Minimum picture detail score',
+		'video.target_relax_step_vmaf': 'Perceptual score adjustment',
+		'video.target_relax_step_xpsnr': 'Detail score adjustment',
 		'video.sample_every': 'Sample cadence',
 		'video.sample_duration': 'Sample duration',
-		'video.min_crf': 'Minimum CRF',
-		'video.max_crf': 'Maximum CRF',
+		'video.min_crf': 'Minimum compression setting',
+		'video.max_crf': 'Maximum compression setting',
 		'video.max_encoded_percent': 'Size ceiling',
 		'video.max_height': 'Output height cap',
 		'video.downsample_algorithm': 'Downsample filter',

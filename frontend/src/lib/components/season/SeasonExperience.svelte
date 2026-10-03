@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolveMetricLabel } from '$lib/folders/studio';
 	import { libraryCopy } from '$lib/library-copy';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
@@ -3293,7 +3294,7 @@
 			{#if qualityMemory.state !== 'empty'}
 				<div class="quality-memory__comparison">
 					<div class="quality-memory__measured">
-						<span>Measured production run</span>
+						<span>This compression run</span>
 						<div class="quality-memory__facts">
 							{#each qualityMemory.measured as fact (fact.label)}
 								<div>
@@ -3375,7 +3376,10 @@
 					</div>
 					<div>
 						<span>Metric</span><strong
-							>{asText(technicalPolicy().quality_metric).toUpperCase() || 'Automatic'}</strong
+							>{resolveMetricLabel(
+								asText(technicalPolicy().quality_metric),
+								folder.metric_support
+							)}</strong
 						>
 					</div>
 					<div>
@@ -3422,7 +3426,7 @@
 						</div>
 					{/if}
 					{#if asNumber(sampleResult.chosen_crf)}<div>
-							<span>Chosen CRF</span><strong>{asNumber(sampleResult.chosen_crf)}</strong>
+							<span>Compression setting</span><strong>{asNumber(sampleResult.chosen_crf)}</strong>
 						</div>{/if}
 					{#if asNumber(sampleResult.quality_score)}<div>
 							<span>Measured score</span><strong

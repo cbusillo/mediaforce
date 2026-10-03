@@ -10,8 +10,8 @@ implementation nouns.
 - Name the user's next decision before naming the subsystem.
 - Prefer short labels that describe work state: `Ready to review`, `Waiting for
 a computer`, `Needs sample`, `Safe to delete`.
-- Keep implementation terms available in advanced settings, logs, tooltips, or
-  metadata rows when they help diagnosis.
+- Keep diagnostic facts reachable in Details, using plain labels. Backend logs
+  and setting keys retain their internal names outside the interface.
 - Do not use different names for the same state across routes.
 - Disabled controls must either explain the missing condition or stay hidden
   when the action cannot help.
@@ -32,8 +32,6 @@ a computer`, `Needs sample`, `Safe to delete`.
 - Policy: use `Settings` or `proposed settings` in Folder Studio proposal rows
   and approval copy.
 - Draft: use `Proposal` in user-visible review and approval copy.
-- Pending proposal: use `Proposal ready for review` in Folder Studio decision
-  state.
 - Encode: use `Compress` for user actions and exact-scope progress. Use
   `Processing` only for a mixed-media running-state summary; keep `encode` in
   technical job tables.
@@ -72,13 +70,12 @@ a computer`, `Needs sample`, `Safe to delete`.
   original backups are already gone. Mark-handled confirmation must say
   `Nothing is deleted`.
 - Missing sample: use `Needs sample` in Library and show page blockers.
-- Polling: use `Checking for updates` in loading and refresh states.
 - Scheduler: use `Work schedule` in Activity and Settings.
 - Schedule profile: use `Work window` in Settings basic labels.
-- Staging root: use `Computer staging folder` in advanced computer settings.
 
-Use the internal term only when the user is editing a technical setting,
-debugging a computer, or comparing logs against backend output.
+Use plain labels even when editing numeric settings: `Picture appearance score`,
+`Picture detail score`, and `Compression setting`. Backend keys and log syntax
+remain internal; they are not screen labels.
 
 ## Global Phase Language
 
@@ -86,14 +83,14 @@ Use this sequence across TV, Movie, Other, Activity, Finished, and Settings.
 Scope nouns may change (`episode`, `movie`, `file`, or `files`), but the phase
 verb does not.
 
-| Phase                    | Primary action              | Waiting or running                   | Ready state        |
-| ------------------------ | --------------------------- | ------------------------------------ | ------------------ |
-| Safe representative work | `Create sample`             | `Sample waiting` / `Creating sample` | `Ready to review`  |
-| Human review media       | `Full screen`               | —                                    | `Ready to review`  |
-| Production compression   | `Compress …`                | `Compressing …`                      | `Ready to check`   |
-| Machine validation       | `Check compressed file(s)`  | `Checking …`                         | `Ready to replace` |
-| Installation             | `Replace original(s)`       | `Replacing …`                        | `Replaced`         |
-| Cleanup                  | `Delete original backup(s)` | `Deleting …`                         | `Deleted`          |
+| Phase                    | Primary action              | Waiting or running                   | Ready state         |
+| ------------------------ | --------------------------- | ------------------------------------ | ------------------- |
+| Safe representative work | `Create sample`             | `Sample waiting` / `Creating sample` | `Ready to review`   |
+| Human review media       | `Full screen`               | —                                    | `Ready to review`   |
+| Production compression   | `Compress …`                | `Compressing …`                      | `Ready to check`    |
+| Machine validation       | `Check compressed file(s)`  | `Checking …`                         | `Ready to replace`  |
+| Installation             | `Replace original(s)`       | `Replacing …`                        | `Replaced`          |
+| Cleanup                  | `Delete original backup(s)` | `Deleting …`                         | `Nothing to delete` |
 
 Use `Set up sample` only when the product genuinely saves a plan without
 opening media or queueing work. Do not use `preview` for this workflow; preview
@@ -130,15 +127,18 @@ bytes in Technical details.
 - Compression queued or running: `Compressing`. Scope-wide work is underway.
 - Compression failed or stopped: `Compression needs attention`. The user must inspect
   or retry from the route that owns recovery.
-- Quality memory has no prior observation: `No memory yet`.
-- Quality memory lacks enough compatible runs: `Sparse memory`.
-- Quality memory no longer matches source or settings: `Memory invalidated`.
-- Quality-memory evaluation failed without affecting production search: `Memory
-unavailable`.
-- Quality-memory evidence disagrees or is unstable: `Evidence conflict`.
-- A stable recommendation has ten or more item/season observations: `High
-confidence`. Always pair these states with `quality floors and saved policy
-remain unchanged` while memory is observation-only.
+- Past results has no finished run: `Nothing yet`, with `No saved results to learn from yet`
+- Not enough matching results: `More results needed`.
+- Earlier results no longer match source or settings: `Earlier results out of date`.
+- Earlier results could not be checked: `Earlier results unavailable`.
+- Earlier results disagree or are unstable: `Results disagree`.
+- A stable starting suggestion has ten or more matching results: `High confidence`;
+  if it differed from the measured run, `High confidence · differed`.
+- A suggested starting setting passed the checks: `Starting suggestion worked`.
+- The suggested starting setting failed a check: `Normal search used`.
+- When earlier results are only recorded for comparison, say that the normal
+  search ran. When a starting setting was tried, describe whether it passed or
+  was discarded. Neither path changes saved settings or quality limits.
 
 ### Activity
 
@@ -170,7 +170,7 @@ remain unchanged` while memory is observation-only.
   other computers are ready.
 - Computer window open with a known close: `Open` when idle and `Working` while
   processing. Show the exact host-local close time beside the state.
-- Computer has time left but no queued episode safely fits: `Draining`. Work
+- Computer has time left but no queued episode safely fits: `Finishing before the window closes`. Work
   resumes automatically in the next compatible full window.
 - Episode stopped at a schedule boundary: `Paused until the next work window`. Explain that
   the whole episode restarts automatically and no failure attempt was used.
@@ -192,14 +192,12 @@ remain unchanged` while memory is observation-only.
 - Cross-media queue summaries: derive `movie`, `episode`, `season`, `show`, or
   `file` from the full relevant job set. Use `media work` or `media items` for
   mixed scopes, and let active work outrank stale attention in the headline.
-- Historical sample failures: `Past sample issues`. Old sample/proof failures
-  are history unless they block current work.
 - Catalog facts match policy: `Current`. Mediaforce can browse remembered file
   facts without opening media.
-- Catalog age recommends another inventory pass: `Refresh suggested`.
+- Catalog age recommends another inventory pass: `Worth a fresh look`.
 - A source could not be reconciled safely: `Needs a check`. Explain that cached
   catalog state was preserved.
-- Evidence scope selected but not started: `Prepared`. Preparing never opens
+- Evidence scope selected but not started: `Ready to start`. Preparing never opens
   media or starts FFmpeg.
 - Evidence analyzer owns a work unit: `Analyzing`.
 - Evidence work stopped before the next unit: `Paused`.
@@ -216,12 +214,8 @@ remain unchanged` while memory is observation-only.
   checking, and promotion events. Use `Season` only for a folder-level summary,
   not for every TV item event.
 
-- Original backups exist: `Original backups ready to delete`. Files can be
+- Original backups exist: `Backups ready to delete`. Files can be
   removed from the cleanup folder after review.
-- Selected folder is safe: `Selected backups ready`. The selected completed
-  folder is eligible for deletion.
-- Cleanup folder missing: `Cleanup folder missing`. Mediaforce cannot verify or
-  delete original backups.
 - Backup outside the Cleanup folder: `Check before deleting`. Mediaforce will
   not delete original backups outside the configured Cleanup folder.
 - Folder state unknown: `Check before deleting`. The user should not remove
@@ -233,15 +227,9 @@ remain unchanged` while memory is observation-only.
 
 ### Settings
 
-- Unsaved settings draft: `Unsaved changes`. Edits are local until saved.
+- Unsaved settings draft: `Unsaved`. Edits are local until saved.
 - Transcode root missing: `Working folder missing`. Mediaforce cannot store
   processing files.
-- Remote host unavailable: `Computer unavailable`. A configured computer cannot
-  accept work right now.
-- Host trust reset supported: `Reset trust`. Advanced computer recovery is
-  available.
-- Archive cleanup target changed: `Save before deleting`. The cleanup target
-  changed and deletion must wait for saved settings.
 
 ## Route Copy Direction
 
@@ -270,7 +258,7 @@ remain unchanged` while memory is observation-only.
   `inference`, and raw workflow labels out of primary copy. Other Studio should
   distinguish `Set up sample` from `Create sample`, use the shared review
   choices (`Keep this version`, `Use less space`, and `Improve picture or
-  sound`), and follow the shared compress/check/replace phase verbs.
+sound`), and follow the shared compress/check/replace phase verbs.
 - Activity may expose more technical detail, but first-level headings should
   still use `computers`, `sample queue`, `compression queue`, and `retry available`.
 - Finished should use destructive language directly: `Delete original
