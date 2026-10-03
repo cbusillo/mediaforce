@@ -7,6 +7,7 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 - `DIRECTION.md` (repository root): what Mediaforce is for and where work
   stops; it wins over any doc here
 - `docs/policies/acceptance-gate.md`: commit/session-finish bar
+- `docs/development/ci-media-tools.md`: pinned CI media tools and cache verification
 - `docs/policies/coding-standards.md`: repo-wide coding expectations
 - `docs/style/index.md`: entry point for language and testing style guides
 - `docs/style/workstation-ui.md`: UI doctrine for user-facing workstation
