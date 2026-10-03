@@ -92,8 +92,9 @@ problem never holds its siblings. Each held item also gets a row in
 `production_holds` naming the scope, the queue mode (folder, season override,
 or older seasons) and the approval it was held under. The web app's
 `held-files-worker` queues held items whose evidence has since cleared as a
-separate run under that same approval once no encode is active for the scope,
-without clearing or retrying the scope's earlier jobs. If the approval changed,
+separate run under that same approval, without waiting for the scope's current
+run and without clearing or retrying the scope's earlier jobs. A held item that
+an active encode is already making keeps waiting until that encode lets it go. If the approval changed,
 or the queue refuses the files outright, nothing is queued and the hold keeps
 that status so the files stay listed. Sample actions keep their hard blocker because
 they select exactly one item.

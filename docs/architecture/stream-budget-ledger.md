@@ -130,10 +130,19 @@ sample cadence, source caps, or quality floors.
 A terminal final-size miss also blocks every production queue entrypoint from
 reusing the same reviewed contract for the items that missed. When the failure
 analysis names those items, a requeue leaves out only them, keeps their
-artifacts, and queues their siblings; when it cannot place a miss on an item,
-the whole requeue fails closed. Queue admission records the approved sample
-identity and a normalized user-intent contract covering size, compression,
-quality, resolution, and retained streams. Recovery requires both a new
+artifacts, and queues their siblings. A shard that missed as a whole covers
+each of its files, and a miss that names no file covers every file of that run:
+those files are left out with a plain reason that says Mediaforce cannot tell
+which one missed, and files outside the run still queue. Only when a covered
+file has no library item to name, or every queued file is covered, does the
+whole requeue fail closed. Before a requeue clears the folder's ended runs,
+each miss is also kept on its files as an item event with the approval it
+missed under, so a later requeue, or a newer run that finished after it, cannot
+let those files retry under the same approval. A run saved without its
+approval keeps its miss under the approval current at that requeue, so it
+still needs another sampled review. Queue admission records the
+approved sample identity and a normalized user-intent contract covering size,
+compression, quality, resolution, and retained streams. Recovery requires both a new
 representative sample and a changed user-intent contract; a new approval
 timestamp, unrelated policy edit, lifecycle override, schedule bypass, or raw
 policy-hash change is not sufficient. Missing or malformed historical contract
