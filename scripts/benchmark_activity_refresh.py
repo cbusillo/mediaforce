@@ -136,7 +136,7 @@ def run_benchmark(pending_count: int, *, iterations: int = 5) -> dict[str, Any]:
         try:
             config, case_counts = _fixture(Path(directory), pending_count)
             expected_waiting = sum(case_counts[case.name] for case in CASES if case.counted)
-            # Display telemetry is bounded separately; no manifest exists in this inventory-only fixture.
+            # Fixture display rows use stubbed totals; no manifests exist in this inventory-only fixture.
             with patch.object(encode_scheduler, "datetime", FixtureDatetime), patch.object(
                 web_app, "runtime_encode_job_manifest_totals", return_value={}
             ) as manifest_reads, patch(

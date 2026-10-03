@@ -29,8 +29,7 @@ Setup and one warm refresh are excluded. Five untraced timing samples, one separ
 tracemalloc allocation pass and one separate SQL/profile instrumentation pass avoid
 mixing tracing overhead into request-component timing. `python_peak_bytes` measures
 incremental traced Python allocations for one warm refresh, not total RSS or native
-SQLite allocations. SQLAlchemy-observed SQL text and counts (excluding raw-driver connection PRAGMAs), profile builds, decorated jobs and bounded
-display manifest-total calls are included in the JSON. The supplied source SHA and
+SQLite allocations. SQLAlchemy-observed SQL text and counts (excluding raw-driver connection PRAGMAs), profile builds, decorated jobs and fixture display manifest-total calls are included in the JSON. The supplied source SHA and
 the script's SHA-256 fingerprint identify what was measured.
 
 If allocation tracing is already enabled, the benchmark subtracts live baseline
@@ -72,9 +71,18 @@ isolated hardware comparison.
 | 1,000 | 335/335 | 1,021.70 | 638.58–1,210.55 | 1,017.44 | 4.47 | 4,136,713 |
 | 10,000 | 3,335/3,335 | 2,053.12 | 1,527.38–3,965.88 | 1,978.82 | 40.51 | 41,113,539 |
 
-Each refresh executed 15 SQL statements, built profiles once, decorated N + 4 jobs,
-and made four display manifest-total calls. JSON encoding medians stayed under
-0.1 ms: only the bounded display rows, not N pending jobs, reach the response.
+With display cardinality held fixed, each fixture refresh executed 15 SQLAlchemy
+statements, built profiles once, decorated N + 4 jobs, and made four display
+manifest-total calls. JSON encoding medians stayed under 0.1 ms: the fixture's four
+display rows, not N pending shards, reach the response. Real `needs_attention`
+display rows are unbounded and are not varied in this comparison; query work,
+manifest reads and response size can grow with that separate dimension.
+
+A review control at `74cf6aa7bc5f30aaa9e86da700ad6fae025c3771` added 30 synthetic
+attention parents while holding 36 pending files fixed. Waiting counts remained
+12, but attention display rows grew to 31, observed statements to 50, display
+manifest-total calls to 39 and response bytes to 103,419. This confirms the
+fixed-display limitation; it is not a production cardinality measurement.
 Exact total samples in milliseconds:
 
 - 36: 6.83, 14.05, 15.72, 19.55, 235.25
@@ -85,7 +93,8 @@ An earlier Always/Never-only probe produced medians 7.64/318.55/3,659.24 ms and
 allocation peaks 231,005/4,129,134/41,073,640 bytes. It omitted clock-based windows
 and is retained as an initial probe, not the main comparison. The spread reinforces
 why individual timings should not be read as precise scaling ratios. Both passes
-show bounded query/profile work and roughly linear pending-inventory allocations.
+show constant query/profile work at fixed display cardinality and roughly linear
+pending-inventory allocations.
 
 Recommendation: pursue a focused compact-column/streaming inventory experiment in a
 separate item. The 10,000-file fixture already consumes about 39 MiB of traced Python
@@ -95,7 +104,9 @@ query and cannot establish its latency or justify priority on timing alone.
 Base the follow-up on the demonstrated allocation scaling, first compare short/empty
 notes, and isolate pending-query work before claiming a timing win. Measure a projection containing
 only classification inputs, while retaining the full display rows and per-file
-classification. Compare exact counts across this closed-window case matrix before adopting it,
+classification. This matrix covers shards under folder parents; standalone `single`
+jobs and variable attention-parent cardinality belong in the follow-up comparison.
+Compare exact counts across that expanded matrix before adopting an optimization,
 and retain the existing scheduler tests for open windows and the Never profile;
 do not replace classification with parent-row counts or introduce cached counts
 without a correctness design. The current production read remains unchanged by
