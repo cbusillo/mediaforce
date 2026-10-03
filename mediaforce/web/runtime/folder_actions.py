@@ -227,33 +227,43 @@ def _final_size_requeue_contract_blocker(
     }
 
 
-def _final_size_miss_item_ids_by_index(job: JobPayload | None) -> dict[int, int]:
-    """Library items that missed final size, by manifest index; empty when any miss cannot be placed."""
+def _final_size_miss_item_ids_by_index(job: JobPayload | None) -> tuple[dict[int, int], set[int]] | None:
+    """Library items that may have missed final size by manifest index, and the indexes no miss names alone.
+
+    A shard that missed as a whole covers each of its files. A miss that names no file covers every
+    file the run was making. Files outside that run are not affected. None when a covered file has no
+    library item.
+    """
     job_payload = object_dict(job)
     failure_analysis = object_dict(object_dict(job_payload.get("progress")).get("failure_analysis"))
     analyses = [object_dict(item) for item in object_list(failure_analysis.get("item_analyses"))]
     if not analyses:
         analyses = [failure_analysis]
-    miss_indexes: set[int] = set()
+    items = _manifest_items(job_payload)
+    run_indexes = [
+        index for index in object_list(job_payload.get("manifest_indexes")) if isinstance(index, int)
+    ] or list(range(len(items)))
+    named_indexes: set[int] = set()
+    covered_indexes: set[int] = set()
     for analysis in analyses:
         if str(analysis.get("kind") or "") != "final_size_target_miss":
             continue
         if "manifest_index" in analysis:
             indexes = [int_value(analysis.get("manifest_index"))]
         else:
-            # A shard that missed as a whole cannot say which of its files missed; leave all of them out.
             indexes = [index for index in object_list(analysis.get("manifest_indexes")) if isinstance(index, int)]
-        if not indexes or any(index < 0 for index in indexes):
-            return {}
-        miss_indexes.update(indexes)
-    items = _manifest_items(job_payload)
+        if not indexes or not all(0 <= index < len(items) for index in indexes):
+            indexes = run_indexes
+        (named_indexes if len(indexes) == 1 else covered_indexes).update(indexes)
     item_ids: dict[int, int] = {}
-    for index in sorted(miss_indexes):
-        item_id = int(items[index].get("library_item_id") or 0) if index < len(items) else 0
+    for index in sorted(named_indexes | covered_indexes):
+        item_id = int(items[index].get("library_item_id") or 0) if 0 <= index < len(items) else 0
         if item_id <= 0:
-            return {}
+            return None
         item_ids[index] = item_id
-    return item_ids
+    if not item_ids:
+        return None
+    return item_ids, covered_indexes - named_indexes
 
 
 def _normalized_number(value: Any) -> float | None:
@@ -565,7 +575,7 @@ def queue_folder_encode_action(
         )
         hold_approval = production_approval_identity(calibration_payload)
         joining_held_files = only_library_item_ids is not None
-        only_item_ids = frozenset(int(item_id) for item_id in only_library_item_ids or ())
+        only_item_ids = {int(item_id) for item_id in only_library_item_ids or ()}
         calibration_video = object_dict(calibration_policy.get("video"))
         calibration_intent = operator_intent_from_policy(
             calibration_video,
@@ -635,8 +645,19 @@ def queue_folder_encode_action(
                         "Make and approve a revised test before starting the season."
                     ),
                 )
-        active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix) or (
-            None if joining_held_files else _stopped_folder_with_active_children(connection, normalized_prefix)
+        if joining_held_files:
+            # Held files join as their own run beside the scope's running one, minus any it is making.
+            busy_item_ids = active_encode_library_item_ids(connection, normalized_prefix)
+            if busy_item_ids is None or not only_item_ids - busy_item_ids:
+                return {
+                    "ok": False,
+                    "code": "encode_already_active",
+                    "message": "A running encode may still be making these files, so they wait for it.",
+                }
+            only_item_ids -= busy_item_ids
+        active_encode_job = None if joining_held_files else (
+            load_active_encode_job_for_prefix_fn(connection, normalized_prefix)
+            or _stopped_folder_with_active_children(connection, normalized_prefix)
         )
         if active_encode_job is not None:
             active_prefix = str(active_encode_job.get("prefix") or normalized_prefix).strip().strip("/")
@@ -932,13 +953,23 @@ def queue_folder_encode_action(
         )
         final_size_miss_indexes: dict[int, int] = {}
         if final_size_requeue_blocker is not None:
-            final_size_miss_indexes = _final_size_miss_item_ids_by_index(latest_encode_job)
-            if not final_size_miss_indexes:
+            final_size_misses = _final_size_miss_item_ids_by_index(latest_encode_job)
+            if final_size_misses is None or {
+                int(item.get("library_item_id") or 0) for item in manifest["items"]
+            } <= set(final_size_misses[0].values()):
                 return final_size_requeue_blocker
+            final_size_miss_indexes, covered_miss_indexes = final_size_misses
             rel_paths = {
                 int(item.get("library_item_id") or 0): str(item.get("rel_path") or "")
                 for item in _manifest_items(object_dict(latest_encode_job))
             }
+            named_miss_ids = {
+                item_id for index, item_id in final_size_miss_indexes.items() if index not in covered_miss_indexes
+            }
+            # A file that only possibly missed is listed when it would otherwise be queued again.
+            covered_miss_ids = {
+                final_size_miss_indexes[index] for index in covered_miss_indexes
+            } & {int(item.get("library_item_id") or 0) for item in manifest["items"]}
             left_out.extend(
                 LeftOutFile(
                     item_id,
@@ -947,9 +978,14 @@ def queue_folder_encode_action(
                     (
                         "Missed its approved final size under the same reviewed settings. "
                         "Approve a fresh test with a changed goal before retrying it."
+                        if item_id in named_miss_ids
+                        else (
+                            "Part of its run missed the approved final size, and Mediaforce cannot tell which file. "
+                            "Approve a fresh test with a changed goal before retrying it."
+                        )
                     ),
                 )
-                for item_id in sorted(set(final_size_miss_indexes.values()))
+                for item_id in sorted(named_miss_ids | covered_miss_ids)
             )
         selection = object_dict(manifest.get("selection"))
         # Files accepted later can join this run under the same mode; see ambiguous_motion.

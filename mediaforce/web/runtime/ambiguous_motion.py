@@ -142,7 +142,7 @@ def accept_ambiguous_motion_action(
         else "No files were waiting for this decision."
     )
     if joining_count:
-        message += f" {_count_phrase(joining_count, accepted_count)} production once nothing else is encoding in the show."
+        message += f" {_count_phrase(joining_count, accepted_count)} production on its own, without waiting for the show's current run."
     if next_queue_count:
         message += (
             f" {_count_phrase(next_queue_count, accepted_count)} production the next time you queue the show, "
