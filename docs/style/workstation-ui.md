@@ -14,8 +14,8 @@ different visual or language model.
 beautiful, obvious at a glance, and written in plain words. A term the Director
 has to look up is a defect.
 
-- Plain and calm comes first. Show what matters now and put the rest one step
-  away.
+- Plain and calm comes first. Show what matters now, including every reason
+  work is waiting, and put diagnostics and implementation detail one step away.
 - Each screen answers two questions at a glance: what is happening, and what
   is the Director's to do.
 - Mediaforce is not a landing page, analytics dashboard, or conversational
