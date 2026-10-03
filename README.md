@@ -413,13 +413,13 @@ you can see the storage win before promotion.
 
 ## Folder defaults
 
-Keep campaign tuning in [config/folder-defaults.toml](config/folder-defaults.toml).
-That file is where per-show or per-season starting policies should live.
+[config/folder-defaults.toml](config/folder-defaults.toml) holds shared
+per-folder starting points and ships with one sample block (`tv/Suits`). Shows
+normally follow the global defaults and the Director's approval; do not pin
+per-show or per-season tuning there.
 
 Bench-approved drafts are saved locally in runtime settings so future runs on
-that machine can reuse them without mutating the tracked repo defaults. If a
-bench-learned policy should become a shared starting point for everyone, copy it
-into `config/folder-defaults.toml` intentionally.
+that machine can reuse them without changing the tracked repo defaults.
 
 Use the web Settings page for ordered typed library roots, the transcode folder,
 remote host definitions, the Plex server URL, and Plex-to-Mediaforce path
