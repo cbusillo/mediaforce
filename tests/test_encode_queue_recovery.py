@@ -8086,6 +8086,172 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(workflow.state, "processing")
 
+    def _save_run(
+            self,
+            connection: DBClient,
+            run_id: str,
+            *,
+            prefix: str,
+            status: str,
+            parts: list[tuple[str, str, int]],
+            manifest: str,
+            updated_at: str,
+    ) -> None:
+        """A folder run and its parts, each part for one manifest index, all last updated at `updated_at`."""
+        self._save_show_job(connection, job_id=run_id, prefix=prefix, status=status)
+        connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == run_id).values(
+            job_kind="folder", manifest_path=str(self.root / "runs" / manifest), updated_at=updated_at,
+        ))
+        for job_id, part_status, index in parts:
+            self._save_show_job(connection, job_id=job_id, prefix=prefix, status=part_status)
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == job_id).values(
+                job_kind="shard",
+                parent_job_id=run_id,
+                manifest_path=str(self.root / "runs" / manifest),
+                manifest_indexes_json=json.dumps([index]),
+                updated_at=updated_at,
+            ))
+
+    def _insert_season_episodes(self, connection: DBClient, seasons: list[int]) -> None:
+        for season in seasons:
+            self._insert_library_item(
+                connection,
+                self._create_source_file(f"Season {season}/episode.mkv"),
+                rel_path=f"tv/show/Season {season}/episode.mkv",
+            )
+
+    def test_folder_workflow_season_needs_attention_only_for_its_own_problems_in_a_show_run(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_season_episodes(connection, [1, 2])
+            self._write_manifest("show-run.json", [
+                {"rel_path": "tv/show/Season 1/episode.mkv"},
+                {"rel_path": "tv/show/Season 2/episode.mkv"},
+            ])
+            self._save_run(
+                connection,
+                "show-run",
+                prefix="tv/show",
+                status="needs_attention",
+                parts=[("part-season-1", "needs_attention", 0), ("part-season-2", "completed", 1)],
+                manifest="show-run.json",
+                updated_at="2026-10-01T00:00:00+00:00",
+            )
+
+            asking = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 1")
+            settled = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+            show = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show")
+            bulk = workflow_state_runtime.build_folder_workflow_states(
+                connection, ["tv/show/Season 1", "tv/show/Season 2"]
+            )
+
+        self.assertEqual(asking.state, "needs_attention")
+        self.assertNotEqual(settled.state, "needs_attention")
+        self.assertEqual(show.state, "needs_attention")
+        self.assertEqual(bulk["tv/show/Season 1"].to_payload(), asking.to_payload())
+        self.assertEqual(bulk["tv/show/Season 2"].to_payload(), settled.to_payload())
+
+    def test_folder_workflow_season_keeps_an_older_runs_problem_a_newer_run_never_reached(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_season_episodes(connection, [1, 2])
+            self._write_manifest("old-run.json", [
+                {"rel_path": "tv/show/Season 1/episode.mkv"},
+                {"rel_path": "tv/show/Season 2/episode.mkv"},
+            ])
+            self._save_run(
+                connection,
+                "old-run",
+                prefix="tv/show",
+                status="needs_attention",
+                parts=[("old-part-1", "completed", 0), ("old-part-2", "needs_attention", 1)],
+                manifest="old-run.json",
+                updated_at="2026-10-01T00:00:00+00:00",
+            )
+            # The newer run covered only Season 1, and one of its files needs the owner too.
+            self._write_manifest("new-run.json", [{"rel_path": "tv/show/Season 1/episode.mkv"}])
+            self._save_run(
+                connection,
+                "new-run",
+                prefix="tv/show",
+                status="needs_attention",
+                parts=[("new-part-1", "needs_attention", 0)],
+                manifest="new-run.json",
+                updated_at="2026-10-02T00:00:00+00:00",
+            )
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == "old-run").values(
+                progress_json=json.dumps({"unfinished_breakdown": [
+                    {"reason": "quality_floor_size_conflict", "label": "older question", "count": 1},
+                ]}),
+            ))
+
+            season_2 = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+            bulk = workflow_state_runtime.build_folder_workflow_states(connection, ["tv/show/Season 2"])
+
+        self.assertEqual(season_2.state, "needs_attention")
+        self.assertIn("older question", season_2.detail)
+        self.assertEqual(bulk["tv/show/Season 2"].to_payload(), season_2.to_payload())
+
+    def test_folder_workflow_newer_run_needing_attention_elsewhere_settles_an_older_problem(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_season_episodes(connection, [1, 2])
+            self._write_manifest("show-run.json", [
+                {"rel_path": "tv/show/Season 1/episode.mkv"},
+                {"rel_path": "tv/show/Season 2/episode.mkv"},
+            ])
+            self._save_run(
+                connection,
+                "old-run",
+                prefix="tv/show",
+                status="needs_attention",
+                parts=[("old-part-1", "needs_attention", 0)],
+                manifest="show-run.json",
+                updated_at="2026-10-01T00:00:00+00:00",
+            )
+            # The newer run encoded Season 1's file, and only Season 2's file needs the owner.
+            self._save_run(
+                connection,
+                "new-run",
+                prefix="tv/show",
+                status="needs_attention",
+                parts=[("new-part-1", "completed", 0), ("new-part-2", "needs_attention", 1)],
+                manifest="show-run.json",
+                updated_at="2026-10-02T00:00:00+00:00",
+            )
+
+            season_1 = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 1")
+            season_2 = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertNotEqual(season_1.state, "needs_attention")
+        self.assertEqual(season_2.state, "needs_attention")
+
+    def test_folder_workflow_season_keeps_attention_when_a_part_cannot_be_traced(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_season_episodes(connection, [1, 2])
+            self._write_manifest("show-run.json", [
+                {"rel_path": "tv/show/Season 1/episode.mkv"},
+                {"rel_path": "tv/show/Season 2/episode.mkv"},
+            ])
+            self._save_run(
+                connection,
+                "show-run",
+                prefix="tv/show",
+                status="needs_attention",
+                parts=[("part-season-1", "needs_attention", 0), ("part-season-2", "completed", 1)],
+                manifest="show-run.json",
+                updated_at="2026-10-01T00:00:00+00:00",
+            )
+            # A part whose manifest is gone could be for any file, Season 2's included.
+            self._save_show_job(connection, job_id="part-unknown", prefix="tv/show", status="needs_attention")
+            connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == "part-unknown").values(
+                job_kind="shard",
+                parent_job_id="show-run",
+                manifest_path=str(self.root / "runs" / "gone.json"),
+                updated_at="2026-10-01T00:00:00+00:00",
+            ))
+
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, "tv/show/Season 2")
+
+        self.assertEqual(workflow.state, "needs_attention")
+
     def test_folder_workflow_finished_season_ignores_its_shows_failed_job(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._insert_library_item(
