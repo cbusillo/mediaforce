@@ -2079,6 +2079,93 @@ async function checkUnderTargetSampleRecovery(baseUrl, timeoutMs) {
   }
 }
 
+async function checkActivityWorkWindows(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  try {
+    for (const width of [1440, 390]) {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      let waitingCount = 10;
+      await page.route(/\/api\/dashboard(?:\?.*)?$/, async (route) => {
+        const response = await route.fetch();
+        const payload = await response.json();
+        payload.encode_queue.state.scheduler_summary = "runs anytime";
+        payload.encode_queue.queued_waiting_count = 12;
+        payload.encode_queue.queued_schedule_waiting_count = waitingCount;
+        await route.fulfill({ response, json: payload });
+      });
+      await page.route(/\/api\/hosts(?:\?.*)?$/, async (route) => {
+        const response = await route.fetch();
+        const payload = await response.json();
+        for (const host of payload.hosts) {
+          host.available = true;
+          host.schedule_open = false;
+          host.schedule_profile_label = "Night";
+          host.active_encode_count = 0;
+        }
+        await route.fulfill({ response, json: payload });
+      });
+      for (waitingCount of [10, 1, 0]) {
+        await openRoute(page, baseUrl, "/ops", timeoutMs);
+        const details = page.locator(".system-details");
+        const toggle = details.locator("summary");
+        await toggle.focus();
+        await page.keyboard.press("Enter");
+        const schedule = page.locator(".schedule-list");
+        await schedule.waitFor({ state: "visible", timeout: timeoutMs });
+        const expectedCount = `${waitingCount} ${waitingCount === 1 ? "file" : "files"} waiting for a work window`;
+        await expect(schedule).toContainText(expectedCount, {
+          timeout: timeoutMs,
+        });
+        await expect(schedule).toContainText("Off schedule", {
+          timeout: timeoutMs,
+        });
+        const text = await schedule.innerText();
+        if (
+          !text.toLocaleLowerCase().includes("queue-wide schedule") ||
+          !text.includes("No queue-wide time limit") ||
+          !text.includes(expectedCount) ||
+          !text.includes("Off schedule") ||
+          text.includes("Work runs anytime")
+        ) {
+          throw new Error(`Activity work-window panel at ${width}px: ${text}`);
+        }
+        if (
+          await page.evaluate(
+            () =>
+              document.documentElement.scrollWidth >
+              document.documentElement.clientWidth,
+          )
+        ) {
+          throw new Error(`Activity work-window panel overflows at ${width}px`);
+        }
+        if (waitingCount === 10) {
+          await schedule.scrollIntoViewIfNeeded();
+          const directory = path.join(rootDir, "scratch", "ui-checks");
+          await mkdir(directory, { recursive: true });
+          await page.screenshot({
+            path: path.join(directory, `731-work-windows-${width}.png`),
+          });
+        }
+        await toggle.focus();
+        await page.keyboard.press("Enter");
+        await schedule.waitFor({ state: "hidden", timeout: timeoutMs });
+      }
+      await page.unrouteAll({ behavior: "wait" });
+      await page.close();
+    }
+    console.log(
+      "route ok: Activity counts work-window waits separately from other waits",
+    );
+  } finally {
+    for (const context of browser.contexts()) {
+      for (const page of context.pages()) {
+        await page.unrouteAll({ behavior: "wait" });
+      }
+    }
+    await browser.close();
+  }
+}
+
 async function checkReviewTransitionDedupe(baseUrl, timeoutMs) {
   const browser = await launchSmokeBrowser();
   try {
@@ -3469,6 +3556,7 @@ async function main() {
       await checkLifecyclePolicyShowIsolation(targetUrl, args.routeTimeoutMs);
       await checkOlderSeasonConfirmation(targetUrl, args.routeTimeoutMs);
       await checkReviewTransitionDedupe(targetUrl, args.routeTimeoutMs);
+      await checkActivityWorkWindows(targetUrl, args.routeTimeoutMs);
       await checkUnderTargetSampleRecovery(targetUrl, args.routeTimeoutMs);
       const reviewReadyFixture = folderRoutes.find(
         (fixtureRoute) =>

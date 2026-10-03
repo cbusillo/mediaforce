@@ -4250,6 +4250,59 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(summary["running_count"], 0)
         self.assertEqual(summary["pending_work_count"], 2)
 
+    def test_schedule_waiting_count_includes_all_queued_episodes_without_counting_the_show(self) -> None:
+        self._write_manifest("manifest-schedule-parts.json", [])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(
+                connection, job_id="schedule-show", manifest_name="manifest-schedule-parts.json",
+                host={}, status="needs_attention", attempt_count=1,
+            )
+            parent = load_encode_job(connection, "schedule-show")
+            assert parent is not None
+            parent["job_kind"] = "folder"
+            save_encode_job(connection, parent)
+            for index in range(10):
+                self._save_job(
+                    connection, job_id=f"schedule-episode-{index}",
+                    manifest_name="manifest-schedule-parts.json", host={}, status="queued", attempt_count=0,
+                    waiting_reason="Estimated runtime about 1h 25m; waiting for a host window with enough time remaining.",
+                )
+                child = load_encode_job(connection, f"schedule-episode-{index}")
+                assert child is not None
+                child.update(job_kind="shard", parent_job_id="schedule-show")
+                save_encode_job(connection, child)
+            for parent_status in ("needs_attention", "queued", "running"):
+                with self.subTest(parent_status=parent_status):
+                    parent["status"] = parent_status
+                    save_encode_job(connection, parent)
+                    queue = web_app._decorate_encode_queue_for_scheduler(
+                        self.config, summarize_encode_queue(connection),
+                    )
+                    self.assertEqual(queue["pending_work_count"], 10)
+                    self.assertEqual(queue["queued_waiting_count"], 10)
+                    self.assertEqual(queue["queued_schedule_waiting_count"], 10)
+                    self.assertNotIn("pending", queue)
+
+    def test_schedule_waiting_count_excludes_other_waits_and_bypassed_work(self) -> None:
+        pending = [
+            {"status": "queued", "host": {"schedule_profile": "never"}},
+            {"status": "queued", "waiting_reason": "waiting for a host schedule window"},
+            {"status": "queued", "progress": {"progress_state": "schedule_waiting"}},
+            {"status": "retry_backoff", "waiting_reason": "waiting before retrying"},
+            {"status": "queued", "waiting_reason": "Waiting for shared storage."},
+            {"status": "queued", "waiting_reason": "Waiting for an encode computer."},
+            {"status": "queued", "waiting_reason": "Estimated runtime longer than every configured host schedule window"},
+            {"status": "queued", "host": {"schedule_profile": "never"}, "bypass_schedule": True,
+             "waiting_reason": "waiting for a host schedule window"},
+            {"status": "queued", "host": {"schedule_profile": "always"}},
+        ]
+        with patch.object(web_app, "runtime_encode_job_manifest_totals") as read_totals:
+            queue = web_app._decorate_encode_queue_for_scheduler(
+                self.config, {"pending": pending, "queued": [], "state": {}},
+            )
+        read_totals.assert_not_called()
+        self.assertEqual(queue["queued_schedule_waiting_count"], 3)
+
     def test_permission_denied_ssh_failure_still_needs_attention_after_attempt_cap(self) -> None:
         source_path = self._create_source_file("episode-host-permission.mkv")
         staging_path = self._staging_path("episode-host-permission.mkv")

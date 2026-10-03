@@ -453,8 +453,15 @@ def summarize_encode_queue(
             library_types=library_types,
         ).to_payload()
     state = load_queue_state(connection)
+    pending = list_encode_jobs(
+        connection,
+        statuses=QUEUED_ENCODE_JOB_STATUSES,
+        limit=counts["pending_work"],
+        job_kinds=RUNNABLE_ENCODE_JOB_KINDS,
+    )
     return {
         "state": state,
+        "pending": pending,
         "queued": queued,
         "running": running,
         "recent": recent,

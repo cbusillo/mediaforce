@@ -9,7 +9,7 @@
 		OperatorWorkPayload
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
-	import { hostSchedulePresentation, workScheduleSummaryCopy } from '$lib/hosts/schedule';
+	import { hostSchedulePresentation, queueScheduleSummaryCopy } from '$lib/hosts/schedule';
 	import OperatorWorkConsole from './OperatorWorkConsole.svelte';
 	import OperatorShell from './OperatorShell.svelte';
 	import StateBadge from './StateBadge.svelte';
@@ -62,7 +62,7 @@
 	const footerSignals = $derived(buildOpsFooterSignals(dashboard, hosts));
 	const encodeQueue = $derived(dashboard?.encode_queue ?? null);
 	const calibrationQueue = $derived(dashboard?.calibration_queue ?? null);
-	const queuedWaitingCount = $derived(encodeQueue?.queued_waiting_count ?? 0);
+	const queuedWaitingCount = $derived(encodeQueue?.queued_schedule_waiting_count ?? 0);
 	const needsAttentionCount = $derived(encodeQueue?.needs_attention_count ?? 0);
 	const encodeWorkCount = $derived(
 		(encodeQueue?.running_count ?? 0) + (encodeQueue?.queued_count ?? 0)
@@ -685,14 +685,14 @@
 					<WorkstationPanel eyebrow="Work schedule" title="When work may run">
 						<div class="schedule-list">
 							<div class="scope-row scope-row--active">
-								<span>Current schedule</span>
+								<span>Queue-wide schedule</span>
 								<strong>
-									{workScheduleSummaryCopy(encodeQueue?.state.scheduler_summary) ||
+									{queueScheduleSummaryCopy(encodeQueue?.state.scheduler_summary) ||
 										'Work schedule is unavailable'}
 								</strong>
 								<small>
 									{queuedWaitingCount.toLocaleString('en-US')}
-									{queuedWaitingCount === 1 ? 'item' : 'items'} waiting for the next work window
+									{queuedWaitingCount === 1 ? 'file' : 'files'} waiting for a work window
 								</small>
 								<a class="inline-link" href={resolve('/settings')}>Edit work schedule</a>
 							</div>

@@ -41,6 +41,11 @@ export function workScheduleSummaryCopy(value: string | null | undefined): strin
 		.replace(/\(utc\)$/i, '(UTC)');
 }
 
+export function queueScheduleSummaryCopy(value: string | null | undefined): string {
+	if (compactText(value) === 'runs anytime') return 'No queue-wide time limit';
+	return workScheduleSummaryCopy(value);
+}
+
 function record(value: unknown): Record<string, unknown> | null {
 	return value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 }

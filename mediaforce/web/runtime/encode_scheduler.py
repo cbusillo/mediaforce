@@ -477,6 +477,8 @@ def decorate_encode_job_for_scheduler(
         config: MediaforceConfig,
         job: dict[str, Any] | None,
         deps: EncodeSchedulerDeps,
+        *,
+        include_telemetry: bool = True,
 ) -> dict[str, Any] | None:
     if job is None:
         return None
@@ -536,7 +538,9 @@ def decorate_encode_job_for_scheduler(
         decorated["scheduler_status_copy"] = f"waiting for {policy['summary']}"
     else:
         decorated["scheduler_status_copy"] = "ready when a worker is free"
-    return decorate_encode_job_telemetry(decorated, encode_job_manifest_totals=deps.encode_job_manifest_totals)
+    if include_telemetry:
+        return decorate_encode_job_telemetry(decorated, encode_job_manifest_totals=deps.encode_job_manifest_totals)
+    return decorated
 
 
 def _encode_job_schedule_state(
@@ -602,13 +606,31 @@ def decorate_encode_queue_for_scheduler(
         decorate_encode_job_for_scheduler(config, job, deps) or job
         for job in object_list(encode_queue.get("needs_attention"))
     ]
+    # Display rows can hide queued episodes under a show that needs attention.
+    # Consume the complete runnable inventory without returning it in the dashboard.
+    pending = [
+        decorate_encode_job_for_scheduler(config, job, deps, include_telemetry=False) or job
+        for job in object_list(decorated.pop("pending", decorated["queued"]))
+    ]
     decorated["queued_waiting_count"] = sum(
         1
-        for job in decorated["queued"]
+        for job in pending
         if (
             bool(job.get("schedule_waiting"))
             or str(job.get("status") or "") == "retry_backoff"
             or bool(str(job.get("waiting_reason") or "").strip())
+        )
+    )
+    decorated["queued_schedule_waiting_count"] = sum(
+        1
+        for job in pending
+        if (
+            str(job.get("status") or "") == "queued"
+            and not job.get("bypass_schedule")
+            and (
+                job.get("schedule_state") in {"off_schedule", "schedule_interrupted", "draining_no_fit"}
+                or "waiting for a host schedule window" in str(job.get("waiting_reason") or "").casefold()
+            )
         )
     )
     decorated["telemetry"] = encode_queue_telemetry(decorated)

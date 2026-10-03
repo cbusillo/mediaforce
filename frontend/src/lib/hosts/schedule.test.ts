@@ -4,6 +4,7 @@ import type { EncodeQueueJob, EncodeQueueSummary, HostRuntime } from '$lib/api/t
 import {
 	hostSchedulePresentation,
 	jobSchedulePresentation,
+	queueScheduleSummaryCopy,
 	scheduleLabels,
 	workScheduleSummaryCopy
 } from './schedule';
@@ -57,6 +58,15 @@ function queue(overrides: Partial<EncodeQueueSummary> = {}): EncodeQueueSummary 
 }
 
 describe('schedule presentation', () => {
+	it('distinguishes an unrestricted queue from computer work windows', () => {
+		expect(queueScheduleSummaryCopy('runs anytime')).toBe('No queue-wide time limit');
+		expect(queueScheduleSummaryCopy('never runs')).toBe('Work schedule is off');
+		expect(queueScheduleSummaryCopy('runs weekdays between 20:00 and 06:00 (host local)')).toBe(
+			'Work runs weekdays between 20:00 and 06:00 (computer local time)'
+		);
+		expect(queueScheduleSummaryCopy(undefined)).toBe('');
+	});
+
 	it('adapts every live scheduler summary without changing unknown text', () => {
 		expect(workScheduleSummaryCopy('runs anytime')).toBe('Work runs anytime');
 		expect(workScheduleSummaryCopy('never runs')).toBe('Work schedule is off');
