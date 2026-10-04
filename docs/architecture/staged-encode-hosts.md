@@ -87,6 +87,24 @@ across all claims and preparation in one scheduler pass.
 The staged paths travel in the host payload under `staged_job` for the length of
 one encode. That key is never persisted with the job.
 
+## Sample and review flow
+
+Sample calibration on a staged computer uses the same scratch lifecycle. It
+copies and verifies the source once, then keeps the keeper connection open
+through crop detection, target-size search, quality measurement, and rendering
+both sides of the browser comparison. Search working files and review renders
+stay inside that job's scratch directory. Review clips return to the controller's
+normal review directory through managed, size-checked transfers; failed transfers
+remove their partial local clips. Stop reaches the remote render and transfer
+processes as well as the search. Releasing the keeper removes remote scratch
+after success, failure, or cancellation.
+
+The saved sample retains the original source identity and host settings; transient
+scratch paths are never saved. Mounted computers keep their existing sample
+flow, and stream computers without scratch keep the controller-local fallback.
+The production scheduler's capacity admission remains separate from the sample
+queue; samples use the worker's existing scratch check before copying.
+
 ## Recovering scratch space
 
 Three layers cover every exit.

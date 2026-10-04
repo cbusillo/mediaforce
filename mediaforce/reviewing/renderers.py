@@ -159,7 +159,9 @@ def render_encoded_preview_clip_remote(
         ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
         format_crf: Callable[[float], str],
         run_remote_command: Callable[..., Any],
+        process_controller: Any = None,
 ) -> None:
+    managed_kwargs = {"process_controller": process_controller} if process_controller is not None else {}
     production_audio_path = None
     production_preview_path = remote_output_path.with_name(
         f".{remote_output_path.stem}-production-preview.mp4"
@@ -177,7 +179,7 @@ def render_encoded_preview_clip_remote(
                 audio_plan=audio_plan or {},
                 ffmpeg_binary=ffmpeg_binary,
             )
-            result = run_remote_command(host, audio_cmd, remote_preview_timeout_seconds)
+            result = run_remote_command(host, audio_cmd, remote_preview_timeout_seconds, **managed_kwargs)
             _raise_on_failure(result, "Preview audio render failed")
 
         cmd = _preview_render_command(
@@ -198,7 +200,7 @@ def render_encoded_preview_clip_remote(
             ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
             format_crf=format_crf,
         )
-        result = run_remote_command(host, cmd, remote_preview_timeout_seconds)
+        result = run_remote_command(host, cmd, remote_preview_timeout_seconds, **managed_kwargs)
         _raise_on_failure(result, "Preview sample encode failed")
         browser_cmd = _browser_preview_proxy_command(
             source_path=production_preview_path,
@@ -207,7 +209,7 @@ def render_encoded_preview_clip_remote(
             include_audio=audio_plan is not None,
             ffmpeg_binary=ffmpeg_binary,
         )
-        result = run_remote_command(host, browser_cmd, remote_preview_timeout_seconds)
+        result = run_remote_command(host, browser_cmd, remote_preview_timeout_seconds, **managed_kwargs)
         _raise_on_failure(result, "Browser preview render failed")
     finally:
         temporary_paths = [production_preview_path]
@@ -433,7 +435,9 @@ def render_source_review_clip_remote(
         ffmpeg_binary: Callable[[], str],
         ffmpeg_hwaccel_input_args: Callable[[str | None], list[str]],
         run_remote_command: Callable[..., Any],
+        process_controller: Any = None,
 ) -> None:
+    managed_kwargs = {"process_controller": process_controller} if process_controller is not None else {}
     cmd = _source_review_clip_command(
         source_path=source_path,
         source_codec=source_codec,
@@ -444,7 +448,7 @@ def render_source_review_clip_remote(
         ffmpeg_binary=ffmpeg_binary,
         ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
     )
-    result = run_remote_command(host, cmd, remote_preview_timeout_seconds)
+    result = run_remote_command(host, cmd, remote_preview_timeout_seconds, **managed_kwargs)
     _raise_on_failure(result, "Source review clip render failed")
 
 
