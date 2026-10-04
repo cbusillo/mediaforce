@@ -45,7 +45,10 @@
 	{/if}
 
 	{#if integrity.records.length > 0}
-		<details class="integrity-inventory" open={tone === 'blocked'}>
+		<details
+			class="integrity-inventory"
+			open={tone === 'blocked' || integrity.records.some((record) => record.publish_wait_reason)}
+		>
 			<summary>
 				<span
 					>{integrity.totalCount === 1

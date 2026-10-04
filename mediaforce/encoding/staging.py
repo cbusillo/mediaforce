@@ -52,6 +52,10 @@ class StagedOutputHeldForReviewError(RuntimeError):
 class PromotionWaiting(RuntimeError):
     """A temporary condition holds this file back; nothing moved and it can be published later."""
 
+    def __init__(self, message: str, *, reason_code: str | None = None) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
 
 class PromotionRestoreError(RuntimeError):
     """A failed promotion could not put its files back, so an original may be out of place."""
@@ -213,6 +217,8 @@ def validate_one_item(
     if row is None:
         raise FileNotFoundError(f"No staged artifact found for item {item['library_item_id']}")
 
+    if row.get("promoted_at") is not None:
+        return json.loads(row["validation_json"] or "{}")
     staging_path = Path(row["staging_path"])
     staged_probe = probe_media(staging_path)
     staged_size_bytes = staging_path.stat().st_size
@@ -600,6 +606,8 @@ def promote_one_item(
     ).mappings().fetchone()
     if stage_row is None:
         raise FileNotFoundError(f"No staged artifact found for item {item['library_item_id']}")
+    if stage_row.get("promoted_at") is not None:
+        return Path(str(stage_row["promoted_path"]))
     validation = json.loads(stage_row["validation_json"] or "{}")
     if not force and not validation.get("passed"):
         raise RuntimeError(f"Item {item['library_item_id']} must be validated before promotion")
@@ -612,6 +620,8 @@ def promote_one_item(
         raise PromotionWaiting(
             "It came out far smaller than its sample predicted. Keep it or make it again before it is replaced."
         )
+    if not force and stage_row.get("validated_at") is None:
+        raise RuntimeError(f"Item {item['library_item_id']} must be validated before promotion")
 
     source_path = Path(item["source_path"])
     staging_path = Path(stage_row["staging_path"])
@@ -629,7 +639,7 @@ def promote_one_item(
         archive_path=archive_path,
     )
     if not reserve.allowed:
-        raise PromotionWaiting(reserve.waiting_reason or "Waiting for a measurable free-space reserve.")
+        raise PromotionWaiting(reserve.waiting_reason or "Waiting for a measurable free-space reserve.", reason_code="space_reserve")
     # Same-volume renames need no free bytes, so they cannot take space an active encode reserved.
     if any(int_value(required) > 0 for required in object_dict(getattr(reserve, "required_by_volume", {})).values()):
         active_reserve_check = active_reserve_waiting_reason or _active_encode_promotion_waiting_reason
@@ -638,7 +648,7 @@ def promote_one_item(
             str(stage_row.get("encode_job_id") or "").strip() or None,
         )
         if active_waiting_reason is not None:
-            raise PromotionWaiting(active_waiting_reason)
+            raise PromotionWaiting(active_waiting_reason, reason_code="space_reserve")
 
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -719,6 +729,10 @@ def promote_one_item(
             promoted_path=str(destination_path), promoted_content_fingerprint=promoted_content_fingerprint,
             promoted_size_bytes=promoted_stat.st_size, promoted_mtime_ns=promoted_stat.st_mtime_ns,
         )
+        if archive_backup_path is not None:
+            record_event(connection, item["library_item_id"], "promotion_rollback_retained", {
+                "retained_archive_backup_path": str(archive_backup_path),
+            })
         connection.commit()
     except BaseException as promotion_error:
         try:
@@ -740,11 +754,6 @@ def promote_one_item(
                 f"Promotion failed and filesystem rollback could not restore the original state: {restore_error}"
             ) from promotion_error
         raise
-    if archive_backup_path is not None:
-        try:
-            safe_unlink(archive_backup_path)
-        except OSError as cleanup_error:
-            LOGGER.warning("Failed to remove superseded promotion archive %s: %s", archive_backup_path, cleanup_error)
     try:
         record_event(
             connection,
@@ -753,6 +762,7 @@ def promote_one_item(
             {
                 "promoted_path": str(destination_path),
                 "archived_source_path": str(archive_path),
+                "retained_archive_backup_path": str(archive_backup_path) if archive_backup_path is not None else None,
             },
         )
         connection.commit()

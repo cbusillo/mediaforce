@@ -524,7 +524,7 @@ def _active_standalone_cli_encode(connection: DBClient, library_item_id: int) ->
             details = json.loads(str(details_json))
         except (TypeError, ValueError):
             continue
-        if not isinstance(details, dict) or str(details.get("encode_origin") or "") != "cli":
+        if not isinstance(details, dict) or str(details.get("encode_origin") or "") not in {"cli", "cli-production", "cli-review"}:
             continue
         if _process_is_running(int_value(details.get("encode_owner_pid"))):
             return True

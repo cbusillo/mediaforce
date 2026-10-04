@@ -74,6 +74,7 @@ class StagedIntegrityRecord:
     detail: str
     # The finished and predicted sizes of a file held for being far smaller than its sample predicted.
     size_prediction: dict[str, Any] | None = None
+    publish_wait_reason: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload = {
@@ -87,6 +88,8 @@ class StagedIntegrityRecord:
         }
         if self.size_prediction is not None:
             payload["size_prediction"] = self.size_prediction
+        if self.publish_wait_reason is not None:
+            payload["publish_wait_reason"] = self.publish_wait_reason
         return payload
 
 
@@ -165,6 +168,7 @@ def staged_integrity_report(
         *,
         discover: bool,
         record_limit: int = MAX_INTEGRITY_RECORDS,
+        include_publish_reason: bool = True,
 ) -> StagedIntegrityReport:
     scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
     return staged_integrity_report_for_scope(
@@ -173,6 +177,7 @@ def staged_integrity_report(
         scope,
         discover=discover,
         record_limit=record_limit,
+        include_publish_reason=include_publish_reason,
     )
 
 
@@ -183,13 +188,22 @@ def staged_integrity_report_for_scope(
         *,
         discover: bool,
         record_limit: int = MAX_INTEGRITY_RECORDS,
+        include_publish_reason: bool = True,
 ) -> StagedIntegrityReport:
     bounded_limit = min(max(1, record_limit), MAX_INTEGRITY_RECORDS)
     rows = _load_scope_rows(connection, scope, limit=bounded_limit + 1)
     database_truncated = len(rows) > bounded_limit
     rows = rows[:bounded_limit]
     staging_roots = _configured_staging_roots(config)
-    records = [_classify_row(row, staging_roots) for row in rows]
+    records = []
+    for row in rows:
+        record = _classify_row(row, staging_roots)
+        delivery = object_dict(_parsed_validation(row["validation_json"]).get("automatic_publish"))
+        if include_publish_reason and delivery.get("reason") and record.disposition != "tracked":
+            reason = str(delivery["reason"])
+            record = replace(record, publish_wait_reason=reason,
+                             detail=record.detail if reason in record.detail else f"{record.detail} {reason}")
+        records.append(record)
     discovery_truncated = bool(discover and database_truncated)
     entries_scanned = 0
     if discover and not database_truncated:
@@ -340,6 +354,13 @@ def _checked_output_unavailable_detail(records: Iterable[StagedIntegrityRecord])
     if "tracked" in dispositions:
         return "This checked output has already been installed in the movie library."
     return "No checked staged output is ready to preview for this movie."
+
+
+def _parsed_validation(raw: Any) -> dict[str, Any]:
+    try:
+        return object_dict(json.loads(str(raw or "{}")))
+    except (ValueError, TypeError):
+        return {}
 
 
 def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> StagedIntegrityRecord:

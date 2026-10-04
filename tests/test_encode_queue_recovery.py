@@ -14552,6 +14552,7 @@ raise SystemExit(0)
                     library_item_id=item_id,
                     staging_path=str(staging_path),
                     validation_json=json.dumps({"passed": True}),
+                    validated_at=web_app._now_iso(),
                     updated_at=web_app._now_iso(),
                 )
             )
@@ -14615,6 +14616,7 @@ raise SystemExit(0)
                     library_item_id=item_id,
                     staging_path=str(staging_path),
                     validation_json=json.dumps({"passed": True}),
+                    validated_at=web_app._now_iso(),
                     encode_job_id="completed-item-job",
                     updated_at=web_app._now_iso(),
                 )
@@ -14738,6 +14740,7 @@ raise SystemExit(0)
                     library_item_id=item_id,
                     staging_path=str(staging_path),
                     validation_json=json.dumps({"passed": True}),
+                    validated_at=web_app._now_iso(),
                     updated_at=web_app._now_iso(),
                 )
             )
@@ -14798,6 +14801,7 @@ raise SystemExit(0)
                     library_item_id=item_id,
                     staging_path=str(staging_path),
                     validation_json=json.dumps({"passed": True}),
+                    validated_at=web_app._now_iso(),
                     updated_at=web_app._now_iso(),
                 )
             )
@@ -14897,6 +14901,7 @@ raise SystemExit(0)
                     library_item_id=item_id,
                     staging_path=str(staging_path),
                     validation_json=json.dumps({"passed": True}),
+                    validated_at=web_app._now_iso(),
                     updated_at=web_app._now_iso(),
                 )
             )
@@ -14954,6 +14959,7 @@ raise SystemExit(0)
                     library_item_id=item_id,
                     staging_path=str(staging_path),
                     validation_json=json.dumps({"passed": True}),
+                    validated_at=web_app._now_iso(),
                     updated_at=web_app._now_iso(),
                 )
             )

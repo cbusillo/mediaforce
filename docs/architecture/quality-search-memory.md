@@ -38,7 +38,8 @@ authoritative.
 The read-only loader uses the latest `staged_artifacts` row for each library
 item. A row is eligible only when all of these conditions hold:
 
-- `encode_origin` is `queue` or `cli`
+- `encode_origin` is `queue`, `cli-production`, `cli-review`, or legacy `cli`;
+  a CLI review contributes only after its full file is manually published
 - the library item is still `promoted`
 - validation reports `passed: true`
 - encode completion, staging, validation, and promotion timestamps are present

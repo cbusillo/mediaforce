@@ -44,6 +44,7 @@ from mediaforce.tuning.calibration_jobs import resolve_pending_review_job
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_queue_partition, \
     cadence_safety_partition, older_season_cadence_payload
+from mediaforce.web.runtime.folder_tuning_advice import review_gate
 from mediaforce.web.runtime.production_holds import approval_identity, queue_mode, record_holds, release_holds
 from mediaforce.web.runtime.left_out_files import LeftOutFile, cadence_left_out_files, drop_manifest_items, \
     left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response
@@ -131,6 +132,24 @@ def _production_approval_contract(calibration: ActionPayload) -> ActionPayload |
         "operator_intent_hash": f"sha256:{stable_json_hash(request)}",
         "operator_intent": request,
     }
+
+
+def current_production_approval_matches(
+        calibration: ActionPayload | None,
+        manifest: ManifestPayload,
+        item: FolderItem,
+) -> bool:
+    if calibration is None or not review_gate(calibration).get("can_confirm_full"):
+        return False
+    accepted_hash = str(calibration.get("accepted_policy_hash") or "")
+    if not accepted_hash or accepted_hash != _calibration_policy_hash(calibration):
+        return False
+    contract = object_dict(manifest.get("selection")).get("production_approval_contract")
+    if contract:
+        recorded = _valid_production_approval_contract(object_dict(contract))
+        return recorded is not None and recorded == _production_approval_contract(calibration)
+    policy = object_dict(item.get("resolved_policy"))
+    return bool(policy and accepted_hash and _calibration_policy_hash({"policy": policy}) == accepted_hash)
 
 
 def production_approval_identity(calibration: ActionPayload) -> str:

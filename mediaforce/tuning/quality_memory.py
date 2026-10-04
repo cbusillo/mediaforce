@@ -27,7 +27,7 @@ QualityMemoryScope = Literal["item", "season", "series"]
 QualityMemoryConfidence = Literal["none", "limited", "moderate", "high"]
 QualitySearchObjective = Literal["quality", "target_size"]
 
-_ALLOWED_ORIGINS = frozenset({"cli", "queue"})
+_ALLOWED_ORIGINS = frozenset({"cli", "cli-production", "cli-review", "queue"})
 _ENCODER_PARAMETER_OPTION = {
     "libaom-av1": "-aom-params",
     "librav1e": "-rav1e-params",

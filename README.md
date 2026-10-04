@@ -33,12 +33,14 @@ The current implementation covers:
 - measured evidence (motion pattern, media fingerprint) checked automatically
   for files production is waiting on
 - side-by-side compare clips for sample review
-- per-file publishing with original-file archival under the transcode root,
+- automatic per-file checking and publishing under a current approval, with
+  original-file archival under the transcode root,
   and user-approved cleanup of those rollback copies
 
-Two gaps remain against that aim: a sample is still approved per show (the
-`One approval covers many shows` milestone), and publishing a checked file is
-still an explicit user action (#734).
+A sample is still approved per show (the `One approval covers many shows`
+milestone). Finished production files are checked and published automatically
+one at a time under their current approval. Manual checking and publishing
+remain explicit overrides. Rollback copies stay until the user approves cleanup.
 
 ## Runtime state
 
@@ -325,14 +327,22 @@ of untracked and temporary files under configured staging roots:
 uv run mediaforce staged-integrity "tv/Show/Season 1" --details
 ```
 
-Promote a validated encode into the library:
+The web app checks finished production files and publishes each passing file
+automatically, retaining the original in the Cleanup folder. Temporary holds
+retry; unknown failures retry with a delay before pausing for the manual check or publish override.
+Changed approvals, failed checks, and file conflicts stay with that file.
+Reasons appear in its staged-integrity details. Sample outputs never
+publish automatically. Older outputs without an unambiguous recorded production origin use
+the manual override, so sample files cannot be mistaken for full replacements.
+
+Manually publish a checked file as an explicit override:
 
 ```bash
 uv run mediaforce promote \
   --index 0
 ```
 
-Promote everything from the latest manifest after approval:
+Manually try every checked file from the latest manifest:
 
 ```bash
 uv run mediaforce promote --all

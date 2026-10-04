@@ -1773,6 +1773,7 @@ export interface StagedIntegrityRecord {
 	detail: string;
 	/** Present when the file is held for coming out far smaller than its sample predicted. */
 	size_prediction?: StagedSizePrediction;
+	publish_wait_reason?: string;
 }
 
 export interface StagedSizePrediction {
