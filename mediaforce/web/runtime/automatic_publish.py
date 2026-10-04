@@ -1,6 +1,7 @@
 import json
 import logging
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from mediaforce.web.runtime.folder_actions import (
 
 LOGGER = logging.getLogger(__name__)
 UNKNOWN_FAILURE_RETRY_LIMIT = 3
+PUBLISH_RETRY_DELAY_SECONDS = 30
 LoadCalibrationState = Callable[[MediaforceConfig, str], dict[str, Any] | None]
 
 
@@ -97,11 +99,16 @@ def _try_publish_file(
             connection,
             item_id,
             "unsafe",
-            "Publishing could not put the files back. Check this file before trying again.",
+            "Publishing could not put the files back. Inspect and restore this file before using the manual publish override.",
         )
-    except PromotionWaiting as exc:
+    except PromotionWaiting:
         connection.rollback()
-        _record_wait(connection, item_id, "waiting", str(exc))
+        _record_wait(
+            connection,
+            item_id,
+            "waiting",
+            "Waiting for enough free space or a storage reservation. Mediaforce will retry this file.",
+        )
     except FileExistsError:
         connection.rollback()
         _record_wait(
@@ -109,6 +116,15 @@ def _try_publish_file(
             item_id,
             "waiting",
             "A different file is already at its place in the library.",
+        )
+    except OSError:
+        connection.rollback()
+        _record_wait(
+            connection,
+            item_id,
+            "waiting",
+            "Storage or a required file is unavailable. Mediaforce will retry this file.",
+            retry_after=time.time() + PUBLISH_RETRY_DELAY_SECONDS,
         )
     except Exception:
         LOGGER.exception("Automatic check or publish failed for item %s", item_id)
@@ -119,10 +135,13 @@ def _try_publish_file(
             connection,
             item_id,
             "failed" if exhausted else "waiting",
-            "Mediaforce could not check or publish this file after retrying. Check it manually before trying again."
+            "Automatic publishing paused after retrying. Inspect this file, then use the manual check or publish override."
             if exhausted
             else "Mediaforce could not check or publish this file. It will try again.",
             failure_attempts=failure_attempts,
+            retry_after=None
+            if exhausted
+            else time.time() + PUBLISH_RETRY_DELAY_SECONDS * failure_attempts,
         )
 
 
@@ -169,6 +188,11 @@ def _publish_file(
         "unsafe",
         "failed",
     }:
+        return
+    if (
+        float(object_dict(validation.get("automatic_publish")).get("retry_after") or 0)
+        > time.time()
+    ):
         return
     rel_path = str(source["rel_path"])
     blocker = production_action_blocker(config, rel_path)
@@ -228,14 +252,11 @@ def _publish_file(
         ),
         None,
     )
+    reasons = []
     if not current_production_approval_matches(calibration, manifest, item):
-        _record_wait(
-            connection,
-            item_id,
-            "waiting",
-            "This file needs a current matching sample approval before it can be published.",
+        reasons.append(
+            "This file needs a current matching sample approval before it can be published."
         )
-        return
     path = Path(str(source["source_path"]))
     fingerprint = file_fingerprint(path, path.stat(), source["duration_seconds"])
     if (
@@ -243,12 +264,11 @@ def _publish_file(
         or fingerprint != source["fingerprint"]
         or fingerprint != stage["source_fingerprint"]
     ):
-        _record_wait(
-            connection,
-            item_id,
-            "waiting",
-            "The original changed after this work was planned. Check it before making a replacement.",
+        reasons.append(
+            "The original changed after this work was planned. Check it before making a replacement."
         )
+    if reasons:
+        _record_wait(connection, item_id, "waiting", " ".join(reasons))
         return
     report = staged_integrity_report(
         connection, config, rel_path, discover=False, include_publish_reason=False
@@ -323,6 +343,7 @@ def _record_wait(
     reason: str,
     *,
     failure_attempts: int | None = None,
+    retry_after: float | None = None,
 ) -> None:
     row = connection.execute(
         select(staged_artifacts.c.validation_json).where(
@@ -339,6 +360,12 @@ def _record_wait(
     delivery = {"state": state, "reason": reason}
     if failure_attempts is not None:
         delivery["failure_attempts"] = failure_attempts
+    previous = object_dict(validation.get("automatic_publish"))
+    changed_reason = {
+        key: value for key, value in previous.items() if key != "retry_after"
+    } != delivery
+    if retry_after is not None:
+        delivery["retry_after"] = retry_after
     if validation.get("automatic_publish") == delivery:
         connection.rollback()
         return
@@ -349,12 +376,13 @@ def _record_wait(
         .where(staged_artifacts.c.library_item_id == item_id)
         .values(validation_json=json.dumps(validation), updated_at=now)
     )
-    connection.execute(
-        insert(item_events).values(
-            library_item_id=item_id,
-            event_type="automatic_publish_waiting",
-            details_json=json.dumps(delivery),
-            created_at=now,
+    if changed_reason:
+        connection.execute(
+            insert(item_events).values(
+                library_item_id=item_id,
+                event_type="automatic_publish_waiting",
+                details_json=json.dumps(delivery),
+                created_at=now,
+            )
         )
-    )
     connection.commit()

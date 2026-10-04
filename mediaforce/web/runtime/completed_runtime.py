@@ -178,7 +178,7 @@ def list_completed_folders(
     if archive_root is not None and resolved_archive_root is not None:
         retained_events = connection.execute(
             select(item_events.c.details_json).where(
-                item_events.c.event_type == "promotion_completed"
+                item_events.c.event_type.in_(("promotion_completed", "promotion_rollback_retained"))
             )
         ).scalars()
         for details_json in retained_events:

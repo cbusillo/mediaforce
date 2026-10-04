@@ -466,7 +466,8 @@ def test_unknown_failure_retries_then_holds_without_stopping_siblings(
 
     with patch.object(delivery, "promote_one_item", side_effect=fail) as attempts:
         for _ in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 2):
-            _run(config)
+            with patch.object(delivery.time, "time", return_value=_ * (delivery.PUBLISH_RETRY_DELAY_SECONDS * delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1)):
+                _run(config)
     assert attempts.call_count == delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1
     assert _status(config, ready_id) == "promoted"
     with open_db(config.paths.db_path) as connection:
@@ -621,4 +622,71 @@ def test_retained_rollback_is_counted_and_owner_cleanup_reaches_it(
     )
     assert result["removed_count"] == folders[0].archived_backup_count
     assert not any(path.is_file() for path in config.archive_root.rglob("*"))
+    assert Path(item["source_path"]).read_bytes() == b"av1"
+
+
+def test_short_storage_outage_does_not_exhaust_retries(config: MediaforceConfig) -> None:
+    item_id, item, _ = _stage(config, "tv/Show/Season 1/one.mkv", checked=True)
+    source = Path(item["source_path"])
+    parked = source.with_suffix(".unavailable")
+    source.rename(parked)
+    for now in (0, 2, 4):
+        with patch.object(delivery.time, "time", return_value=now):
+            _run(config)
+    parked.rename(source)
+    with patch.object(delivery.time, "time", return_value=6):
+        _run(config)
+    assert _status(config, item_id) == "validated"
+    with patch.object(delivery.time, "time", return_value=delivery.PUBLISH_RETRY_DELAY_SECONDS + 1):
+        _run(config)
+    assert _status(config, item_id) == "promoted"
+
+
+def test_changing_free_space_counts_do_not_create_wait_events(config: MediaforceConfig) -> None:
+    item_id, _, _ = _stage(config, "tv/Show/Season 1/one.mkv", checked=True)
+    with patch.object(delivery, "promote_one_item", side_effect=[
+        PromotionWaiting("Need 100 bytes but only 4 is available"),
+        PromotionWaiting("Need 100 bytes but only 3 is available"),
+        PromotionWaiting("Need 100 bytes but only 2 is available"),
+    ]):
+        for _ in range(3):
+            _run(config)
+    with open_db(config.paths.db_path) as connection:
+        events = connection.execute(select(item_events.c.details_json).where(
+            item_events.c.library_item_id == item_id,
+            item_events.c.event_type == "automatic_publish_waiting",
+        )).scalars().all()
+    assert len(events) == 1
+
+
+def test_reports_changed_approval_and_source_together(config: MediaforceConfig) -> None:
+    item_id, item, _ = _stage(config, "tv/Show/Season 1/one.mkv")
+    approval = _approval()
+    approval.pop("accepted_at")
+    Path(item["source_path"]).write_bytes(b"replaced original")
+    _run(config, approval)
+    with open_db(config.paths.db_path) as connection:
+        saved = json.loads(connection.execute(select(staged_artifacts.c.validation_json).where(
+            staged_artifacts.c.library_item_id == item_id)).scalar_one())
+    reason = saved["automatic_publish"]["reason"]
+    assert "matching sample approval" in reason
+    assert "original changed" in reason
+
+
+def test_retained_rollback_count_survives_best_effort_history_failure(config: MediaforceConfig) -> None:
+    from mediaforce import execution
+    _, item, _ = _stage(config, "tv/Show/Season 1/one.mkv")
+    archive = config.archive_root / item["rel_path"]
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(b"earlier rollback")
+    record = execution._record_event
+    def fail_history(connection: DBClient, item_id: int, event_type: str, details: dict[str, Any]) -> None:
+        if event_type == "promotion_completed":
+            raise RuntimeError("history write unavailable")
+        record(connection, item_id, event_type, details)
+    with patch.object(execution, "_record_event", side_effect=fail_history):
+        _run(config)
+    with open_db(config.paths.db_path) as connection:
+        folders = list_completed_folders(connection, archive_root=config.archive_root, folder_group=web_app._folder_group)
+    assert folders[0].archived_backup_count == 2
     assert Path(item["source_path"]).read_bytes() == b"av1"

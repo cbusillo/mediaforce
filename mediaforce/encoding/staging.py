@@ -723,6 +723,10 @@ def promote_one_item(
             promoted_path=str(destination_path), promoted_content_fingerprint=promoted_content_fingerprint,
             promoted_size_bytes=promoted_stat.st_size, promoted_mtime_ns=promoted_stat.st_mtime_ns,
         )
+        if archive_backup_path is not None:
+            record_event(connection, item["library_item_id"], "promotion_rollback_retained", {
+                "retained_archive_backup_path": str(archive_backup_path),
+            })
         connection.commit()
     except BaseException as promotion_error:
         try:

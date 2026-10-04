@@ -398,6 +398,15 @@ class QualityMemoryTests(unittest.TestCase):
             as_of=self.as_of,
         )
 
+    def test_new_cli_origins_preserve_promoted_quality_learning(self) -> None:
+        context = self._context()
+        for item_id, origin in enumerate(("cli-production", "cli-review"), start=1):
+            with self.subTest(origin=origin):
+                rel_path = f"tv/Example Show/Season 01/CLI {item_id}.mkv"
+                self._add_outcome(item_id, rel_path, crf=30.0, context=context, origin=origin, source_fingerprint=origin)
+                result = self._load(rel_path, context, current_source_fingerprint=origin)
+                self.assertEqual(result.cohorts[0].evidence_count, 1)
+
     @staticmethod
     def _context() -> QualitySearchContext:
         return QualitySearchContext(
