@@ -1,0 +1,272 @@
+{
+  "schema_version": 1,
+  "source_sha": "9ab84cc9",
+  "benchmark_sha256": "a6ea64f254bf05db947eaab350886585e9f9487e1af1ba5c0d7906b51e24529f",
+  "generated_at": "2026-10-04T04:56:42.800684+00:00",
+  "python_version": "3.13.7",
+  "platform": "macOS-27.2-arm64-arm-64bit-Mach-O",
+  "scope": "Shared queue summary, schedule decoration and JSON response encoding; excludes other route work and transport",
+  "results": [
+    {
+      "pending_files": 36,
+      "iterations": 5,
+      "fixture_case_counts": {
+        "closed_profile": 3,
+        "window_reason": 3,
+        "interrupted": 3,
+        "interrupted_storage": 3,
+        "interrupted_host": 3,
+        "short_window": 3,
+        "retry": 3,
+        "storage": 3,
+        "host": 3,
+        "impossible_fit": 3,
+        "bypass": 3,
+        "ready": 3
+      },
+      "parent_states": [
+        "needs_attention",
+        "queued",
+        "running"
+      ],
+      "expected_waiting_files": 12,
+      "observed_waiting_files": 12,
+      "observed_pending_files": 36,
+      "samples": [
+        {
+          "summary_ms": 3.2727920915931463,
+          "decoration_ms": 0.16891700215637684,
+          "serialization_ms": 0.04970794543623924,
+          "total_ms": 3.4914170391857624,
+          "response_bytes": 11655
+        },
+        {
+          "summary_ms": 2.966041909530759,
+          "decoration_ms": 0.15445798635482788,
+          "serialization_ms": 0.04129204899072647,
+          "total_ms": 3.161791944876313,
+          "response_bytes": 11655
+        },
+        {
+          "summary_ms": 2.8602920938283205,
+          "decoration_ms": 0.1499578356742859,
+          "serialization_ms": 0.04245806485414505,
+          "total_ms": 3.0527079943567514,
+          "response_bytes": 11655
+        },
+        {
+          "summary_ms": 2.800125163048506,
+          "decoration_ms": 0.14533288776874542,
+          "serialization_ms": 0.04033301956951618,
+          "total_ms": 2.9857910703867674,
+          "response_bytes": 11655
+        },
+        {
+          "summary_ms": 2.8031659312546253,
+          "decoration_ms": 0.14279200695455074,
+          "serialization_ms": 0.04175002686679363,
+          "total_ms": 2.9877079650759697,
+          "response_bytes": 11655
+        }
+      ],
+      "median_total_ms": 3.0527079943567514,
+      "python_peak_bytes": 232542,
+      "sql_statements": 15,
+      "sql_statements_text": [
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at ASC, rowid ASC\n LIMIT ? OFFSET ?",
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at ASC, rowid ASC\n LIMIT ? OFFSET ?",
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?, ?, ?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at DESC, rowid DESC\n LIMIT ? OFFSET ?",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at DESC, rowid DESC\n LIMIT ? OFFSET ?",
+        "SELECT library_items.rel_path, library_items.status \nFROM library_items \nWHERE library_items.rel_path IN (?)",
+        "SELECT library_items.rel_path, library_items.status \nFROM library_items \nWHERE library_items.rel_path IN (?)",
+        "SELECT library_items.rel_path, library_items.status \nFROM library_items \nWHERE library_items.rel_path IN (?)",
+        "SELECT library_items.rel_path, library_items.status \nFROM library_items \nWHERE library_items.rel_path IN (?)",
+        "SELECT encode_queue_state.queue_name, encode_queue_state.is_paused, encode_queue_state.stop_requested, encode_queue_state.active_job_id, encode_queue_state.updated_at \nFROM encode_queue_state \nWHERE encode_queue_state.queue_name = ?",
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at ASC, rowid ASC\n LIMIT ? OFFSET ?"
+      ],
+      "profile_builds": 1,
+      "job_decorations": 40,
+      "display_manifest_total_calls": 4,
+      "passed": true
+    },
+    {
+      "pending_files": 1000,
+      "iterations": 5,
+      "fixture_case_counts": {
+        "closed_profile": 84,
+        "window_reason": 84,
+        "interrupted": 84,
+        "interrupted_storage": 84,
+        "interrupted_host": 83,
+        "short_window": 83,
+        "retry": 83,
+        "storage": 83,
+        "host": 83,
+        "impossible_fit": 83,
+        "bypass": 83,
+        "ready": 83
+      },
+      "parent_states": [
+        "needs_attention",
+        "queued",
+        "running"
+      ],
+      "expected_waiting_files": 335,
+      "observed_waiting_files": 335,
+      "observed_pending_files": 1000,
+      "samples": [
+        {
+          "summary_ms": 16.653375001624227,
+          "decoration_ms": 2.5345829781144857,
+          "serialization_ms": 0.053541967645287514,
+          "total_ms": 19.241499947384,
+          "response_bytes": 11658
+        },
+        {
+          "summary_ms": 16.850665910169482,
+          "decoration_ms": 2.6924170088022947,
+          "serialization_ms": 0.06400002166628838,
+          "total_ms": 19.607082940638065,
+          "response_bytes": 11658
+        },
+        {
+          "summary_ms": 16.802833881229162,
+          "decoration_ms": 2.5353331584483385,
+          "serialization_ms": 0.05349982529878616,
+          "total_ms": 19.391666864976287,
+          "response_bytes": 11658
+        },
+        {
+          "summary_ms": 16.560709103941917,
+          "decoration_ms": 2.5793330278247595,
+          "serialization_ms": 0.05820789374411106,
+          "total_ms": 19.198250025510788,
+          "response_bytes": 11658
+        },
+        {
+          "summary_ms": 18.160791834816337,
+          "decoration_ms": 2.763708122074604,
+          "serialization_ms": 0.059333862736821175,
+          "total_ms": 20.983833819627762,
+          "response_bytes": 11658
+        }
+      ],
+      "median_total_ms": 19.391666864976287,
+      "python_peak_bytes": 4138163,
+      "sql_statements": 15,
+      "sql_statements_text": [
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at ASC, rowid ASC\n LIMIT ? OFFSET ?",
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at ASC, rowid ASC\n LIMIT ? OFFSET ?",
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?, ?, ?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at DESC, rowid DESC\n LIMIT ? OFFSET ?",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at DESC, rowid DESC\n LIMIT ? OFFSET ?",
+        "SELECT library_items.rel_path, library_items.status \nFROM library_items \nWHERE library_items.rel_path IN (?)",
+        "SELECT library_items.rel_path, library_items.status \nFROM library_items \nWHERE library_items.rel_path IN (?)",
+        "SELECT library_items.rel_path, library_items.status \nFROM library_items \nWHERE library_items.rel_path IN (?)",
+        "SELECT library_items.rel_path, library_items.status \nFROM library_items \nWHERE library_items.rel_path IN (?)",
+        "SELECT encode_queue_state.queue_name, encode_queue_state.is_paused, encode_queue_state.stop_requested, encode_queue_state.active_job_id, encode_queue_state.updated_at \nFROM encode_queue_state \nWHERE encode_queue_state.queue_name = ?",
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at ASC, rowid ASC\n LIMIT ? OFFSET ?"
+      ],
+      "profile_builds": 1,
+      "job_decorations": 1004,
+      "display_manifest_total_calls": 4,
+      "passed": true
+    },
+    {
+      "pending_files": 10000,
+      "iterations": 5,
+      "fixture_case_counts": {
+        "closed_profile": 834,
+        "window_reason": 834,
+        "interrupted": 834,
+        "interrupted_storage": 834,
+        "interrupted_host": 833,
+        "short_window": 833,
+        "retry": 833,
+        "storage": 833,
+        "host": 833,
+        "impossible_fit": 833,
+        "bypass": 833,
+        "ready": 833
+      },
+      "parent_states": [
+        "needs_attention",
+        "queued",
+        "running"
+      ],
+      "expected_waiting_files": 3335,
+      "observed_waiting_files": 3335,
+      "observed_pending_files": 10000,
+      "samples": [
+        {
+          "summary_ms": 185.64716703258455,
+          "decoration_ms": 33.24904199689627,
+          "serialization_ms": 0.08587492629885674,
+          "total_ms": 218.98208395577967,
+          "response_bytes": 11660
+        },
+        {
+          "summary_ms": 194.5993748959154,
+          "decoration_ms": 33.943874994292855,
+          "serialization_ms": 0.09195809252560139,
+          "total_ms": 228.63520798273385,
+          "response_bytes": 11660
+        },
+        {
+          "summary_ms": 200.84075001068413,
+          "decoration_ms": 32.332041999325156,
+          "serialization_ms": 0.07808301597833633,
+          "total_ms": 233.25087502598763,
+          "response_bytes": 11660
+        },
+        {
+          "summary_ms": 181.59220810048282,
+          "decoration_ms": 29.13554199039936,
+          "serialization_ms": 0.07004081271588802,
+          "total_ms": 210.79779090359807,
+          "response_bytes": 11660
+        },
+        {
+          "summary_ms": 188.50679183378816,
+          "decoration_ms": 30.808374984189868,
+          "serialization_ms": 0.08575012907385826,
+          "total_ms": 219.40091694705188,
+          "response_bytes": 11660
+        }
+      ],
+      "median_total_ms": 219.40091694705188,
+      "python_peak_bytes": 41120887,
+      "sql_statements": 15,
+      "sql_statements_text": [
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at ASC, rowid ASC\n LIMIT ? OFFSET ?",
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at ASC, rowid ASC\n LIMIT ? OFFSET ?",
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?, ?, ?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at DESC, rowid DESC\n LIMIT ? OFFSET ?",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT count(*) AS count_1 \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?) AND encode_jobs.job_kind IN (?, ?)",
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at DESC, rowid DESC\n LIMIT ? OFFSET ?",
+        "SELECT library_items.rel_path, library_items.status \nFROM library_items \nWHERE library_items.rel_path IN (?)",
+        "SELECT library_items.rel_path, library_items.status \nFROM library_items \nWHERE library_items.rel_path IN (?)",
+        "SELECT library_items.rel_path, library_items.status \nFROM library_items \nWHERE library_items.rel_path IN (?)",
+        "SELECT library_items.rel_path, library_items.status \nFROM library_items \nWHERE library_items.rel_path IN (?)",
+        "SELECT encode_queue_state.queue_name, encode_queue_state.is_paused, encode_queue_state.stop_requested, encode_queue_state.active_job_id, encode_queue_state.updated_at \nFROM encode_queue_state \nWHERE encode_queue_state.queue_name = ?",
+        "SELECT encode_jobs.job_id, encode_jobs.prefix, encode_jobs.job_kind, encode_jobs.parent_job_id, encode_jobs.status, encode_jobs.manifest_path, encode_jobs.manifest_indexes_json, encode_jobs.item_count, encode_jobs.saved_profile_path, encode_jobs.host_json, encode_jobs.last_host_json, encode_jobs.notes, encode_jobs.process_pid, encode_jobs.error, encode_jobs.bypass_schedule, encode_jobs.attempt_count, encode_jobs.leased_at, encode_jobs.lease_expires_at, encode_jobs.heartbeat_at, encode_jobs.worker_id, encode_jobs.schedule_close_deadline_at, encode_jobs.retry_not_before, encode_jobs.waiting_reason, encode_jobs.terminal_reason, encode_jobs.last_failure_kind, encode_jobs.last_failure_at, encode_jobs.host_cooldown_until, encode_jobs.progress_json, encode_jobs.created_at, encode_jobs.started_at, encode_jobs.finished_at, encode_jobs.updated_at, rowid AS rowid \nFROM encode_jobs \nWHERE encode_jobs.status IN (?, ?) AND encode_jobs.job_kind IN (?, ?) ORDER BY encode_jobs.created_at ASC, rowid ASC\n LIMIT ? OFFSET ?"
+      ],
+      "profile_builds": 1,
+      "job_decorations": 10004,
+      "display_manifest_total_calls": 4,
+      "passed": true
+    }
+  ]
+}

@@ -112,3 +112,84 @@ do not replace classification with parent-row counts or introduce cached counts
 without a correctness design. The current production read remains unchanged by
 this measurement. There is no demonstrated production incident or numeric latency
 budget, and no deployment is part of this work.
+
+## October 4, 2026 compact inventory comparison
+
+The follow-up for #758 reproduces the unchanged #755 benchmark, then adopts a
+compact pending read after the expanded comparison demonstrates lower allocations.
+The scheduler and display reads remain unchanged. The pending read selects the eight
+inputs used by scheduler decoration and hydrates each row as the cursor is consumed;
+it no longer retains a fetched list of full database rows alongside hydrated jobs.
+Classification still visits every pending runnable file, with the same statuses,
+ordering and limit. There is no persisted count, display cap or dispatch change.
+
+[Baseline reproduction](evidence/activity-refresh-758-baseline.json) and
+[comparison data](evidence/pending-inventory-758.json) retain the samples and SQL.
+The baseline was run before source edits at `9ab84cc91db07c08b3aec785a875b98eededd79b`
+(its raw caller-supplied SHA is abbreviated). The comparison records this base SHA,
+SHA-256 fingerprints of the measured product files, and both benchmark scripts.
+These file fingerprints identify the uncommitted comparison source exactly;
+they are not a claim that the base commit already contains the projection.
+
+```bash
+uv run python scripts/benchmark_pending_inventory.py \
+  --source-sha "$(git rev-parse HEAD)" --sizes 36,1000,10000 --iterations 5 \
+  --output /path/outside/the/repo/pending-inventory.json
+```
+
+The fixture uses empty, 22-byte short and original 1,104-byte wide notes. It adds
+non-bypassed Never files, closed-profile retry backoff and closed-profile unrelated
+reasons to the original cases. Uneven frequencies and 136 independent one-file
+checks at noon and 11 PM UTC under attention/queued/running parents and as singles
+prevent cancelling aggregate errors. Open night, closed night, Never and bypass
+counts agree. Existing cross-midnight scheduler tests remain part of the full gate.
+
+Timing is untraced; allocation, SQL and profile passes are separate. Isolated pending
+query time uses a warm, already-open connection and includes cursor consumption and
+hydration, excluding opening, other summary queries and media-scope reads. Full runs
+precede compact runs; busy-host variation and this fixed order prevent causal or
+precise timing-ratio claims. Both paths use the same fixture. The allocation result,
+including empty notes, supports adoption without a production latency claim.
+
+| Files | Notes | Full pending peak bytes | Compact pending peak bytes | Full query median ms | Compact query median ms | Full refresh peak bytes | Compact refresh peak bytes |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 36 | empty | 104,580 | 44,480 | 0.45 | 0.27 | 173,490 | 147,977 |
+| 1,000 | empty | 2,726,353 | 1,002,795 | 7.03 | 3.84 | 3,009,478 | 1,546,086 |
+| 10,000 | empty | 27,321,148 | 9,987,839 | 86.79 | 41.77 | 29,842,792 | 15,083,334 |
+| 36 | short | 106,848 | 43,680 | 0.43 | 0.26 | 190,633 | 148,585 |
+| 1,000 | short | 2,789,353 | 1,003,899 | 7.16 | 4.05 | 3,071,980 | 1,555,512 |
+| 10,000 | short | 27,949,180 | 9,987,911 | 85.50 | 40.80 | 30,487,570 | 15,084,038 |
+| 36 | wide | 145,800 | 43,440 | 0.49 | 0.26 | 207,217 | 152,557 |
+| 1,000 | wide | 3,869,753 | 992,323 | 15.22 | 4.54 | 4,159,008 | 1,552,966 |
+| 10,000 | wide | 38,771,148 | 9,987,583 | 186.36 | 45.64 | 41,297,372 | 15,087,664 |
+
+Pending hydration peaks measure the isolated query return. Decoration incremental
+peaks in the raw data exclude already-retained raw inventory and measure the copied
+decorated rows separately. Whole-refresh peaks include summary rows, pending
+inventory, decoration and serialization together. These peaks have different
+lifetimes and are not additive. They cover traced Python allocations, not RSS or
+native SQLite memory; caller tracing stays enabled but its peak history is reset.
+
+At 10,000 files, empty/short pending allocations fall about 63–64%; whole-refresh
+allocations fall about 49–51%. The wide-row peak falls further because unused notes
+are not loaded. The small fixture has modest absolute savings. No real queue size
+was measured, and these results do not promise a production memory saving.
+
+All comparisons require identical complete display payloads and exact
+pending/window counts. SQL/profile work remains equal across paths: 15 observed
+statements and one profile build with four display telemetry calls at fixed display
+cardinality. SQLAlchemy counts exclude raw-driver connection PRAGMAs.
+
+| Pending files | Singles | Extra attention parents | Clock UTC | Waiting files | Attention rows | SQL statements | Display telemetry calls |
+| ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| 36 | 18 | 0 | 12:00 | 17 | 1 | 22 | 11 |
+| 36 | 0 | 30 | 12:00 | 17 | 31 | 50 | 39 |
+| 36 | 18 | 30 | 23:00 | 8 | 31 | 57 | 46 |
+
+Adding attention rows raises query, telemetry and response work in both paths;
+compact whole-refresh peaks can be higher in these small display-heavy controls.
+Every attention row and all telemetry remain present. Standalone singles overlap
+display and runnable inventories, but their full display rows remain unchanged.
+Internal pending rows never reach the API. The optimization targets demonstrated
+pending hydration cost rather than capping display cost. No deployment, live media,
+host operation or change to quality/validation rules is part of this experiment.
