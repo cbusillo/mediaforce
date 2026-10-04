@@ -8,9 +8,10 @@ import unittest
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from mediaforce.encoding import runner, staged_host
+from mediaforce import remote
 from mediaforce.encoding.staged_host import (
     KEEPER_PID_FILE,
     SCRATCH_DIR_PREFIX,
@@ -19,6 +20,7 @@ from mediaforce.encoding.staged_host import (
     StagedScratchError,
     host_scratch_root,
     keeper_script,
+    measure_scratch_free_bytes,
     remote_ffmpeg_command,
     required_scratch_bytes,
     staged_job,
@@ -103,6 +105,67 @@ class ScratchScriptTests(unittest.TestCase):
 
 
 class StagedHostTests(unittest.TestCase):
+    def test_idle_admission_reclaims_crash_scratch_before_measuring_and_preserves_live_work(self) -> None:
+        with TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            dead = root / f"{SCRATCH_DIR_PREFIX}crashed"
+            live = root / f"{SCRATCH_DIR_PREFIX}live"
+            unrelated = root / "other-data"
+            for directory in (dead, live, unrelated):
+                directory.mkdir()
+                (directory / "source").write_bytes(b"payload")
+            (live / KEEPER_PID_FILE).write_text(str(os.getpid()))
+            old = time.time() - (staged_host.ORPHAN_GRACE_MINUTES + 5) * 60
+            os.utime(dead, (old, old))
+
+            def local_remote(_host: dict[str, Any], command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                self.assertFalse(kwargs["wake_before_connect"])
+                if "df -Pk" in command[-1]:
+                    # Pin capacity to whether the crash debris was actually reclaimed.
+                    return subprocess.CompletedProcess(command, 0, "0" if dead.exists() else "12345", "")
+                return subprocess.run(command, capture_output=True, text=True, timeout=kwargs["timeout"])
+
+            host = {"scratch_root": raw_root}
+            self.assertEqual(measure_scratch_free_bytes(host, local_remote), 0)
+            self.assertTrue(dead.exists())
+            self.assertEqual(measure_scratch_free_bytes(host, local_remote, sweep_idle=True), 12345 * 1024)
+            self.assertFalse(dead.exists())
+            self.assertTrue(live.exists())
+            self.assertTrue(unrelated.exists())
+
+    def test_admission_probe_uses_transport_without_waking_the_computer(self) -> None:
+        result = subprocess.CompletedProcess([], 0, stdout="Login profile notice\n12345\n", stderr="")
+        with patch("mediaforce.remote._ensure_remote_awake_for_ssh") as wake, patch(
+            "mediaforce.remote.subprocess.run", return_value=result,
+        ):
+            free_bytes = measure_scratch_free_bytes(
+                {"host": "scratch-worker", "scratch_root": "/scratch", "wake_mac": "00:11:22:33:44:55"},
+                remote.run_remote_command,
+            )
+        self.assertEqual(free_bytes, 12345 * 1024)
+        wake.assert_not_called()
+
+    def test_admission_probe_measures_kib_without_creating_a_missing_root(self) -> None:
+        with TemporaryDirectory() as raw_root:
+            missing = Path(raw_root) / "scratch with spaces" / "nested"
+            observed_commands: list[list[str]] = []
+
+            def local_remote(
+                    _host: dict[str, Any], command: list[str], timeout: int, *, wake_before_connect: bool,
+            ) -> subprocess.CompletedProcess[str]:
+                self.assertFalse(wake_before_connect)
+                observed_commands.append(command)
+                script = "df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 20000 7655 12345 39%% /\\n'; }\n" + command[-1]
+                return subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=timeout)
+
+            free_bytes = measure_scratch_free_bytes({"scratch_root": str(missing)}, local_remote)
+            self.assertEqual(free_bytes, 12345 * 1024)
+            self.assertFalse(missing.parent.exists())
+            self.assertEqual(len(observed_commands), 1)
+
+        remote = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="12345\n", stderr=""))
+        self.assertEqual(measure_scratch_free_bytes({"scratch_root": "/scratch"}, remote), 12345 * 1024)
+
     def test_scratch_root_must_be_an_absolute_folder_below_the_filesystem_root(self) -> None:
         self.assertEqual(host_scratch_root({"scratch_root": "/var/tmp/scratch"}), PurePosixPath("/var/tmp/scratch"))
         for unsafe in ("", "  ", "/", "relative/scratch", None):
