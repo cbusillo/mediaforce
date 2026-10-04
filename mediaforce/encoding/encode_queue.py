@@ -428,6 +428,31 @@ def list_child_encode_jobs_for_parents(
     return children
 
 
+def list_pending_encode_jobs(connection: DBClient, *, limit: int) -> list[dict[str, Any]]:
+    """Complete runnable inventory with only scheduler-decoration inputs; never display rows."""
+    rows = connection.execute(
+        select(
+            encode_jobs.c.status, encode_jobs.c.host_json, encode_jobs.c.bypass_schedule,
+            encode_jobs.c.attempt_count, encode_jobs.c.waiting_reason, encode_jobs.c.progress_json,
+            encode_jobs.c.started_at, encode_jobs.c.schedule_close_deadline_at,
+        )
+        .where(encode_jobs.c.status.in_(QUEUED_ENCODE_JOB_STATUSES))
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+        .order_by(encode_jobs.c.created_at.asc(), _rowid_column().asc())
+        .limit(limit)
+    ).mappings()
+    return [
+        {
+            "status": str(row["status"]), "host": _loads_host_payload(row["host_json"]),
+            "bypass_schedule": bool(row["bypass_schedule"]),
+            "attempt_count": int(row["attempt_count"] or 0), "waiting_reason": row["waiting_reason"],
+            "progress": json.loads(str(row["progress_json"])) if row["progress_json"] else None,
+            "started_at": row["started_at"], "schedule_close_deadline_at": row["schedule_close_deadline_at"],
+        }
+        for row in rows
+    ]
+
+
 def summarize_encode_queue(
         connection: DBClient,
         *,
@@ -465,12 +490,7 @@ def summarize_encode_queue(
             library_types=library_types,
         ).to_payload()
     state = load_queue_state(connection)
-    pending = list_encode_jobs(
-        connection,
-        statuses=QUEUED_ENCODE_JOB_STATUSES,
-        limit=counts["pending_work"],
-        job_kinds=RUNNABLE_ENCODE_JOB_KINDS,
-    )
+    pending = list_pending_encode_jobs(connection, limit=counts["pending_work"])
     return {
         "state": state,
         "pending": pending,
