@@ -2830,10 +2830,14 @@ def encode_queue_worker_loop(
     )
 
 
-def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps) -> None:
+def process_encode_queue_once(
+        *, config_path: Path, deps: EncodeQueueRuntimeDeps,
+        prepared_staged_hosts: dict[str, dict[str, Any]] | None = None,
+) -> None:
     config = deps.load_config(config_path)
     claimed_jobs: list[dict[str, Any]] = []
     capacity_cache: CapacityCache = {}
+    staged_hosts_to_prepare: dict[str, dict[str, Any]] = {}
     with open_db(config.paths.db_path) as connection:
         ensure_queue_state(connection, updated_at=deps.now_iso())
         connection.commit()
@@ -2854,6 +2858,8 @@ def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps
                 config,
                 deps,
                 capacity_cache=capacity_cache,
+                staged_hosts_to_prepare=staged_hosts_to_prepare if prepared_staged_hosts is None else None,
+                prepared_staged_hosts=prepared_staged_hosts,
             )
             if next_job is None:
                 break
@@ -2886,8 +2892,34 @@ def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps
                         failure_kind=failure_kind,
                         error_message=error_message,
                     )
+                if bool(object_dict(job.get("host")).get("scratch_admission_started")):
+                    if not _host_has_other_running_jobs(config, str(job["job_id"]), job.get("host")):
+                        deps.stop_encode_host_if_configured(config, job.get("host"))
             except Exception:
                 deps.logger.exception("Encode dispatch failure recovery failed for %s", job["job_id"])
+
+    if staged_hosts_to_prepare:
+        ready_hosts: dict[str, dict[str, Any]] = {}
+        for key, host in staged_hosts_to_prepare.items():
+            try:
+                started = deps.ensure_encode_host_ready(config, host)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                deps.logger.exception("Could not prepare staged computer %s for scratch admission", key)
+                continue
+            ready_hosts[key] = {**host, "available": True, "probe_available": True,
+                                "scratch_admission_started": bool(started)}
+        if ready_hosts:
+            try:
+                # Startup runs outside the database transaction, then every candidate gets
+                # a fresh schedule, cooldown and capacity check before charging an attempt.
+                process_encode_queue_once(config_path=config_path, deps=deps, prepared_staged_hosts=ready_hosts)
+            finally:
+                for host in ready_hosts.values():
+                    if bool(host.get("scratch_admission_started")) and not _host_has_other_running_jobs(config, "", host):
+                        try:
+                            deps.stop_encode_host_if_configured(config, host)
+                        except (OSError, RuntimeError, subprocess.SubprocessError):
+                            deps.logger.exception("Could not stop unused staged computer after scratch admission")
 
 
 def claim_next_runnable_encode_job(
@@ -2896,12 +2928,16 @@ def claim_next_runnable_encode_job(
         deps: EncodeQueueRuntimeDeps,
         *,
         capacity_cache: CapacityCache | None = None,
+        staged_hosts_to_prepare: dict[str, dict[str, Any]] | None = None,
+        prepared_staged_hosts: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     next_job = load_next_runnable_encode_job(
         connection,
         config,
         deps,
         capacity_cache=capacity_cache,
+        staged_hosts_to_prepare=staged_hosts_to_prepare,
+        prepared_staged_hosts=prepared_staged_hosts,
     )
     if next_job is None:
         return None
@@ -2954,6 +2990,8 @@ def load_next_runnable_encode_job(
         deps: EncodeQueueRuntimeDeps,
         *,
         capacity_cache: CapacityCache | None = None,
+        staged_hosts_to_prepare: dict[str, dict[str, Any]] | None = None,
+        prepared_staged_hosts: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     parent_sync_jobs: dict[str, dict[str, Any]] = {}
 
@@ -2974,6 +3012,15 @@ def load_next_runnable_encode_job(
     ).mappings().fetchall()
     now = datetime.now(tz=UTC)
     host_rows = deps.host_runtime_rows(connection, config, now=now) if rows else []
+    if prepared_staged_hosts:
+        host_rows = [
+            {**host, "available": True, "probe_available": True,
+             "scratch_admission_started": bool(prepared.get("scratch_admission_started"))}
+            if not object_list(host.get("issues")) and (prepared := next(
+                (value for value in prepared_staged_hosts.values() if _host_identity_matches(host, value)), None,
+            )) is not None else host
+            for host in host_rows
+        ]
     duration_estimation_relevant = any(
         parse_schedule_close_deadline(host.get("schedule_closes_at")) is not None
         or str(deps.schedule_profile_policy_for_host(config, host).get("mode") or "anytime") != "anytime"
@@ -3007,6 +3054,16 @@ def load_next_runnable_encode_job(
             host_payload: dict[str, Any],
             estimate: EncodeDurationEstimate | None,
     ) -> dict[str, Any] | None:
+        if _uses_staged_scratch(host_payload) and not bool(host_payload.get("available")):
+            if staged_hosts_to_prepare is not None:
+                staged_hosts_to_prepare[_encode_duration_host_cache_key(host_payload)] = host_payload
+            name = str(host_payload.get("label") or host_payload.get("key") or "the encode computer")
+            reason = f"Waiting to start {name} before checking scratch space."
+            if job.get("waiting_reason") != reason:
+                job.update(waiting_reason=reason, updated_at=deps.now_iso(), schedule_close_deadline_at=None)
+                save_encode_job(connection, job)
+                defer_parent_sync(job)
+            return None
         if estimate is not None and not bool(job.get("bypass_schedule")):
             job["admission_estimate"] = _encode_duration_estimate_payload(estimate)
         schedule_close_deadline_at = _selected_encode_schedule_close_deadline(job, host_payload)
@@ -3137,6 +3194,9 @@ def load_next_runnable_encode_job(
             ]
             if any(reserved is None for reserved in reservations):
                 return f"Waiting for the active work's scratch-space requirement on {name}."
+            if not bool(host.get("available")):
+                # The selected startable computer is prepared outside the claim transaction.
+                return None
             reserved_bytes = max((reserved for reserved in reservations if reserved is not None), default=0)
             cache_key = _encode_duration_host_cache_key(host)
             if cache_key not in scratch_capacity_cache:
@@ -3368,10 +3428,10 @@ def run_encode_job(
     schedule_interrupted = False
     failure_kind: str | None = None
     error: str | None = None
-    started_host_for_job = False
+    started_host_for_job = bool(object_dict(job.get("host")).get("scratch_admission_started"))
     try:
         process_controller.throw_if_cancelled()
-        started_host_for_job = deps.ensure_encode_host_ready(config, job.get("host"))
+        started_host_for_job = deps.ensure_encode_host_ready(config, job.get("host")) or started_host_for_job
         process_controller.throw_if_cancelled()
         with open_db(config.paths.db_path) as connection:
             deps.encode_manifest_items(

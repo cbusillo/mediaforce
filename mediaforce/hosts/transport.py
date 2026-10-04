@@ -66,6 +66,7 @@ def run_remote_command(
         process_controller: ManagedProcessController | None = None,
         *,
         idle_timeout: float | None = None,
+        wake_before_connect: bool = True,
         ssh_target_for_host: Callable[[dict[str, object]], str],
         remote_shell_path_export_line: Callable[[], str],
         run_remote_ssh: Callable[..., subprocess.CompletedProcess[str]],
@@ -98,6 +99,8 @@ def run_remote_command(
         remote_kwargs["process_controller"] = process_controller
     if idle_timeout is not None:
         remote_kwargs["idle_timeout"] = idle_timeout
+    if not wake_before_connect:
+        remote_kwargs["wake_before_connect"] = False
     result = run_remote_ssh(
         normalized_host,
         "sh",

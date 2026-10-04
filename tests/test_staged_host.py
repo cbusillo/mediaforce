@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import Mock, patch
 
 from mediaforce.encoding import runner, staged_host
+from mediaforce import remote
 from mediaforce.encoding.staged_host import (
     KEEPER_PID_FILE,
     SCRATCH_DIR_PREFIX,
@@ -104,12 +105,27 @@ class ScratchScriptTests(unittest.TestCase):
 
 
 class StagedHostTests(unittest.TestCase):
+    def test_admission_probe_uses_transport_without_waking_the_computer(self) -> None:
+        result = subprocess.CompletedProcess([], 0, stdout="12345\n", stderr="")
+        with patch("mediaforce.remote._ensure_remote_awake_for_ssh") as wake, patch(
+            "mediaforce.remote.subprocess.run", return_value=result,
+        ):
+            free_bytes = measure_scratch_free_bytes(
+                {"host": "scratch-worker", "scratch_root": "/scratch", "wake_mac": "00:11:22:33:44:55"},
+                remote.run_remote_command,
+            )
+        self.assertEqual(free_bytes, 12345 * 1024)
+        wake.assert_not_called()
+
     def test_admission_probe_measures_kib_without_creating_a_missing_root(self) -> None:
         with TemporaryDirectory() as raw_root:
             missing = Path(raw_root) / "scratch with spaces" / "nested"
             observed_commands: list[list[str]] = []
 
-            def local_remote(_host: dict[str, Any], command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+            def local_remote(
+                    _host: dict[str, Any], command: list[str], timeout: int, *, wake_before_connect: bool,
+            ) -> subprocess.CompletedProcess[str]:
+                self.assertFalse(wake_before_connect)
                 observed_commands.append(command)
                 script = "df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 20000 7655 12345 39%% /\\n'; }\n" + command[-1]
                 return subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=timeout)

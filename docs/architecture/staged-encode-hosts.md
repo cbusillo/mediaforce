@@ -38,6 +38,13 @@ wait until an active file finishes. Unknown active budgets hold new scratch work
 on that computer. Admission does not sweep or create directories; a missing
 scratch root is measured on its nearest existing ancestor.
 
+A staged computer with an automatic start command is prepared before admission,
+outside the database transaction. The file stays queued without an attempt while
+it starts. The scheduler then rechecks the schedule, host eligibility and scratch
+capacity. Capacity probes never wake a computer themselves. If a computer was
+started for this check but cannot take work, its configured stop command runs;
+if it takes work, the worker retains that cleanup responsibility.
+
 `mediaforce/encoding/staged_host.py` owns the scratch directory.
 
 1. Sweep the scratch root for directories whose keeper is gone.
