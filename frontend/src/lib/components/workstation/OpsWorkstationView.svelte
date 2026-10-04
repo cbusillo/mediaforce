@@ -584,18 +584,18 @@
 		<aside class="ops__rail" aria-label="Computer readiness">
 			<details class="system-details">
 				<summary class="system-details__summary">
-					<div>
+					<span class="system-details__heading">
 						<span class="mf-eyebrow">Details</span>
 						<strong>Computers and schedule</strong>
-					</div>
-					<div class="system-details__state">
+					</span>
+					<span class="system-details__state">
 						<StateBadge
 							compact
 							tone={readyHosts > 0 ? 'ready' : 'wait'}
 							label={`${readyHosts.toLocaleString('en-US')} ready`}
 						/>
 						<span>Open</span>
-					</div>
+					</span>
 				</summary>
 				<div class="system-details__content">
 					<WorkstationPanel
@@ -1405,7 +1405,7 @@
 		display: none;
 	}
 
-	.system-details__summary > div:first-child {
+	.system-details__heading {
 		display: grid;
 		gap: 7px;
 		min-width: 0;

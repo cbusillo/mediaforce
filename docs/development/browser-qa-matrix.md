@@ -365,6 +365,11 @@ An unrestricted queue reads `No queue-wide time limit` even when computers are
 off schedule. Activity's window-wait badge and notice use the same file count,
 rather than retry/storage waits or show-row counts. While the queue is paused,
 the panel says window waits update on resume instead of presenting stale counts.
+The work-window fixture clears active and attention work, then checks the
+readiness headline with and without an ordinary queued show at 1440px and
+390px. Both must read `Waiting for a work window`; the expanded schedule
+panel must retain the same file count. This covers the two readiness branches,
+not a live scheduler or production queue.
 
 On Activity, `Working now` must own or begin the first viewport at desktop and
 390px widths; do not place a visible hero or separate dashboard summary ahead of

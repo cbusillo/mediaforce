@@ -1055,6 +1055,21 @@ export function buildOpsBlockers(
 	return blockers;
 }
 
+function workWindowReadinessSummary(
+	waitingFiles: number,
+	schedulerSummary: string | null | undefined
+): OpsReadinessSummary {
+	return {
+		tone: 'wait',
+		title: 'Waiting for a work window',
+		detail:
+			queueScheduleSummaryCopy(schedulerSummary) ||
+			'Waiting work will start when its allowed time begins.',
+		metricLabel: 'Files waiting',
+		metricValue: String(waitingFiles)
+	};
+}
+
 export function buildOpsReadinessSummary(
 	dashboard: DashboardSummaryPayload | null | undefined,
 	hosts: HostsPayload | null | undefined,
@@ -1197,6 +1212,9 @@ export function buildOpsReadinessSummary(
 	if (capacity.total > 0 && capacity.encodeReady === 0 && queuedWork > 0 && runningCount === 0) {
 		const allAvailableHostsScheduledOff =
 			capacity.available > 0 && capacity.scheduledOff === capacity.available;
+		if (allAvailableHostsScheduledOff && queuedWaiting > 0) {
+			return workWindowReadinessSummary(queuedWaiting, queue?.state.scheduler_summary);
+		}
 		const workersReachable = capacity.available > 0;
 		return {
 			tone: workersReachable ? 'wait' : 'fail',
@@ -1226,15 +1244,7 @@ export function buildOpsReadinessSummary(
 		};
 	}
 	if (queuedWaiting > 0 && capacity.encodeReady === 0) {
-		return {
-			tone: 'wait',
-			title: 'Waiting for a work window',
-			detail:
-				queueScheduleSummaryCopy(queue?.state.scheduler_summary) ||
-				'Waiting work will start when its allowed time begins.',
-			metricLabel: 'Files waiting',
-			metricValue: String(queuedWaiting)
-		};
+		return workWindowReadinessSummary(queuedWaiting, queue?.state.scheduler_summary);
 	}
 	if (reviewReadyCount > 0) {
 		return {

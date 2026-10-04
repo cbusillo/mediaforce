@@ -184,6 +184,57 @@ function quietDashboardFixture(): DashboardSummaryPayload {
 }
 
 describe('Activity work-window totals', () => {
+	it.each([true, false])(
+		'shows the file wait count with ordinary queued rows present: %s',
+		(hasQueuedRows) => {
+			const dashboard = quietDashboardFixture();
+			const queue = dashboard.encode_queue;
+			queue.recent = [];
+			queue.needs_attention_count = 0;
+			queue.queued = hasQueuedRows
+				? [{ job_id: 'waiting-show', prefix: 'tv/show', status: 'queued' }]
+				: [];
+			queue.queued_count = queue.queued.length;
+			queue.queued_schedule_waiting_count = 10;
+			queue.state.scheduler_summary = 'runs anytime';
+			const hosts = hostsFixture();
+			hosts.hosts = hosts.hosts.map((host) => ({ ...host, schedule_open: false }));
+
+			expect(buildOpsReadinessSummary(dashboard, hosts, null)).toMatchObject({
+				tone: 'wait',
+				title: 'Waiting for a work window',
+				metricLabel: 'Files waiting',
+				metricValue: String(queue.queued_schedule_waiting_count)
+			});
+		}
+	);
+
+	it.each([true, false])(
+		'keeps unavailable or busy computers distinct: available %s',
+		(available) => {
+			const dashboard = quietDashboardFixture();
+			const queue = dashboard.encode_queue;
+			queue.recent = [];
+			queue.needs_attention_count = 0;
+			queue.queued = [{ job_id: 'waiting-show', prefix: 'tv/show', status: 'queued' }];
+			queue.queued_count = 1;
+			queue.queued_schedule_waiting_count = 0;
+			const hosts = hostsFixture();
+			hosts.hosts = hosts.hosts.map((host) => ({
+				...host,
+				available,
+				schedule_open: true,
+				active_encode_count: host.max_parallel_encodes
+			}));
+
+			expect(buildOpsReadinessSummary(dashboard, hosts, null)).toMatchObject({
+				title: available ? 'Computers are busy or waiting' : 'No computer can work right now',
+				metricLabel: 'Available',
+				metricValue: '0'
+			});
+		}
+	);
+
 	it('does not describe retry delays as window waits when no encode computer is configured', () => {
 		const dashboard = quietDashboardFixture();
 		const queue = dashboard.encode_queue;
@@ -1337,13 +1388,7 @@ describe('Ops workstation mapping', () => {
 	});
 
 	it('summarizes the first-glance Ops readiness answer', () => {
-		const dashboard = dashboardFixture();
-		dashboard.encode_queue.running = [];
-		dashboard.encode_queue.running_count = 0;
-		dashboard.encode_queue.queued = [];
-		dashboard.encode_queue.queued_count = 0;
-		dashboard.calibration_queue.sample.running = [];
-		dashboard.calibration_queue.active_count = 0;
+		const dashboard = quietDashboardFixture();
 		const summary = buildOpsReadinessSummary(dashboard, hostsFixture(), null);
 
 		expect(summary).toMatchObject({
