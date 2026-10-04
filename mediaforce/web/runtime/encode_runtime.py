@@ -2550,6 +2550,11 @@ def _scratch_capacity_key(host: dict[str, Any]) -> str:
     return f"{_encode_duration_host_cache_key(host)}|{host_scratch_root(host)}|{host.get('start_command') or ''}"
 
 
+def _scratch_space_wait_reason(name: str, required_bytes: int, free_bytes: int) -> str:
+    needed_gib = (required_bytes + 1024 ** 3 - 1) // (1024 ** 3)
+    return f"Waiting for scratch space on {name}: {needed_gib} GiB needed, {free_bytes // (1024 ** 3)} GiB free."
+
+
 def _prepared_encode_host_rows(
         hosts: list[dict[str, Any]], prepared_hosts: dict[str, dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
@@ -2620,6 +2625,8 @@ def _launch_scratch_admission_task(
                 deps.scratch_admission_task_hosts.pop(key, None)
 
     with deps.scratch_admission_lock:
+        if prepare and any(_host_identity_matches(host, ready) for ready in deps.scratch_ready_hosts.values()):
+            return
         if key in deps.scratch_admission_tasks or any(
                 _host_identity_matches(host, task_host) for task_host in deps.scratch_admission_task_hosts.values()
         ):
@@ -2989,10 +2996,18 @@ def process_encode_queue_once(
             prepared_staged_hosts = dict(deps.scratch_ready_hosts)
         host_rows = _prepared_encode_host_rows(deps.host_runtime_rows(connection, config) if has_queued_work else [],
                                                prepared_staged_hosts)
+        blocked_scratch_tokens = {
+            token for blocked in _globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC)).values()
+            for token in _host_identity_tokens(blocked)
+        } if has_queued_work else set()
 
     scratch_capacity_cache: dict[str, int | None] = {}
     now = datetime.now(tz=UTC)
     for host in host_rows:
+        if "encode_queue" not in {str(capability).lower() for capability in host.get("capabilities") or []}:
+            continue
+        if _host_identity_tokens(host) & blocked_scratch_tokens:
+            continue
         if not _uses_staged_scratch(host) or not bool(host.get("available")) or not bool(host.get("probe_available", True)):
             continue
         if int(host.get("active_encode_count") or 0) >= int(host.get("max_parallel_encodes") or 1):
@@ -3344,7 +3359,17 @@ def load_next_runnable_encode_job(
                 checking = cache_key in deps.scratch_admission_tasks or any(
                     _host_identity_matches(host, task_host) for task_host in deps.scratch_admission_task_hosts.values()
                 )
-            if checking:
+                previous_sample = deps.scratch_capacity_samples.get(cache_key)
+            awaiting_reading = checking or (
+                bool(host.get("available")) and cache_key not in scratch_capacity_cache and not scratch_probe_allowed
+            )
+            if awaiting_reading:
+                # Keep an established waiting reason stable, but never admit using a stale reading.
+                if previous_sample is not None:
+                    if previous_sample.free_bytes is None:
+                        return f"Waiting to measure scratch space on {name}; Mediaforce will check again."
+                    if previous_sample.free_bytes < required_bytes:
+                        return _scratch_space_wait_reason(name, required_bytes, previous_sample.free_bytes)
                 return f"Waiting for the scratch-space check on {name}."
             if not bool(host.get("available")):
                 previous = deps.scratch_admission_history.get(cache_key)
@@ -3366,8 +3391,7 @@ def load_next_runnable_encode_job(
             if free_bytes is None:
                 return f"Waiting to measure scratch space on {name}; Mediaforce will check again."
             if free_bytes < required_bytes:
-                needed_gib = (required_bytes + 1024 ** 3 - 1) // (1024 ** 3)
-                return f"Waiting for scratch space on {name}: {needed_gib} GiB needed, {free_bytes // (1024 ** 3)} GiB free."
+                return _scratch_space_wait_reason(name, required_bytes, free_bytes)
             return None
 
         def scratch_admission_pending(host: dict[str, Any]) -> bool:
