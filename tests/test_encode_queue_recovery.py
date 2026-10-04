@@ -109,6 +109,10 @@ def _remote_host_unreachable(*_args: object, **_kwargs: object) -> subprocess.Co
     return subprocess.CompletedProcess(["ssh"], 255, "", "ssh: connect to host: Operation timed out")
 
 
+def _scratch_fixture_is_local(_lookup_host: str) -> bool:
+    return False
+
+
 class EncodeQueueRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -19984,6 +19988,7 @@ raise SystemExit(0)
             self.assertEqual(claimed["status"], "running")
             self.assertIsNone(claimed["schedule_close_deadline_at"])
 
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_scratch_startup_happens_before_claim_and_outside_database_transaction(self) -> None:
         host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
         host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce",
@@ -20089,6 +20094,7 @@ raise SystemExit(0)
             task.join(timeout=5)
             assert not task.is_alive(), "scratch admission task did not finish"
 
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_scratch_probes_are_shared_across_claims_and_never_hold_the_write_lock(self) -> None:
         host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
         host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce", max_parallel_encodes=2)
@@ -20123,6 +20129,7 @@ raise SystemExit(0)
         probe.assert_called_once()
         self.assertEqual(deps.dispatch_encode_job.call_count, 2)
 
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_failed_scratch_start_backs_off_and_allows_another_startable_computer(self) -> None:
         hosts = []
         for name, priority in (("broken", 2), ("backup", 1)):
@@ -20156,6 +20163,7 @@ raise SystemExit(0)
         deps.dispatch_encode_job.assert_called_once()
 
 
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_scratch_startable_computer_does_not_delay_an_active_alternative(self) -> None:
         host = self._encode_host_row("scratch-worker", schedule_closes_at=None, priority=2)
         host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce",
@@ -20178,6 +20186,7 @@ raise SystemExit(0)
             self.assertEqual(requests, {})
             probe.assert_not_called()
 
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_busy_scratch_measurement_does_not_hold_the_next_file_after_cleanup(self) -> None:
         host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
         host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce",
@@ -20221,6 +20230,7 @@ raise SystemExit(0)
         deps.ensure_encode_host_ready.assert_called_once()
         deps.dispatch_encode_job.assert_called_once()
 
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_scratch_probes_skip_busy_and_closed_computers_but_allow_schedule_bypass(self) -> None:
         host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
         host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce", active_encode_count=1)
@@ -20266,6 +20276,7 @@ raise SystemExit(0)
         probe.assert_called_once()
         deps.dispatch_encode_job.assert_called_once()
 
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_scratch_admission_waits_without_attempt_and_recovers(self) -> None:
         host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
         host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce")
@@ -20294,6 +20305,7 @@ raise SystemExit(0)
             self.assertEqual(claimed["attempt_count"], 1)
             self.assertIsNone(claimed["waiting_reason"])
 
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_scratch_admission_skips_large_file_and_probes_once_per_pass(self) -> None:
         host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
         host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce")
@@ -20319,6 +20331,7 @@ raise SystemExit(0)
             self.assertEqual(queued["attempt_count"], 0)
             self.assertIn("scratch space", queued["waiting_reason"])
 
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_scratch_probe_faults_wait_and_allow_a_healthy_alternative(self) -> None:
         scratch = self._encode_host_row("scratch-worker", schedule_closes_at=None, priority=2)
         scratch.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce")
@@ -20352,6 +20365,7 @@ raise SystemExit(0)
                     assert selected is not None
                     self.assertEqual(selected["host"]["key"], "backup")
 
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_scratch_admission_reserves_running_work_before_it_copies(self) -> None:
         host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
         host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce",
@@ -20373,6 +20387,7 @@ raise SystemExit(0)
             assert selected is not None
             self.assertEqual(selected["job_id"], "next")
 
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_scratch_admission_requires_all_source_sizes(self) -> None:
         host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
         host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce")
