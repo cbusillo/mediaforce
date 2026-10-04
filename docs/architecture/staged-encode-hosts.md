@@ -38,8 +38,13 @@ Already admitted work reserves its full scratch budget on that computer,
 including work that has not started copying. This is conservative: bytes already
 on disk are also reflected in the free-space measurement, so parallel work may
 wait until an active file finishes. Unknown active budgets hold new scratch work
-on that computer. Admission does not sweep or create directories; a missing
-scratch root is measured on its nearest existing ancestor.
+on that computer. On a computer without running work, the background admission
+check runs the existing keeper-aware sweep before measuring: a crash's orphaned
+source/output must not prevent the next worker from ever being admitted. Live
+keepers, recently starting folders and unrelated directories remain protected
+by the same sweep rules. Checks with active work only measure. Admission does
+not create directories; a missing scratch root is measured on its nearest
+existing ancestor.
 
 A staged computer with an automatic start command is prepared before admission,
 in a background task outside the database transaction. Startup, capacity checks

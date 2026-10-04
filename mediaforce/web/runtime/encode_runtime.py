@@ -2575,7 +2575,7 @@ def _launch_scratch_admission_task(
             if prepare:
                 started = bool(deps.ensure_encode_host_ready(config, host))
             idle_before = not _host_has_other_running_jobs(config, "", host)
-            free_bytes = measure_scratch_free_bytes(host, run_remote_command)
+            free_bytes = measure_scratch_free_bytes(host, run_remote_command, sweep_idle=idle_before)
             now = time.monotonic()
             sample = _ScratchAdmissionSnapshot(free_bytes, now + deps.encode_host_cooldown_seconds, now)
             idle_after = not _host_has_other_running_jobs(config, "", host)

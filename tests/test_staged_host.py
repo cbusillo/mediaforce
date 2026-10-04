@@ -105,6 +105,34 @@ class ScratchScriptTests(unittest.TestCase):
 
 
 class StagedHostTests(unittest.TestCase):
+    def test_idle_admission_reclaims_crash_scratch_before_measuring_and_preserves_live_work(self) -> None:
+        with TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            dead = root / f"{SCRATCH_DIR_PREFIX}crashed"
+            live = root / f"{SCRATCH_DIR_PREFIX}live"
+            unrelated = root / "other-data"
+            for directory in (dead, live, unrelated):
+                directory.mkdir()
+                (directory / "source").write_bytes(b"payload")
+            (live / KEEPER_PID_FILE).write_text(str(os.getpid()))
+            old = time.time() - (staged_host.ORPHAN_GRACE_MINUTES + 5) * 60
+            os.utime(dead, (old, old))
+
+            def local_remote(_host: dict[str, Any], command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+                self.assertFalse(kwargs["wake_before_connect"])
+                if "df -Pk" in command[-1]:
+                    # Pin capacity to whether the crash debris was actually reclaimed.
+                    return subprocess.CompletedProcess(command, 0, "0" if dead.exists() else "12345", "")
+                return subprocess.run(command, capture_output=True, text=True, timeout=kwargs["timeout"])
+
+            host = {"scratch_root": raw_root}
+            self.assertEqual(measure_scratch_free_bytes(host, local_remote), 0)
+            self.assertTrue(dead.exists())
+            self.assertEqual(measure_scratch_free_bytes(host, local_remote, sweep_idle=True), 12345 * 1024)
+            self.assertFalse(dead.exists())
+            self.assertTrue(live.exists())
+            self.assertTrue(unrelated.exists())
+
     def test_admission_probe_uses_transport_without_waking_the_computer(self) -> None:
         result = subprocess.CompletedProcess([], 0, stdout="12345\n", stderr="")
         with patch("mediaforce.remote._ensure_remote_awake_for_ssh") as wake, patch(
