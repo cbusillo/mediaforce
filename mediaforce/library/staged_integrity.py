@@ -165,6 +165,7 @@ def staged_integrity_report(
         *,
         discover: bool,
         record_limit: int = MAX_INTEGRITY_RECORDS,
+        include_publish_reason: bool = True,
 ) -> StagedIntegrityReport:
     scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
     return staged_integrity_report_for_scope(
@@ -173,6 +174,7 @@ def staged_integrity_report(
         scope,
         discover=discover,
         record_limit=record_limit,
+        include_publish_reason=include_publish_reason,
     )
 
 
@@ -183,6 +185,7 @@ def staged_integrity_report_for_scope(
         *,
         discover: bool,
         record_limit: int = MAX_INTEGRITY_RECORDS,
+        include_publish_reason: bool = True,
 ) -> StagedIntegrityReport:
     bounded_limit = min(max(1, record_limit), MAX_INTEGRITY_RECORDS)
     rows = _load_scope_rows(connection, scope, limit=bounded_limit + 1)
@@ -193,7 +196,7 @@ def staged_integrity_report_for_scope(
     for row in rows:
         record = _classify_row(row, staging_roots)
         delivery = object_dict(_parsed_validation(row["validation_json"]).get("automatic_publish"))
-        if delivery.get("reason") and record.disposition != "tracked":
+        if include_publish_reason and delivery.get("reason") and record.disposition != "tracked":
             record = replace(record, detail=f"{record.detail} {delivery['reason']}")
         records.append(record)
     discovery_truncated = bool(discover and database_truncated)

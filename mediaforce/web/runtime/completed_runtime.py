@@ -118,6 +118,7 @@ def list_completed_folders(
     grouped: dict[str, CompletedFolder] = {}
     confirmed_item_ids = _confirmed_originals_removed_item_ids(connection)
     resolved_archive_root = archive_root.resolve() if archive_root is not None else None
+    counted_backup_paths: set[Path] = set()
     for row in rows:
         rel_path = str(row["rel_path"] or "")
         group = folder_group(rel_path)
@@ -165,11 +166,44 @@ def list_completed_folders(
             folder.missing_backup_count += 1
             continue
         folder.archived_backup_count += 1
+        counted_backup_paths.add(archived_path.resolve())
         try:
             folder.archived_backup_size_bytes += archived_path.stat().st_size
         except FileNotFoundError:
             folder.archived_backup_count -= 1
             folder.missing_backup_count += 1
+
+    # A later publish retains the previous rollback beside the latest original.
+    # Include those retained copies in the same folder's owner-approved cleanup count.
+    if archive_root is not None and resolved_archive_root is not None:
+        retained_events = connection.execute(
+            select(item_events.c.details_json).where(
+                item_events.c.event_type == "promotion_completed"
+            )
+        ).scalars()
+        for details_json in retained_events:
+            retained_path = _clean_text(
+                _event_details(details_json).get("retained_archive_backup_path")
+            )
+            if not retained_path:
+                continue
+            backup = Path(retained_path)
+            if not backup.is_file() or not _path_is_within_root(
+                backup, resolved_archive_root
+            ):
+                continue
+            if backup.resolve() in counted_backup_paths:
+                continue
+            group = folder_group(backup.relative_to(archive_root).as_posix())
+            folder = grouped.get(group[0]) if group is not None else None
+            if folder is not None:
+                try:
+                    size = backup.stat().st_size
+                except FileNotFoundError:
+                    continue
+                folder.archived_backup_count += 1
+                folder.archived_backup_size_bytes += size
+                counted_backup_paths.add(backup.resolve())
 
     for folder in grouped.values():
         folder.cleanup_state, folder.cleanup_detail = _folder_cleanup_state(

@@ -329,9 +329,10 @@ uv run mediaforce staged-integrity "tv/Show/Season 1" --details
 
 The web app checks finished production files and publishes each passing file
 automatically, retaining the original in the Cleanup folder. Temporary holds
-retry; changed approvals, failed checks, and file conflicts stay with that file.
-Reasons appear in its staged-integrity details and history. Sample outputs never
-publish automatically. Older outputs without a recorded production origin use
+retry; unknown failures retry a bounded number of times before requiring a manual check.
+Changed approvals, failed checks, and file conflicts stay with that file.
+Reasons appear in its staged-integrity details. Sample outputs never
+publish automatically. Older outputs without an unambiguous recorded production origin use
 the manual override, so sample files cannot be mistaken for full replacements.
 
 Manually publish a checked file as an explicit override:

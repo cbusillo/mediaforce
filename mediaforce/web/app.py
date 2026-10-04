@@ -632,8 +632,9 @@ def create_app(
                     config,
                     evidence_runner=evidence_runner,
                     held_files_sweep=_join_cleared_held_files,
-                    automatic_publish_sweep=lambda: publish_checked_files_once(
+                    automatic_publish_sweep=lambda stop_event: publish_checked_files_once(
                         load_config(config.paths.config_path), load_calibration_state=_load_calibration_state,
+                        stop_event=stop_event,
                     ),
                 )
                 _safe_collect_host_statuses(config)
@@ -4782,8 +4783,9 @@ def _start_supervised_worker(
         process_once_fn: Callable[[], None],
         poll_seconds: float,
         failure_message: str,
+        stop_event: threading.Event | None = None,
 ) -> SupervisedWorkerHandle:
-    stop_event = threading.Event()
+    stop_event = stop_event if stop_event is not None else threading.Event()
     thread = threading.Thread(
         target=run_supervised_worker_loop,
         kwargs={
@@ -4815,7 +4817,7 @@ def _start_background_workers(
         *,
         evidence_runner: BoundedEvidenceRunner | None = None,
         held_files_sweep: Callable[[], None] | None = None,
-        automatic_publish_sweep: Callable[[], None] | None = None,
+        automatic_publish_sweep: Callable[[threading.Event], None] | None = None,
 ) -> BackgroundWorkerRuntime | None:
     lease = _acquire_background_worker_leadership(config)
     if lease is None:
@@ -4829,9 +4831,11 @@ def _start_background_workers(
         if evidence_runner is not None:
             handles.append(_start_evidence_autostart_worker(config, evidence_runner))
         if automatic_publish_sweep is not None:
+            publish_stop_event = threading.Event()
             handles.append(_start_supervised_worker(
                 name="automatic-publish-worker",
-                process_once_fn=automatic_publish_sweep,
+                process_once_fn=lambda: automatic_publish_sweep(publish_stop_event),
+                stop_event=publish_stop_event,
                 poll_seconds=ENCODE_QUEUE_POLL_SECONDS,
                 failure_message="Automatic file publishing failed; it will retry.",
             ))

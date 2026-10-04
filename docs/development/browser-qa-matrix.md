@@ -111,7 +111,7 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   is explained separately from a measured quality-floor conflict.
 - Approved state: `/folders/tv/Approved%20Show/Season%201`, where approval is
   complete and no production is queued in this static fixture.
-  `Compress the season` remains the manual admission override; in a running
+  `Compress the season` remains the separate production admission action; in a running
   app each finished approved file is checked and published automatically.
 - Protected approved state: `/folders/tv/Protected%20Ready/Season%202`, where an
   accepted test is ready but the current/recent season requires the explicit
@@ -441,7 +441,8 @@ exact condition that allows work to continue. Activity remains a secondary
 diagnostics route and must not be required to understand this movie. A ready
 manual replacement override must state that it runs immediately, preserves a
 backup of the original, and must not be triggered during browser QA. Static
-replacement-ready fixtures keep background publishing disabled; validate the
+replacement-ready fixtures have no unambiguous production origin, so the running
+publish worker leaves their replacements untouched. Validate the
 automatic per-file path with isolated synthetic files and a disposable database,
 including a blocked sibling, a temporary retry, and retained rollback copies. In that ready state,
 `Preview checked output` must remain secondary to replacement, open the exact

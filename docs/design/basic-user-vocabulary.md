@@ -40,11 +40,11 @@ a computer`, `Needs sample`, `Safe to delete`.
   a route that targets one episode.
 - Exact TV approval: use `Sample approved` for the settled review state and
   `Compress the full episode` for the separate production action. Approval
-  records the user's judgment. Name the episode and file, show the expected
+  records the user's judgment and does not queue work. Name the episode and file, show the expected
   size change, and state that compression creates a separate file. Each finished
   production file is checked and published automatically under current approval,
-  keeping its original backup. Manual compress, check, and replace actions are
-  explicit overrides; only real judgment calls need another decision.
+  keeping its original backup. Compression admission stays a separate action. Manual check and replace
+  actions are explicit overrides.
 - Movie scope: use `Action covers` with `Only this file` or `The whole title`.
   Keep `scope`, `exact selection`, and `title-wide` in technical details only.
 - Movie validation: automatic checking is normal; use `Check compressed file`

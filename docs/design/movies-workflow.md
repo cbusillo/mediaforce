@@ -45,9 +45,9 @@ second encode path.
   an explicit viewing-only `Full screen` control.
 - The ordinary review outcomes are `Keep this version`, `Use less space`, and
   `Improve picture or sound`. Keeping a version records the user's judgment
-  about the sample; it authorizes matching production, checking, and per-file
-  publishing without separate check or replace decisions.
-- A manual production action is scope-derived. For one exact movie it
+  about the sample and does not queue production. Once production is admitted,
+  matching files are checked and published without separate check or replace decisions.
+- The separate production action is scope-derived. For one exact movie it
   uses `Compress this movie` and states that it adds one file to the compression
   queue while the original remains unchanged until checked replacement.
 - Each finished production file is checked and published automatically under

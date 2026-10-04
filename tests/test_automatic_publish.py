@@ -4,11 +4,14 @@ from dataclasses import replace
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 from sqlalchemy import select
 
+from mediaforce import cli
+from mediaforce.web.runtime.completed_runtime import list_completed_folders, clear_completed_backups_action
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
@@ -160,7 +163,7 @@ def _status(config: MediaforceConfig, item_id: int) -> str:
 
 
 @pytest.mark.parametrize("root", ["tv/Show/Season 1", "movies/Title", "other/Folder"])
-@pytest.mark.parametrize("origin", ["queue", "cli"])
+@pytest.mark.parametrize("origin", ["queue", "cli-production"])
 def test_checks_and_publishes_each_file_without_manual_action(config: MediaforceConfig, root: str, origin: str) -> None:
     item_id, item, staged = _stage(config, f"{root}/one.mkv", origin=origin)
     _run(config)
@@ -399,4 +402,223 @@ def test_app_supervises_automatic_delivery_with_its_leadership(config: Mediaforc
     ):
         runtime = web_app._start_background_workers(config, automatic_publish_sweep=sweep)
     assert runtime is not None
-    assert start.call_args.kwargs["process_once_fn"] is sweep
+    start.call_args.kwargs["process_once_fn"]()
+    assert sweep.call_args.args == (start.call_args.kwargs["stop_event"],)
+
+
+@pytest.mark.parametrize("problem", ["failed_check", "drifted", "missing"])
+def test_repeated_integrity_hold_keeps_one_bounded_reason(
+    config: MediaforceConfig, problem: str
+) -> None:
+    item_id, _, staged = _stage(config, "tv/Show/Season 1/held.mkv")
+    if problem == "drifted":
+        staged.write_bytes(b"changed output")
+    elif problem == "missing":
+        staged.unlink()
+    else:
+        with open_db(config.paths.db_path) as connection:
+            connection.execute(
+                staged_artifacts.update()
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(validation_json='{"passed":false}')
+            )
+            connection.commit()
+    for _ in range(5):
+        _run(config)
+    with open_db(config.paths.db_path) as connection:
+        events = (
+            connection.execute(
+                select(item_events.c.details_json).where(
+                    item_events.c.library_item_id == item_id,
+                    item_events.c.event_type == "automatic_publish_waiting",
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(events) == 1
+        reason = json.loads(events[0])["reason"]
+        report = staged_integrity_report(
+            connection, config, "tv/Show/Season 1", discover=False
+        )
+        assert report.records[0].detail.count(reason) <= 2
+
+
+def test_unknown_failure_retries_then_holds_without_stopping_siblings(
+    config: MediaforceConfig,
+) -> None:
+    failed_id, failed_item, _ = _stage(
+        config, "tv/Show/Season 1/failed.mkv", checked=True
+    )
+    ready_id, _, _ = _stage(config, "tv/Show/Season 1/ready.mkv", checked=True)
+    promote = delivery.promote_one_item
+
+    def fail(
+        connection: DBClient,
+        config: MediaforceConfig,
+        item: dict[str, Any],
+        *,
+        force: bool,
+    ) -> Path:
+        if item["library_item_id"] == failed_id:
+            raise RuntimeError("unclassified failure")
+        return promote(connection, config, item, force=force)
+
+    with patch.object(delivery, "promote_one_item", side_effect=fail) as attempts:
+        for _ in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 2):
+            _run(config)
+    assert attempts.call_count == delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1
+    assert _status(config, ready_id) == "promoted"
+    with open_db(config.paths.db_path) as connection:
+        saved = json.loads(
+            connection.execute(
+                select(staged_artifacts.c.validation_json).where(
+                    staged_artifacts.c.library_item_id == failed_id
+                )
+            ).scalar_one()
+        )
+        assert saved["automatic_publish"]["state"] == "failed"
+    # A deliberate new check clears the terminal hold and supports a manual retry.
+    with (
+        open_db(config.paths.db_path) as connection,
+        patch("mediaforce.execution.probe_media", return_value=_probe()),
+    ):
+        delivery.validate_one_item(connection, config, failed_item)
+    _run(config)
+    assert _status(config, failed_id) == "promoted"
+
+
+def test_shutdown_stops_between_files(config: MediaforceConfig) -> None:
+    first, _, _ = _stage(config, "tv/Show/Season 1/one.mkv", checked=True)
+    second, _, _ = _stage(config, "tv/Show/Season 1/two.mkv", checked=True)
+    stop = threading.Event()
+    promote = delivery.promote_one_item
+
+    def finish_one(
+        connection: DBClient,
+        config: MediaforceConfig,
+        item: dict[str, Any],
+        *,
+        force: bool,
+    ) -> Path:
+        result = promote(connection, config, item, force=force)
+        stop.set()
+        return result
+
+    with (
+        patch.object(delivery, "promote_one_item", side_effect=finish_one),
+        patch("mediaforce.execution.probe_media", return_value=_probe()),
+    ):
+        delivery.publish_checked_files_once(
+            config, load_calibration_state=lambda *_args: _approval(), stop_event=stop
+        )
+    assert _status(config, first) == "promoted"
+    assert _status(config, second) == "validated"
+
+
+def test_cli_review_and_legacy_cli_output_do_not_auto_publish(
+    config: MediaforceConfig,
+) -> None:
+    item_id, item, staged = _stage(config, "tv/Show/Season 1/review.mkv", checked=True)
+
+    def encode(*_args: Any, **kwargs: Any) -> list[Any]:
+        with open_db(config.paths.db_path) as connection:
+            connection.execute(
+                staged_artifacts.update()
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(encode_origin=kwargs["encode_context"]["origin"])
+            )
+            connection.commit()
+        return [
+            SimpleNamespace(
+                staging_path=staged,
+                staging_size_bytes=3,
+                source_size_bytes=18,
+                chosen_crf=30,
+                quality_metric="ssim",
+                quality_score=1,
+            )
+        ]
+
+    with (
+        open_db(config.paths.db_path) as connection,
+        patch.object(cli, "encode_manifest_items", side_effect=encode),
+        patch.object(cli, "_print_manifest_item"),
+        patch.object(
+            cli,
+            "validate_manifest_items",
+            return_value=[
+                {
+                    "passed": True,
+                    "source_size_bytes": 18,
+                    "staged_size_bytes": 3,
+                    "bytes_saved": 15,
+                    "checks": [],
+                }
+            ],
+        ),
+        patch.object(cli, "generate_compare_clips", return_value=[]),
+    ):
+        cli._run_review(
+            connection,
+            config,
+            config.paths.project_root / f"manifest-{item_id}.json",
+            {"items": [item]},
+            index=0,
+            overwrite=True,
+            duration=8,
+            timestamps=None,
+            output_dir=config.paths.review_dir,
+            play=False,
+        )
+    _run(config)
+    assert _status(config, item_id) == "validated"
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(
+            staged_artifacts.update()
+            .where(staged_artifacts.c.library_item_id == item_id)
+            .values(encode_origin="cli")
+        )
+        connection.commit()
+    _run(config)
+    assert _status(config, item_id) == "validated"
+    assert Path(item["source_path"]).read_bytes() == b"original media file"
+
+
+def test_unapproved_draft_does_not_hide_accepted_parent(
+    config: MediaforceConfig,
+) -> None:
+    item_id, _, _ = _stage(config, "tv/Show/Season 1/one.mkv")
+
+    def load(_config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+        return _approval() if prefix == "tv/Show" else {"policy": {}, "mode": "sample"}
+
+    with patch("mediaforce.execution.probe_media", return_value=_probe()):
+        delivery.publish_checked_files_once(config, load_calibration_state=load)
+    assert _status(config, item_id) == "promoted"
+
+
+def test_retained_rollback_is_counted_and_owner_cleanup_reaches_it(
+    config: MediaforceConfig,
+) -> None:
+    _, item, _ = _stage(config, "tv/Show/Season 1/one.mkv")
+    archive = config.archive_root / item["rel_path"]
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(b"earlier rollback")
+    _run(config)
+    with open_db(config.paths.db_path) as connection:
+        folders = list_completed_folders(
+            connection,
+            archive_root=config.archive_root,
+            folder_group=web_app._folder_group,
+        )
+    assert folders[0].archived_backup_count == 2
+    assert folders[0].archived_backup_size_bytes == len(b"earlier rollback") + len(
+        b"original media file"
+    )
+    result = clear_completed_backups_action(
+        config, folder_group=web_app._folder_group, prefixes=[folders[0].prefix]
+    )
+    assert result["removed_count"] == folders[0].archived_backup_count
+    assert not any(path.is_file() for path in config.archive_root.rglob("*"))
+    assert Path(item["source_path"]).read_bytes() == b"av1"

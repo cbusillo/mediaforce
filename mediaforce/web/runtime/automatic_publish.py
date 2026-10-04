@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -16,41 +17,79 @@ from mediaforce.encoding.delivery_lock import delivery_lock
 from mediaforce.encoding.staging import PromotionRestoreError, PromotionWaiting
 from mediaforce.execution import promote_one_item, validate_one_item
 from mediaforce.library.staged_integrity import staged_integrity_report
-from mediaforce.web.runtime.folder_actions import current_production_approval_matches, production_action_blocker
+from mediaforce.web.runtime.folder_actions import (
+    current_production_approval_matches,
+    production_action_blocker,
+)
 
 
 LOGGER = logging.getLogger(__name__)
+UNKNOWN_FAILURE_RETRY_LIMIT = 3
 LoadCalibrationState = Callable[[MediaforceConfig, str], dict[str, Any] | None]
 
 
-def publish_checked_files_once(config: MediaforceConfig, *, load_calibration_state: LoadCalibrationState) -> None:
+def publish_checked_files_once(
+    config: MediaforceConfig,
+    *,
+    load_calibration_state: LoadCalibrationState,
+    stop_event: threading.Event | None = None,
+) -> None:
     """Check and publish each finished production file; temporary holds retry next pass."""
     with open_db(config.paths.db_path) as connection:
         item_ids = list(
             connection.execute(
                 select(staged_artifacts.c.library_item_id)
-                .join(library_items, library_items.c.id == staged_artifacts.c.library_item_id)
+                .join(
+                    library_items,
+                    library_items.c.id == staged_artifacts.c.library_item_id,
+                )
                 .where(staged_artifacts.c.promoted_at.is_(None))
                 .where(library_items.c.status.in_(("encoded", "validated")))
                 .where(
-                    or_(staged_artifacts.c.encode_origin.is_(None), staged_artifacts.c.encode_origin != "calibration")
+                    or_(
+                        staged_artifacts.c.encode_origin.is_(None),
+                        staged_artifacts.c.encode_origin.not_in(
+                            ("calibration", "cli-review")
+                        ),
+                    )
                 )
                 .order_by(staged_artifacts.c.library_item_id)
             ).scalars()
         )
     for item_id in item_ids:
+        if stop_event is not None and stop_event.is_set():
+            break
         with delivery_lock(config.paths.db_path, item_id, blocking=False) as acquired:
             if not acquired:
                 continue
             with open_db(config.paths.db_path) as connection:
-                _try_publish_file(connection, config, item_id, load_calibration_state)
+                _try_publish_file(
+                    connection, config, item_id, load_calibration_state, stop_event
+                )
 
 
 def _try_publish_file(
-    connection: DBClient, config: MediaforceConfig, item_id: int, load_calibration_state: LoadCalibrationState
+    connection: DBClient,
+    config: MediaforceConfig,
+    item_id: int,
+    load_calibration_state: LoadCalibrationState,
+    stop_event: threading.Event | None,
 ) -> None:
+    failure_attempts = 0
     try:
-        _publish_file(connection, config, item_id, load_calibration_state)
+        saved = connection.execute(
+            select(staged_artifacts.c.validation_json).where(
+                staged_artifacts.c.library_item_id == item_id
+            )
+        ).scalar_one_or_none()
+        try:
+            previous = object_dict(
+                object_dict(json.loads(saved or "{}")).get("automatic_publish")
+            )
+            failure_attempts = int(previous.get("failure_attempts") or 0)
+        except (ValueError, TypeError):
+            pass
+        _publish_file(connection, config, item_id, load_calibration_state, stop_event)
     except PromotionRestoreError:
         LOGGER.exception("Automatic publish could not restore item %s", item_id)
         connection.rollback()
@@ -65,29 +104,59 @@ def _try_publish_file(
         _record_wait(connection, item_id, "waiting", str(exc))
     except FileExistsError:
         connection.rollback()
-        _record_wait(connection, item_id, "waiting", "A different file is already at its place in the library.")
+        _record_wait(
+            connection,
+            item_id,
+            "waiting",
+            "A different file is already at its place in the library.",
+        )
     except Exception:
         LOGGER.exception("Automatic check or publish failed for item %s", item_id)
         connection.rollback()
+        failure_attempts += 1
+        exhausted = failure_attempts >= UNKNOWN_FAILURE_RETRY_LIMIT
         _record_wait(
-            connection, item_id, "waiting", "Mediaforce could not check or publish this file. It will try again."
+            connection,
+            item_id,
+            "failed" if exhausted else "waiting",
+            "Mediaforce could not check or publish this file after retrying. Check it manually before trying again."
+            if exhausted
+            else "Mediaforce could not check or publish this file. It will try again.",
+            failure_attempts=failure_attempts,
         )
 
 
 def _publish_file(
-    connection: DBClient, config: MediaforceConfig, item_id: int, load_calibration_state: LoadCalibrationState
+    connection: DBClient,
+    config: MediaforceConfig,
+    item_id: int,
+    load_calibration_state: LoadCalibrationState,
+    stop_event: threading.Event | None,
 ) -> None:
     stage = (
-        connection.execute(select(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id))
+        connection.execute(
+            select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id
+            )
+        )
         .mappings()
         .first()
     )
-    source = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().first()
-    if stage is None or source is None or stage["promoted_at"] is not None or stage["encode_origin"] == "calibration":
+    source = (
+        connection.execute(select(library_items).where(library_items.c.id == item_id))
+        .mappings()
+        .first()
+    )
+    if (
+        stage is None
+        or source is None
+        or stage["promoted_at"] is not None
+        or stage["encode_origin"] in {"calibration", "cli-review"}
+    ):
         return
     if source["status"] not in {"encoded", "validated"}:
         return
-    if stage["encode_origin"] not in {"queue", "cli"}:
+    if stage["encode_origin"] not in {"queue", "cli-production"}:
         _record_wait(
             connection,
             item_id,
@@ -96,7 +165,10 @@ def _publish_file(
         )
         return
     validation = object_dict(json.loads(stage["validation_json"] or "{}"))
-    if object_dict(validation.get("automatic_publish")).get("state") == "unsafe":
+    if object_dict(validation.get("automatic_publish")).get("state") in {
+        "unsafe",
+        "failed",
+    }:
         return
     rel_path = str(source["rel_path"])
     blocker = production_action_blocker(config, rel_path)
@@ -107,19 +179,31 @@ def _publish_file(
     for job in load_active_encode_jobs_for_prefix(connection, rel_path):
         if job.get("job_kind") == "folder":
             continue
-        active_manifest = object_dict(json.loads(Path(str(job["manifest_path"])).read_text()))
+        active_manifest = object_dict(
+            json.loads(Path(str(job["manifest_path"])).read_text())
+        )
         active_items = object_list(active_manifest.get("items"))
-        indexes = object_list(job.get("manifest_indexes")) or list(range(len(active_items)))
+        indexes = object_list(job.get("manifest_indexes")) or list(
+            range(len(active_items))
+        )
         if not active_items:
             raise RuntimeError("An active file job's membership is unavailable")
-        if any(int(object_dict(active_items[index]).get("library_item_id") or 0) == item_id for index in indexes):
+        if any(
+            int(object_dict(active_items[index]).get("library_item_id") or 0) == item_id
+            for index in indexes
+        ):
             _record_wait(
-                connection, item_id, "waiting", "This file is still being made. It will be checked when it finishes."
+                connection,
+                item_id,
+                "waiting",
+                "This file is still being made. It will be checked when it finishes.",
             )
             return
     manifest = object_dict(json.loads(Path(str(stage["manifest_path"])).read_text()))
     item = object_dict(object_list(manifest.get("items"))[int(stage["item_index"])])
-    if int(item.get("library_item_id") or 0) != item_id or str(item.get("source_path")) != str(source["source_path"]):
+    if int(item.get("library_item_id") or 0) != item_id or str(
+        item.get("source_path")
+    ) != str(source["source_path"]):
         _record_wait(
             connection,
             item_id,
@@ -127,9 +211,22 @@ def _publish_file(
             "The saved work no longer matches this file. Make it again with the current settings.",
         )
         return
-    prefixes = [rel_path, *(parent.as_posix() for parent in Path(rel_path).parents if parent.as_posix() != ".")]
+    prefixes = [
+        rel_path,
+        *(
+            parent.as_posix()
+            for parent in Path(rel_path).parents
+            if parent.as_posix() != "."
+        ),
+    ]
     calibration = next(
-        (state for prefix in prefixes if (state := load_calibration_state(config, prefix)) is not None), None
+        (
+            state
+            for prefix in prefixes
+            if (state := load_calibration_state(config, prefix))
+            and state.get("accepted_policy_hash")
+        ),
+        None,
     )
     if not current_production_approval_matches(calibration, manifest, item):
         _record_wait(
@@ -153,8 +250,12 @@ def _publish_file(
             "The original changed after this work was planned. Check it before making a replacement.",
         )
         return
-    report = staged_integrity_report(connection, config, rel_path, discover=False)
-    record = next((record for record in report.records if record.item_id == item_id), None)
+    report = staged_integrity_report(
+        connection, config, rel_path, discover=False, include_publish_reason=False
+    )
+    record = next(
+        (record for record in report.records if record.item_id == item_id), None
+    )
     if report.database_truncated or record is None:
         raise RuntimeError("This file's integrity record is unavailable")
     if record.disposition not in {"unvalidated", "promotable"}:
@@ -173,12 +274,28 @@ def _publish_file(
             return
     # Validation may repair a container. Check the resulting evidence before installing it.
     report = staged_integrity_report(connection, config, rel_path, discover=False)
-    if not any(record.item_id == item_id and record.disposition == "promotable" for record in report.records):
-        _record_wait(connection, item_id, "waiting", "The checked file changed. Check it again before replacing it.")
+    if not any(
+        record.item_id == item_id and record.disposition == "promotable"
+        for record in report.records
+    ):
+        _record_wait(
+            connection,
+            item_id,
+            "waiting",
+            "The checked file changed. Check it again before replacing it.",
+        )
         return
     connection.commit()
+    if stop_event is not None and stop_event.is_set():
+        return
     calibration = next(
-        (state for prefix in prefixes if (state := load_calibration_state(config, prefix)) is not None), None
+        (
+            state
+            for prefix in prefixes
+            if (state := load_calibration_state(config, prefix))
+            and state.get("accepted_policy_hash")
+        ),
+        None,
     )
     if not current_production_approval_matches(calibration, manifest, item):
         _record_wait(
@@ -199,9 +316,18 @@ def _publish_file(
     promote_one_item(connection, config, item, force=False)
 
 
-def _record_wait(connection: DBClient, item_id: int, state: str, reason: str) -> None:
+def _record_wait(
+    connection: DBClient,
+    item_id: int,
+    state: str,
+    reason: str,
+    *,
+    failure_attempts: int | None = None,
+) -> None:
     row = connection.execute(
-        select(staged_artifacts.c.validation_json).where(staged_artifacts.c.library_item_id == item_id)
+        select(staged_artifacts.c.validation_json).where(
+            staged_artifacts.c.library_item_id == item_id
+        )
     ).first()
     if row is None:
         return
@@ -211,6 +337,8 @@ def _record_wait(connection: DBClient, item_id: int, state: str, reason: str) ->
         validation = {"passed": False, "unreadable_validation_json": row[0]}
         reason = "Its saved check results could not be read. Check this file again before replacing it."
     delivery = {"state": state, "reason": reason}
+    if failure_attempts is not None:
+        delivery["failure_attempts"] = failure_attempts
     if validation.get("automatic_publish") == delivery:
         connection.rollback()
         return

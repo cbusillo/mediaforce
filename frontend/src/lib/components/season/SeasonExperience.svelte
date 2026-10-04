@@ -3069,7 +3069,8 @@
 					<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5" /></svg>
 				</button>
 				<p class="action-note">
-					Mediaforce publishes each passing episode automatically. This action is a manual override.
+					Passing episodes publish automatically under their current sample approval. This action is
+					a manual override.
 				</p>
 			</section>
 		{:else if humanState.key === 'finish_blocked'}

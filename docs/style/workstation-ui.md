@@ -115,11 +115,12 @@ has to look up is a defect.
   cadence, shard, quality memory, or internal job IDs as interface language.
 - Button text names the actual effect and scope. A queued action says it queues;
   an immediate action says it starts now; replacement says which file changes.
-- Approval records the user's judgment about the sample. Compression, checking,
+- Approval records the user's judgment about the sample. Compression admission
+  remains a separate commitment and action. Compression, checking,
   and replacement remain distinct phases on screen; each finished production
   file is checked and published automatically under its current approval.
-  Manual checking and publishing are explicit overrides. Only real judgment
-  calls ask the user, and deleting rollback copies always needs their approval.
+  Manual checking and publishing are explicit overrides. Deleting rollback
+  copies always needs user approval.
 - Put scope, consequence, and recovery or backup expectation beside each
   consequential action once. Do not repeat the same safety sentence throughout
   the screen.
