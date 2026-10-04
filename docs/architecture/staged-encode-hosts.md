@@ -44,6 +44,13 @@ it starts. The scheduler then rechecks the schedule, host eligibility and scratc
 capacity. Capacity probes never wake a computer themselves. If a computer was
 started for this check but cannot take work, its configured stop command runs;
 if it takes work, the worker retains that cleanup responsibility.
+The scheduler remembers an unsuccessful startup or the last measured capacity
+of a computer it stopped, for the existing host cooldown interval. It does not
+power-cycle that computer on each poll for the same oversized file; another
+startable computer or a smaller file can proceed. Capacity is refreshed after
+the cooldown, or on the next pass while the computer is already available.
+Measurements happen outside the database write transaction and are shared
+across all claims and preparation in one scheduler pass.
 
 `mediaforce/encoding/staged_host.py` owns the scratch directory.
 

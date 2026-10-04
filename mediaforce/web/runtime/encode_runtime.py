@@ -126,6 +126,13 @@ class EncodeQueueRuntimeDeps:
     encode_job_max_attempts: int
     encode_host_cooldown_seconds: int
     live_encode_job_controller: Any = None
+    scratch_admission_history: dict[str, "_ScratchAdmissionSnapshot"] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _ScratchAdmissionSnapshot:
+    free_bytes: int | None
+    retry_after_monotonic: float
 
 
 ENCODE_HOST_BACKUP_FAILURE_THRESHOLD = 2
@@ -2525,6 +2532,25 @@ def _scratch_source_size(items: list[dict[str, Any]]) -> int | None:
     return max(sizes) if sizes and all(size > 0 for size in sizes) else None
 
 
+def _scratch_capacity_key(host: dict[str, Any]) -> str:
+    return f"{_encode_duration_host_cache_key(host)}|{host_scratch_root(host)}|{host.get('start_command') or ''}"
+
+
+def _prepared_encode_host_rows(
+        hosts: list[dict[str, Any]], prepared_hosts: dict[str, dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if not prepared_hosts:
+        return hosts
+    rows: list[dict[str, Any]] = []
+    for host in hosts:
+        prepared = next((value for value in prepared_hosts.values() if _host_identity_matches(host, value)), None)
+        if prepared is not None and not object_list(host.get("issues")):
+            host = {**host, "available": True, "probe_available": True,
+                    "scratch_admission_started": bool(prepared.get("scratch_admission_started"))}
+        rows.append(host)
+    return rows
+
+
 def _running_encode_reserve_state(
         connection: DBClient,
         config: MediaforceConfig,
@@ -2833,6 +2859,7 @@ def encode_queue_worker_loop(
 def process_encode_queue_once(
         *, config_path: Path, deps: EncodeQueueRuntimeDeps,
         prepared_staged_hosts: dict[str, dict[str, Any]] | None = None,
+        scratch_capacity_cache: dict[str, int | None] | None = None,
 ) -> None:
     config = deps.load_config(config_path)
     claimed_jobs: list[dict[str, Any]] = []
@@ -2852,6 +2879,35 @@ def process_encode_queue_once(
             save_queue_state(connection, state)
         if state.get("is_paused"):
             return
+        has_queued_work = connection.execute(select(encode_jobs.c.job_id)
+                                            .where(encode_jobs.c.status == "queued")
+                                            .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+                                            .limit(1)).first() is not None
+        host_rows = _prepared_encode_host_rows(
+            deps.host_runtime_rows(connection, config) if has_queued_work else [], prepared_staged_hosts,
+        )
+
+    if scratch_capacity_cache is None:
+        scratch_capacity_cache = {}
+    for host in host_rows:
+        if not _uses_staged_scratch(host) or not bool(host.get("available")) or not bool(host.get("probe_available", True)):
+            continue
+        key = _scratch_capacity_key(host)
+        if key in scratch_capacity_cache:
+            continue
+        try:
+            free_bytes = measure_scratch_free_bytes(host, run_remote_command)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            free_bytes = None
+        scratch_capacity_cache[key] = free_bytes
+        deps.scratch_admission_history[key] = _ScratchAdmissionSnapshot(
+            free_bytes, time.monotonic() + deps.encode_host_cooldown_seconds,
+        )
+
+    with open_db(config.paths.db_path) as connection:
+        state = load_queue_state(connection)
+        if state.get("is_paused") or state.get("stop_requested"):
+            return
         while True:
             next_job = claim_next_runnable_encode_job(
                 connection,
@@ -2860,6 +2916,7 @@ def process_encode_queue_once(
                 capacity_cache=capacity_cache,
                 staged_hosts_to_prepare=staged_hosts_to_prepare if prepared_staged_hosts is None else None,
                 prepared_staged_hosts=prepared_staged_hosts,
+                scratch_capacity_cache=scratch_capacity_cache,
             )
             if next_job is None:
                 break
@@ -2892,9 +2949,6 @@ def process_encode_queue_once(
                         failure_kind=failure_kind,
                         error_message=error_message,
                     )
-                if bool(object_dict(job.get("host")).get("scratch_admission_started")):
-                    if not _host_has_other_running_jobs(config, str(job["job_id"]), job.get("host")):
-                        deps.stop_encode_host_if_configured(config, job.get("host"))
             except Exception:
                 deps.logger.exception("Encode dispatch failure recovery failed for %s", job["job_id"])
 
@@ -2905,6 +2959,9 @@ def process_encode_queue_once(
                 started = deps.ensure_encode_host_ready(config, host)
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 deps.logger.exception("Could not prepare staged computer %s for scratch admission", key)
+                deps.scratch_admission_history[_scratch_capacity_key(host)] = _ScratchAdmissionSnapshot(
+                    None, time.monotonic() + deps.encode_host_cooldown_seconds,
+                )
                 continue
             ready_hosts[key] = {**host, "available": True, "probe_available": True,
                                 "scratch_admission_started": bool(started)}
@@ -2912,7 +2969,8 @@ def process_encode_queue_once(
             try:
                 # Startup runs outside the database transaction, then every candidate gets
                 # a fresh schedule, cooldown and capacity check before charging an attempt.
-                process_encode_queue_once(config_path=config_path, deps=deps, prepared_staged_hosts=ready_hosts)
+                process_encode_queue_once(config_path=config_path, deps=deps, prepared_staged_hosts=ready_hosts,
+                                          scratch_capacity_cache=scratch_capacity_cache)
             finally:
                 for host in ready_hosts.values():
                     if bool(host.get("scratch_admission_started")) and not _host_has_other_running_jobs(config, "", host):
@@ -2930,6 +2988,7 @@ def claim_next_runnable_encode_job(
         capacity_cache: CapacityCache | None = None,
         staged_hosts_to_prepare: dict[str, dict[str, Any]] | None = None,
         prepared_staged_hosts: dict[str, dict[str, Any]] | None = None,
+        scratch_capacity_cache: dict[str, int | None] | None = None,
 ) -> dict[str, Any] | None:
     next_job = load_next_runnable_encode_job(
         connection,
@@ -2938,6 +2997,7 @@ def claim_next_runnable_encode_job(
         capacity_cache=capacity_cache,
         staged_hosts_to_prepare=staged_hosts_to_prepare,
         prepared_staged_hosts=prepared_staged_hosts,
+        scratch_capacity_cache=scratch_capacity_cache,
     )
     if next_job is None:
         return None
@@ -2992,6 +3052,7 @@ def load_next_runnable_encode_job(
         capacity_cache: CapacityCache | None = None,
         staged_hosts_to_prepare: dict[str, dict[str, Any]] | None = None,
         prepared_staged_hosts: dict[str, dict[str, Any]] | None = None,
+        scratch_capacity_cache: dict[str, int | None] | None = None,
 ) -> dict[str, Any] | None:
     parent_sync_jobs: dict[str, dict[str, Any]] = {}
 
@@ -3012,15 +3073,7 @@ def load_next_runnable_encode_job(
     ).mappings().fetchall()
     now = datetime.now(tz=UTC)
     host_rows = deps.host_runtime_rows(connection, config, now=now) if rows else []
-    if prepared_staged_hosts:
-        host_rows = [
-            {**host, "available": True, "probe_available": True,
-             "scratch_admission_started": bool(prepared.get("scratch_admission_started"))}
-            if not object_list(host.get("issues")) and (prepared := next(
-                (value for value in prepared_staged_hosts.values() if _host_identity_matches(host, value)), None,
-            )) is not None else host
-            for host in host_rows
-        ]
+    host_rows = _prepared_encode_host_rows(host_rows, prepared_staged_hosts)
     duration_estimation_relevant = any(
         parse_schedule_close_deadline(host.get("schedule_closes_at")) is not None
         or str(deps.schedule_profile_policy_for_host(config, host).get("mode") or "anytime") != "anytime"
@@ -3043,7 +3096,9 @@ def load_next_runnable_encode_job(
         tuple[dict[str, Any] | None, str | None],
     ] = {}
     scratch_relevant = any(_uses_staged_scratch(host) for host in host_rows)
-    scratch_capacity_cache: dict[str, int | None] = {}
+    scratch_probe_allowed = scratch_capacity_cache is None
+    if scratch_capacity_cache is None:
+        scratch_capacity_cache = {}
     saw_duration_block = False
     best_fit_candidates: list[
         tuple[tuple[int, float, int], dict[str, Any], dict[str, Any], EncodeDurationEstimate | None]
@@ -3194,20 +3249,28 @@ def load_next_runnable_encode_job(
             ]
             if any(reserved is None for reserved in reservations):
                 return f"Waiting for the active work's scratch-space requirement on {name}."
-            if not bool(host.get("available")):
-                # The selected startable computer is prepared outside the claim transaction.
-                return None
             reserved_bytes = max((reserved for reserved in reservations if reserved is not None), default=0)
-            cache_key = _encode_duration_host_cache_key(host)
-            if cache_key not in scratch_capacity_cache:
+            required_bytes = required_scratch_bytes(scratch_source_size) + reserved_bytes
+            cache_key = _scratch_capacity_key(host)
+            if not bool(host.get("available")):
+                previous = deps.scratch_admission_history.get(cache_key)
+                if previous is None or time.monotonic() >= previous.retry_after_monotonic:
+                    return None
+                if previous.free_bytes is None:
+                    return f"Waiting to retry starting {name} after its last unsuccessful check."
+                if previous.free_bytes >= required_bytes:
+                    return None
+                free_bytes = previous.free_bytes
+            elif cache_key not in scratch_capacity_cache and scratch_probe_allowed:
                 try:
                     scratch_capacity_cache[cache_key] = measure_scratch_free_bytes(host, run_remote_command)
                 except (OSError, RuntimeError, subprocess.SubprocessError):
                     scratch_capacity_cache[cache_key] = None
-            free_bytes = scratch_capacity_cache[cache_key]
+                free_bytes = scratch_capacity_cache[cache_key]
+            else:
+                free_bytes = scratch_capacity_cache.get(cache_key)
             if free_bytes is None:
                 return f"Waiting to measure scratch space on {name}; Mediaforce will check again."
-            required_bytes = required_scratch_bytes(scratch_source_size) + reserved_bytes
             if free_bytes < required_bytes:
                 needed_gib = (required_bytes + 1024 ** 3 - 1) // (1024 ** 3)
                 return f"Waiting for scratch space on {name}: {needed_gib} GiB needed, {free_bytes // (1024 ** 3)} GiB free."

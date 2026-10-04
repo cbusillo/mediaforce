@@ -20036,11 +20036,84 @@ raise SystemExit(0)
         deps.ensure_encode_host_ready.assert_called_once()
         deps.dispatch_encode_job.assert_not_called()
         deps.stop_encode_host_if_configured.assert_called_once()
+        with patch("mediaforce.web.runtime.encode_runtime.measure_scratch_free_bytes") as probe:
+            encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
+        deps.ensure_encode_host_ready.assert_called_once()
+        deps.stop_encode_host_if_configured.assert_called_once()
+        probe.assert_not_called()
         with open_db(self.config.paths.db_path) as connection:
             queued = load_encode_job(connection, "scratch-startup")
             assert queued is not None
             self.assertEqual(queued["attempt_count"], 0)
             self.assertIn("scratch space", queued["waiting_reason"])
+
+        deps.scratch_admission_history.clear()
+        deps.stop_encode_host_if_configured.reset_mock()
+        deps.dispatch_encode_job.side_effect = RuntimeError("dispatch failed")
+        with patch("mediaforce.web.runtime.encode_runtime.measure_scratch_free_bytes", return_value=required):
+            encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
+        deps.stop_encode_host_if_configured.assert_called_once()
+
+    def test_scratch_probes_are_shared_across_claims_and_never_hold_the_write_lock(self) -> None:
+        host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
+        host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce", max_parallel_encodes=2)
+        required = encode_runtime.required_scratch_bytes(1024)
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("scratch-two-jobs.json", [self._estimate_manifest_item(600)])
+            for job_id in ("scratch-first", "scratch-second"):
+                self._save_job(connection, job_id=job_id, manifest_name="scratch-two-jobs.json",
+                               host={}, status="queued", attempt_count=0)
+            encode_runtime.ensure_queue_state(connection, updated_at=web_app._now_iso())
+            state = load_queue_state(connection)
+            state["is_paused"] = False
+            save_queue_state(connection, state)
+            connection.commit()
+
+        def probe_capacity(_host: dict[str, Any], _remote: Any) -> int:
+            with open_db(self.config.paths.db_path) as other:
+                other.exec_driver_sql("BEGIN IMMEDIATE")
+                self.assertEqual(encode_runtime.running_encode_job_count(other), 0)
+            return 2 * required
+
+        deps = web_app._encode_queue_runtime_deps()
+        deps.load_config = Mock(return_value=self.config)
+        deps.host_runtime_rows = Mock(return_value=[host])
+        deps.dispatch_encode_job = Mock()
+        deps.encode_reserve_preflight = Mock(return_value=SimpleNamespace(allowed=True, waiting_reason=None))
+        with patch("mediaforce.web.runtime.encode_runtime.measure_scratch_free_bytes", side_effect=probe_capacity) as probe:
+            encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
+        probe.assert_called_once()
+        self.assertEqual(deps.dispatch_encode_job.call_count, 2)
+
+    def test_failed_scratch_start_backs_off_and_allows_another_startable_computer(self) -> None:
+        hosts = []
+        for name, priority in (("broken", 2), ("backup", 1)):
+            host = self._encode_host_row(name, schedule_closes_at=None, priority=priority)
+            host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce",
+                        available=False, probe_available=False, start_command="start-test-computer")
+            hosts.append(host)
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("scratch-start-failure.json", [self._estimate_manifest_item(600)])
+            self._save_job(connection, job_id="scratch-start-failure", manifest_name="scratch-start-failure.json",
+                           host={}, status="queued", attempt_count=0)
+            encode_runtime.ensure_queue_state(connection, updated_at=web_app._now_iso())
+            state = load_queue_state(connection)
+            state["is_paused"] = False
+            save_queue_state(connection, state)
+            connection.commit()
+        deps = web_app._encode_queue_runtime_deps()
+        deps.load_config = Mock(return_value=self.config)
+        deps.host_runtime_rows = Mock(return_value=hosts)
+        deps.ensure_encode_host_ready = Mock(side_effect=[RuntimeError("start failed"), True])
+        deps.dispatch_encode_job = Mock()
+        deps.encode_reserve_preflight = Mock(return_value=SimpleNamespace(allowed=True, waiting_reason=None))
+        encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
+        with patch("mediaforce.web.runtime.encode_runtime.measure_scratch_free_bytes",
+                   return_value=encode_runtime.required_scratch_bytes(1024)):
+            encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
+        self.assertEqual([call.args[1]["key"] for call in deps.ensure_encode_host_ready.call_args_list], ["broken", "backup"])
+        deps.dispatch_encode_job.assert_called_once()
+
 
     def test_scratch_startable_computer_does_not_delay_an_active_alternative(self) -> None:
         host = self._encode_host_row("scratch-worker", schedule_closes_at=None, priority=2)
