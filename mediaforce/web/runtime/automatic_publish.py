@@ -407,12 +407,14 @@ def _record_wait(
     except (ValueError, TypeError):
         validation = {"passed": False, "unreadable_validation_json": row[0]}
         reason = "Its saved check results could not be read. Check this file again before replacing it."
+    previous = object_dict(validation.get("automatic_publish"))
     delivery = {"state": state, "reason": reason}
+    if failure_attempts is None and previous.get("failure_attempts") is not None:
+        failure_attempts = previous["failure_attempts"]
     if failure_attempts is not None:
         delivery["failure_attempts"] = failure_attempts
     if retry_after is None and state == "waiting":
         retry_after = time.time() + PUBLISH_RETRY_DELAY_SECONDS
-    previous = object_dict(validation.get("automatic_publish"))
     changed_reason = {
         key: value for key, value in previous.items() if key != "retry_after"
     } != delivery

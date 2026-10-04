@@ -12,6 +12,7 @@ from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.encoding.delivery_lock import archive_activity
+from mediaforce.web.runtime.archive_cleanup import archive_path_needs_recovery, recovery_archive_paths
 from mediaforce.library.media_scopes import media_scope_from_prefix, path_matches_scope
 FolderGroup = tuple[str, str, str, str]
 ORIGINALS_REMOVED_EVENT = "originals_removed_confirmed"
@@ -505,6 +506,8 @@ def _clear_completed_backups_action(
     removed_size_bytes = 0
     removed_prefixes: set[str] = set()
     selected_paths = _selected_archive_paths(config, normalized_prefixes)
+    protected = recovery_archive_paths(config, archive_root)
+    preserved_count = 0
     for path in archive_root.rglob("*"):
         if not path.is_file():
             continue
@@ -512,6 +515,9 @@ def _clear_completed_backups_action(
         if normalized_prefixes is not None and not (
             _path_matches_prefixes(rel_path, normalized_prefixes) or path.resolve() in selected_paths
         ):
+            continue
+        if archive_path_needs_recovery(path, protected):
+            preserved_count += 1
             continue
         selected_prefix = selected_paths.get(path.resolve())
         group = folder_group(rel_path)
@@ -533,7 +539,10 @@ def _clear_completed_backups_action(
     if removed_count <= 0:
         return {
             "ok": True,
-            "message": "No original backups matched the selected finished folders.",
+            "message": "No original backups matched the selected finished folders."
+                       + (" Kept originals needed by unpublished files. Inspect and restore those files before cleanup."
+                          if preserved_count else ""),
+            "preserved_count": preserved_count,
             "removed_count": 0,
             "removed_size_bytes": 0,
             "removed_prefix_count": 0,
@@ -546,9 +555,12 @@ def _clear_completed_backups_action(
             f"Deleted {removed_count} original backup{'s' if removed_count != 1 else ''} "
             f"from {len(removed_prefixes)} finished folder{'s' if len(removed_prefixes) != 1 else ''}."
         )
+    if preserved_count:
+        message += " Kept originals needed by unpublished files. Inspect and restore those files before cleanup."
     return {
         "ok": True,
         "message": message,
+        "preserved_count": preserved_count,
         "removed_count": removed_count,
         "removed_size_bytes": removed_size_bytes,
         "removed_prefix_count": len(removed_prefixes),

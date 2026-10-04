@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import select
 
 from mediaforce import cli
+from mediaforce.web.runtime.archive_cleanup import clear_archive_cleanup_action
 from mediaforce.web.runtime.completed_runtime import list_completed_folders, clear_completed_backups_action
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
@@ -446,14 +447,16 @@ def test_repeated_integrity_hold_keeps_one_bounded_reason(
         assert report.records[0].detail.count(reason) == 1
 
 
+@pytest.mark.parametrize("intermittent_storage_wait", [False, True])
 def test_unknown_failure_retries_then_holds_without_stopping_siblings(
-    config: MediaforceConfig,
+    config: MediaforceConfig, intermittent_storage_wait: bool,
 ) -> None:
     failed_id, failed_item, _ = _stage(
         config, "tv/Show/Season 1/failed.mkv", checked=True
     )
     ready_id, _, _ = _stage(config, "tv/Show/Season 1/ready.mkv", checked=True)
     promote = delivery.promote_one_item
+    failed_calls = 0
 
     def fail(
         connection: DBClient,
@@ -462,15 +465,20 @@ def test_unknown_failure_retries_then_holds_without_stopping_siblings(
         *,
         force: bool,
     ) -> Path:
+        nonlocal failed_calls
         if item["library_item_id"] == failed_id:
+            failed_calls += 1
+            if intermittent_storage_wait and failed_calls % 2 == 0:
+                raise ConnectionError("storage unavailable")
             raise RuntimeError("unclassified failure")
         return promote(connection, config, item, force=force)
 
     with patch.object(delivery, "promote_one_item", side_effect=fail) as attempts:
-        for _ in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 2):
+        for _ in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT * 2 + 2):
             with patch.object(delivery.time, "time", return_value=_ * (delivery.PUBLISH_RETRY_DELAY_SECONDS * delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1)):
                 _run(config)
-    assert attempts.call_count == delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1
+    expected_failures = delivery.UNKNOWN_FAILURE_RETRY_LIMIT * 2 - 1 if intermittent_storage_wait else delivery.UNKNOWN_FAILURE_RETRY_LIMIT
+    assert attempts.call_count == expected_failures + 1
     assert _status(config, ready_id) == "promoted"
     with open_db(config.paths.db_path) as connection:
         saved = json.loads(
@@ -785,7 +793,8 @@ def test_wait_reason_is_public_without_duplicate_details(config: MediaforceConfi
     assert record.detail.count(record.publish_wait_reason) == 1
 
 
-def test_owner_cleanup_preserves_an_original_during_publication(config: MediaforceConfig) -> None:
+@pytest.mark.parametrize("settings_cleanup", [False, True])
+def test_owner_cleanup_preserves_an_original_during_publication(config: MediaforceConfig, settings_cleanup: bool) -> None:
     from mediaforce import execution
     _stage(config, "tv/Show/Season 1/done.mkv", checked=True)
     _run(config)
@@ -807,8 +816,9 @@ def test_owner_cleanup_preserves_an_original_during_publication(config: Mediafor
         thread.start()
         try:
             assert moved.wait(5)
-            result = clear_completed_backups_action(config, folder_group=web_app._folder_group,
-                prefixes=["tv/Show/Season 1"], valid_prefixes={"tv/Show/Season 1"})
+            result = (clear_archive_cleanup_action(config) if settings_cleanup else
+                clear_completed_backups_action(config, folder_group=web_app._folder_group,
+                    prefixes=["tv/Show/Season 1"], valid_prefixes={"tv/Show/Season 1"}))
             assert result["ok"] is False
             assert result["removed_count"] == 0
         finally:
@@ -822,3 +832,30 @@ def test_owner_cleanup_preserves_an_original_during_publication(config: Mediafor
         prefixes=["tv/Show/Season 1"], valid_prefixes={"tv/Show/Season 1"})
     assert result["ok"] is True
     assert result["removed_count"] == 1
+
+
+@pytest.mark.parametrize("settings_cleanup", [False, True])
+def test_cleanup_keeps_originals_needed_by_an_unpublished_sibling(config: MediaforceConfig, settings_cleanup: bool) -> None:
+    _stage(config, "tv/Show/Season 1/done.mkv", checked=True)
+    _run(config)
+    item_id, item, _ = _stage(config, "tv/Show/Season 1/unsafe.mkv", checked=True)
+    original = Path(item["source_path"])
+    archived = config.archive_root / item["rel_path"]
+    archived.parent.mkdir(parents=True, exist_ok=True)
+    original.rename(archived)
+    retained = archived.with_name(f".{archived.name}.promotion-backup-fixture")
+    retained.write_bytes(b"previous original")
+    with open_db(config.paths.db_path) as connection:
+        delivery._record_wait(connection, item_id, "unsafe", "Inspect and restore this file.")
+    result = (clear_archive_cleanup_action(config) if settings_cleanup else
+        clear_completed_backups_action(config, folder_group=web_app._folder_group,
+            prefixes=["tv/Show/Season 1"], valid_prefixes={"tv/Show/Season 1"}))
+    assert result["removed_count"] == 1
+    assert result["preserved_count"] == 2
+    assert "Inspect and restore" in result["message"]
+    assert archived.read_bytes() == b"original media file"
+    assert retained.read_bytes() == b"previous original"
+    assert not (config.archive_root / "tv/Show/Season 1/done.mkv").exists()
+    archived.rename(original)
+    _run(config)
+    assert _status(config, item_id) != "promoted"
