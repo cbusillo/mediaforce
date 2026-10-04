@@ -149,6 +149,29 @@ def _free_bytes_script(scratch_root: PurePosixPath) -> str:
     return f'mkdir -p {root} && df -Pk {root} | tail -1 | awk \'{{print $4}}\''
 
 
+def measure_scratch_free_bytes(
+        host: dict[str, Any], run_remote_command: RunRemoteCommand, *, sweep_idle: bool = False,
+) -> int:
+    """Measure admission capacity, optionally reclaiming existing dead scratch on an idle host."""
+    root = host_scratch_root(host)
+    if root is None:
+        raise StagedScratchError("The encode host has no usable scratch folder configured.")
+    if sweep_idle:
+        swept = run_remote_command(host, ["sh", "-c", sweep_script(root)], timeout=10, wake_before_connect=False)
+        if swept.returncode != 0:
+            raise StagedScratchError("Could not clear abandoned scratch on the encode host.")
+    script = "\n".join([
+        f"root={shlex.quote(str(root))}",
+        'while [ ! -e "$root" ]; do root=${root%/*}; [ -n "$root" ] || root=/; done',
+        'df -Pk "$root" | tail -1 | awk \'{print $4}\'',
+    ])
+    result = run_remote_command(host, ["sh", "-c", script], timeout=10, wake_before_connect=False)
+    free_kib = ((result.stdout or "").strip().splitlines()[-1:] or [""])[0]
+    if result.returncode != 0 or not free_kib.isdigit():
+        raise StagedScratchError("Could not measure scratch space on the encode host.")
+    return int(free_kib) * 1024
+
+
 def _digest_script(path: PurePosixPath) -> str:
     target = shlex.quote(str(path))
     return f"(sha256sum {target} 2>/dev/null || shasum -a 256 {target}) | awk '{{print $1}}'"

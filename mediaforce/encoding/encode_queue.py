@@ -47,6 +47,7 @@ _PERSISTED_ENCODE_HOST_KEYS = (
     "schedule_profile",
     "schedule_timezone",
     "scratch_root",
+    "scratch_admission_started",
     "source_roots",
     "staging_root",
     "start_command",
@@ -185,7 +186,7 @@ def persisted_encode_host_payload(payload: dict[str, Any] | None) -> dict[str, A
             except (TypeError, ValueError):
                 continue
             continue
-        if key == "videotoolbox_available":
+        if key in {"videotoolbox_available", "scratch_admission_started"}:
             if value is None:
                 continue
             persisted[key] = bool(value)
