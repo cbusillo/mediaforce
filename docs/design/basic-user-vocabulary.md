@@ -168,6 +168,9 @@ bytes in Technical details.
 - Computer available: `Ready`. This computer can accept work now.
 - Computer schedule closed: `Off schedule`. This is normal and not a failure if
   other computers are ready.
+- Activity waiting for computer windows: `Waiting for a work window`, with
+  `Files waiting` counting files rather than queued show rows. This wording
+  applies both to ordinary queued shows and the summary fallback.
 - Computer window open with a known close: `Open` when idle and `Working` while
   processing. Show the exact host-local close time beside the state.
 - Computer has time left but no queued episode safely fits: `Finishing before the window closes`. Work

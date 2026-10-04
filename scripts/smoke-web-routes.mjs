@@ -2088,15 +2088,31 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
       const page = await browser.newPage({ viewport: { width, height: 900 } });
       let waitingCount = 10;
       let paused = false;
+      let queuedShow = false;
       await page.route(/\/api\/dashboard(?:\?.*)?$/, async (route) => {
         const response = await route.fetch();
         const payload = await response.json();
         payload.encode_queue.state.scheduler_summary = "runs anytime";
         payload.encode_queue.state.is_paused = paused;
-        payload.encode_queue.queued = [];
-        payload.encode_queue.queued_count = 0;
+        payload.encode_queue.queued = queuedShow
+          ? [{
+            job_id: "window-wait",
+            prefix: "tv/Example Show",
+            status: "queued",
+            schedule_state: "off_schedule",
+          }]
+          : [];
+        payload.encode_queue.queued_count = payload.encode_queue.queued.length;
         payload.encode_queue.running = [];
         payload.encode_queue.running_count = 0;
+        payload.encode_queue.needs_attention = [];
+        payload.encode_queue.needs_attention_count = 0;
+        payload.encode_queue.recent = [];
+        payload.calibration_queue.active_count = 0;
+        payload.calibration_queue.review_ready = [];
+        payload.calibration_queue.sample.running = [];
+        payload.calibration_queue.sample.queued = [];
+        payload.calibration_queue.sample.pending_review = [];
         payload.encode_queue.queued_waiting_count = 2;
         payload.encode_queue.queued_schedule_waiting_count = waitingCount;
         await route.fulfill({ response, json: payload });
@@ -2137,9 +2153,9 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
         } else {
           await expect(windowNotice).toHaveCount(0);
         }
-        await expect(page.locator(".blocker-list")).not.toContainText(
-          "Work runs anytime",
-        );
+        await expect(
+          page.locator(".blocker-list").filter({ hasText: "Work runs anytime" }),
+        ).toHaveCount(0);
         const text = await schedule.innerText();
         if (
           !text.toLocaleLowerCase().includes("queue-wide schedule") ||
@@ -2170,6 +2186,41 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
         await toggle.focus();
         await page.keyboard.press("Enter");
         await schedule.waitFor({ state: "hidden", timeout: timeoutMs });
+      }
+      waitingCount = 10;
+      for (queuedShow of [false, true]) {
+        await openRoute(page, baseUrl, "/ops", timeoutMs);
+        await expect(
+          page.getByText("Waiting for a work window", { exact: true }),
+        ).toBeVisible();
+        const toggle = page.locator(".system-details summary");
+        await toggle.focus();
+        await page.keyboard.press("Enter");
+        await expect(page.locator(".schedule-list")).toContainText(
+          `${waitingCount} files waiting for a work window`,
+        );
+        const fonts = await page.locator(".ops").evaluate((root) =>
+          [...new Set(
+            Array.from(root.querySelectorAll("*"), (element) =>
+              getComputedStyle(element).fontFamily,
+            ),
+          )],
+        );
+        if (fonts.some((font) => !/\b(sans-serif|monospace)\b/.test(font))) {
+          throw new Error(
+            `Activity font fallback missing at ${width}px: ${JSON.stringify(fonts)}`,
+          );
+        }
+        console.log(`Activity resolved font families at ${width}px: ${JSON.stringify(fonts)}`);
+        const directory = path.join(rootDir, "scratch", "ui-checks");
+        await mkdir(directory, { recursive: true });
+        await page.screenshot({
+          path: path.join(directory, `756-${queuedShow ? "queued" : "fallback"}-${width}.png`),
+          fullPage: true,
+        });
+        await toggle.focus();
+        await page.keyboard.press("Enter");
+        await expect(page.locator(".schedule-list")).toBeHidden();
       }
       waitingCount = 10;
       paused = true;
