@@ -950,6 +950,10 @@ class OperatorWorkTests(unittest.TestCase):
             with open_db(self.config.paths.db_path) as thread_connection:
                 results.append(maybe_schedule_scan(thread_connection, self.config, None, deps, force=True))
 
+        # Schema setup is not part of the concurrent scheduling behavior being timed.
+        with open_db(self.config.paths.db_path) as connection:
+            connection.commit()
+
         first = threading.Thread(target=schedule_scan)
         second = threading.Thread(target=lambda: (second_started.set(), schedule_scan()))
         first.start()

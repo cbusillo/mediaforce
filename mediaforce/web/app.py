@@ -47,6 +47,7 @@ from mediaforce.tuning.target_default_context import (
 )
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, migrate_config_state, \
     update_runtime_settings, update_runtime_folder_policy_values, upsert_runtime_folder_policy_override
+from mediaforce.web.runtime.automatic_publish import publish_checked_files_once
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
 from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
@@ -631,6 +632,9 @@ def create_app(
                     config,
                     evidence_runner=evidence_runner,
                     held_files_sweep=_join_cleared_held_files,
+                    automatic_publish_sweep=lambda: publish_checked_files_once(
+                        load_config(config.paths.config_path), load_calibration_state=_load_calibration_state,
+                    ),
                 )
                 _safe_collect_host_statuses(config)
                 yield
@@ -4811,6 +4815,7 @@ def _start_background_workers(
         *,
         evidence_runner: BoundedEvidenceRunner | None = None,
         held_files_sweep: Callable[[], None] | None = None,
+        automatic_publish_sweep: Callable[[], None] | None = None,
 ) -> BackgroundWorkerRuntime | None:
     lease = _acquire_background_worker_leadership(config)
     if lease is None:
@@ -4823,6 +4828,13 @@ def _start_background_workers(
         handles.append(_start_catalog_refresh_worker(config))
         if evidence_runner is not None:
             handles.append(_start_evidence_autostart_worker(config, evidence_runner))
+        if automatic_publish_sweep is not None:
+            handles.append(_start_supervised_worker(
+                name="automatic-publish-worker",
+                process_once_fn=automatic_publish_sweep,
+                poll_seconds=ENCODE_QUEUE_POLL_SECONDS,
+                failure_message="Automatic file publishing failed; it will retry.",
+            ))
         if held_files_sweep is not None:
             handles.append(_start_supervised_worker(
                 name="held-files-worker",

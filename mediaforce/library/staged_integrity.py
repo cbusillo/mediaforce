@@ -189,7 +189,13 @@ def staged_integrity_report_for_scope(
     database_truncated = len(rows) > bounded_limit
     rows = rows[:bounded_limit]
     staging_roots = _configured_staging_roots(config)
-    records = [_classify_row(row, staging_roots) for row in rows]
+    records = []
+    for row in rows:
+        record = _classify_row(row, staging_roots)
+        delivery = object_dict(_parsed_validation(row["validation_json"]).get("automatic_publish"))
+        if delivery.get("reason") and record.disposition != "tracked":
+            record = replace(record, detail=f"{record.detail} {delivery['reason']}")
+        records.append(record)
     discovery_truncated = bool(discover and database_truncated)
     entries_scanned = 0
     if discover and not database_truncated:
@@ -340,6 +346,13 @@ def _checked_output_unavailable_detail(records: Iterable[StagedIntegrityRecord])
     if "tracked" in dispositions:
         return "This checked output has already been installed in the movie library."
     return "No checked staged output is ready to preview for this movie."
+
+
+def _parsed_validation(raw: Any) -> dict[str, Any]:
+    try:
+        return object_dict(json.loads(str(raw or "{}")))
+    except (ValueError, TypeError):
+        return {}
 
 
 def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> StagedIntegrityRecord:

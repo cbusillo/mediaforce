@@ -9,6 +9,7 @@ from typing import Any, Callable
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
+from mediaforce.encoding.delivery_lock import delivery_lock
 from mediaforce.encoding.commands import build_ffmpeg_command as _build_ffmpeg_command_impl
 from mediaforce.encoding.helpers import _build_streaming_remote_ffmpeg_command as _build_streaming_remote_ffmpeg_command_impl, \
     _streaming_output_args_for_path as _streaming_output_args_for_path_impl, \
@@ -211,20 +212,22 @@ def encode_one_item(
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         encode_context: dict[str, Any] | None = None,
 ) -> EncodeResult:
-    with _staged_encode_host(config, item, host, process_controller, progress_callback) as encode_host:
-        return _encode_one_item_on_host(
-            connection,
-            config,
-            manifest_path,
-            manifest,
-            index,
-            item,
-            overwrite=overwrite,
-            process_controller=process_controller,
-            host=encode_host,
-            progress_callback=progress_callback,
-            encode_context=encode_context,
-        )
+    connection.commit()
+    with delivery_lock(config.paths.db_path, int(item["library_item_id"])):
+        with _staged_encode_host(config, item, host, process_controller, progress_callback) as encode_host:
+            return _encode_one_item_on_host(
+                connection,
+                config,
+                manifest_path,
+                manifest,
+                index,
+                item,
+                overwrite=overwrite,
+                process_controller=process_controller,
+                host=encode_host,
+                progress_callback=progress_callback,
+                encode_context=encode_context,
+            )
 
 
 @contextmanager
@@ -372,18 +375,20 @@ def validate_manifest_items(
 
 
 def validate_one_item(connection: DBClient, config: MediaforceConfig, item: dict[str, Any]) -> dict[str, Any]:
-    return validate_one_item_impl(
-        connection,
-        config,
-        item,
-        probe_media=probe_media,
-        source_has_preservable_subtitles=_source_has_preservable_subtitles,
-        check=_check,
-        timestamp=timestamp,
-        record_event=_record_event,
-        packet_end_probe=probe_packet_end_seconds,
-        remux_container=remux_container_metadata,
-    )
+    connection.commit()
+    with delivery_lock(config.paths.db_path, int(item["library_item_id"])):
+        return validate_one_item_impl(
+            connection,
+            config,
+            item,
+            probe_media=probe_media,
+            source_has_preservable_subtitles=_source_has_preservable_subtitles,
+            check=_check,
+            timestamp=timestamp,
+            record_event=_record_event,
+            packet_end_probe=probe_packet_end_seconds,
+            remux_container=remux_container_metadata,
+        )
 
 
 LOGGER = logging.getLogger(__name__)
@@ -456,16 +461,18 @@ def promote_manifest_items(
 
 def promote_one_item(connection: DBClient, config: MediaforceConfig, item: dict[str, Any], *,
                      force: bool) -> Path:
-    return promote_one_item_impl(
-        connection,
-        config,
-        item,
-        force=force,
-        probe_media=probe_media,
-        file_fingerprint=file_fingerprint,
-        timestamp=timestamp,
-        record_event=_record_event,
-    )
+    connection.commit()
+    with delivery_lock(config.paths.db_path, int(item["library_item_id"])):
+        return promote_one_item_impl(
+            connection,
+            config,
+            item,
+            force=force,
+            probe_media=probe_media,
+            file_fingerprint=file_fingerprint,
+            timestamp=timestamp,
+            record_event=_record_event,
+        )
 
 
 def _search_quality(

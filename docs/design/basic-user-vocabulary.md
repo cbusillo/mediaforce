@@ -40,15 +40,18 @@ a computer`, `Needs sample`, `Safe to delete`.
   a route that targets one episode.
 - Exact TV approval: use `Sample approved` for the settled review state and
   `Compress the full episode` for the separate production action. Approval
-  records the user's judgment and does not queue work. Name the episode and
-  file, show the expected size change, and state that compression creates a
-  separate file; checking and the explicit replace decision happen later.
+  records the user's judgment. Name the episode and file, show the expected
+  size change, and state that compression creates a separate file. Each finished
+  production file is checked and published automatically under current approval,
+  keeping its original backup. Manual compress, check, and replace actions are
+  explicit overrides; only real judgment calls need another decision.
 - Movie scope: use `Action covers` with `Only this file` or `The whole title`.
   Keep `scope`, `exact selection`, and `title-wide` in technical details only.
-- Movie validation: use `Check compressed file` and `checked file` instead of
+- Movie validation: automatic checking is normal; use `Check compressed file`
+  for the manual override and `checked file` instead of
   `validate outputs` and `validated output` on the primary user path.
-- Movie promotion: use `Replace original now` when the checked replacement is
-  ready. State beside the action that it runs immediately and that Mediaforce
+- Movie promotion: each passing file publishes automatically under current
+  approval. Use `Replace original now` for the explicit manual override. State beside the action that it runs immediately and that Mediaforce
   keeps an original backup first.
 - Other scope: use `One file` or `Whole folder` as the high-level choice, then
   show `Files included` and `Files left untouched` before sample or production
@@ -88,8 +91,8 @@ verb does not.
 | Safe representative work | `Create sample`             | `Sample waiting` / `Creating sample` | `Ready to review`   |
 | Human review media       | `Full screen`               | —                                    | `Ready to review`   |
 | Production compression   | `Compress …`                | `Compressing …`                      | `Ready to check`    |
-| Machine validation       | `Check compressed file(s)`  | `Checking …`                         | `Ready to replace`  |
-| Installation             | `Replace original(s)`       | `Replacing …`                        | `Replaced`          |
+| Machine validation       | Automatic; manual `Check compressed file(s)`  | `Checking …`                         | `Ready to replace`  |
+| Installation             | Automatic; manual `Replace original(s)`       | `Replacing …`                        | `Replaced`          |
 | Cleanup                  | `Delete original backup(s)` | `Deleting …`                         | `Nothing to delete` |
 
 Use `Set up sample` only when the product genuinely saves a plan without

@@ -1,0 +1,402 @@
+import json
+import threading
+from dataclasses import replace
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+from unittest.mock import Mock, patch
+
+import pytest
+from sqlalchemy import select
+
+from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.core.db import DBClient, open_db, reset_engine_cache
+from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
+from mediaforce.core.models import ProbeSummary
+from mediaforce.core.utils import file_fingerprint, timestamp
+from mediaforce.encoding.delivery_lock import delivery_lock
+from mediaforce.encoding.staging import PromotionRestoreError, PromotionWaiting
+from mediaforce.library.staged_integrity import staged_integrity_report
+from mediaforce.web import app as web_app
+from mediaforce.web.runtime import automatic_publish as delivery
+from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
+
+
+@pytest.fixture
+def config(tmp_path: Path) -> Iterator[MediaforceConfig]:
+    result = MediaforceConfig(
+        raw={
+            "validation": {},
+            "media": {
+                "source_roots": {key: str(tmp_path / "source" / key) for key in ("tv", "movies", "other")},
+                "staging_root": str(tmp_path / "staging"),
+                "archive_root": str(tmp_path / "archive"),
+                "output_container": "mkv",
+            },
+        },
+        paths=ConfigPaths(
+            project_root=tmp_path,
+            config_path=tmp_path / "config.toml",
+            db_path=tmp_path / "state/library.sqlite3",
+            run_manifest_dir=tmp_path / "runs",
+            web_state_dir=tmp_path / "web",
+            review_dir=tmp_path / "review",
+            runtime_settings_path=tmp_path / "runtime.json",
+            runtime_reservation_dir=tmp_path / "reservations",
+        ),
+    )
+    yield result
+    reset_engine_cache()
+
+
+def _approval() -> dict[str, Any]:
+    state = {
+        "mode": "sample",
+        "policy": {"video": {"preset": 6}},
+        "job_id": "sample",
+        "accepted_sample_job_id": "sample",
+        "accepted_at": timestamp(),
+    }
+    state["accepted_policy_hash"] = calibration_policy_hash(state)
+    return state
+
+
+def _stage(
+    config: MediaforceConfig, rel_path: str, *, checked: bool = False, origin: str = "queue"
+) -> tuple[int, dict[str, Any], Path]:
+    source = config.source_root_map[rel_path.split("/")[0]] / Path(*Path(rel_path).parts[1:])
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"original media file")
+    staged = Path(config.media["staging_root"]) / rel_path
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(b"av1")
+    fingerprint = file_fingerprint(source, source.stat(), 60.0)
+    now = timestamp()
+    with open_db(config.paths.db_path) as connection:
+        item_id = int(
+            connection.execute(
+                library_items.insert().values(
+                    source_path=str(source),
+                    rel_path=rel_path,
+                    media_root=Path(rel_path).parts[0],
+                    parent_dir=Path(rel_path).parent.as_posix(),
+                    file_name=source.name,
+                    container=".mkv",
+                    size_bytes=source.stat().st_size,
+                    mtime_ns=source.stat().st_mtime_ns,
+                    fingerprint=fingerprint,
+                    duration_seconds=60.0,
+                    audio_summary_json="[]",
+                    subtitle_summary_json="[]",
+                    last_scan_id="fixture",
+                    discovered_at=now,
+                    last_seen_at=now,
+                    updated_at=now,
+                    status="validated" if checked else "encoded",
+                )
+            ).inserted_primary_key[0]
+        )
+        item = {
+            "library_item_id": item_id,
+            "source_path": str(source),
+            "source_fingerprint": fingerprint,
+            "source_size_bytes": source.stat().st_size,
+            "duration_seconds": 60.0,
+            "rel_path": rel_path,
+            "media_root": Path(rel_path).parts[0],
+            "subtitle_summary": [],
+            "resolved_policy": _approval()["policy"],
+        }
+        manifest_path = config.paths.project_root / f"manifest-{item_id}.json"
+        manifest_path.write_text(json.dumps({"run_id": f"run-{item_id}", "items": [item]}))
+        connection.execute(
+            staged_artifacts.insert().values(
+                library_item_id=item_id,
+                manifest_run_id=f"run-{item_id}",
+                manifest_path=str(manifest_path),
+                item_index=0,
+                encode_origin=origin,
+                staging_path=str(staged),
+                staging_size_bytes=staged.stat().st_size,
+                staging_mtime_ns=staged.stat().st_mtime_ns,
+                source_fingerprint=fingerprint,
+                validation_json=json.dumps({"passed": True}) if checked else "{}",
+                validated_at=now if checked else None,
+                updated_at=now,
+            )
+        )
+        connection.commit()
+    return item_id, item, staged
+
+
+def _probe() -> ProbeSummary:
+    return ProbeSummary(
+        duration_seconds=60.0,
+        video_codec="av1",
+        video_bitrate=100,
+        width=1920,
+        height=1080,
+        pix_fmt="yuv420p10le",
+        audio_track_count=1,
+        subtitle_track_count=0,
+        english_audio_count=1,
+        english_subtitle_count=0,
+        default_audio_language="eng",
+        default_subtitle_language=None,
+        audio_summary_json="[]",
+        subtitle_summary_json="[]",
+    )
+
+
+def _run(config: MediaforceConfig, approval: dict[str, Any] | None = None) -> None:
+    state = approval if approval is not None else _approval()
+    with patch("mediaforce.execution.probe_media", return_value=_probe()):
+        delivery.publish_checked_files_once(config, load_calibration_state=lambda _config, _prefix: state)
+
+
+def _status(config: MediaforceConfig, item_id: int) -> str:
+    with open_db(config.paths.db_path) as connection:
+        return str(connection.execute(select(library_items.c.status).where(library_items.c.id == item_id)).scalar_one())
+
+
+@pytest.mark.parametrize("root", ["tv/Show/Season 1", "movies/Title", "other/Folder"])
+@pytest.mark.parametrize("origin", ["queue", "cli"])
+def test_checks_and_publishes_each_file_without_manual_action(config: MediaforceConfig, root: str, origin: str) -> None:
+    item_id, item, staged = _stage(config, f"{root}/one.mkv", origin=origin)
+    _run(config)
+    assert _status(config, item_id) == "promoted"
+    assert Path(item["source_path"]).read_bytes() == b"av1"
+    assert (config.archive_root / item["rel_path"]).read_bytes() == b"original media file"
+    assert not staged.exists()
+    _run(config)
+    assert (config.archive_root / item["rel_path"]).read_bytes() == b"original media file"
+
+
+def test_ready_file_publishes_beside_running_and_failed_siblings(config: MediaforceConfig) -> None:
+    good_id, good, _ = _stage(config, "tv/Show/Season 1/good.mkv")
+    failed_id, _, failed_stage = _stage(config, "tv/Show/Season 1/failed.mkv")
+    busy_id, busy, _ = _stage(config, "tv/Show/Season 1/busy.mkv")
+    with open_db(config.paths.db_path) as connection:
+        failed_stage.write_bytes(b"drifted")
+        for job_id, kind, item in [("parent", "folder", good), ("child", "shard", busy)]:
+            manifest_path = config.paths.project_root / f"active-{job_id}.json"
+            manifest_path.write_text(json.dumps({"items": [item]}))
+            connection.execute(
+                encode_jobs.insert().values(
+                    job_id=job_id,
+                    job_kind=kind,
+                    status="running",
+                    prefix="tv/Show/Season 1",
+                    manifest_path=str(manifest_path),
+                    manifest_indexes_json="[0]",
+                    host_json="{}",
+                    item_count=1,
+                    created_at=timestamp(),
+                    updated_at=timestamp(),
+                )
+            )
+        connection.commit()
+    _run(config)
+    assert _status(config, good_id) == "promoted"
+    assert _status(config, failed_id) == "encoded"
+    assert _status(config, busy_id) == "encoded"
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "approval_changed",
+        "approval_revoked",
+        "original_changed",
+        "validation_failed",
+        "calibration",
+        "invalid_contract",
+        "unknown_origin",
+    ],
+)
+def test_unapproved_or_failed_files_are_not_published(config: MediaforceConfig, problem: str) -> None:
+    item_id, item, _ = _stage(
+        config, "tv/Show/Season 1/one.mkv", origin="calibration" if problem == "calibration" else "queue"
+    )
+    approval = _approval()
+    if problem == "approval_changed":
+        approval["policy"] = {"video": {"preset": 5}}
+        approval["accepted_policy_hash"] = calibration_policy_hash(approval)
+    if problem == "approval_revoked":
+        approval.pop("accepted_at")
+    if problem == "original_changed":
+        Path(item["source_path"]).write_bytes(b"new original")
+    if problem == "invalid_contract":
+        path = config.paths.project_root / f"manifest-{item_id}.json"
+        manifest = json.loads(path.read_text())
+        manifest["selection"] = {"production_approval_contract": {"policy_hash": approval["accepted_policy_hash"]}}
+        path.write_text(json.dumps(manifest))
+    with open_db(config.paths.db_path) as connection:
+        if problem == "validation_failed":
+            connection.execute(
+                staged_artifacts.update()
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(validation_json='{"passed":false}')
+            )
+        if problem == "unknown_origin":
+            connection.execute(
+                staged_artifacts.update()
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(encode_origin=None)
+            )
+        connection.commit()
+    _run(config, approval)
+    assert _status(config, item_id) == "encoded"
+    assert not (config.archive_root / item["rel_path"]).exists()
+
+
+def test_temporary_publish_failure_retries_without_holding_siblings(config: MediaforceConfig) -> None:
+    waiting_id, _, _ = _stage(config, "tv/Show/Season 1/waiting.mkv", checked=True)
+    ready_id, _, _ = _stage(config, "tv/Show/Season 1/ready.mkv", checked=True)
+    promote = delivery.promote_one_item
+
+    def sometimes_wait(connection: DBClient, config: MediaforceConfig, item: dict[str, Any], *, force: bool) -> Path:
+        if item["library_item_id"] == waiting_id:
+            raise PromotionWaiting("Waiting for enough free space.")
+        return promote(connection, config, item, force=force)
+
+    with patch.object(delivery, "promote_one_item", side_effect=sometimes_wait):
+        _run(config)
+        _run(config)
+    assert _status(config, waiting_id) == "validated"
+    assert _status(config, ready_id) == "promoted"
+    with open_db(config.paths.db_path) as connection:
+        report = staged_integrity_report(connection, config, "tv/Show/Season 1", discover=False)
+        assert "Waiting for enough free space" in next(r.detail for r in report.records if r.item_id == waiting_id)
+        events = connection.execute(
+            select(item_events).where(
+                item_events.c.library_item_id == waiting_id, item_events.c.event_type == "automatic_publish_waiting"
+            )
+        ).all()
+        assert len(events) == 1
+    _run(config)
+    assert _status(config, waiting_id) == "promoted"
+
+
+def test_validation_failure_keeps_original_and_other_file_publishes(config: MediaforceConfig) -> None:
+    failed_id, _, _ = _stage(config, "tv/Show/Season 1/failed.mkv")
+    ready_id, _, _ = _stage(config, "tv/Show/Season 1/ready.mkv")
+    validate = delivery.validate_one_item
+
+    def failed_check(connection: DBClient, config: MediaforceConfig, item: dict[str, Any]) -> dict[str, Any]:
+        if item["library_item_id"] == failed_id:
+            with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
+                return validate(connection, config, item)
+        return validate(connection, config, item)
+
+    with patch.object(delivery, "validate_one_item", side_effect=failed_check):
+        _run(config)
+    assert _status(config, failed_id) == "encoded"
+    assert _status(config, ready_id) == "promoted"
+
+
+def test_retains_preexisting_rollback_copy(config: MediaforceConfig) -> None:
+    _, item, _ = _stage(config, "tv/Show/Season 1/one.mkv")
+    archive = config.archive_root / item["rel_path"]
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(b"earlier rollback")
+    _run(config)
+    assert archive.read_bytes() == b"original media file"
+    assert any(path.read_bytes() == b"earlier rollback" for path in archive.parent.iterdir() if path != archive)
+
+
+def test_unsafe_restore_is_recorded_and_not_retried(config: MediaforceConfig) -> None:
+    item_id, _, _ = _stage(config, "tv/Show/Season 1/one.mkv", checked=True)
+    with patch.object(delivery, "promote_one_item", side_effect=PromotionRestoreError("restore failed")) as promote:
+        _run(config)
+        _run(config)
+    assert promote.call_count == 1
+    with open_db(config.paths.db_path) as connection:
+        report = staged_integrity_report(connection, config, "tv/Show/Season 1", discover=False)
+        assert "could not put the files back" in report.records[0].detail
+    assert _status(config, item_id) == "validated"
+
+
+def test_worker_skips_locked_file_and_publishes_another(config: MediaforceConfig) -> None:
+    item_id, _, _ = _stage(config, "tv/Show/Season 1/locked.mkv")
+    ready_id, _, _ = _stage(config, "tv/Show/Season 1/ready.mkv")
+    started, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with delivery_lock(config.paths.db_path, item_id):
+            started.set()
+            release.wait(5)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert started.wait(5)
+        _run(config)
+        assert _status(config, item_id) == "encoded"
+        assert _status(config, ready_id) == "promoted"
+    finally:
+        release.set()
+        thread.join()
+
+
+def test_unreadable_check_record_does_not_stop_other_files(config: MediaforceConfig) -> None:
+    failed_id, _, _ = _stage(config, "tv/Show/Season 1/broken.mkv")
+    ready_id, _, _ = _stage(config, "tv/Show/Season 1/ready.mkv")
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(
+            staged_artifacts.update()
+            .where(staged_artifacts.c.library_item_id == failed_id)
+            .values(validation_json="broken-json")
+        )
+        connection.commit()
+    _run(config)
+    assert _status(config, ready_id) == "promoted"
+    assert _status(config, failed_id) == "encoded"
+    with open_db(config.paths.db_path) as connection:
+        row = connection.execute(
+            select(staged_artifacts.c.validation_json).where(staged_artifacts.c.library_item_id == failed_id)
+        ).scalar_one()
+        assert json.loads(row)["unreadable_validation_json"] == "broken-json"
+
+
+def test_manual_delivery_after_automatic_delivery_preserves_original(config: MediaforceConfig) -> None:
+    _, item, _ = _stage(config, "tv/Show/Season 1/one.mkv")
+    _run(config)
+    with open_db(config.paths.db_path) as connection:
+        path = delivery.promote_one_item(connection, config, item, force=False)
+        checked = delivery.validate_one_item(connection, config, item)
+    assert checked["passed"]
+    assert path.read_bytes() == b"av1"
+    assert (config.archive_root / item["rel_path"]).read_bytes() == b"original media file"
+
+
+def test_approval_revoked_during_validation_prevents_publishing(config: MediaforceConfig) -> None:
+    item_id, item, _ = _stage(config, "tv/Show/Season 1/one.mkv")
+    approval = _approval()
+    validate = delivery.validate_one_item
+
+    def revoke(connection: DBClient, config: MediaforceConfig, item: dict[str, Any]) -> dict[str, Any]:
+        result = validate(connection, config, item)
+        approval.pop("accepted_at")
+        return result
+
+    with patch.object(delivery, "validate_one_item", side_effect=revoke):
+        _run(config, approval)
+    assert _status(config, item_id) == "validated"
+    assert Path(item["source_path"]).read_bytes() == b"original media file"
+    assert not (config.archive_root / item["rel_path"]).exists()
+
+
+def test_app_supervises_automatic_delivery_with_its_leadership(config: MediaforceConfig) -> None:
+    sweep = Mock()
+    with (
+        patch.object(web_app, "_acquire_background_worker_leadership", return_value=Mock()),
+        patch.object(web_app, "_start_calibration_queue_worker"),
+        patch.object(web_app, "_start_encode_queue_worker"),
+        patch.object(web_app, "_start_controller_storage_worker"),
+        patch.object(web_app, "_start_catalog_refresh_worker"),
+        patch.object(web_app, "_start_supervised_worker") as start,
+    ):
+        runtime = web_app._start_background_workers(config, automatic_publish_sweep=sweep)
+    assert runtime is not None
+    assert start.call_args.kwargs["process_once_fn"] is sweep

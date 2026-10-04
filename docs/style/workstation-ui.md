@@ -115,8 +115,11 @@ has to look up is a defect.
   cadence, shard, quality memory, or internal job IDs as interface language.
 - Button text names the actual effect and scope. A queued action says it queues;
   an immediate action says it starts now; replacement says which file changes.
-- Approval records a user judgment. Compression admission is a separate
-  commitment and action.
+- Approval records the user's judgment about the sample. Compression, checking,
+  and replacement remain distinct phases on screen; each finished production
+  file is checked and published automatically under its current approval.
+  Manual checking and publishing are explicit overrides. Only real judgment
+  calls ask the user, and deleting rollback copies always needs their approval.
 - Put scope, consequence, and recovery or backup expectation beside each
   consequential action once. Do not repeat the same safety sentence throughout
   the screen.
@@ -207,8 +210,9 @@ has to look up is a defect.
 - Does the next action explain why it is safe, blocked, or waiting?
 - Does every visible sentence earn its place under the copy budget?
 - Does fullscreen contain viewing controls only?
-- Are approval, compression, checking, and replacement visibly separate
-  commitments?
+- Are approval, compression, checking, and replacement visibly distinct phases,
+  with automatic per-file checking and replacement and manual actions shown as
+  overrides?
 
 ## Process expectations
 

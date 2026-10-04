@@ -110,7 +110,9 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   `/folders/tv/Quality%20Conflict/Season%201`, proving arithmetic impossibility
   is explained separately from a measured quality-floor conflict.
 - Approved state: `/folders/tv/Approved%20Show/Season%201`, where approval is
-  complete but production remains unqueued until `Compress the season` is chosen.
+  complete and no production is queued in this static fixture.
+  `Compress the season` remains the manual admission override; in a running
+  app each finished approved file is checked and published automatically.
 - Protected approved state: `/folders/tv/Protected%20Ready/Season%202`, where an
   accepted test is ready but the current/recent season requires the explicit
   lifecycle override dialog before queueing.
@@ -437,8 +439,11 @@ or running, Studio must replace sample controls with the current movie's status:
 queue position, assignment and worker availability, progress, blockers, and the
 exact condition that allows work to continue. Activity remains a secondary
 diagnostics route and must not be required to understand this movie. A ready
-replacement must state that it runs immediately, preserves a backup of the
-original, and must not be triggered during browser QA. In that ready state,
+manual replacement override must state that it runs immediately, preserves a
+backup of the original, and must not be triggered during browser QA. Static
+replacement-ready fixtures keep background publishing disabled; validate the
+automatic per-file path with isolated synthetic files and a disposable database,
+including a blocked sibling, a temporary retry, and retained rollback copies. In that ready state,
 `Preview checked output` must remain secondary to replacement, open the exact
 staged file that still matches its final check, never autoplay, and fail closed
 when the file is missing, drifted, ambiguous, remote-only, or blocked by a

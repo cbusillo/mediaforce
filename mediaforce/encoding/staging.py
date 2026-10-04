@@ -213,6 +213,8 @@ def validate_one_item(
     if row is None:
         raise FileNotFoundError(f"No staged artifact found for item {item['library_item_id']}")
 
+    if row.get("promoted_at") is not None:
+        return json.loads(row["validation_json"] or "{}")
     staging_path = Path(row["staging_path"])
     staged_probe = probe_media(staging_path)
     staged_size_bytes = staging_path.stat().st_size
@@ -600,6 +602,8 @@ def promote_one_item(
     ).mappings().fetchone()
     if stage_row is None:
         raise FileNotFoundError(f"No staged artifact found for item {item['library_item_id']}")
+    if stage_row.get("promoted_at") is not None:
+        return Path(str(stage_row["promoted_path"]))
     validation = json.loads(stage_row["validation_json"] or "{}")
     if not force and not validation.get("passed"):
         raise RuntimeError(f"Item {item['library_item_id']} must be validated before promotion")
@@ -740,11 +744,6 @@ def promote_one_item(
                 f"Promotion failed and filesystem rollback could not restore the original state: {restore_error}"
             ) from promotion_error
         raise
-    if archive_backup_path is not None:
-        try:
-            safe_unlink(archive_backup_path)
-        except OSError as cleanup_error:
-            LOGGER.warning("Failed to remove superseded promotion archive %s: %s", archive_backup_path, cleanup_error)
     try:
         record_event(
             connection,
@@ -753,6 +752,7 @@ def promote_one_item(
             {
                 "promoted_path": str(destination_path),
                 "archived_source_path": str(archive_path),
+                "retained_archive_backup_path": str(archive_backup_path) if archive_backup_path is not None else None,
             },
         )
         connection.commit()
