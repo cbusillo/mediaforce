@@ -74,6 +74,7 @@ class StagedIntegrityRecord:
     detail: str
     # The finished and predicted sizes of a file held for being far smaller than its sample predicted.
     size_prediction: dict[str, Any] | None = None
+    publish_wait_reason: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload = {
@@ -87,6 +88,8 @@ class StagedIntegrityRecord:
         }
         if self.size_prediction is not None:
             payload["size_prediction"] = self.size_prediction
+        if self.publish_wait_reason is not None:
+            payload["publish_wait_reason"] = self.publish_wait_reason
         return payload
 
 
@@ -197,7 +200,9 @@ def staged_integrity_report_for_scope(
         record = _classify_row(row, staging_roots)
         delivery = object_dict(_parsed_validation(row["validation_json"]).get("automatic_publish"))
         if include_publish_reason and delivery.get("reason") and record.disposition != "tracked":
-            record = replace(record, detail=f"{record.detail} {delivery['reason']}")
+            reason = str(delivery["reason"])
+            record = replace(record, publish_wait_reason=reason,
+                             detail=record.detail if reason in record.detail else f"{record.detail} {reason}")
         records.append(record)
     discovery_truncated = bool(discover and database_truncated)
     entries_scanned = 0

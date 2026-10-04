@@ -277,7 +277,8 @@ def test_temporary_publish_failure_retries_without_holding_siblings(config: Medi
             )
         ).all()
         assert len(events) == 1
-    _run(config)
+    with patch.object(delivery.time, "time", return_value=delivery.time.time() + delivery.PUBLISH_RETRY_DELAY_SECONDS + 1):
+        _run(config)
     assert _status(config, waiting_id) == "promoted"
 
 
@@ -423,8 +424,9 @@ def test_repeated_integrity_hold_keeps_one_bounded_reason(
                 .values(validation_json='{"passed":false}')
             )
             connection.commit()
-    for _ in range(5):
-        _run(config)
+    for attempt in range(5):
+        with patch.object(delivery.time, "time", return_value=attempt * (delivery.PUBLISH_RETRY_DELAY_SECONDS + 1)):
+            _run(config)
     with open_db(config.paths.db_path) as connection:
         events = (
             connection.execute(
@@ -441,7 +443,7 @@ def test_repeated_integrity_hold_keeps_one_bounded_reason(
         report = staged_integrity_report(
             connection, config, "tv/Show/Season 1", discover=False
         )
-        assert report.records[0].detail.count(reason) <= 2
+        assert report.records[0].detail.count(reason) == 1
 
 
 def test_unknown_failure_retries_then_holds_without_stopping_siblings(
@@ -645,12 +647,13 @@ def test_short_storage_outage_does_not_exhaust_retries(config: MediaforceConfig)
 def test_changing_free_space_counts_do_not_create_wait_events(config: MediaforceConfig) -> None:
     item_id, _, _ = _stage(config, "tv/Show/Season 1/one.mkv", checked=True)
     with patch.object(delivery, "promote_one_item", side_effect=[
-        PromotionWaiting("Need 100 bytes but only 4 is available"),
-        PromotionWaiting("Need 100 bytes but only 3 is available"),
-        PromotionWaiting("Need 100 bytes but only 2 is available"),
+        PromotionWaiting("Need 100 bytes but only 4 is available", reason_code="space_reserve"),
+        PromotionWaiting("Need 100 bytes but only 3 is available", reason_code="space_reserve"),
+        PromotionWaiting("Need 100 bytes but only 2 is available", reason_code="space_reserve"),
     ]):
-        for _ in range(3):
-            _run(config)
+        for attempt in range(3):
+            with patch.object(delivery.time, "time", return_value=attempt * (delivery.PUBLISH_RETRY_DELAY_SECONDS + 1)):
+                _run(config)
     with open_db(config.paths.db_path) as connection:
         events = connection.execute(select(item_events.c.details_json).where(
             item_events.c.library_item_id == item_id,
@@ -690,3 +693,132 @@ def test_retained_rollback_count_survives_best_effort_history_failure(config: Me
         folders = list_completed_folders(connection, archive_root=config.archive_root, folder_group=web_app._folder_group)
     assert folders[0].archived_backup_count == 2
     assert Path(item["source_path"]).read_bytes() == b"av1"
+
+
+def test_manual_publish_waiting_for_encode_rechecks_validation(config: MediaforceConfig) -> None:
+    item_id, item, staged = _stage(config, "tv/Show/Season 1/one.mkv", checked=True)
+    started = threading.Event()
+    failures: list[Exception] = []
+    def publish() -> None:
+        with open_db(config.paths.db_path) as connection:
+            started.set()
+            try:
+                delivery.promote_one_item(connection, config, item, force=False)
+            except Exception as exc:
+                failures.append(exc)
+    with delivery_lock(config.paths.db_path, item_id):
+        thread = threading.Thread(target=publish)
+        thread.start()
+        assert started.wait(5)
+        staged.write_bytes(b"unchecked replacement")
+        with open_db(config.paths.db_path) as connection:
+            connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id)
+                               .values(validation_json='{"passed":true}', validated_at=None))
+            connection.commit()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert len(failures) == 1
+    assert "must be validated" in str(failures[0])
+    assert Path(item["source_path"]).read_bytes() == b"original media file"
+    assert staged.read_bytes() == b"unchecked replacement"
+
+
+@pytest.mark.parametrize("rel_path", ["movies/Title.avi", "tv/Show/Episode 01.avi"])
+def test_loose_file_rollback_counts_and_selected_cleanup_follow_owner(config: MediaforceConfig, rel_path: str) -> None:
+    _, item, _ = _stage(config, rel_path)
+    archive = config.archive_root / item["rel_path"]
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_bytes(b"earlier rollback")
+    _run(config)
+    with open_db(config.paths.db_path) as connection:
+        folders = list_completed_folders(connection, archive_root=config.archive_root, folder_group=web_app._folder_group)
+    assert folders[0].archived_backup_count == 2
+    result = clear_completed_backups_action(config, folder_group=web_app._folder_group, prefixes=[folders[0].prefix])
+    assert result["removed_count"] == 2
+    assert result["removed_prefix_count"] == 1
+    assert not any(path.is_file() for path in config.archive_root.rglob("*"))
+    assert Path(item["source_path"]).with_suffix(".mkv").read_bytes() == b"av1"
+
+
+def test_collision_holds_both_files_for_a_manual_choice(config: MediaforceConfig) -> None:
+    first, first_item, _ = _stage(config, "tv/Show/Season 1/one.mp4", checked=True)
+    second, second_item, _ = _stage(config, "tv/Show/Season 1/one.avi", checked=True)
+    _run(config)
+    assert _status(config, first) == "validated"
+    assert _status(config, second) == "validated"
+    assert not Path(first_item["source_path"]).with_suffix(".mkv").exists()
+    assert Path(second_item["source_path"]).read_bytes() == b"original media file"
+
+
+def test_missing_source_has_a_specific_wait_when_parent_is_reachable(config: MediaforceConfig) -> None:
+    item_id, item, _ = _stage(config, "tv/Show/Season 1/one.mkv", checked=True)
+    Path(item["source_path"]).unlink()
+    _run(config)
+    with open_db(config.paths.db_path) as connection:
+        saved = json.loads(connection.execute(select(staged_artifacts.c.validation_json).where(
+            staged_artifacts.c.library_item_id == item_id)).scalar_one())
+    assert "missing from a reachable folder" in saved["automatic_publish"]["reason"]
+    assert "retry this file" not in saved["automatic_publish"]["reason"]
+
+
+def test_malformed_sibling_job_does_not_hold_a_finished_file(config: MediaforceConfig) -> None:
+    ready_id, _, _ = _stage(config, "tv/Show/Season 1/ready.mkv")
+    manifest = config.paths.project_root / "malformed-job.json"
+    manifest.write_text('{"items":[]}')
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.insert().values(job_id="broken", job_kind="shard", status="running",
+            prefix="tv/Show/Season 1", manifest_path=str(manifest), manifest_indexes_json="[0]", host_json="{}",
+            item_count=1, created_at=timestamp(), updated_at=timestamp()))
+        connection.commit()
+    _run(config)
+    assert _status(config, ready_id) == "promoted"
+
+
+def test_wait_reason_is_public_without_duplicate_details(config: MediaforceConfig) -> None:
+    _, _, staged = _stage(config, "tv/Show/Season 1/one.mkv")
+    staged.unlink()
+    _run(config)
+    with open_db(config.paths.db_path) as connection:
+        record = staged_integrity_report(connection, config, "tv/Show/Season 1", discover=False).records[0]
+    assert record.publish_wait_reason is not None
+    assert record.to_payload()["publish_wait_reason"] == record.publish_wait_reason
+    assert record.detail.count(record.publish_wait_reason) == 1
+
+
+def test_owner_cleanup_preserves_an_original_during_publication(config: MediaforceConfig) -> None:
+    from mediaforce import execution
+    _stage(config, "tv/Show/Season 1/done.mkv", checked=True)
+    _run(config)
+    _, item, _ = _stage(config, "tv/Show/Season 1/publishing.mkv", checked=True)
+    moved, release = threading.Event(), threading.Event()
+    failures: list[Exception] = []
+    def probe(_path: Path) -> ProbeSummary:
+        moved.set()
+        assert release.wait(5)
+        raise RuntimeError("final probe failed")
+    def publish() -> None:
+        with open_db(config.paths.db_path) as connection:
+            try:
+                execution.promote_one_item(connection, config, item, force=False)
+            except Exception as exc:
+                failures.append(exc)
+    with patch.object(execution, "probe_media", side_effect=probe):
+        thread = threading.Thread(target=publish)
+        thread.start()
+        try:
+            assert moved.wait(5)
+            result = clear_completed_backups_action(config, folder_group=web_app._folder_group,
+                prefixes=["tv/Show/Season 1"], valid_prefixes={"tv/Show/Season 1"})
+            assert result["ok"] is False
+            assert result["removed_count"] == 0
+        finally:
+            release.set()
+            thread.join(5)
+    assert not thread.is_alive()
+    assert len(failures) == 1
+    assert not isinstance(failures[0], PromotionRestoreError)
+    assert Path(item["source_path"]).read_bytes() == b"original media file"
+    result = clear_completed_backups_action(config, folder_group=web_app._folder_group,
+        prefixes=["tv/Show/Season 1"], valid_prefixes={"tv/Show/Season 1"})
+    assert result["ok"] is True
+    assert result["removed_count"] == 1

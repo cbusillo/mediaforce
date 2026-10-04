@@ -9,7 +9,7 @@ from typing import Any, Callable
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.encoding.delivery_lock import delivery_lock
+from mediaforce.encoding.delivery_lock import archive_activity, delivery_lock
 from mediaforce.encoding.commands import build_ffmpeg_command as _build_ffmpeg_command_impl
 from mediaforce.encoding.helpers import _build_streaming_remote_ffmpeg_command as _build_streaming_remote_ffmpeg_command_impl, \
     _streaming_output_args_for_path as _streaming_output_args_for_path_impl, \
@@ -462,7 +462,9 @@ def promote_manifest_items(
 def promote_one_item(connection: DBClient, config: MediaforceConfig, item: dict[str, Any], *,
                      force: bool) -> Path:
     connection.commit()
-    with delivery_lock(config.paths.db_path, int(item["library_item_id"])):
+    with delivery_lock(config.paths.db_path, int(item["library_item_id"])), archive_activity(config.paths.db_path) as available:
+        if not available:
+            raise PromotionWaiting("Original backups are being cleaned. Retry publishing after cleanup finishes.")
         return promote_one_item_impl(
             connection,
             config,

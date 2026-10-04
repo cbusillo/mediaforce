@@ -8,9 +8,10 @@ from typing import Any
 from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import DBClient
+from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
 from mediaforce.encoding.staging import safe_unlink
+from mediaforce.encoding.delivery_lock import archive_activity
 from mediaforce.library.media_scopes import media_scope_from_prefix, path_matches_scope
 FolderGroup = tuple[str, str, str, str]
 ORIGINALS_REMOVED_EVENT = "originals_removed_confirmed"
@@ -119,12 +120,14 @@ def list_completed_folders(
     confirmed_item_ids = _confirmed_originals_removed_item_ids(connection)
     resolved_archive_root = archive_root.resolve() if archive_root is not None else None
     counted_backup_paths: set[Path] = set()
+    item_folder_prefixes: dict[int, str] = {}
     for row in rows:
         rel_path = str(row["rel_path"] or "")
         group = folder_group(rel_path)
         if group is None:
             continue
         prefix, title, subtitle, scope_label = group
+        item_folder_prefixes[int(row["library_item_id"])] = prefix
         folder = grouped.get(prefix)
         if folder is None:
             folder = CompletedFolder(
@@ -177,13 +180,13 @@ def list_completed_folders(
     # Include those retained copies in the same folder's owner-approved cleanup count.
     if archive_root is not None and resolved_archive_root is not None:
         retained_events = connection.execute(
-            select(item_events.c.details_json).where(
+            select(item_events.c.library_item_id, item_events.c.details_json).where(
                 item_events.c.event_type.in_(("promotion_completed", "promotion_rollback_retained"))
             )
-        ).scalars()
-        for details_json in retained_events:
+        ).mappings()
+        for event in retained_events:
             retained_path = _clean_text(
-                _event_details(details_json).get("retained_archive_backup_path")
+                _event_details(event["details_json"]).get("retained_archive_backup_path")
             )
             if not retained_path:
                 continue
@@ -194,8 +197,7 @@ def list_completed_folders(
                 continue
             if backup.resolve() in counted_backup_paths:
                 continue
-            group = folder_group(backup.relative_to(archive_root).as_posix())
-            folder = grouped.get(group[0]) if group is not None else None
+            folder = grouped.get(item_folder_prefixes.get(int(event["library_item_id"]), ""))
             if folder is not None:
                 try:
                     size = backup.stat().st_size
@@ -453,6 +455,22 @@ def clear_completed_backups_action(
         valid_prefixes: set[str] | None = None,
         on_removed: Callable[[Path], None] | None = None,
 ) -> dict[str, Any]:
+    with archive_activity(config.paths.db_path, cleanup=True) as available:
+        if not available:
+            return {"ok": False, "message": "Files are being published. Retry cleanup when they finish.",
+                    "removed_count": 0, "removed_size_bytes": 0, "removed_prefix_count": 0}
+        return _clear_completed_backups_action(config, folder_group=folder_group, prefixes=prefixes,
+                                              valid_prefixes=valid_prefixes, on_removed=on_removed)
+
+
+def _clear_completed_backups_action(
+        config: MediaforceConfig,
+        *,
+        folder_group: Callable[[str], FolderGroup | None],
+        prefixes: list[str] | None = None,
+        valid_prefixes: set[str] | None = None,
+        on_removed: Callable[[Path], None] | None = None,
+) -> dict[str, Any]:
     archive_root = _configured_archive_root(config)
     normalized_prefixes = _normalized_prefixes(prefixes)
     if prefixes is not None and not normalized_prefixes:
@@ -486,14 +504,20 @@ def clear_completed_backups_action(
     removed_count = 0
     removed_size_bytes = 0
     removed_prefixes: set[str] = set()
+    selected_paths = _selected_archive_paths(config, normalized_prefixes)
     for path in archive_root.rglob("*"):
         if not path.is_file():
             continue
         rel_path = path.relative_to(archive_root).as_posix()
-        if normalized_prefixes is not None and not _path_matches_prefixes(rel_path, normalized_prefixes):
+        if normalized_prefixes is not None and not (
+            _path_matches_prefixes(rel_path, normalized_prefixes) or path.resolve() in selected_paths
+        ):
             continue
+        selected_prefix = selected_paths.get(path.resolve())
         group = folder_group(rel_path)
-        if group is not None:
+        if selected_prefix is not None:
+            removed_prefixes.add(selected_prefix)
+        elif group is not None:
             removed_prefixes.add(group[0])
         try:
             removed_size_bytes += path.stat().st_size
@@ -529,6 +553,29 @@ def clear_completed_backups_action(
         "removed_size_bytes": removed_size_bytes,
         "removed_prefix_count": len(removed_prefixes),
     }
+
+
+def _selected_archive_paths(config: MediaforceConfig, prefixes: set[str] | None) -> dict[Path, str]:
+    """Use the owning item's current path when a rollback's filename differs."""
+    if prefixes is None or not config.paths.db_path.is_file():
+        return {}
+    with open_db(config.paths.db_path) as connection:
+        rows = connection.execute(
+            select(library_items.c.id, library_items.c.rel_path, staged_artifacts.c.archived_source_path)
+            .join(staged_artifacts, library_items.c.id == staged_artifacts.c.library_item_id)
+            .where(staged_artifacts.c.promoted_at.is_not(None))
+        ).mappings().all()
+        item_prefixes = {int(row["id"]): next(prefix for prefix in prefixes if path_matches_scope(str(row["rel_path"]), prefix))
+                         for row in rows if _path_matches_prefixes(str(row["rel_path"]), prefixes)}
+        paths = {Path(str(row["archived_source_path"])).resolve(): item_prefixes[int(row["id"])] for row in rows
+                 if int(row["id"]) in item_prefixes and row["archived_source_path"]}
+        for event in connection.execute(select(item_events.c.library_item_id, item_events.c.details_json).where(
+            item_events.c.event_type.in_(("promotion_completed", "promotion_rollback_retained"))
+        )).mappings():
+            retained = _event_details(event["details_json"]).get("retained_archive_backup_path")
+            if int(event["library_item_id"]) in item_prefixes and retained:
+                paths[Path(str(retained)).resolve()] = item_prefixes[int(event["library_item_id"])]
+        return paths
 
 
 def _normalized_prefixes(prefixes: list[str] | None) -> set[str] | None:

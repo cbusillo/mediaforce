@@ -442,7 +442,8 @@ diagnostics route and must not be required to understand this movie. A ready
 manual replacement override must state that it runs immediately, preserves a
 backup of the original, and must not be triggered during browser QA. Static
 replacement-ready fixtures have no unambiguous production origin, so the running
-publish worker leaves their replacements untouched. Validate the
+publish worker leaves their media files untouched but records an origin-unknown
+wait in their disposable database and visible details. Validate the
 automatic per-file path with isolated synthetic files and a disposable database,
 including a blocked sibling, a temporary retry, and retained rollback copies. In that ready state,
 `Preview checked output` must remain secondary to replacement, open the exact

@@ -101,14 +101,14 @@ def _try_publish_file(
             "unsafe",
             "Publishing could not put the files back. Inspect and restore this file before using the manual publish override.",
         )
-    except PromotionWaiting:
+    except PromotionWaiting as exc:
         connection.rollback()
-        _record_wait(
-            connection,
-            item_id,
-            "waiting",
-            "Waiting for enough free space or a storage reservation. Mediaforce will retry this file.",
+        reason = (
+            "Waiting for enough free space or a storage reservation. Mediaforce will retry this file."
+            if exc.reason_code == "space_reserve"
+            else str(exc)
         )
+        _record_wait(connection, item_id, "waiting", reason)
     except FileExistsError:
         connection.rollback()
         _record_wait(
@@ -117,6 +117,15 @@ def _try_publish_file(
             "waiting",
             "A different file is already at its place in the library.",
         )
+    except FileNotFoundError as exc:
+        connection.rollback()
+        reachable_parent = bool(exc.filename and Path(exc.filename).parent.is_dir())
+        reason = (
+            "A required file is missing from a reachable folder. Inspect the original and saved work before replacing it."
+            if reachable_parent
+            else "Storage or a required file is unavailable. Mediaforce will retry this file."
+        )
+        _record_wait(connection, item_id, "waiting", reason)
     except OSError:
         connection.rollback()
         _record_wait(
@@ -175,14 +184,6 @@ def _publish_file(
         return
     if source["status"] not in {"encoded", "validated"}:
         return
-    if stage["encode_origin"] not in {"queue", "cli-production"}:
-        _record_wait(
-            connection,
-            item_id,
-            "waiting",
-            "This file's production origin is unknown. Check and publish it manually if it is a full replacement.",
-        )
-        return
     validation = object_dict(json.loads(stage["validation_json"] or "{}"))
     if object_dict(validation.get("automatic_publish")).get("state") in {
         "unsafe",
@@ -194,6 +195,14 @@ def _publish_file(
         > time.time()
     ):
         return
+    if stage["encode_origin"] not in {"queue", "cli-production"}:
+        _record_wait(
+            connection,
+            item_id,
+            "waiting",
+            "This file's production origin is unknown. Check and publish it manually if it is a full replacement.",
+        )
+        return
     rel_path = str(source["rel_path"])
     blocker = production_action_blocker(config, rel_path)
     if blocker is not None:
@@ -203,19 +212,39 @@ def _publish_file(
     for job in load_active_encode_jobs_for_prefix(connection, rel_path):
         if job.get("job_kind") == "folder":
             continue
-        active_manifest = object_dict(
-            json.loads(Path(str(job["manifest_path"])).read_text())
+        owns_output = (
+            str(job.get("job_id") or "") == str(stage["encode_job_id"] or "")
+            or str(job.get("prefix") or "") == rel_path
         )
-        active_items = object_list(active_manifest.get("items"))
-        indexes = object_list(job.get("manifest_indexes")) or list(
-            range(len(active_items))
-        )
-        if not active_items:
-            raise RuntimeError("An active file job's membership is unavailable")
-        if any(
-            int(object_dict(active_items[index]).get("library_item_id") or 0) == item_id
-            for index in indexes
-        ):
+        try:
+            active_manifest = object_dict(
+                json.loads(Path(str(job["manifest_path"])).read_text())
+            )
+            active_items = object_list(active_manifest.get("items"))
+            indexes = object_list(job.get("manifest_indexes")) or list(
+                range(len(active_items))
+            )
+            if not active_items or any(
+                not 0 <= int(index) < len(active_items) for index in indexes
+            ):
+                raise ValueError("File-job membership is incomplete")
+            active_ids = {
+                int(object_dict(active_items[int(index)]).get("library_item_id") or 0)
+                for index in indexes
+            }
+            if any(active_id <= 0 for active_id in active_ids):
+                raise ValueError("File-job identities are incomplete")
+        except (OSError, ValueError, TypeError):
+            if owns_output:
+                _record_wait(
+                    connection,
+                    item_id,
+                    "waiting",
+                    "Its active job's saved work is unavailable. It will be checked when that job finishes.",
+                )
+                return
+            continue
+        if item_id in active_ids:
             _record_wait(
                 connection,
                 item_id,
@@ -270,6 +299,25 @@ def _publish_file(
     if reasons:
         _record_wait(connection, item_id, "waiting", " ".join(reasons))
         return
+    destination = path.with_suffix(f".{config.output_container}")
+    other_sources = connection.execute(
+        select(library_items.c.source_path).where(
+            library_items.c.parent_dir == source["parent_dir"],
+            library_items.c.id != item_id,
+        )
+    ).scalars()
+    if any(
+        Path(str(other)).with_suffix(destination.suffix) == destination
+        and Path(str(other)).exists()
+        for other in other_sources
+    ):
+        _record_wait(
+            connection,
+            item_id,
+            "waiting",
+            "Another file would land in the same place. Choose the replacement before publishing either file.",
+        )
+        return
     report = staged_integrity_report(
         connection, config, rel_path, discover=False, include_publish_reason=False
     )
@@ -282,6 +330,8 @@ def _publish_file(
         _record_wait(connection, item_id, "waiting", record.detail)
         return
     connection.commit()
+    if stop_event is not None and stop_event.is_set():
+        return
     if record.disposition == "unvalidated":
         result = validate_one_item(connection, config, item)
         if not result["passed"]:
@@ -360,6 +410,8 @@ def _record_wait(
     delivery = {"state": state, "reason": reason}
     if failure_attempts is not None:
         delivery["failure_attempts"] = failure_attempts
+    if retry_after is None and state == "waiting":
+        retry_after = time.time() + PUBLISH_RETRY_DELAY_SECONDS
     previous = object_dict(validation.get("automatic_publish"))
     changed_reason = {
         key: value for key, value in previous.items() if key != "retry_after"

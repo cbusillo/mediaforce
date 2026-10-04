@@ -430,6 +430,7 @@ def test_promotion_reserve_preflight_is_atomic_before_any_move(tmp_path: Path) -
         def execute(_statement: object) -> SimpleNamespace:
             return SimpleNamespace(mappings=lambda: SimpleNamespace(fetchone=lambda: {
                 "validation_json": '{"passed": true}',
+                "validated_at": "checked",
                 "staging_path": str(staging),
             }))
 

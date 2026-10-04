@@ -52,6 +52,10 @@ class StagedOutputHeldForReviewError(RuntimeError):
 class PromotionWaiting(RuntimeError):
     """A temporary condition holds this file back; nothing moved and it can be published later."""
 
+    def __init__(self, message: str, *, reason_code: str | None = None) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
 
 class PromotionRestoreError(RuntimeError):
     """A failed promotion could not put its files back, so an original may be out of place."""
@@ -616,6 +620,8 @@ def promote_one_item(
         raise PromotionWaiting(
             "It came out far smaller than its sample predicted. Keep it or make it again before it is replaced."
         )
+    if not force and stage_row.get("validated_at") is None:
+        raise RuntimeError(f"Item {item['library_item_id']} must be validated before promotion")
 
     source_path = Path(item["source_path"])
     staging_path = Path(stage_row["staging_path"])
@@ -633,7 +639,7 @@ def promote_one_item(
         archive_path=archive_path,
     )
     if not reserve.allowed:
-        raise PromotionWaiting(reserve.waiting_reason or "Waiting for a measurable free-space reserve.")
+        raise PromotionWaiting(reserve.waiting_reason or "Waiting for a measurable free-space reserve.", reason_code="space_reserve")
     # Same-volume renames need no free bytes, so they cannot take space an active encode reserved.
     if any(int_value(required) > 0 for required in object_dict(getattr(reserve, "required_by_volume", {})).values()):
         active_reserve_check = active_reserve_waiting_reason or _active_encode_promotion_waiting_reason
@@ -642,7 +648,7 @@ def promote_one_item(
             str(stage_row.get("encode_job_id") or "").strip() or None,
         )
         if active_waiting_reason is not None:
-            raise PromotionWaiting(active_waiting_reason)
+            raise PromotionWaiting(active_waiting_reason, reason_code="space_reserve")
 
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     destination_path.parent.mkdir(parents=True, exist_ok=True)
