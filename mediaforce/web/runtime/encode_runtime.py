@@ -132,6 +132,7 @@ class EncodeQueueRuntimeDeps:
     scratch_admission_tasks: dict[str, threading.Thread] = field(default_factory=dict)
     scratch_admission_task_hosts: dict[str, dict[str, Any]] = field(default_factory=dict)
     scratch_admission_lock: threading.Lock = field(default_factory=threading.Lock)
+    scratch_admission_pass_started: float = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2069,6 +2070,7 @@ def select_encode_host(
         host_rank: Any | None = None,
         globally_blocked_hosts: dict[str, dict[str, Any]] | None = None,
         scratch_admission_issue: Callable[[dict[str, Any]], str | None] | None = None,
+        scratch_admission_pending: Callable[[dict[str, Any]], bool] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     library_key = _encode_job_library_key(job)
     current_time = now or datetime.now(tz=UTC)
@@ -2174,6 +2176,9 @@ def select_encode_host(
 
     if scratch_admission_issue is not None:
         scratch_issues: list[str] = []
+        pending_check = scratch_admission_pending is not None and any(
+            scratch_admission_pending(host) for host in active_hosts + startable_hosts
+        )
 
         def scratch_ready(host: dict[str, Any]) -> bool:
             issue = scratch_admission_issue(host)
@@ -2184,6 +2189,9 @@ def select_encode_host(
 
         active_hosts = [host for host in active_hosts if scratch_ready(host)]
         startable_hosts = [host for host in startable_hosts if scratch_ready(host)]
+        if pending_check:
+            # An active alternative can proceed; do not boot another computer while a check/start is pending.
+            startable_hosts = []
         if not active_hosts and not startable_hosts and scratch_issues:
             return None, " ".join(dict.fromkeys(scratch_issues))
 
@@ -2946,6 +2954,9 @@ def encode_queue_worker_loop(
 def process_encode_queue_once(
         *, config_path: Path, deps: EncodeQueueRuntimeDeps,
 ) -> None:
+    with deps.scratch_admission_lock:
+        previous_pass_started = deps.scratch_admission_pass_started
+        deps.scratch_admission_pass_started = time.monotonic()
     config = deps.load_config(config_path)
     claimed_jobs: list[dict[str, Any]] = []
     capacity_cache: CapacityCache = {}
@@ -2992,7 +3003,10 @@ def process_encode_queue_once(
         key = _scratch_capacity_key(host)
         with deps.scratch_admission_lock:
             sample = deps.scratch_capacity_samples.get(key)
-        if sample is not None and time.monotonic() - sample.measured_at_monotonic <= 3 * deps.encode_queue_poll_seconds:
+        if sample is not None and (
+            (previous_pass_started > 0 and sample.measured_at_monotonic >= previous_pass_started)
+            or time.monotonic() - sample.measured_at_monotonic <= 3 * deps.encode_queue_poll_seconds
+        ):
             scratch_capacity_cache[key] = sample.free_bytes
         else:
             _launch_scratch_admission_task(config, deps, host)
@@ -3356,6 +3370,19 @@ def load_next_runnable_encode_job(
                 return f"Waiting for scratch space on {name}: {needed_gib} GiB needed, {free_bytes // (1024 ** 3)} GiB free."
             return None
 
+        def scratch_admission_pending(host: dict[str, Any]) -> bool:
+            if not _uses_staged_scratch(host):
+                return False
+            cooldown = deps.parse_iso(job.get("host_cooldown_until"))
+            if cooldown is not None and cooldown > now and (
+                _host_identity_tokens(host) & _host_identity_tokens(object_dict(job.get("last_host")))
+            ):
+                return False
+            with deps.scratch_admission_lock:
+                checking = any(_host_identity_matches(host, task_host)
+                               for task_host in deps.scratch_admission_task_hosts.values())
+            return checking or (bool(host.get("available")) and _scratch_capacity_key(host) not in scratch_capacity_cache)
+
         selection_key = (*_encode_host_selection_key(job), best_fit_host_selection, admission_key, scratch_source_size)
         selection = host_selection_cache.get(selection_key)
         if selection is None:
@@ -3370,6 +3397,7 @@ def load_next_runnable_encode_job(
                 host_rank=host_rank,
                 globally_blocked_hosts=globally_blocked_hosts,
                 scratch_admission_issue=scratch_admission_issue if scratch_relevant else None,
+                scratch_admission_pending=scratch_admission_pending if scratch_relevant and not scratch_probe_allowed else None,
             )
             host_selection_cache[selection_key] = selection
         host_payload, waiting_reason = selection

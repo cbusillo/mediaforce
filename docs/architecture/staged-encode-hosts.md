@@ -22,7 +22,11 @@ as before, and removing `scratch_root` returns it to piping.
 Before assigning a file, the scheduler checks the computer's scratch filesystem
 using a bounded read-only probe in a background task. It keeps at most one check
 in flight per computer and briefly reuses its result (up to three scheduler
-poll intervals). Probes skip full or off-schedule computers; schedule-bypassed
+poll intervals, or a reading completed since the previous pass began). The latter
+ensures a slow pass can consume its background result rather than continually
+expiring it. Active alternatives can proceed while a check or startup is pending,
+but another sleeping computer is not started until that check finishes. Probes
+skip full or off-schedule computers; schedule-bypassed
 work still gets a capacity check. Its budget is the source size plus an output
 no larger than the source, quality-search working space (25% of source size),
 and a 2 GiB margin, matching the worker's check. A shard needs room for its
