@@ -2526,9 +2526,9 @@ class _RunningEncodeReserveState:
 
 def _uses_staged_scratch(host: dict[str, Any]) -> bool:
     return (
-        execution_mode_for_host(host) == "ssh"
-        and host_media_access_for_host(host) == "stream"
+        host_media_access_for_host(host) == "stream"
         and host_scratch_root(host) is not None
+        and execution_mode_for_host(host) == "ssh"
     )
 
 
@@ -2594,7 +2594,7 @@ def _launch_scratch_admission_task(
                     with deps.scratch_admission_lock:
                         deps.scratch_ready_hosts.pop(key, None)
         except Exception:
-            deps.logger.exception("Scratch admission check failed for computer %s", key)
+            deps.logger.exception("Scratch admission check failed for computer %s", host.get("label") or host.get("key"))
             now = time.monotonic()
             failure = _ScratchAdmissionSnapshot(None, now + deps.encode_host_cooldown_seconds, now)
             with deps.scratch_admission_lock:
