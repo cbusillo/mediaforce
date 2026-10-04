@@ -166,7 +166,7 @@ def measure_scratch_free_bytes(
         'df -Pk "$root" | tail -1 | awk \'{print $4}\'',
     ])
     result = run_remote_command(host, ["sh", "-c", script], timeout=10, wake_before_connect=False)
-    free_kib = (result.stdout or "").strip()
+    free_kib = ((result.stdout or "").strip().splitlines()[-1:] or [""])[0]
     if result.returncode != 0 or not free_kib.isdigit():
         raise StagedScratchError("Could not measure scratch space on the encode host.")
     return int(free_kib) * 1024

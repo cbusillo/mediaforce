@@ -134,7 +134,7 @@ class StagedHostTests(unittest.TestCase):
             self.assertTrue(unrelated.exists())
 
     def test_admission_probe_uses_transport_without_waking_the_computer(self) -> None:
-        result = subprocess.CompletedProcess([], 0, stdout="12345\n", stderr="")
+        result = subprocess.CompletedProcess([], 0, stdout="Login profile notice\n12345\n", stderr="")
         with patch("mediaforce.remote._ensure_remote_awake_for_ssh") as wake, patch(
             "mediaforce.remote.subprocess.run", return_value=result,
         ):

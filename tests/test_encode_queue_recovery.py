@@ -20132,6 +20132,46 @@ raise SystemExit(0)
         self.assertEqual(deps.dispatch_encode_job.call_count, 2)
 
     @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
+    def test_unused_scratch_readiness_from_an_already_awake_computer_expires(self) -> None:
+        host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
+        host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce",
+                    available=False, probe_available=False, start_command="start-test-computer")
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("scratch-already-awake.json", [self._estimate_manifest_item(600)])
+            self._save_job(connection, job_id="scratch-already-awake", manifest_name="scratch-already-awake.json",
+                           host={}, status="queued", attempt_count=0)
+            encode_runtime.ensure_queue_state(connection, updated_at=web_app._now_iso())
+            state = load_queue_state(connection)
+            state["is_paused"] = False
+            save_queue_state(connection, state)
+            connection.commit()
+        deps = web_app._encode_queue_runtime_deps()
+        deps.load_config = Mock(return_value=self.config)
+        deps.host_runtime_rows = Mock(return_value=[host])
+        deps.ensure_encode_host_ready = Mock(side_effect=[False, True])
+        deps.dispatch_encode_job = Mock()
+        deps.stop_encode_host_if_configured = Mock()
+        deps.encode_reserve_preflight = Mock(return_value=SimpleNamespace(allowed=True, waiting_reason=None))
+        required = encode_runtime.required_scratch_bytes(1024)
+        with patch("mediaforce.web.runtime.encode_runtime.measure_scratch_free_bytes", return_value=required - 1):
+            encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
+            self._join_scratch_admission_tasks(deps)
+            encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
+        deps.dispatch_encode_job.assert_not_called()
+        deps.stop_encode_host_if_configured.assert_not_called()
+        self.assertEqual(deps.scratch_ready_hosts, {})
+        # Its own schedule has now slept the computer; the stale host row stays unavailable.
+        # After capacity backoff expires, admission must prepare it again, not keep probing asleep.
+        with patch("mediaforce.web.runtime.encode_runtime.time.monotonic",
+                   return_value=time.monotonic() + deps.encode_host_cooldown_seconds + 1), \
+                patch("mediaforce.web.runtime.encode_runtime.measure_scratch_free_bytes", return_value=required):
+            encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
+            self._join_scratch_admission_tasks(deps)
+            encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
+        self.assertEqual(deps.ensure_encode_host_ready.call_count, 2)
+        deps.dispatch_encode_job.assert_called_once()
+
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_failed_scratch_start_backs_off_and_allows_another_startable_computer(self) -> None:
         hosts = []
         for name, priority in (("broken", 2), ("backup", 1)):

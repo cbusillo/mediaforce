@@ -2627,10 +2627,14 @@ def _stop_unused_scratch_preparations(
         prepared_hosts: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     with deps.scratch_admission_lock:
-        ready_hosts = [host for key, host in deps.scratch_ready_hosts.items()
+        ready_hosts = [(key, host) for key, host in deps.scratch_ready_hosts.items()
                        if prepared_hosts is None or prepared_hosts.get(key) is host]
-    for host in ready_hosts:
-        if bool(host.get("scratch_admission_started")) and not _host_has_other_running_jobs(config, "", host):
+    for key, host in ready_hosts:
+        if not bool(host.get("scratch_admission_started")):
+            with deps.scratch_admission_lock:
+                if deps.scratch_ready_hosts.get(key) is host:
+                    deps.scratch_ready_hosts.pop(key, None)
+        elif not _host_has_other_running_jobs(config, "", host):
             _launch_scratch_admission_task(config, deps, host, stop=True)
 
 
