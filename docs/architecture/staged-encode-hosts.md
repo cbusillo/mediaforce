@@ -19,11 +19,31 @@ as before, and removing `scratch_root` returns it to piping.
 
 ## Job lifecycle
 
+Before assigning a file, the scheduler checks the computer's scratch filesystem
+using a bounded read-only probe. Its budget is the source size plus an output
+no larger than the source, quality-search working space (25% of source size),
+and a 2 GiB margin, matching the worker's check. A shard needs room for its
+largest file because it stages files one at a time.
+
+A computer with too little space, an unknown file size, or a failed capacity
+probe is skipped for that file. Another eligible computer can take it; otherwise
+the file stays queued with a plain waiting reason and no encode attempt is
+charged. The next scheduler pass checks again. Schedule bypass does not bypass
+the scratch check. Each computer is measured at most once per pass.
+
+Already admitted work reserves its full scratch budget on that computer,
+including work that has not started copying. This is conservative: bytes already
+on disk are also reflected in the free-space measurement, so parallel work may
+wait until an active file finishes. Unknown active budgets hold new scratch work
+on that computer. Admission does not sweep or create directories; a missing
+scratch root is measured on its nearest existing ancestor.
+
 `mediaforce/encoding/staged_host.py` owns the scratch directory.
 
 1. Sweep the scratch root for directories whose keeper is gone.
 2. Check that the scratch filesystem has room for the source, an output no
-   larger than the source, quality-search samples and a fixed margin.
+   larger than the source, quality-search samples and a fixed margin. This
+   worker check remains necessary if space changes after scheduler admission.
 3. Open a keeper connection that creates `.mediaforce-staged-<id>` and records
    its process id.
 4. Copy the source over SSH while hashing it, then compare the host's SHA-256.

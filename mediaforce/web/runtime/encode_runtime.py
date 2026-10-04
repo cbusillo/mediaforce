@@ -3,12 +3,13 @@ import os
 import re
 import shlex
 import socket
+import subprocess
 import threading
 import time
 import fcntl
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import lru_cache
@@ -47,7 +48,8 @@ from mediaforce.encoding.free_space import CapacityCache, encode_reserve_preflig
 from mediaforce.encoding.quality import REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, QualitySearchError, \
     QualityTempCleanupError, QualityTempSetupError, RemoteQualityTimeoutError, analyze_quality_policy_failure, \
     quality_error_message
-from mediaforce.encoding.staged_host import StagedScratchError
+from mediaforce.encoding.staged_host import StagedScratchError, host_scratch_root, measure_scratch_free_bytes, \
+    required_scratch_bytes
 from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.cadence import CadenceResolutionError
 from mediaforce.encoding.free_space import ReserveInputError
@@ -2053,6 +2055,7 @@ def select_encode_host(
         host_admission: Any | None = None,
         host_rank: Any | None = None,
         globally_blocked_hosts: dict[str, dict[str, Any]] | None = None,
+        scratch_admission_issue: Callable[[dict[str, Any]], str | None] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     library_key = _encode_job_library_key(job)
     current_time = now or datetime.now(tz=UTC)
@@ -2155,6 +2158,21 @@ def select_encode_host(
         elif had_blocked_candidate:
             blocked_host_name = _blocked_host_wait_name(globally_blocked_hosts)
             return None, f"waiting for host cooldown to expire on {blocked_host_name}"
+
+    if scratch_admission_issue is not None:
+        scratch_issues: list[str] = []
+
+        def scratch_ready(host: dict[str, Any]) -> bool:
+            issue = scratch_admission_issue(host)
+            if issue:
+                scratch_issues.append(issue)
+                return False
+            return True
+
+        active_hosts = [host for host in active_hosts if scratch_ready(host)]
+        startable_hosts = [host for host in startable_hosts if scratch_ready(host)]
+        if not active_hosts and not startable_hosts and scratch_issues:
+            return None, " ".join(dict.fromkeys(scratch_issues))
 
     cooldown_until = deps.parse_iso(job.get("host_cooldown_until"))
     last_host = object_dict(job.get("last_host"))
@@ -2490,6 +2508,21 @@ class _RunningEncodeReserveState:
     has_large_or_unmeasurable_work: bool
     reserve_unmeasurable: bool
     reserved_by_volume: dict[str, int]
+    scratch_reserved_by_host: dict[str, int | None] = field(default_factory=dict)
+
+
+def _uses_staged_scratch(host: dict[str, Any]) -> bool:
+    return (
+        execution_mode_for_host(host) == "ssh"
+        and host_media_access_for_host(host) == "stream"
+        and host_scratch_root(host) is not None
+    )
+
+
+def _scratch_source_size(items: list[dict[str, Any]]) -> int | None:
+    sizes = [int_value(item.get("source_size_bytes") or item.get("size_bytes")) for item in items]
+    # A shard stages one file at a time; every member must have a measurable budget.
+    return max(sizes) if sizes and all(size > 0 for size in sizes) else None
 
 
 def _running_encode_reserve_state(
@@ -2510,6 +2543,7 @@ def _running_encode_reserve_state(
     has_large_or_unmeasurable_work = False
     reserve_unmeasurable = False
     reserved_by_volume: dict[str, int] = {}
+    scratch_reserved_by_host: dict[str, int | None] = {}
     for row in running_rows:
         running_job = load_encode_job(connection, str(row["job_id"]))
         if running_job is None:
@@ -2521,6 +2555,15 @@ def _running_encode_reserve_state(
             config,
             _encode_job_estimate_items(running_job, manifest_items_cache=manifest_items_cache),
         )
+        running_host = object_dict(running_job.get("host"))
+        if _uses_staged_scratch(running_host):
+            source_size = _scratch_source_size(running_items)
+            for token in _host_identity_tokens(running_host):
+                previous = scratch_reserved_by_host.get(token, 0)
+                scratch_reserved_by_host[token] = (
+                    previous + required_scratch_bytes(source_size)
+                    if previous is not None and source_size is not None else None
+                )
         try:
             if not running_items or large_job_requires_serialization(config, running_items):
                 has_large_or_unmeasurable_work = True
@@ -2546,6 +2589,7 @@ def _running_encode_reserve_state(
         has_large_or_unmeasurable_work,
         reserve_unmeasurable,
         reserved_by_volume,
+        scratch_reserved_by_host,
     )
 
 
@@ -2948,9 +2992,11 @@ def load_next_runnable_encode_job(
         capacity_cache=shared_capacity_cache,
     )
     host_selection_cache: dict[
-        tuple[str, bool, str, str, bool, tuple[tuple[str, int, bool], ...] | None],
+        tuple[str, bool, str, str, bool, tuple[tuple[str, int, bool], ...] | None, int | None],
         tuple[dict[str, Any] | None, str | None],
     ] = {}
+    scratch_relevant = any(_uses_staged_scratch(host) for host in host_rows)
+    scratch_capacity_cache: dict[str, int | None] = {}
     saw_duration_block = False
     best_fit_candidates: list[
         tuple[tuple[int, float, int], dict[str, Any], dict[str, Any], EncodeDurationEstimate | None]
@@ -3073,7 +3119,41 @@ def load_next_runnable_encode_job(
                     now=now,
                 )
         best_fit_host_selection = host_rank is not None
-        selection_key = (*_encode_host_selection_key(job), best_fit_host_selection, admission_key)
+        scratch_source_size = (
+            _scratch_source_size(_encode_reserve_items(
+                connection, config, _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
+            )) if scratch_relevant else None
+        )
+
+        def scratch_admission_issue(host: dict[str, Any]) -> str | None:
+            if not _uses_staged_scratch(host):
+                return None
+            name = str(host.get("label") or host.get("key") or "the encode computer")
+            if scratch_source_size is None:
+                return f"Waiting for this file's size before checking scratch space on {name}."
+            reservations = [
+                running_reserve_state.scratch_reserved_by_host.get(token, 0)
+                for token in _host_identity_tokens(host)
+            ]
+            if any(reserved is None for reserved in reservations):
+                return f"Waiting for the active work's scratch-space requirement on {name}."
+            reserved_bytes = max((reserved for reserved in reservations if reserved is not None), default=0)
+            cache_key = _encode_duration_host_cache_key(host)
+            if cache_key not in scratch_capacity_cache:
+                try:
+                    scratch_capacity_cache[cache_key] = measure_scratch_free_bytes(host, run_remote_command)
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    scratch_capacity_cache[cache_key] = None
+            free_bytes = scratch_capacity_cache[cache_key]
+            if free_bytes is None:
+                return f"Waiting to measure scratch space on {name}; Mediaforce will check again."
+            required_bytes = required_scratch_bytes(scratch_source_size) + reserved_bytes
+            if free_bytes < required_bytes:
+                needed_gib = (required_bytes + 1024 ** 3 - 1) // (1024 ** 3)
+                return f"Waiting for scratch space on {name}: {needed_gib} GiB needed, {free_bytes // (1024 ** 3)} GiB free."
+            return None
+
+        selection_key = (*_encode_host_selection_key(job), best_fit_host_selection, admission_key, scratch_source_size)
         selection = host_selection_cache.get(selection_key)
         if selection is None:
             selection = select_encode_host(
@@ -3086,6 +3166,7 @@ def load_next_runnable_encode_job(
                 host_admission=host_admission,
                 host_rank=host_rank,
                 globally_blocked_hosts=globally_blocked_hosts,
+                scratch_admission_issue=scratch_admission_issue if scratch_relevant else None,
             )
             host_selection_cache[selection_key] = selection
         host_payload, waiting_reason = selection

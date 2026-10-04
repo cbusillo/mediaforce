@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from mediaforce.encoding import runner, staged_host
 from mediaforce.encoding.staged_host import (
@@ -19,6 +19,7 @@ from mediaforce.encoding.staged_host import (
     StagedScratchError,
     host_scratch_root,
     keeper_script,
+    measure_scratch_free_bytes,
     remote_ffmpeg_command,
     required_scratch_bytes,
     staged_job,
@@ -103,6 +104,24 @@ class ScratchScriptTests(unittest.TestCase):
 
 
 class StagedHostTests(unittest.TestCase):
+    def test_admission_probe_measures_kib_without_creating_a_missing_root(self) -> None:
+        with TemporaryDirectory() as raw_root:
+            missing = Path(raw_root) / "scratch with spaces" / "nested"
+            observed_commands: list[list[str]] = []
+
+            def local_remote(_host: dict[str, Any], command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+                observed_commands.append(command)
+                script = "df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 20000 7655 12345 39%% /\\n'; }\n" + command[-1]
+                return subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=timeout)
+
+            free_bytes = measure_scratch_free_bytes({"scratch_root": str(missing)}, local_remote)
+            self.assertEqual(free_bytes, 12345 * 1024)
+            self.assertFalse(missing.parent.exists())
+            self.assertEqual(len(observed_commands), 1)
+
+        remote = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="12345\n", stderr=""))
+        self.assertEqual(measure_scratch_free_bytes({"scratch_root": "/scratch"}, remote), 12345 * 1024)
+
     def test_scratch_root_must_be_an_absolute_folder_below_the_filesystem_root(self) -> None:
         self.assertEqual(host_scratch_root({"scratch_root": "/var/tmp/scratch"}), PurePosixPath("/var/tmp/scratch"))
         for unsafe in ("", "  ", "/", "relative/scratch", None):
