@@ -127,12 +127,18 @@ class EncodeQueueRuntimeDeps:
     encode_host_cooldown_seconds: int
     live_encode_job_controller: Any = None
     scratch_admission_history: dict[str, "_ScratchAdmissionSnapshot"] = field(default_factory=dict)
+    scratch_capacity_samples: dict[str, "_ScratchAdmissionSnapshot"] = field(default_factory=dict)
+    scratch_ready_hosts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    scratch_admission_tasks: dict[str, threading.Thread] = field(default_factory=dict)
+    scratch_admission_task_hosts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    scratch_admission_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 @dataclass(frozen=True, slots=True)
 class _ScratchAdmissionSnapshot:
     free_bytes: int | None
     retry_after_monotonic: float
+    measured_at_monotonic: float = 0
 
 
 ENCODE_HOST_BACKUP_FAILURE_THRESHOLD = 2
@@ -2551,6 +2557,83 @@ def _prepared_encode_host_rows(
     return rows
 
 
+def _launch_scratch_admission_task(
+        config: MediaforceConfig, deps: EncodeQueueRuntimeDeps, host: dict[str, Any], *, prepare: bool = False,
+        stop: bool = False,
+) -> None:
+    key = _scratch_capacity_key(host)
+
+    def run_task() -> None:
+        started = False
+        try:
+            if stop:
+                if not _host_has_other_running_jobs(config, "", host):
+                    deps.stop_encode_host_if_configured(config, host)
+                with deps.scratch_admission_lock:
+                    deps.scratch_ready_hosts.pop(key, None)
+                return
+            if prepare:
+                started = bool(deps.ensure_encode_host_ready(config, host))
+            idle_before = not _host_has_other_running_jobs(config, "", host)
+            free_bytes = measure_scratch_free_bytes(host, run_remote_command)
+            now = time.monotonic()
+            sample = _ScratchAdmissionSnapshot(free_bytes, now + deps.encode_host_cooldown_seconds, now)
+            idle_after = not _host_has_other_running_jobs(config, "", host)
+            with deps.scratch_admission_lock:
+                deps.scratch_capacity_samples[key] = sample
+                if idle_before and idle_after:
+                    deps.scratch_admission_history[key] = sample
+                if prepare:
+                    deps.scratch_ready_hosts[key] = {**host, "scratch_admission_started": started}
+            if prepare:
+                with open_db(config.paths.db_path) as connection:
+                    state = load_queue_state(connection)
+                if state.get("is_paused") or state.get("stop_requested"):
+                    if started and not _host_has_other_running_jobs(config, "", host):
+                        deps.stop_encode_host_if_configured(config, host)
+                    with deps.scratch_admission_lock:
+                        deps.scratch_ready_hosts.pop(key, None)
+        except Exception:
+            deps.logger.exception("Scratch admission check failed for computer %s", key)
+            now = time.monotonic()
+            failure = _ScratchAdmissionSnapshot(None, now + deps.encode_host_cooldown_seconds, now)
+            with deps.scratch_admission_lock:
+                deps.scratch_capacity_samples[key] = failure
+                if prepare:
+                    deps.scratch_admission_history[key] = failure
+            if started and not _host_has_other_running_jobs(config, "", host):
+                try:
+                    deps.stop_encode_host_if_configured(config, host)
+                except Exception:
+                    deps.logger.exception("Could not stop computer after failed scratch preparation")
+        finally:
+            with deps.scratch_admission_lock:
+                deps.scratch_admission_tasks.pop(key, None)
+                deps.scratch_admission_task_hosts.pop(key, None)
+
+    with deps.scratch_admission_lock:
+        if key in deps.scratch_admission_tasks or any(
+                _host_identity_matches(host, task_host) for task_host in deps.scratch_admission_task_hosts.values()
+        ):
+            return
+        task = threading.Thread(target=run_task, name="scratch-admission", daemon=True)
+        deps.scratch_admission_tasks[key] = task
+        deps.scratch_admission_task_hosts[key] = host
+        task.start()
+
+
+def _stop_unused_scratch_preparations(
+        config: MediaforceConfig, deps: EncodeQueueRuntimeDeps,
+        prepared_hosts: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    with deps.scratch_admission_lock:
+        ready_hosts = [host for key, host in deps.scratch_ready_hosts.items()
+                       if prepared_hosts is None or prepared_hosts.get(key) is host]
+    for host in ready_hosts:
+        if bool(host.get("scratch_admission_started")) and not _host_has_other_running_jobs(config, "", host):
+            _launch_scratch_admission_task(config, deps, host, stop=True)
+
+
 def _running_encode_reserve_state(
         connection: DBClient,
         config: MediaforceConfig,
@@ -2858,8 +2941,6 @@ def encode_queue_worker_loop(
 
 def process_encode_queue_once(
         *, config_path: Path, deps: EncodeQueueRuntimeDeps,
-        prepared_staged_hosts: dict[str, dict[str, Any]] | None = None,
-        scratch_capacity_cache: dict[str, int | None] | None = None,
 ) -> None:
     config = deps.load_config(config_path)
     claimed_jobs: list[dict[str, Any]] = []
@@ -2878,31 +2959,39 @@ def process_encode_queue_once(
             state.update({"stop_requested": False, "active_job_id": None, "updated_at": deps.now_iso()})
             save_queue_state(connection, state)
         if state.get("is_paused"):
+            _stop_unused_scratch_preparations(config, deps)
             return
         has_queued_work = connection.execute(select(encode_jobs.c.job_id)
                                             .where(encode_jobs.c.status == "queued")
                                             .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
                                             .limit(1)).first() is not None
-        host_rows = _prepared_encode_host_rows(
-            deps.host_runtime_rows(connection, config) if has_queued_work else [], prepared_staged_hosts,
-        )
+        has_bypass_work = connection.execute(select(encode_jobs.c.job_id)
+                                             .where(encode_jobs.c.status == "queued")
+                                             .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+                                             .where(encode_jobs.c.bypass_schedule == 1)
+                                             .limit(1)).first() is not None
+        with deps.scratch_admission_lock:
+            prepared_staged_hosts = dict(deps.scratch_ready_hosts)
+        host_rows = _prepared_encode_host_rows(deps.host_runtime_rows(connection, config) if has_queued_work else [],
+                                               prepared_staged_hosts)
 
-    if scratch_capacity_cache is None:
-        scratch_capacity_cache = {}
+    scratch_capacity_cache: dict[str, int | None] = {}
+    now = datetime.now(tz=UTC)
     for host in host_rows:
         if not _uses_staged_scratch(host) or not bool(host.get("available")) or not bool(host.get("probe_available", True)):
             continue
-        key = _scratch_capacity_key(host)
-        if key in scratch_capacity_cache:
+        if int(host.get("active_encode_count") or 0) >= int(host.get("max_parallel_encodes") or 1):
             continue
-        try:
-            free_bytes = measure_scratch_free_bytes(host, run_remote_command)
-        except (OSError, RuntimeError, subprocess.SubprocessError):
-            free_bytes = None
-        scratch_capacity_cache[key] = free_bytes
-        deps.scratch_admission_history[key] = _ScratchAdmissionSnapshot(
-            free_bytes, time.monotonic() + deps.encode_host_cooldown_seconds,
-        )
+        if not deps.scheduler_allows_encode_run(deps.schedule_profile_policy_for_host(config, host), now=now,
+                                               host_payload=host, bypass_schedule=has_bypass_work):
+            continue
+        key = _scratch_capacity_key(host)
+        with deps.scratch_admission_lock:
+            sample = deps.scratch_capacity_samples.get(key)
+        if sample is not None and time.monotonic() - sample.measured_at_monotonic <= 3 * deps.encode_queue_poll_seconds:
+            scratch_capacity_cache[key] = sample.free_bytes
+        else:
+            _launch_scratch_admission_task(config, deps, host)
 
     with open_db(config.paths.db_path) as connection:
         state = load_queue_state(connection)
@@ -2914,7 +3003,7 @@ def process_encode_queue_once(
                 config,
                 deps,
                 capacity_cache=capacity_cache,
-                staged_hosts_to_prepare=staged_hosts_to_prepare if prepared_staged_hosts is None else None,
+                staged_hosts_to_prepare=staged_hosts_to_prepare,
                 prepared_staged_hosts=prepared_staged_hosts,
                 scratch_capacity_cache=scratch_capacity_cache,
             )
@@ -2928,6 +3017,10 @@ def process_encode_queue_once(
     for job in claimed_jobs:
         try:
             deps.dispatch_encode_job(config_path=config_path, job_id=str(job["job_id"]))
+            with deps.scratch_admission_lock:
+                for key, prepared_host in list(deps.scratch_ready_hosts.items()):
+                    if _host_identity_matches(prepared_host, object_dict(job.get("host"))):
+                        deps.scratch_ready_hosts.pop(key, None)
         except Exception as exc:
             deps.logger.exception("Encode job dispatch failed for %s", job["job_id"])
             try:
@@ -2952,32 +3045,9 @@ def process_encode_queue_once(
             except Exception:
                 deps.logger.exception("Encode dispatch failure recovery failed for %s", job["job_id"])
 
-    if staged_hosts_to_prepare:
-        ready_hosts: dict[str, dict[str, Any]] = {}
-        for key, host in staged_hosts_to_prepare.items():
-            try:
-                started = deps.ensure_encode_host_ready(config, host)
-            except (OSError, RuntimeError, subprocess.SubprocessError):
-                deps.logger.exception("Could not prepare staged computer %s for scratch admission", key)
-                deps.scratch_admission_history[_scratch_capacity_key(host)] = _ScratchAdmissionSnapshot(
-                    None, time.monotonic() + deps.encode_host_cooldown_seconds,
-                )
-                continue
-            ready_hosts[key] = {**host, "available": True, "probe_available": True,
-                                "scratch_admission_started": bool(started)}
-        if ready_hosts:
-            try:
-                # Startup runs outside the database transaction, then every candidate gets
-                # a fresh schedule, cooldown and capacity check before charging an attempt.
-                process_encode_queue_once(config_path=config_path, deps=deps, prepared_staged_hosts=ready_hosts,
-                                          scratch_capacity_cache=scratch_capacity_cache)
-            finally:
-                for host in ready_hosts.values():
-                    if bool(host.get("scratch_admission_started")) and not _host_has_other_running_jobs(config, "", host):
-                        try:
-                            deps.stop_encode_host_if_configured(config, host)
-                        except (OSError, RuntimeError, subprocess.SubprocessError):
-                            deps.logger.exception("Could not stop unused staged computer after scratch admission")
+    for host in staged_hosts_to_prepare.values():
+        _launch_scratch_admission_task(config, deps, host, prepare=True)
+    _stop_unused_scratch_preparations(config, deps, prepared_staged_hosts)
 
 
 def claim_next_runnable_encode_job(
@@ -3252,6 +3322,12 @@ def load_next_runnable_encode_job(
             reserved_bytes = max((reserved for reserved in reservations if reserved is not None), default=0)
             required_bytes = required_scratch_bytes(scratch_source_size) + reserved_bytes
             cache_key = _scratch_capacity_key(host)
+            with deps.scratch_admission_lock:
+                checking = cache_key in deps.scratch_admission_tasks or any(
+                    _host_identity_matches(host, task_host) for task_host in deps.scratch_admission_task_hosts.values()
+                )
+            if checking:
+                return f"Waiting for the scratch-space check on {name}."
             if not bool(host.get("available")):
                 previous = deps.scratch_admission_history.get(cache_key)
                 if previous is None or time.monotonic() >= previous.retry_after_monotonic:
