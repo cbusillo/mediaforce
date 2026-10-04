@@ -2167,7 +2167,7 @@ export function detailSeasonState(
 				detail: integrity.available
 					? exactEpisode
 						? 'The episode must be accounted for before its file is replaced.'
-						: 'Every episode must be accounted for before any file is replaced.'
+						: 'Each episode is checked separately. Files that are not ready stay untouched.'
 					: exactEpisode
 						? 'Mediaforce is confirming the episode before enabling finish.'
 						: 'Mediaforce is confirming every episode before enabling finish.',

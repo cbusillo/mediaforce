@@ -3068,7 +3068,9 @@
 						: 'Replace original episodes'}
 					<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5" /></svg>
 				</button>
-				<p class="action-note">Nothing changes until you choose this action.</p>
+				<p class="action-note">
+					Mediaforce publishes each passing episode automatically. This action is a manual override.
+				</p>
 			</section>
 		{:else if humanState.key === 'finish_blocked'}
 			<section class="ready-room ready-room--blocked">
