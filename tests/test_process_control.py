@@ -1,3 +1,4 @@
+import ast
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 import errno
@@ -272,21 +273,34 @@ class ProcessControlTests(TestCase):
         with tempfile.TemporaryDirectory() as directory:
             helper_path = Path(directory) / "_process_deadline.py"
             helper_path.write_bytes(captured_bytes)
+            captured_marker = Path(directory) / "captured-helper-executed"
             substituted_marker = Path(directory) / "substituted-helper-executed"
-            with patch.object(process_control_module, "__file__", str(Path(directory) / "process_control.py")):
+            with patch.dict(vars(process_control_module), {"__file__": str(Path(directory) / "process_control.py")}):
                 snapshot = process_control_module._read_process_deadline_helper_bytes()
+                module = ast.parse(snapshot)
+                marker = ast.parse(
+                    f"__import__('pathlib').Path({str(captured_marker)!r}).write_text('captured')"
+                ).body[0]
+                future_import_end = max(
+                    (index for index, node in enumerate(module.body)
+                     if isinstance(node, ast.ImportFrom) and node.module == "__future__"),
+                    default=-1,
+                )
+                module.body.insert(future_import_end + 1, marker)
+                marked_snapshot = ast.unparse(module).encode()
                 helper_path.write_text(
                     "from pathlib import Path\n"
                     f"Path({str(substituted_marker)!r}).write_text('executed')\n"
                     "raise SystemExit(91)\n",
                     encoding="utf-8",
                 )
-                with patch.object(process_control_module, "_PROCESS_DEADLINE_HELPER_BYTES", snapshot):
+                with patch.object(process_control_module, "_PROCESS_DEADLINE_HELPER_BYTES", marked_snapshot):
                     result = run_command(
                         [sys.executable, "-c", "print('captured-helper')"],
                         process_controller=ManagedProcessController(),
                     )
                 self.assertFalse(substituted_marker.exists())
+                self.assertTrue(captured_marker.exists())
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "captured-helper\n")
