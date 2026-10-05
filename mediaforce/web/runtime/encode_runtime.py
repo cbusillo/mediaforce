@@ -22,7 +22,6 @@ from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy import and_, or_
-from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.runtime.scratch_reservations import calibration_scratch_reservations
@@ -47,9 +46,9 @@ from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, parse
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, EncodeDurationSample, \
     estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples
-from mediaforce.encoding.free_space import CapacityCache, encode_reserve_preflight, large_job_requires_serialization
-from mediaforce.encoding.quality import REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, QualitySearchError, \
-    QualityTempCleanupError, QualityTempSetupError, RemoteQualityTimeoutError, analyze_quality_policy_failure, \
+from mediaforce.encoding.free_space import CapacityCache, large_job_requires_serialization
+from mediaforce.encoding.quality import REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, \
+    QualityTempSetupError, RemoteQualityTimeoutError, analyze_quality_policy_failure, \
     quality_error_message
 from mediaforce.encoding.staged_host import StagedScratchError, host_scratch_root, measure_scratch_free_bytes, \
     required_scratch_bytes
@@ -2909,7 +2908,6 @@ def encode_job_heartbeat_loop(
         deps: EncodeQueueRuntimeDeps,
 ) -> None:
     while not stop_event.wait(deps.encode_job_heartbeat_seconds):
-        # noinspection PyBroadException
         try:
             with open_db(deps.load_config(config_path).paths.db_path) as connection:
                 # Read and write in one locked transaction: a writer that saved a row it read before

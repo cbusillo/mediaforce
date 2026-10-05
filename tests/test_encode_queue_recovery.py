@@ -59,7 +59,7 @@ from mediaforce.encoding import quality as encoding_quality
 from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding import video_filters
-from mediaforce.encoding.free_space import ReservePreflight, VolumeCapacity
+from mediaforce.encoding.free_space import ReservePreflight, VolumeCapacity, encode_reserve_preflight
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence, reclassify_cadence_summary
 from mediaforce.encoding.duration_estimate import EncodeDurationSample, load_encode_duration_samples
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
@@ -16261,7 +16261,6 @@ raise SystemExit(0)
 
     def test_run_crf_search_preserves_quality_error_when_cleanup_also_fails(self) -> None:
         host = {"mode": "ssh", "host": "cbusillo@stream-host"}
-        scoped_temp_dir = "/tmp/mediaforce-transcode/.mediaforce-ab-av1-test"
         remote_results = [
             subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
             subprocess.CompletedProcess(args=["ssh"], returncode=1, stdout="", stderr="quality failed"),
@@ -22192,7 +22191,7 @@ raise SystemExit(0)
                 items: list[dict[str, Any]],
                 **kwargs: Any,
         ) -> Any:
-            return encode_runtime.encode_reserve_preflight(
+            return encode_reserve_preflight(
                 config,
                 items,
                 host=object_dict(kwargs.get("host")),
