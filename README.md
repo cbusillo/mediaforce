@@ -1,14 +1,13 @@
 # Mediaforce
 
 Mediaforce reclaims space on a media library by re-encoding it to AV1 video
-and Opus audio with minimal, acceptable quality loss, while asking the user
-for as little as possible. `DIRECTION.md` sets what it is for and where work
-stops; it wins over this README.
+and Opus audio with minimal, acceptable quality loss.
 
-The aim: the user decides once, in plain words, how each kind of content
-should look, and Mediaforce applies that across the library in the background,
-one file at a time. Each episode or movie is encoded, checked, and published on
-its own, and a problem with one file stays with that file.
+The Director's [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md)
+comes first, followed by this repository's [DIRECTION.md](DIRECTION.md).
+Those files set purpose, work order, and stop boundaries and take precedence
+over this README. [AGENTS.md](AGENTS.md) is the repository's agent-instruction
+entry point; this README describes the current implementation and how to use it.
 
 ## Scope
 
@@ -37,10 +36,10 @@ The current implementation covers:
   original-file archival under the transcode root,
   and user-approved cleanup of those rollback copies
 
-A sample is still approved per show (the `One approval covers many shows`
-milestone). Finished production files are checked and published automatically
-one at a time under their current approval. Manual checking and publishing
-remain explicit overrides. Rollback copies stay until the user approves cleanup.
+A sample is still approved per show. Finished production files are checked and
+published automatically one at a time under their current approval. Manual
+checking and publishing remain explicit overrides. Rollback copies stay until
+the user approves cleanup.
 
 ## Runtime state
 
@@ -164,7 +163,7 @@ requirements for the current `ab-av1` path plus Av1an, Xav, and Auto-Boost. Use
 the plan to collect output size, runtime, selected CRF or quantizer, metric
 score, and review artifacts before choosing a production engine migration.
 
-You can run Mediaforce either directly with `python3` or through `uv`:
+Run Mediaforce through the project entrypoint with `uv`:
 
 ```bash
 uv run mediaforce report --limit 10
@@ -634,20 +633,30 @@ Mediaforce can install this Mac's SSH public key, then let the prep step
 create remote paths and install `ffmpeg-full` plus `ab-av1` for
 `sample_calibration` hosts when possible. Those sample hosts now verify
 `libvmaf`/`xpsnr` metric support and `libsvtav1` before they show as ready.
-For mounted-media macOS hosts, including the controller itself, Mediaforce can
-reconnect an SMB volume through Finder. Recovery runs before preparation,
-sampling, or encode dispatch. The active signed-in console user must already
-have the share password saved in the login Keychain; Mediaforce never reads,
-stores, or transports it. While a required controller share is healthy,
+The controller reconnects required SMB storage through the macOS NetFS API
+with `UIOption=NoUI`, using existing Keychain credentials without reading,
+storing, or transporting passwords. Its background recovery runs even when
+processing is paused or the work window is closed; reconnecting storage does
+not unpause work. Clean connection failures retry with bounded backoff;
+an ambiguous timeout waits for a manual reconnect through Finder or Prepare.
+Fresh checks must verify the expected mount path, share identity, and directory
+access before work starts. See [controller storage recovery](docs/development/macos-login-item.md#controller-storage-recovery)
+for the runtime contract and installed acceptance procedure.
+
+While a required controller share is healthy,
 Mediaforce learns a password-free mount mapping into
 `~/Library/Application Support/mediaforce/controller-smb-mounts.json`. Status
 reads use that machine-local mapping instead of probing or mutating mount state.
 For first bootstrap, a private `controller_smb_mounts` list in runtime settings
 may supply the same `source` and `/Volumes/...` `mount_point` fields until a
-healthy mount can be observed and learned. Repeated automatic failures use a
+healthy mount can be observed and learned.
+
+Remote mounted-media macOS hosts reconnect through Finder before preparation,
+sampling, or encode dispatch. The signed-in console user must already have the
+share password saved in the login Keychain. Repeated automatic failures use a
 bounded cooldown, and a missing GUI session remains suppressed until the console
 login session changes. The user can use Prepare for an explicit retry. Each
-host keeps at most one Finder request per share: a request Finder has not
+remote host keeps at most one Finder request per share: a request Finder has not
 answered within the attempt, usually because a dialog is open, is left running
 rather than ended, since ending it would not close the dialog. Later attempts,
 explicit or automatic, report that request instead of opening another dialog

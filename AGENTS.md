@@ -2,8 +2,13 @@
 
 Only session-start facts that are easy to miss belong here.
 
-Read `DIRECTION.md` first. It sets what Mediaforce is for and where work stops,
-and it wins over any issue, plan, or doc that disagrees.
+Read the Director's [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md)
+first, then this repository's [DIRECTION.md](DIRECTION.md). Those files own
+purpose, work order, and stop boundaries; they take precedence over issues,
+plans, and other docs.
+
+`AGENTS.md` is the only agent-instruction file. Keep any nested instructions
+in an `AGENTS.md` too.
 
 ## Naming
 
