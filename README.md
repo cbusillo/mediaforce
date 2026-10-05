@@ -536,7 +536,9 @@ and keeps the command lines aligned with the actual configured ports. Pass
 one side, for example `scripts/mediaforce-dev.sh restart backend`.
 
 Frontend discovery checks the npm/Vite process (or its parent) against the
-exact checkout working directory. Stop and restart preserve another checkout's
+exact checkout working directory. Managed npm starts in `frontend/` so its
+rewritten process title remains attributable; an ambiguous legacy npm title in
+the repository root is preserved. Stop and restart preserve another checkout's
 process tree and live shared PID record. If a live foreign PID record would be
 overwritten, start refuses with instructions to stop it from its owning
 checkout first. Stale PID records can be replaced; the shared backend runtime

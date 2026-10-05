@@ -20,6 +20,7 @@ def prepare_dev_service(
     repo = tmp_path / "checkout with spaces"
     scripts = repo / "scripts"
     scripts.mkdir(parents=True)
+    (repo / "frontend").mkdir()
     script = scripts / "mediaforce-dev.sh"
     shutil.copyfile(Path(__file__).resolve().parents[1] / "scripts/mediaforce-dev.sh", script)
     if service == "symlink":
@@ -74,7 +75,7 @@ elif name == "ps" and "DEV_TEST_TREE" in os.environ:
     if started and Path(started).exists():
         rows.append({"pid": json.loads(Path(started).read_text())["pid"], "parent": 0,
                      "command": os.environ.get("DEV_TEST_STARTED_COMMAND", os.environ["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web"),
-                     "cwd": os.environ["DEV_TEST_REPO"]})
+                     "cwd": json.loads(Path(started).read_text()).get("cwd", os.environ["DEV_TEST_REPO"])})
     if sys.argv[1:] == ["-axo", "pid=,ppid="]:
         for row in rows:
             print(row["pid"], row["parent"])
@@ -102,7 +103,7 @@ elif name == "lsof" and "-d" in sys.argv:
     rows = json.loads(Path(os.environ["DEV_TEST_TREE"]).read_text()) if "DEV_TEST_TREE" in os.environ else []
     started = os.environ.get("DEV_TEST_STARTED")
     if started and Path(started).exists():
-        rows.append({"pid": json.loads(Path(started).read_text())["pid"], "cwd": os.environ["DEV_TEST_REPO"]})
+        rows.append({"pid": json.loads(Path(started).read_text())["pid"], "cwd": json.loads(Path(started).read_text()).get("cwd", os.environ["DEV_TEST_REPO"])})
     row = next((row for row in rows if str(row["pid"]) == sys.argv[sys.argv.index("-p") + 1]), None)
     if row and row.get("cwd", os.environ["DEV_TEST_REPO"]):
         print("p" + str(row["pid"]) + "\\n" + "n" + row.get("cwd", os.environ["DEV_TEST_REPO"]))
@@ -426,7 +427,7 @@ def test_stop_discovers_owned_parent_and_descendants_and_preserves_foreign_tree(
     if component == "all":
         frontend = start_process_tree(tmp_path, process_trees, "frontend")
         rows.extend([
-            {"pid": frontend.root.pid, "parent": 0, "command": "vite " + environment["DEV_TEST_REPO"] + "/frontend", "finished": str(frontend.finished)},
+            {"pid": frontend.root.pid, "parent": 0, "command": "vite " + environment["DEV_TEST_REPO"] + "/frontend", "cwd": environment["DEV_TEST_REPO"] + "/frontend", "finished": str(frontend.finished)},
             {"pid": frontend.child_pid, "parent": frontend.root.pid, "command": "vite worker", "finished": str(frontend.child_finished)},
         ])
         (pid_file.parent / "mediaforce-frontend.pid").write_text(str(frontend.root.pid))
@@ -514,7 +515,7 @@ import os
 from pathlib import Path
 import sys
 
-Path(os.environ["DEV_TEST_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "args": sys.argv}))
+Path(os.environ["DEV_TEST_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "args": sys.argv, "cwd": os.getcwd()}))
 os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
 ''')
     binary.chmod(0o755)
@@ -550,7 +551,7 @@ os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
 
 def frontend_tree_rows(tree: ProcessTree, checkout: str, command: str) -> list[dict[str, object]]:
     return [
-        {"pid": tree.root.pid, "parent": 0, "command": command, "cwd": checkout,
+        {"pid": tree.root.pid, "parent": 0, "command": command, "cwd": checkout if command.startswith("npm --prefix ") else checkout + "/frontend",
          "finished": str(tree.finished)},
         {"pid": tree.child_pid, "parent": tree.root.pid, "command": "vite worker",
          "cwd": checkout + "/frontend", "port": "4173", "finished": str(tree.child_finished)},
@@ -694,7 +695,7 @@ import json
 import os
 from pathlib import Path
 import sys
-Path(os.environ["DEV_TEST_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "args": sys.argv}))
+Path(os.environ["DEV_TEST_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "args": sys.argv, "cwd": os.getcwd()}))
 os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
 ''')
     npm.chmod(0o755)
@@ -710,6 +711,7 @@ os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
                 assert_tree_stopped(owned)
             new_frontend = json.loads(started.read_text())
             assert int(pid_file.read_text()) == new_frontend["pid"]
+            assert new_frontend["cwd"] == environment["DEV_TEST_REPO"] + "/frontend"
             assert new_frontend["args"][1:5] == ["--prefix", environment["DEV_TEST_REPO"] + "/frontend", "run", "dev"]
             assert "frontend: started" in result.stdout
         else:
@@ -768,4 +770,33 @@ def test_stop_owned_listener_preserves_foreign_pid_record(
     assert foreign.root.poll() is None
     assert not foreign.child_finished.exists()
     assert pid_file.read_text() == str(foreign.root.pid)
+    assert lock.read_bytes() == lock_bytes
+
+
+@pytest.mark.parametrize("running", ["pid_file", "listener"])
+def test_rewritten_npm_in_repo_root_cannot_claim_a_foreign_prefix(
+    tmp_path: Path, process_trees: list[ProcessTree], running: str,
+) -> None:
+    script, lock, backend_pid_file, _, environment = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    tree = start_process_tree(tmp_path, process_trees, "foreign-prefix")
+    repo = environment["DEV_TEST_REPO"]
+    rows = frontend_tree_rows(tree, repo + "-sibling", "npm run dev")
+    rows[0]["cwd"] = repo
+    table = tmp_path / "process-table.json"
+    table.write_text(json.dumps(rows))
+    environment["DEV_TEST_TREE"] = str(table)
+    pid_file = backend_pid_file.parent / "mediaforce-frontend.pid"
+    if running == "pid_file":
+        pid_file.write_text(str(tree.root.pid))
+    lock_bytes = lock.read_bytes()
+    result = subprocess.run(
+        ["/bin/bash", str(script), "stop", "frontend"], cwd=tmp_path,
+        env=environment, capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert tree.root.poll() is None
+    assert not tree.child_finished.exists()
+    assert not select.select([tree.lifetime_reader], [], [], 0)[0]
+    if running == "pid_file":
+        assert pid_file.read_text() == str(tree.root.pid)
     assert lock.read_bytes() == lock_bytes
