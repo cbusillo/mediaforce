@@ -40,6 +40,7 @@ def test_capture_seed_request_preserves_adapter_timeout(tmp_path: Path) -> None:
 
     def request_seed(**_kwargs: Any) -> Any:
         return advisor._run_structured_llm_request(
+            project_root=tmp_path,
             developer="test instructions", message="test request", schema={},
             max_seconds=timeout_seconds, task=AdvisorTask.SEED_POLICY,
             prompt_version=advisor.SEED_PROMPT_VERSION,
