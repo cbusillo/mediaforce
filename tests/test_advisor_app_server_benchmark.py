@@ -31,7 +31,7 @@ def test_capture_seed_request_reuses_existing_case_contract(tmp_path: Path) -> N
     assert spec.prompt_version == advisor.SEED_PROMPT_VERSION
     assert spec.max_seconds > 0
     assert spec.schema["additionalProperties"] is False
-    assert "300 MB" in spec.message
+    assert case.payload["operator_note"] in spec.message
 
 
 def test_capture_seed_request_preserves_adapter_timeout(tmp_path: Path) -> None:
@@ -63,7 +63,7 @@ def test_normalize_seed_response_applies_existing_policy_logic(tmp_path: Path) -
 
     assert response["ok"] is True
     assert response["request_disposition"] == "honored"
-    assert response["proposed_policy"]["video"]["target_size_bytes"] == 300_000_000
+    assert response["proposed_policy"]["video"]["target_size_bytes"] == case.payload["requested_experiment"]["budget_bytes"]
 
 
 def test_app_server_events_capture_usage_without_exposing_mcp_names() -> None:

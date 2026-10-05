@@ -1,0 +1,87 @@
+# Pinned input for policy, lifecycle and queue behavior tests.
+# Values belong to these scenarios and do not track operator defaults.
+[config]
+include_files = []
+[state]
+db_path = "state/library.sqlite3"
+run_manifest_dir = "state/runs"
+web_state_dir = "state/web"
+review_dir = "state/review"
+runtime_reservation_dir = "state/reservations"
+[media]
+staging_root = "staging"
+archive_root = "archive"
+output_container = "mkv"
+[media.source_roots]
+movies = "sources/movies"
+other = "sources/other"
+tv = "sources/tv"
+[video]
+encoder = "libsvtav1"
+pixel_format = "yuv420p10le"
+preset = 4
+crf_search = true
+quality_metric = "vmaf"
+target_vmaf = 85.0
+min_target_vmaf = 80.0
+target_xpsnr = 41.0
+min_target_xpsnr = 35.0
+target_size_mb = 300
+target_size_bytes = 300000000
+target_runtime_minutes = 45
+size_goal_schema_version = 1
+size_goal_mode = "normalized"
+size_goal_source = "config_default"
+sample_projection_tolerance_percent = 10
+final_output_tolerance_percent = 5
+compression_intent_schema_version = 1
+compression_intent = "balanced"
+compression_intent_source = "config_default"
+compression_intent_confirmed = true
+decision_model = "size_first_review"
+quality_engine = "ab_av1_fast_sample"
+target_relax_step_vmaf = 0.5
+target_relax_step_xpsnr = 1.0
+sample_every = "8m"
+sample_duration = "20s"
+min_crf = 18
+max_crf = 38
+target_search_max_crf = 63
+max_encoded_percent = 80
+default_grain = 8
+grain_denoise = 0
+thorough = true
+max_height = 1080
+resolution_intent_mode = "max_height"
+resolution_intent_source = "config_default"
+black_bar_handling = "off"
+[audio]
+keep_languages = ["eng"]
+copy_codecs = ["aac", "opus"]
+convert_to_opus_codecs = ["ac3", "eac3", "dts", "dtshd", "flac", "pcm_s16le", "pcm_s24le", "truehd"]
+stereo_opus_bitrate = "128k"
+surround_5_1_opus_bitrate = "256k"
+surround_7_1_opus_bitrate = "320k"
+[subtitle]
+keep_languages = ["eng"]
+prefer_text = true
+keep_forced = true
+default_mode = "first_english"
+[planning]
+series_lifecycle_mode = "auto"
+current_season_inactive_days = 365
+season_acquisition_hold_days = 30
+series_metadata_stale_days = 7
+[metadata.plex]
+enabled = true
+base_url = ""
+token_env = "MEDIAFORCE_PLEX_TOKEN"
+refresh_interval_hours = 1
+[metadata.plex.library_roots]
+[metadata.tmdb]
+enabled = true
+base_url = "https://metadata.invalid/3"
+token_env = "MEDIAFORCE_TMDB_TOKEN"
+refresh_interval_hours = 24
+[validation]
+require_size_reduction = true

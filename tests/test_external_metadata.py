@@ -1,4 +1,5 @@
 import copy
+from collections.abc import Mapping
 import os
 import tempfile
 import tomllib
@@ -9,12 +10,13 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy import select
+from sqlalchemy.engine import Connection
 
-from mediaforce.core.config import ConfigPaths, DEFAULT_CONFIG_PATH, MediaforceConfig
+from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata
 from mediaforce.library.external_metadata import PlexClient, PlexPathMapping, ProviderHttpError, TmdbClient, \
-    map_plex_part_path, tmdb_id_from_guids
+    JSONPayload, map_plex_part_path, tmdb_id_from_guids
 from mediaforce.library.metadata_sync import sync_external_metadata
 from mediaforce.web.settings_runtime import normalize_metadata_settings
 
@@ -54,7 +56,7 @@ class ExternalMetadataTests(unittest.TestCase):
     def test_clients_parse_plex_and_tmdb_payloads_without_leaking_tokens(self) -> None:
         requests: list[tuple[str, dict[str, str]]] = []
 
-        def fake_fetch(url: str, headers, _timeout: float):
+        def fake_fetch(url: str, headers: Mapping[str, str], _timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
             requests.append((url, dict(headers)))
             if "type=2" in url:
                 query = parse_qs(urlsplit(url).query)
@@ -126,7 +128,7 @@ class ExternalMetadataTests(unittest.TestCase):
         self.assertTrue(all("secret" not in url for url, _ in requests))
 
     def test_plex_client_rejects_incomplete_pagination(self) -> None:
-        def fake_fetch(_url: str, headers, _timeout: float):
+        def fake_fetch(_url: str, headers: Mapping[str, str], _timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
             if dict(headers).get("X-Plex-Container-Start") == "0":
                 return {
                     "MediaContainer": {
@@ -152,7 +154,7 @@ class ExternalMetadataTests(unittest.TestCase):
             list(client.items(4))
 
     def test_plex_client_rejects_structurally_incomplete_items(self) -> None:
-        def fake_fetch(_url: str, _headers, _timeout: float):
+        def fake_fetch(_url: str, _headers: Mapping[str, str], _timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
             return {
                 "MediaContainer": {
                     "totalSize": 1,
@@ -207,7 +209,7 @@ class ExternalMetadataTests(unittest.TestCase):
                 )
             )
 
-            def conflicting_fetch(url: str, _headers, _timeout: float):
+            def conflicting_fetch(url: str, _headers: Mapping[str, str], _timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
                 parsed = urlsplit(url)
                 query = parse_qs(parsed.query)
                 if parsed.path.endswith("/identity"):
@@ -327,7 +329,7 @@ class ExternalMetadataTests(unittest.TestCase):
                     .where(series_metadata.c.series_prefix == "tv/Stale Show")
                 ).fetchall()
 
-                def failed_fetch(_url: str, _headers, _timeout: float):
+                def failed_fetch(_url: str, _headers: Mapping[str, str], _timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
                     raise ProviderHttpError("offline", status_code=503)
 
                 failed = sync_external_metadata(
@@ -372,7 +374,7 @@ class ExternalMetadataTests(unittest.TestCase):
                     fetch_json_fn=self._successful_fetch,
                 )
 
-                def unexpected_fetch(_url: str, _headers, _timeout: float):
+                def unexpected_fetch(_url: str, _headers: Mapping[str, str], _timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
                     raise AssertionError("fresh provider caches should avoid network calls")
 
                 cached = sync_external_metadata(
@@ -411,7 +413,7 @@ class ExternalMetadataTests(unittest.TestCase):
                     select(series_metadata).where(series_metadata.c.series_prefix == "tv/Show")
                 ).mappings().one()
 
-                def missing_show_fetch(url: str, _headers, _timeout: float):
+                def missing_show_fetch(url: str, _headers: Mapping[str, str], _timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
                     parsed = urlsplit(url)
                     query = parse_qs(parsed.query)
                     if parsed.path.endswith("/identity"):
@@ -476,7 +478,7 @@ class ExternalMetadataTests(unittest.TestCase):
         self.assertEqual(payload["tmdb"]["refresh_interval_hours"], 48.0)
 
     def _config(self) -> MediaforceConfig:
-        with DEFAULT_CONFIG_PATH.open("rb") as handle:
+        with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
             raw = copy.deepcopy(tomllib.load(handle))
         raw["media"]["source_roots"] = {"tv": str(self.root / "source" / "tv")}
         raw["media"]["staging_root"] = str(self.root / "staging")
@@ -495,7 +497,7 @@ class ExternalMetadataTests(unittest.TestCase):
         return MediaforceConfig(raw=raw, paths=paths)
 
     @staticmethod
-    def _insert_item(connection, source_path: Path, rel_path: str) -> int:
+    def _insert_item(connection: Connection, source_path: Path, rel_path: str) -> int:
         timestamp = "2025-01-01T00:00:00+00:00"
         result = connection.execute(
             library_items.insert().values(
@@ -521,7 +523,7 @@ class ExternalMetadataTests(unittest.TestCase):
         return int(result.inserted_primary_key[0])
 
     @staticmethod
-    def _successful_fetch(url: str, headers, _timeout: float):
+    def _successful_fetch(url: str, headers: Mapping[str, str], _timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
         parsed = urlsplit(url)
         query = parse_qs(parsed.query)
         if parsed.path.endswith("/identity"):
