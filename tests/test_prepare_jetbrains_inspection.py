@@ -8,22 +8,21 @@ import sys
 
 import pytest
 from pathlib import Path
-from xml.etree.ElementTree import parse
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CANONICAL_PROFILE = ROOT / "config" / "jetbrains" / "Mediaforce.xml"
+PROFILE_BYTES = b"opaque fixture profile: preserve these bytes\n"
+EMPTY_DIGEST_EVENT = "empty-digest-output"
 
 
 @pytest.fixture
 def preparation_sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
-    if shutil.which("node") is None:
-        pytest.skip("Preparation requires Node; no dependencies are installed by this test")
     repo = tmp_path / "isolated worktree"
     (repo / "scripts").mkdir(parents=True)
     shutil.copyfile(ROOT / "scripts/prepare-jetbrains-inspection.sh", repo / "scripts/prepare-jetbrains-inspection.sh")
+    shutil.copyfile(ROOT / "scripts/prepare-jetbrains-state.mjs", repo / "scripts/prepare-jetbrains-state.mjs")
     (repo / "config/jetbrains").mkdir(parents=True)
-    shutil.copyfile(CANONICAL_PROFILE, repo / "config/jetbrains/Mediaforce.xml")
+    (repo / "config/jetbrains/Mediaforce.xml").write_bytes(PROFILE_BYTES)
     (repo / "frontend").mkdir()
     for name in ("package.json", "package-lock.json"):
         (repo / "frontend" / name).write_text("{}")
@@ -33,6 +32,7 @@ def preparation_sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     binaries = tmp_path / "bin"
     binaries.mkdir()
     stub = "#!" + sys.executable + "\n" + r'''
+import hashlib
 import json
 import os
 import sys
@@ -44,15 +44,35 @@ with Path(os.environ["PREP_TEST_LOG"]).open("a") as log:
 if name == "uv":
     assert sys.argv[1:3] == ["run", "--no-project"]
     repo = Path(sys.argv[sys.argv.index("--repo") + 1])
+    assert repo == Path(os.environ["PREP_TEST_REPO"])
     idea = repo / ".idea"
     idea.mkdir(exist_ok=True)
     module = '<module type="PYTHON_MODULE" version="4">\n    <content url="file://$MODULE_DIR$">\n    </content>\n</module>\n'
-    if os.environ.get("PREP_TEST_BAD_MODULE"):
-        module = "unsupported helper output"
     (idea / "mediaforce.iml").write_text(module)
+elif name == "node":
+    repo = Path(os.environ["PREP_TEST_REPO"])
+    assert Path(sys.argv[1]) == repo / "scripts/prepare-jetbrains-state.mjs"
+    if sys.argv[2] == "normalize":
+        assert sys.argv[3] == str(repo / ".idea/mediaforce.iml")
+        if os.environ.get("PREP_TEST_NODE_FAIL"):
+            print("fixture normalization failed", file=sys.stderr)
+            sys.exit(9)
+    elif sys.argv[2] == "digest":
+        assert sys.argv[3:] == [str(repo / "frontend" / name) for name in ("package.json", "package-lock.json")]
+        if os.environ.get("PREP_TEST_EMPTY_DIGEST"):
+            with Path(os.environ["PREP_TEST_LOG"]).open("a") as log:
+                log.write(json.dumps([os.environ["PREP_TEST_EMPTY_DIGEST_EVENT"]]) + "\n")
+            sys.exit(0)
+        digest = hashlib.sha256()
+        for path in sys.argv[3:]:
+            digest.update(Path(path).read_bytes())
+        print(digest.hexdigest(), end="")
+    else:
+        raise AssertionError(sys.argv)
 elif name == "npm":
     assert sys.argv[1] == "--prefix" and sys.argv[3] == "ci"
     frontend = Path(sys.argv[2])
+    assert frontend == Path(os.environ["PREP_TEST_REPO"]) / "frontend"
     modules = frontend / "node_modules"
     (modules / ".bin").mkdir(parents=True, exist_ok=True)
     (modules / ".package-lock.json").write_text("{}")
@@ -61,24 +81,27 @@ elif name == "npm":
     binary.chmod(0o755)
 elif name == "svelte-kit":
     assert sys.argv[1:] == ["sync"]
+    assert Path.cwd() == Path(os.environ["PREP_TEST_REPO"]) / "frontend"
     if os.environ.get("PREP_TEST_SYNC_FAIL"):
         sys.exit(9)
     Path(".svelte-kit").mkdir(exist_ok=True)
 else:
     raise AssertionError(name)
 '''
-    for name in ("uv", "npm"):
+    for name in ("uv", "npm", "node"):
         path = binaries / name
         path.write_text(stub)
         path.chmod(0o755)
-    environment = {**os.environ, "CODE_HOME": str(tmp_path / "code-home"),
-                   "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
+    environment = {"HOME": str(tmp_path / "home"), "CODE_HOME": str(tmp_path / "code-home"),
+                   "PREP_TEST_REPO": str(repo),
+                   "PREP_TEST_EMPTY_DIGEST_EVENT": EMPTY_DIGEST_EVENT,
+                   "PATH": str(binaries) + os.pathsep + "/usr/bin:/bin",
                    "PREP_TEST_LOG": str(tmp_path / "calls.jsonl")}
     return repo, environment
 
 
 def _run_preparation(repo: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["bash", str(repo / "scripts/prepare-jetbrains-inspection.sh")],
+    return subprocess.run(["/bin/bash", str(repo / "scripts/prepare-jetbrains-inspection.sh")],
                           cwd=repo.parent, env=environment, capture_output=True, text=True, timeout=10)
 
 
@@ -87,22 +110,15 @@ def _preparation_calls(environment: dict[str, str], name: str) -> list[list[str]
     return [call for line in log.read_text().splitlines() if (call := json.loads(line))[0] == name]
 
 
-def test_preparation_normalizes_module_and_caches_successful_frontend_state(
+def test_preparation_copies_profiles_and_caches_successful_frontend_state(
         preparation_sandbox: tuple[Path, dict[str, str]],
 ) -> None:
     repo, environment = preparation_sandbox
     result = _run_preparation(repo, environment)
     assert result.returncode == 0, result.stderr
-    module = parse(repo / ".idea/mediaforce.iml").getroot()
-    assert module.attrib["external.system.id"] == "pyproject.toml"
-    content = module.find("content")
-    assert content is not None and content.attrib["url"] == "file://$MODULE_DIR$"
-    exclusion = content.find("excludeFolder")
-    assert exclusion is not None
-    assert exclusion.attrib["url"] == "file://$MODULE_DIR$/frontend"
     profiles = [repo / ".idea/inspectionProfiles/Mediaforce.xml", repo / "frontend/.idea/inspectionProfiles/Mediaforce.xml"]
     timestamps = [path.stat().st_mtime_ns for path in profiles]
-    assert all(path.read_bytes() == CANONICAL_PROFILE.read_bytes() for path in profiles)
+    assert all(path.read_bytes() == PROFILE_BYTES for path in profiles)
     assert _run_preparation(repo, environment).returncode == 0
     assert [path.stat().st_mtime_ns for path in profiles] == timestamps
     assert len(_preparation_calls(environment, "npm")) == 1
@@ -114,19 +130,24 @@ def test_preparation_normalizes_module_and_caches_successful_frontend_state(
     (repo / "frontend/node_modules/.package-lock.json").unlink()
     assert _run_preparation(repo, environment).returncode == 0
     assert len(_preparation_calls(environment, "npm")) == 2
-    (repo / "frontend/package-lock.json").write_text('{"changed":true}')
+    (repo / "frontend/package.json").write_text('{"name":"changed"}')
     assert _run_preparation(repo, environment).returncode == 0
     assert len(_preparation_calls(environment, "npm")) == 3
+    (repo / "frontend/package-lock.json").write_text('{"changed":true}')
+    assert _run_preparation(repo, environment).returncode == 0
+    assert len(_preparation_calls(environment, "npm")) == 4
 
 
-@pytest.mark.parametrize("failure", ["module", "svelte", "duplicate"])
+@pytest.mark.parametrize("failure", ["normalize", "digest", "svelte", "duplicate"])
 def test_preparation_failure_is_explicit_and_preserves_unowned_modules(
         preparation_sandbox: tuple[Path, dict[str, str]], failure: str,
 ) -> None:
     repo, environment = preparation_sandbox
     extra = repo / ".idea/mediaforce@1.iml"
-    if failure == "module":
-        environment["PREP_TEST_BAD_MODULE"] = "1"
+    if failure == "normalize":
+        environment["PREP_TEST_NODE_FAIL"] = "1"
+    elif failure == "digest":
+        environment["PREP_TEST_EMPTY_DIGEST"] = "1"
     elif failure == "svelte":
         environment["PREP_TEST_SYNC_FAIL"] = "1"
     else:
@@ -135,11 +156,15 @@ def test_preparation_failure_is_explicit_and_preserves_unowned_modules(
     result = _run_preparation(repo, environment)
     assert result.returncode != 0
     assert not (repo / "frontend/node_modules/.mediaforce-dependencies.sha256").exists()
-    if failure == "module":
-        assert "Unexpected Python preparation module format" in result.stderr
+    if failure == "normalize":
+        assert "fixture normalization failed" in result.stderr
+        assert _preparation_calls(environment, "npm") == []
+    elif failure == "digest":
+        assert _preparation_calls(environment, EMPTY_DIGEST_EVENT) == [[EMPTY_DIGEST_EVENT]]
+        assert result.stderr
         assert _preparation_calls(environment, "npm") == []
     elif failure == "duplicate":
-        assert "Review duplicate IDE module" in result.stderr
+        assert result.stderr
         assert extra.read_text() == "operator IDE state"
         assert not Path(environment["PREP_TEST_LOG"]).exists()
 

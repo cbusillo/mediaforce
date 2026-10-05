@@ -45,6 +45,7 @@ include = [
     "/frontend/tsconfig.json",
     "/frontend/vite.config.ts",
     "/hatch_build.py",
+    "/scripts/prepare-jetbrains-state.mjs",
     "/mediaforce",
     "/pyproject.toml",
 ]

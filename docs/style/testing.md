@@ -32,3 +32,8 @@ must not assert or depend on.
 - Prefer the narrowest concrete acceptance check that proves the change
 - Keep test doubles and fixtures typed enough to stay inspection- and Ruff-clean
 - Prefer real reusable helpers over repeated ad hoc setup in each test
+
+Inspection preparation uses Python tests with pinned UV, npm and Node stubs for
+orchestration, profile byte preservation and dependency-cache invalidation.
+The existing Vitest lane exercises the actual JavaScript module normalization
+and manifest digest, including its CLI, using temporary inputs.
