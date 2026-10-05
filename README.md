@@ -535,6 +535,13 @@ and keeps the command lines aligned with the actual configured ports. Pass
 `backend` or `frontend` as a second argument when you intentionally want only
 one side, for example `scripts/mediaforce-dev.sh restart backend`.
 
+Frontend discovery checks the npm/Vite process (or its parent) against the
+exact checkout working directory. Stop and restart preserve another checkout's
+process tree and live shared PID record. If a live foreign PID record would be
+overwritten, start refuses with instructions to stop it from its owning
+checkout first. Stale PID records can be replaced; the shared backend runtime
+lock is always preserved.
+
 The backend also holds a Python-level singleton lock while running, so a second
 `mediaforce-web` process exits instead of binding another port and confusing the
 local session. Busy startup reports the active owner PID and bind address when

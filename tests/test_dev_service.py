@@ -73,7 +73,8 @@ elif name == "ps" and "DEV_TEST_TREE" in os.environ:
     started = os.environ.get("DEV_TEST_STARTED")
     if started and Path(started).exists():
         rows.append({"pid": json.loads(Path(started).read_text())["pid"], "parent": 0,
-                     "command": os.environ["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web"})
+                     "command": os.environ.get("DEV_TEST_STARTED_COMMAND", os.environ["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web"),
+                     "cwd": os.environ["DEV_TEST_REPO"]})
     if sys.argv[1:] == ["-axo", "pid=,ppid="]:
         for row in rows:
             print(row["pid"], row["parent"])
@@ -97,6 +98,16 @@ elif name == "ps" and sys.argv[1:3] == ["-p", os.environ["DEV_TEST_PID"]]:
         print(command)
     elif sys.argv[-1] == "ppid=":
         print(0)
+elif name == "lsof" and "-d" in sys.argv:
+    rows = json.loads(Path(os.environ["DEV_TEST_TREE"]).read_text()) if "DEV_TEST_TREE" in os.environ else []
+    started = os.environ.get("DEV_TEST_STARTED")
+    if started and Path(started).exists():
+        rows.append({"pid": json.loads(Path(started).read_text())["pid"], "cwd": os.environ["DEV_TEST_REPO"]})
+    row = next((row for row in rows if str(row["pid"]) == sys.argv[sys.argv.index("-p") + 1]), None)
+    if row and row.get("cwd", os.environ["DEV_TEST_REPO"]):
+        print("p" + str(row["pid"]) + "\\n" + "n" + row.get("cwd", os.environ["DEV_TEST_REPO"]))
+    else:
+        sys.exit(1)
 elif name == "lsof" and "DEV_TEST_TREE" in os.environ:
     rows = json.loads(Path(os.environ["DEV_TEST_TREE"]).read_text())
     port = sys.argv[2].removeprefix("-tiTCP:")
@@ -115,7 +126,12 @@ elif name == "python3":
 elif name == "dirname":
     print(Path(sys.argv[1]).parent)
 elif name == "sed":
-    print(sys.stdin.read().strip())
+    if "-n" in sys.argv:
+        for line in sys.stdin:
+            if line.startswith("n"):
+                print(line[1:].rstrip("\\n"))
+    else:
+        print(sys.stdin.read().strip())
 elif name == "awk":
     if "-v" in sys.argv:
         parent = sys.argv[sys.argv.index("-v") + 1].split("=", 1)[1]
@@ -141,7 +157,7 @@ elif name == "mkdir":
     assert target.resolve().is_relative_to(Path(os.environ["HOME"]).resolve())
     target.mkdir(parents=True, exist_ok=True)
 elif name == "nohup":
-    os.execv(sys.argv[1], sys.argv[1:])
+    os.execvpe(sys.argv[1], sys.argv[1:], os.environ)
 elif name == "rm":
     for argument in sys.argv[1:]:
         if argument.startswith("-"):
@@ -211,8 +227,10 @@ def test_stop_unloads_only_this_checkout_and_preserves_runtime_lock(
 
     assert result.returncode == 0, result.stderr
     assert lock.read_bytes() == lock_bytes
-    if running == "idle" or process in {"owned", "python_owned"}:
+    if running == "idle" or running != "pid_file" or process in {"owned", "python_owned"}:
         assert not pid_file.exists()
+    else:
+        assert pid_file.read_text() == str(child.pid)
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     target = "gui/4242/" + LOGIN_ITEM_LABEL
     assert ["launchctl", "print", target] in calls
@@ -528,3 +546,226 @@ os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
         assert select.select([lifetime_reader], [], [], 5)[0], "started fixture backend still alive"
         assert os.read(lifetime_reader, 1) == b""
         os.close(lifetime_reader)
+
+
+def frontend_tree_rows(tree: ProcessTree, checkout: str, command: str) -> list[dict[str, object]]:
+    return [
+        {"pid": tree.root.pid, "parent": 0, "command": command, "cwd": checkout,
+         "finished": str(tree.finished)},
+        {"pid": tree.child_pid, "parent": tree.root.pid, "command": "vite worker",
+         "cwd": checkout + "/frontend", "port": "4173", "finished": str(tree.child_finished)},
+    ]
+
+
+@pytest.mark.parametrize("checkout_kind,command_kind", [
+    (checkout, command) for checkout in ("owned", "sibling", "nested", "foreign", "unavailable")
+    for command in ("relative", "rewritten", "absolute", "vite")
+])
+@pytest.mark.parametrize("running", ["pid_file", "listener"])
+def test_frontend_stop_requires_exact_checkout_and_stops_the_whole_tree(
+    tmp_path: Path, process_trees: list[ProcessTree], checkout_kind: str, command_kind: str, running: str,
+) -> None:
+    script, lock, backend_pid_file, _, environment = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    tree = start_process_tree(tmp_path, process_trees, "frontend")
+    repo = environment["DEV_TEST_REPO"]
+    checkout = {"owned": repo, "sibling": repo + "-sibling", "nested": repo + "/nested",
+                "foreign": "/foreign/checkout", "unavailable": ""}[checkout_kind]
+    command = {"relative": "npm --prefix frontend run dev -- --strictPort",
+               "rewritten": "npm run dev --host 127.0.0.1",
+               "absolute": "npm --prefix " + repo + "/frontend run dev -- --strictPort",
+               "vite": sys.executable + " " + repo + "/frontend/node_modules/.bin/vite --strictPort"}[command_kind]
+    rows = frontend_tree_rows(tree, checkout, command)
+    if checkout_kind == "unavailable":
+        for row in rows:
+            row["cwd"] = ""
+    table = tmp_path / "process-table.json"
+    table.write_text(json.dumps(rows))
+    environment["DEV_TEST_TREE"] = str(table)
+    pid_file = backend_pid_file.parent / "mediaforce-frontend.pid"
+    if running == "pid_file":
+        pid_file.write_text(str(tree.child_pid))
+    lock_bytes = lock.read_bytes()
+    result = subprocess.run(
+        ["/bin/bash", str(script), "stop", "frontend"], cwd=tmp_path,
+        env=environment, capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    if checkout_kind == "owned":
+        assert_tree_stopped(tree)
+        assert not pid_file.exists()
+    else:
+        assert tree.root.poll() is None
+        assert not tree.finished.exists()
+        assert not tree.child_finished.exists()
+        assert not select.select([tree.lifetime_reader], [], [], 0)[0]
+        if running == "pid_file":
+            assert pid_file.read_text() == str(tree.child_pid)
+    assert lock.read_bytes() == lock_bytes
+
+
+@pytest.mark.parametrize("action,component", [
+    (action, component) for action in ("stop", "start", "restart") for component in ("frontend", "all")
+])
+def test_frontend_actions_preserve_foreign_trees_and_both_shared_pid_files(
+    tmp_path: Path, process_trees: list[ProcessTree], action: str, component: str,
+) -> None:
+    script, lock, backend_pid_file, _, environment = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    frontend = start_process_tree(tmp_path, process_trees, "foreign-frontend")
+    backend = start_process_tree(tmp_path, process_trees, "foreign-backend")
+    rows = frontend_tree_rows(frontend, environment["DEV_TEST_REPO"] + "-sibling", "npm --prefix frontend run dev")
+    rows.append({"pid": backend.root.pid, "parent": 0, "command": "/foreign/.venv/bin/mediaforce-web",
+                 "port": "8777", "finished": str(backend.finished)})
+    table = tmp_path / "process-table.json"
+    table.write_text(json.dumps(rows))
+    environment["DEV_TEST_TREE"] = str(table)
+    frontend_pid_file = backend_pid_file.parent / "mediaforce-frontend.pid"
+    frontend_pid_file.write_text(str(frontend.root.pid))
+    backend_pid_file.write_text(str(backend.root.pid))
+    lock_bytes = lock.read_bytes()
+    result = subprocess.run(
+        ["/bin/bash", str(script), action, component], cwd=tmp_path,
+        env=environment, capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == (0 if action == "stop" else 1), result.stderr
+    for tree in (frontend, backend):
+        assert tree.root.poll() is None
+        assert not tree.child_finished.exists()
+        assert not select.select([tree.lifetime_reader], [], [], 0)[0]
+    assert frontend_pid_file.read_text() == str(frontend.root.pid)
+    assert backend_pid_file.read_text() == str(backend.root.pid)
+    assert lock.read_bytes() == lock_bytes
+
+
+@pytest.mark.parametrize("component", ["frontend", "backend"])
+def test_start_preserves_live_foreign_pid_file_even_without_a_listener(
+    tmp_path: Path, process_trees: list[ProcessTree], component: str,
+) -> None:
+    script, lock, backend_pid_file, _, environment = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    tree = start_process_tree(tmp_path, process_trees, "foreign")
+    rows = frontend_tree_rows(tree, "/foreign/checkout", "npm run dev")
+    for row in rows:
+        row.pop("port", None)
+    table = tmp_path / "process-table.json"
+    table.write_text(json.dumps(rows))
+    environment["DEV_TEST_TREE"] = str(table)
+    pid_file = backend_pid_file if component == "backend" else backend_pid_file.parent / "mediaforce-frontend.pid"
+    pid_file.write_text(str(tree.root.pid))
+    result = subprocess.run(
+        ["/bin/bash", str(script), "start", component], cwd=tmp_path,
+        env=environment, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "stop it from its owning checkout" in result.stderr
+    assert pid_file.read_text() == str(tree.root.pid)
+    assert tree.root.poll() is None
+    assert lock.exists()
+
+
+@pytest.mark.parametrize("action,running", [("start", "pid_file"), ("start", "listener"), ("start", "stale"), ("restart", "pid_file")])
+def test_owned_frontend_reuse_and_restart(
+    tmp_path: Path, process_trees: list[ProcessTree], action: str, running: str,
+) -> None:
+    script, lock, backend_pid_file, log, environment = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    owned = start_process_tree(tmp_path, process_trees, "owned-frontend")
+    foreign = start_process_tree(tmp_path, process_trees, "foreign-frontend")
+    rows = frontend_tree_rows(owned, environment["DEV_TEST_REPO"], "npm run dev")
+    if running == "stale":
+        rows[1].pop("port")
+    rows += frontend_tree_rows(foreign, "/foreign/checkout", "npm run dev")
+    # The foreign checkout runs on another port.
+    rows[-1].pop("port")
+    table = tmp_path / "process-table.json"
+    table.write_text(json.dumps(rows))
+    environment["DEV_TEST_TREE"] = str(table)
+    pid_file = backend_pid_file.parent / "mediaforce-frontend.pid"
+    if running == "pid_file":
+        pid_file.write_text(str(owned.child_pid))
+    elif running == "stale":
+        pid_file.write_text("not-a-pid")
+    started = tmp_path / "started.json"
+    environment["DEV_TEST_STARTED"] = str(started)
+    environment["DEV_TEST_STARTED_COMMAND"] = "npm run dev"
+    cleanup_reader, cleanup_writer = os.pipe()
+    lifetime_reader, lifetime_writer = os.pipe()
+    environment["DEV_TEST_START_CLEANUP_FD"] = str(cleanup_reader)
+    npm = Path(environment["PATH"]) / "npm"
+    npm.write_text("#!" + sys.executable + "\n" + '''
+import json
+import os
+from pathlib import Path
+import sys
+Path(os.environ["DEV_TEST_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "args": sys.argv}))
+os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
+''')
+    npm.chmod(0o755)
+    lock_bytes = lock.read_bytes()
+    try:
+        result = subprocess.run(
+            ["/bin/bash", str(script), action, "frontend"], cwd=tmp_path, env=environment,
+            capture_output=True, text=True, timeout=20, pass_fds=(cleanup_reader, lifetime_writer),
+        )
+        assert result.returncode == 0, result.stderr
+        if action == "restart" or running == "stale":
+            if action == "restart":
+                assert_tree_stopped(owned)
+            new_frontend = json.loads(started.read_text())
+            assert int(pid_file.read_text()) == new_frontend["pid"]
+            assert new_frontend["args"][1:5] == ["--prefix", environment["DEV_TEST_REPO"] + "/frontend", "run", "dev"]
+            assert "frontend: started" in result.stdout
+        else:
+            assert owned.root.poll() is None
+            assert not started.exists()
+            assert "frontend: running" in result.stdout
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            assert not any(call[0] == "nohup" for call in calls)
+        assert foreign.root.poll() is None
+        assert not foreign.child_finished.exists()
+        assert lock.read_bytes() == lock_bytes
+    finally:
+        os.close(cleanup_reader)
+        os.close(lifetime_writer)
+        try:
+            os.write(cleanup_writer, b"done")
+        except BrokenPipeError:
+            pass
+        os.close(cleanup_writer)
+        assert select.select([lifetime_reader], [], [], 5)[0], "started fixture frontend still alive"
+        assert os.read(lifetime_reader, 1) == b""
+        os.close(lifetime_reader)
+
+
+@pytest.mark.parametrize("component", ["frontend", "backend"])
+def test_stop_owned_listener_preserves_foreign_pid_record(
+    tmp_path: Path, process_trees: list[ProcessTree], component: str,
+) -> None:
+    script, lock, backend_pid_file, _, environment = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    owned = start_process_tree(tmp_path, process_trees, "owned")
+    foreign = start_process_tree(tmp_path, process_trees, "foreign")
+    if component == "frontend":
+        rows = frontend_tree_rows(owned, environment["DEV_TEST_REPO"], "npm run dev")
+        rows += frontend_tree_rows(foreign, "/foreign/checkout", "npm --prefix frontend run dev")
+        pid_file = backend_pid_file.parent / "mediaforce-frontend.pid"
+    else:
+        rows = [
+            {"pid": tree.root.pid, "parent": 0, "command": repo + "/.venv/bin/mediaforce-web",
+             "port": "8777", "finished": str(tree.finished)}
+            for tree, repo in ((owned, environment["DEV_TEST_REPO"]), (foreign, "/foreign/checkout"))
+        ]
+        rows.append({"pid": owned.child_pid, "parent": owned.root.pid, "command": "uvicorn worker",
+                     "finished": str(owned.child_finished)})
+        pid_file = backend_pid_file
+    table = tmp_path / "process-table.json"
+    table.write_text(json.dumps(rows))
+    environment["DEV_TEST_TREE"] = str(table)
+    pid_file.write_text(str(foreign.root.pid))
+    lock_bytes = lock.read_bytes()
+    result = subprocess.run(
+        ["/bin/bash", str(script), "stop", component], cwd=tmp_path,
+        env=environment, capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert_tree_stopped(owned)
+    assert foreign.root.poll() is None
+    assert not foreign.child_finished.exists()
+    assert pid_file.read_text() == str(foreign.root.pid)
+    assert lock.read_bytes() == lock_bytes

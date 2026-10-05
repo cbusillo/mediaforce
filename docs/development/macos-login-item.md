@@ -113,8 +113,9 @@ the process's command or a parent process's command, including when a Python
 interpreter launches it. Start the local
 development backend with `scripts/mediaforce-dev.sh start backend`. A sibling
 checkout's backend stays running when discovered through a PID file, port
-listener, or runtime lock. Stop may remove the shared development PID file;
-the runtime lock is preserved.
+listener, or runtime lock. Shared development PID records and frontend
+ownership follow the [local development helper](../../README.md#commands)
+behavior described in the README; the runtime lock is preserved.
 
 ## Verification
 
