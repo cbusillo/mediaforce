@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE_BYTES = b"opaque fixture profile: preserve these bytes\n"
+EMPTY_DIGEST_EVENT = "empty-digest-output"
 
 
 @pytest.fixture
@@ -59,6 +60,8 @@ elif name == "node":
     elif sys.argv[2] == "digest":
         assert sys.argv[3:] == [str(repo / "frontend" / name) for name in ("package.json", "package-lock.json")]
         if os.environ.get("PREP_TEST_EMPTY_DIGEST"):
+            with Path(os.environ["PREP_TEST_LOG"]).open("a") as log:
+                log.write(json.dumps([os.environ["PREP_TEST_EMPTY_DIGEST_EVENT"]]) + "\n")
             sys.exit(0)
         digest = hashlib.sha256()
         for path in sys.argv[3:]:
@@ -91,6 +94,7 @@ else:
         path.chmod(0o755)
     environment = {"HOME": str(tmp_path / "home"), "CODE_HOME": str(tmp_path / "code-home"),
                    "PREP_TEST_REPO": str(repo),
+                   "PREP_TEST_EMPTY_DIGEST_EVENT": EMPTY_DIGEST_EVENT,
                    "PATH": str(binaries) + os.pathsep + "/usr/bin:/bin",
                    "PREP_TEST_LOG": str(tmp_path / "calls.jsonl")}
     return repo, environment
@@ -156,6 +160,7 @@ def test_preparation_failure_is_explicit_and_preserves_unowned_modules(
         assert "fixture normalization failed" in result.stderr
         assert _preparation_calls(environment, "npm") == []
     elif failure == "digest":
+        assert _preparation_calls(environment, EMPTY_DIGEST_EVENT) == [[EMPTY_DIGEST_EVENT]]
         assert result.stderr
         assert _preparation_calls(environment, "npm") == []
     elif failure == "duplicate":
