@@ -1,6 +1,5 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const EXTERNAL_SYSTEM_ATTRIBUTE = 'external.system.id="pyproject.toml"';
@@ -35,7 +34,12 @@ export function dependencyDigest(manifests) {
 	return digest.digest('hex');
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+const entryFile = process.argv[1];
+if (
+	entryFile &&
+	fs.existsSync(entryFile) &&
+	fs.realpathSync(entryFile) === fs.realpathSync(fileURLToPath(import.meta.url))
+) {
 	switch (process.argv[2]) {
 		case 'normalize':
 			normalizePythonModuleFile(process.argv[3]);

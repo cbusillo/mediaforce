@@ -33,6 +33,10 @@ dependency_stamp="$frontend_root/node_modules/.mediaforce-dependencies.sha256"
 dependency_digest="$(
 	node "$repo_root/scripts/prepare-jetbrains-state.mjs" digest "$frontend_root/package.json" "$frontend_root/package-lock.json"
 )"
+if [[ -z "$dependency_digest" ]]; then
+	echo "Dependency digest preparation returned no digest" >&2
+	exit 1
+fi
 
 if [[ ! -f "$dependency_stamp" ]] || [[ ! -f "$frontend_root/node_modules/.package-lock.json" ]] || [[ "$(<"$dependency_stamp")" != "$dependency_digest" ]]; then
 	rm -f "$dependency_stamp"
