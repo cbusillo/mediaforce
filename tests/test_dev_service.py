@@ -327,7 +327,9 @@ def process_trees() -> Iterator[list[ProcessTree]]:
                     tree.root.stderr.close()
 
 
-def start_process_tree(tmp_path: Path, trees: list[ProcessTree], name: str) -> ProcessTree:
+def start_process_tree(
+    tmp_path: Path, trees: list[ProcessTree], name: str, *, ignore_sigterm: bool = False,
+) -> ProcessTree:
     finished = tmp_path / f"{name}-finished.json"
     child_finished = tmp_path / f"{name}-child-finished"
     cleanup_reader, cleanup_writer = os.pipe()
@@ -342,7 +344,7 @@ def terminate(signum, frame):
     Path(sys.argv[2]).touch()
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     os.kill(os.getpid(), signal.SIGTERM)
-signal.signal(signal.SIGTERM, terminate)
+signal.signal(signal.SIGTERM, signal.SIG_IGN if sys.argv[4] == "stubborn" else terminate)
 os.write(int(sys.argv[3]), b"ready")
 os.close(int(sys.argv[3]))
 os.read(int(sys.argv[1]), 4)
@@ -358,7 +360,7 @@ import sys
 cleanup_reader, lifetime_writer = int(sys.argv[2]), int(sys.argv[3])
 ready_reader, ready_writer = os.pipe()
 child = subprocess.Popen(
-    [sys.executable, "-c", sys.argv[4], str(cleanup_reader), sys.argv[5], str(ready_writer)],
+    [sys.executable, "-c", sys.argv[4], str(cleanup_reader), sys.argv[5], str(ready_writer), sys.argv[6]],
     pass_fds=(cleanup_reader, lifetime_writer, ready_writer),
 )
 os.close(ready_writer)
@@ -374,7 +376,8 @@ result = child.wait()
 Path(sys.argv[1]).write_text(json.dumps({"child_returncode": result, "root_signaled": root_signaled}))
 '''
     root = subprocess.Popen(
-        [sys.executable, "-c", code, str(finished), str(cleanup_reader), str(lifetime_writer), child_code, str(child_finished)],
+        [sys.executable, "-c", code, str(finished), str(cleanup_reader), str(lifetime_writer), child_code,
+         str(child_finished), "stubborn" if ignore_sigterm else "normal"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=(cleanup_reader, lifetime_writer),
     )
     os.close(cleanup_reader)
@@ -429,6 +432,39 @@ def test_stop_discovers_owned_parent_and_descendants_and_preserves_foreign_tree(
     assert lock.read_bytes() == lock_bytes
     assert not pid_file.exists()
     assert "unloaded launch agent" not in result.stdout
+
+
+def test_stop_forces_stubborn_owned_tree_to_exit(
+    tmp_path: Path, process_trees: list[ProcessTree],
+) -> None:
+    script, lock, pid_file, _, environment = prepare_dev_service(tmp_path, "absent", "pid_file", "owned")
+    owned = start_process_tree(tmp_path, process_trees, "stubborn", ignore_sigterm=True)
+    foreign = start_process_tree(tmp_path, process_trees, "foreign")
+    table = tmp_path / "process-table.json"
+    rows = []
+    for tree, repo in ((owned, environment["DEV_TEST_REPO"]), (foreign, "/foreign/checkout")):
+        rows.extend([
+            {"pid": tree.root.pid, "parent": 0, "command": repo + "/.venv/bin/mediaforce-web",
+             "finished": str(tree.finished)},
+            {"pid": tree.child_pid, "parent": tree.root.pid, "command": "uvicorn worker",
+             "finished": str(tree.child_finished)},
+        ])
+    table.write_text(json.dumps(rows))
+    environment["DEV_TEST_TREE"] = str(table)
+    pid_file.write_text(str(owned.child_pid))
+    lock_bytes = lock.read_bytes()
+    result = subprocess.run(
+        ["/bin/bash", str(script), "stop", "backend"], cwd=tmp_path,
+        env=environment, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert owned.root.wait(timeout=5) == -signal.SIGKILL
+    assert_tree_stopped(owned)
+    assert not owned.child_finished.exists()
+    assert foreign.root.poll() is None
+    assert not foreign.finished.exists()
+    assert lock.read_bytes() == lock_bytes
+    assert not pid_file.exists()
 
 
 def test_restart_stops_owned_tree_unloads_once_and_starts_backend_with_retained_lock(
