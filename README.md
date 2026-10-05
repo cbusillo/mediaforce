@@ -634,12 +634,13 @@ create remote paths and install `ffmpeg-full` plus `ab-av1` for
 `sample_calibration` hosts when possible. Those sample hosts now verify
 `libvmaf`/`xpsnr` metric support and `libsvtav1` before they show as ready.
 The controller's automatic background recovery reconnects required SMB storage
-through the macOS NetFS API
-with `UIOption=NoUI`, using existing Keychain credentials without reading,
+with a saved share mapping through the macOS NetFS API with `UIOption=NoUI`,
+using existing Keychain credentials without reading,
 storing, or transporting passwords. Its background recovery runs even when
 processing is paused or the work window is closed; reconnecting storage does
 not unpause work. Clean connection failures retry with bounded backoff;
-an ambiguous timeout waits for a manual reconnect through Finder or Prepare.
+missing mappings and failures that cannot be retried safely, including ambiguous
+timeouts, wait for user attention.
 Fresh checks must verify the expected mount path, share identity, and directory
 access before work starts. See [controller storage recovery](docs/development/macos-login-item.md#controller-storage-recovery)
 for the runtime contract and installed acceptance procedure.
