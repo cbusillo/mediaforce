@@ -1,11 +1,12 @@
 import json
 from pathlib import Path
 import tempfile
+import tomllib
 import unittest
 from typing import Any
 
-from mediaforce.core.config import load_config
-from mediaforce.encoding.bakeoff import build_bakeoff_plan, write_bakeoff_plan
+from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.encoding.bakeoff import DEFAULT_BAKEOFF_ENGINES, build_bakeoff_plan, write_bakeoff_plan
 
 
 def _manifest() -> dict[str, Any]:
@@ -67,8 +68,25 @@ def _manifest() -> dict[str, Any]:
 
 
 class BakeoffPlanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def _config(self) -> MediaforceConfig:
+        with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
+            raw = tomllib.load(handle)
+        return MediaforceConfig(raw=raw, paths=ConfigPaths(
+            project_root=self.root, config_path=self.root / "config.toml",
+            db_path=self.root / "library.sqlite3", run_manifest_dir=self.root / "runs",
+            web_state_dir=self.root / "web", review_dir=self.root / "review",
+            runtime_settings_path=self.root / "runtime.json",
+        ))
+
     def test_build_bakeoff_plan_uses_size_first_defaults_and_candidates(self) -> None:
-        config = load_config(Path("config/defaults.toml"))
+        config = self._config()
         plan = build_bakeoff_plan(
             config,
             _manifest(),
@@ -77,8 +95,8 @@ class BakeoffPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(plan["decision_model"], "size_first_review")
-        self.assertEqual(plan["default_targets"]["target_size_mb"], 300)
-        self.assertEqual(plan["default_targets"]["min_target_vmaf"], 80.0)
+        self.assertEqual(plan["default_targets"]["target_size_mb"], config.video["target_size_mb"])
+        self.assertEqual(plan["default_targets"]["min_target_vmaf"], config.video["min_target_vmaf"])
         item = plan["items"][0]
         self.assertEqual(item["target_size_bytes"], 300_000_000)
         self.assertEqual(item["target_video_size_bytes"], 231_200_000)
@@ -88,17 +106,17 @@ class BakeoffPlanTests(unittest.TestCase):
         self.assertEqual(item["resolution"], "1920x1080")
         self.assertEqual(item["quality_floor"], {"metric": "vmaf", "target": 85.0, "minimum": 80.0})
         engine_keys = [engine["key"] for engine in item["engines"]]
-        self.assertEqual(engine_keys, ["ab-av1", "av1an", "xav", "auto-boost"])
-        av1an = item["engines"][1]
+        self.assertEqual(engine_keys, list(DEFAULT_BAKEOFF_ENGINES))
+        av1an = next(engine for engine in item["engines"] if engine["key"] == "av1an")
         self.assertIn("scene-aware-candidate", av1an["category"])
         self.assertIn("ssimulacra2", av1an["metric_support"])
         self.assertIn("ssimulacra2", av1an["command"])
         self.assertEqual(av1an["command_status"], "template-needs-host-validation")
-        auto_boost = item["engines"][3]
+        auto_boost = next(engine for engine in item["engines"] if engine["key"] == "auto-boost")
         self.assertEqual(auto_boost["metric_support"], ["script-defined"])
 
     def test_build_bakeoff_plan_resolves_normalized_target_for_item_runtime(self) -> None:
-        config = load_config(Path("config/defaults.toml"))
+        config = self._config()
         manifest = _manifest()
         manifest["items"][0]["duration_seconds"] = 88 * 60
 
@@ -110,14 +128,23 @@ class BakeoffPlanTests(unittest.TestCase):
         self.assertEqual(item["target_video_size_bytes"], 454_080_000)
         self.assertEqual(command[command.index("--target-size-mb") + 1], "454.08")
 
+    def test_build_bakeoff_plan_forwards_custom_configuration_defaults(self) -> None:
+        config = self._config()
+        config.raw["video"].update(target_size_bytes=470_000_000, target_size_mb=470, min_target_vmaf=72.5)
+
+        plan = build_bakeoff_plan(config, _manifest(), indexes=[0])
+
+        self.assertEqual(plan["default_targets"]["target_size_bytes"], config.video["target_size_bytes"])
+        self.assertEqual(plan["default_targets"]["min_target_vmaf"], config.video["min_target_vmaf"])
+
     def test_build_bakeoff_plan_can_limit_engines(self) -> None:
-        config = load_config(Path("config/defaults.toml"))
+        config = self._config()
         plan = build_bakeoff_plan(config, _manifest(), indexes=[0], engines=["av1an"])
 
         self.assertEqual([engine["key"] for engine in plan["items"][0]["engines"]], ["av1an"])
 
     def test_build_bakeoff_plan_blocks_target_size_engine_when_runtime_is_missing(self) -> None:
-        config = load_config(Path("config/defaults.toml"))
+        config = self._config()
         manifest = _manifest()
         manifest["items"][0]["duration_seconds"] = 0
 

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mediaforce.core.config import ConfigPaths, DEFAULT_CONFIG_PATH, MediaforceConfig
+from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.library.run_manifests import build_run_manifest
 from mediaforce.tuning.target_provenance import (
     EXACT_ITEM_TARGET_BELOW_QUALITY_SAFE_MINIMUM,
@@ -256,7 +256,7 @@ class TargetProvenanceTests(unittest.TestCase):
         self.assertTrue(provenance["policy_hash"])
 
     def _config(self, *, overrides: list[dict[str, object]] | None = None) -> MediaforceConfig:
-        with DEFAULT_CONFIG_PATH.open("rb") as handle:
+        with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
             raw = tomllib.load(handle)
         raw["overrides"] = overrides or []
         raw["video"].update({

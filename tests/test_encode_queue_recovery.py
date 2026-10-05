@@ -24566,7 +24566,7 @@ raise SystemExit(0)
         self.assertIn("one season at a time", str(raised.exception.detail))
 
     def test_lifecycle_override_queues_only_the_exact_tv_episode(self) -> None:
-        with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
+        with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
             complete_raw = copy.deepcopy(tomllib.load(handle))
         complete_raw["media"].update(self.config.raw["media"])
         complete_raw["remote_hosts"] = []
@@ -24686,7 +24686,7 @@ raise SystemExit(0)
         self.assertIn("Confirm the older-season selection", str(raised.exception.detail))
 
     def test_queue_older_seasons_freezes_server_selected_manifest(self) -> None:
-        with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
+        with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
             complete_raw = copy.deepcopy(tomllib.load(handle))
         complete_raw["media"].update(self.config.raw["media"])
         complete_raw["remote_hosts"] = []
@@ -24795,7 +24795,7 @@ raise SystemExit(0)
         return reclassify_cadence_summary(measured)
 
     def _complete_queue_config(self) -> MediaforceConfig:
-        with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
+        with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
             complete_raw = copy.deepcopy(tomllib.load(handle))
         complete_raw["media"].update(self.config.raw["media"])
         complete_raw["remote_hosts"] = []
@@ -25611,7 +25611,7 @@ raise SystemExit(0)
         self.assertEqual(raised.exception.status_code, 400)
 
     def test_queue_older_seasons_queues_only_cadence_cleared_items(self) -> None:
-        with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
+        with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
             complete_raw = copy.deepcopy(tomllib.load(handle))
         complete_raw["media"].update(self.config.raw["media"])
         complete_raw["remote_hosts"] = []
@@ -25766,7 +25766,7 @@ raise SystemExit(0)
         self.assertEqual(work_status, "queued")
 
     def test_queue_older_seasons_does_not_create_an_empty_job_when_none_are_cleared(self) -> None:
-        with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
+        with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
             complete_raw = copy.deepcopy(tomllib.load(handle))
         complete_raw["media"].update(self.config.raw["media"])
         complete_raw["remote_hosts"] = []

@@ -5,7 +5,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from mediaforce.core.config import ConfigPaths, DEFAULT_CONFIG_PATH, MediaforceConfig
+from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata
 from mediaforce.library.candidate_selection import (
@@ -331,7 +331,7 @@ class LibraryLifecycleTests(unittest.TestCase):
                 "tv/A Plex Show/Season 1/Episode 01.mkv",
                 age_days=200,
             )
-            discovered_item = self._insert_item(
+            self._insert_item(
                 connection,
                 "tv/B Discovered Show/Season 1/Episode 01.mkv",
                 age_days=1_000,
@@ -624,7 +624,7 @@ class LibraryLifecycleTests(unittest.TestCase):
         self._insert_series_metadata(connection, "tv/House", status="Returning Series", in_production=True)
 
     def _config(self, *, mode: str | None = None) -> MediaforceConfig:
-        with DEFAULT_CONFIG_PATH.open("rb") as handle:
+        with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
             raw = copy.deepcopy(tomllib.load(handle))
         raw["media"]["source_roots"] = {
             "movies": str(self.root / "source" / "movies"),
