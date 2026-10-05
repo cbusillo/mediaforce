@@ -374,3 +374,30 @@ def test_unknown_active_sample_size_holds_other_staged_work(sample_run: dict[str
         runtime.run_sampled_calibration(**sample_run)
     stage.assert_not_called()
     sample_run["deps"].search_quality_for_source.assert_not_called()
+
+
+def test_active_sample_protects_computer_from_encode_and_admission_cleanup(sample_run: dict[str, Any]) -> None:
+    from sqlalchemy import update
+    from mediaforce.core.db_tables import calibration_jobs
+
+    config = sample_run["config"]
+    host = config.remote_hosts[0]
+    with open_db(config.paths.db_path) as connection:
+        save_job(connection, {"job_id": "using-computer", "prefix": "tv/active", "status": "running", "lane": "sample",
+                              "action": "baseline", "host": sample_run["host_data"], "sample_item": sample_run["sample_item"],
+                              "created_at": "2026-10-04T00:00:00+00:00", "updated_at": "2026-10-04T00:00:00+00:00"})
+    prepared = {**host, "scratch_admission_started": True}
+    deps = Mock()
+    import threading
+    deps.scratch_admission_lock = threading.Lock()
+    deps.scratch_ready_hosts = {"prepared": prepared}
+    assert encode_runtime._host_has_other_running_jobs(config, "finished-encode", host)
+    with patch.object(encode_runtime, "_launch_scratch_admission_task") as lifecycle:
+        encode_runtime._stop_unused_scratch_preparations(config, deps)
+        lifecycle.assert_not_called()
+        with open_db(config.paths.db_path) as connection:
+            connection.execute(update(calibration_jobs).where(calibration_jobs.c.job_id == "using-computer")
+                               .values(status="pending_review"))
+        assert not encode_runtime._host_has_other_running_jobs(config, "finished-encode", host)
+        encode_runtime._stop_unused_scratch_preparations(config, deps)
+        lifecycle.assert_called_once_with(config, deps, prepared, stop=True)

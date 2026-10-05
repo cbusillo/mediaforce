@@ -704,7 +704,9 @@ def run_sampled_calibration(
             )
         active_budgets = [reservations.get(token, 0) for token in host_identity_tokens(sample_host)]
         if any(budget is None for budget in active_budgets):
-            raise StagedScratchError("Waiting for the active work's scratch-space requirement on this computer.")
+            raise StagedScratchError(
+                "Cannot check scratch space because active work has an unknown file size. Retry after it finishes."
+            )
         reserved_bytes = max((budget for budget in active_budgets if budget is not None), default=0)
     stage = staged_job(
         sample_host,

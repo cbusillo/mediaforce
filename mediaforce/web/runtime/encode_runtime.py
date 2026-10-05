@@ -21,6 +21,7 @@ from sqlalchemy import func
 from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
+from sqlalchemy import and_, or_
 from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.config import MediaforceConfig
@@ -29,6 +30,7 @@ from mediaforce.web.runtime.controller_storage_recovery import controller_storag
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
 from mediaforce.core.db import DBClient, is_database_busy_failure, open_db
 from mediaforce.core.db_tables import encode_jobs
+from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
@@ -3108,6 +3110,10 @@ def claim_next_runnable_encode_job(
         prepared_staged_hosts: dict[str, dict[str, Any]] | None = None,
         scratch_capacity_cache: dict[str, int | None] | None = None,
 ) -> dict[str, Any] | None:
+    known_calibrations = connection.execute(
+        select(calibration_jobs.c.job_id, calibration_jobs.c.host_json, calibration_jobs.c.sample_item_json)
+        .where(calibration_jobs.c.status.in_(("starting", "running")))
+    ).mappings().fetchall()
     next_job = load_next_runnable_encode_job(
         connection,
         config,
@@ -3121,8 +3127,27 @@ def claim_next_runnable_encode_job(
         return None
     worker_id = _encode_job_worker_id()
     now_iso = deps.now_iso()
+    claim = update(encode_jobs)
+    selected_host = object_dict(next_job.get("host"))
+    if _uses_staged_scratch(selected_host):
+        tokens = _host_identity_tokens(selected_host) | {str(selected_host.get("label") or "").strip()}
+        tokens.discard("")
+        new_calibrations = select(calibration_jobs.c.job_id).where(
+            calibration_jobs.c.status.in_(("starting", "running")),
+            or_(func.trim(func.json_extract(calibration_jobs.c.host_json, "$.key")).in_(tokens),
+                func.trim(func.json_extract(calibration_jobs.c.host_json, "$.host")).in_(tokens)),
+        )
+        if known_calibrations:
+            new_calibrations = new_calibrations.where(~or_(*(
+                and_(calibration_jobs.c.job_id == row["job_id"],
+                     calibration_jobs.c.host_json == row["host_json"],
+                     calibration_jobs.c.sample_item_json == row["sample_item_json"])
+                for row in known_calibrations
+            )))
+        # Recheck promises atomically with the claim, without locking during probes or selection.
+        claim = claim.where(~new_calibrations.exists())
     update_result = connection.execute(
-        update(encode_jobs)
+        claim
         .where(encode_jobs.c.job_id == next_job["job_id"])
         .where(encode_jobs.c.status == "queued")
         .values(
@@ -3806,6 +3831,9 @@ def _host_has_other_running_jobs(config: MediaforceConfig, job_id: str, host_pay
     if not target_key:
         return False
     with open_db(config.paths.db_path) as connection:
+        sample_reservations = calibration_scratch_reservations(connection, config)
+        if _host_identity_tokens(target_host) & sample_reservations.keys():
+            return True
         rows = connection.execute(
             select(encode_jobs.c.job_id, encode_jobs.c.host_json)
             .where(encode_jobs.c.status == "running")

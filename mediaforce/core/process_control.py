@@ -243,7 +243,7 @@ def _retained_process_deadline_helper() -> Iterator[tuple[int, str]]:
 class ManagedProcessController:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._process: subprocess.Popen[str] | None = None
+        self._process: subprocess.Popen[str] | subprocess.Popen[bytes] | None = None
         self._cancel_requested = False
         self._cancel_error_type: type[ProcessCancelledError] = ProcessCancelledError
         self._cancel_message = "Operation was cancelled."
@@ -253,7 +253,9 @@ class ManagedProcessController:
         self._activity_guard: Callable[[], None] | None = None
         self._process_deadline_ns: int | None = None
 
-    def attach(self, process: subprocess.Popen[str], *, terminate_process_group: bool = False) -> None:
+    def attach(
+            self, process: subprocess.Popen[str] | subprocess.Popen[bytes], *, terminate_process_group: bool = False,
+    ) -> None:
         with self._lock:
             if self._cleanup_unproven:
                 raise ProcessDeadlineEnforcementError(
@@ -268,7 +270,7 @@ class ManagedProcessController:
 
     def clear(
             self,
-            process: subprocess.Popen[str],
+            process: subprocess.Popen[str] | subprocess.Popen[bytes],
             *,
             cleanup_unproven: bool = False,
     ) -> None:
@@ -403,7 +405,7 @@ class ManagedProcessController:
 
 
 def _terminate_process(
-        process: subprocess.Popen[str] | None,
+        process: subprocess.Popen[str] | subprocess.Popen[bytes] | None,
         *,
         terminate_process_group: bool,
         process_group_id: int | None = None,

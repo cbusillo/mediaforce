@@ -106,10 +106,18 @@ The sample's worker check also includes scratch promised to active encodes and
 other samples on that computer. Starting/running calibration rows reserve their
 full source/output/search budget before bytes reach disk; the production
 scheduler includes those rows too. A sample excludes its own row from that
-additional reservation. Unknown active budgets hold further scratch work.
+additional reservation. Unknown active budgets leave production work queued.
+Samples retain their existing failure/retry behavior: if active work's budget
+is unknown or space is insufficient, the sample reports the reason and can be
+retried after that work finishes or on another computer.
 As with parallel encodes, the full reservation is conservative because bytes
 already written also reduce measured free space. Completed samples waiting for
 review reserve no remote space: their keeper has already removed scratch.
+The encode claim atomically rejects a new or changed sample reservation that
+arrives after selection; the next pass selects again without consuming an
+attempt. Selection and probes retain their existing transaction boundaries.
+Encode completion and admission cleanup keep a computer running while a staged
+sample is using it.
 
 Review moments follow the existing remote-computer path: stored evidence and
 default moments are used without another controller-side source analysis or a
