@@ -14,7 +14,7 @@ import pytest
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db
-from mediaforce.encoding.encode_queue import save_encode_job
+from mediaforce.encoding.encode_queue import load_encode_job, save_encode_job
 from mediaforce.tuning.calibration_jobs import save_job
 from mediaforce.web.runtime import encode_runtime
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
@@ -257,7 +257,38 @@ def test_stop_reaches_real_remote_renderer_and_cleans_keeper(sample_run: dict[st
         with pytest.raises(ProcessCancelledError):
             runtime.run_sampled_calibration(**sample_run)
     assert any("-i" in command for command in observed)
+    assert not any(command[:2] == ["rm", "-rf"] for command in observed)
     pull.assert_not_called()
+    assert_scratch_empty(sample_run)
+
+
+@pytest.mark.parametrize("source_review", [False, True])
+def test_stop_cancels_real_review_pull_process_and_removes_local_clip(sample_run: dict[str, Any], source_review: bool) -> None:
+    setattr(sample_run["deps"], "render_source_review_clips" if source_review else "encode_preview_clips",
+            render_source_review_clips if source_review else encode_preview_clips)
+    readers: list[subprocess.Popen[bytes]] = []
+    local_paths: list[Path] = []
+
+    def pull(job: staged_host.StagedJob, path: Path, **kwargs: Any) -> None:
+        def popen(_argv: list[str], **process_kwargs: Any) -> subprocess.Popen[bytes]:
+            reader = subprocess.Popen(["sh", "-c", "printf partial; sleep 30"], **process_kwargs)
+            readers.append(reader)
+            sample_run["process_controller"].cancel()
+            return reader
+
+        local_paths.append(path)
+        with patch.object(staged_host.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "100", "")):
+            staged_host.pull_output(job, path, popen=popen, **kwargs)
+
+    renderer = "mediaforce.review._render_source_review_clip_remote" if source_review else "mediaforce.review._render_encoded_preview_clip_remote"
+    with local_stage(sample_run), patch("mediaforce.review.run_remote_command") as remote, patch(renderer), patch(
+        "mediaforce.reviewing.clips.pull_output", side_effect=pull
+    ), pytest.raises(ProcessCancelledError):
+        runtime.run_sampled_calibration(**sample_run)
+    assert len(readers) == 1
+    assert readers[0].poll() is not None
+    assert not local_paths[0].exists()
+    assert not any(call.args[1][:2] == ["rm", "-rf"] for call in remote.call_args_list)
     assert_scratch_empty(sample_run)
 
 
@@ -401,3 +432,33 @@ def test_active_sample_protects_computer_from_encode_and_admission_cleanup(sampl
         assert not encode_runtime._host_has_other_running_jobs(config, "finished-encode", host)
         encode_runtime._stop_unused_scratch_preparations(config, deps)
         lifecycle.assert_called_once_with(config, deps, prepared, stop=True)
+
+
+def test_encode_claim_rechecks_changed_sample_budget(sample_run: dict[str, Any], tmp_path: Path) -> None:
+    from sqlalchemy import update
+    from mediaforce.core.db_tables import encode_jobs
+
+    config = sample_run["config"]
+    running_encode(sample_run, tmp_path)
+    sample = {"job_id": "changing-sample", "prefix": "tv/changing", "status": "running", "lane": "sample",
+              "action": "baseline", "host": sample_run["host_data"], "sample_item": sample_run["sample_item"],
+              "created_at": "2026-10-04T00:00:00+00:00", "updated_at": "2026-10-04T00:00:00+00:00"}
+    with open_db(config.paths.db_path) as connection:
+        save_job(connection, sample)
+        connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == "production").values(status="queued"))
+        connection.commit()
+        selected = load_encode_job(connection, "production")
+        assert selected is not None
+
+        def select_while_sample_changes(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            with open_db(config.paths.db_path) as sample_connection:
+                sample_connection.exec_driver_sql("BEGIN IMMEDIATE")
+                save_job(sample_connection, {**sample, "sample_item": {**sample["sample_item"], "source_size_bytes": 999999}})
+            return selected
+
+        deps = Mock(encode_job_lease_seconds=60, now_iso=sample_run["deps"].now_iso)
+        with patch.object(encode_runtime, "load_next_runnable_encode_job", side_effect=select_while_sample_changes):
+            assert encode_runtime.claim_next_runnable_encode_job(connection, config, deps) is None
+        queued = load_encode_job(connection, "production")
+        assert queued is not None
+        assert queued["status"] == "queued" and queued["attempt_count"] == 0

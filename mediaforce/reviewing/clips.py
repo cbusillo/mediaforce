@@ -154,10 +154,11 @@ def encode_preview_clips_remote(
                 )
             )
     finally:
-        try:
-            run_remote_command(host, ["rm", "-rf", str(remote_root)], 30)
-        except (OSError, RuntimeError, subprocess.SubprocessError):
-            pass
+        if staged is None:
+            try:
+                run_remote_command(host, ["rm", "-rf", str(remote_root)], 30)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                pass
     return encoded
 
 
@@ -394,8 +395,9 @@ def render_source_review_clips_remote(
                 )
             )
     finally:
-        try:
-            run_remote_command(host, ["rm", "-rf", str(remote_root)], 30)
-        except (OSError, RuntimeError, subprocess.SubprocessError):
-            pass
+        if staged is None:
+            try:
+                run_remote_command(host, ["rm", "-rf", str(remote_root)], 30)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                pass
     return rendered
