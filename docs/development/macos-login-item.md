@@ -110,8 +110,10 @@ remains owned by `mediaforce service`.
 
 Backend process discovery also requires that checkout's exact executable in
 the command, including when a Python interpreter launches it. Start the local
-development backend with `scripts/mediaforce-dev.sh start backend`; a sibling
-checkout's PID file, port listener, or runtime-lock owner is left running.
+development backend with `scripts/mediaforce-dev.sh start backend`. A sibling
+checkout's backend stays running when discovered through a PID file, port
+listener, or runtime lock. Stop may remove the shared development PID file;
+the runtime lock is preserved.
 
 ## Verification
 

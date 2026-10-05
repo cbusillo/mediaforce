@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 STATE_DIR="${HOME}/Library/Application Support/mediaforce"
 BACKEND_PID_FILE="${STATE_DIR}/mediaforce-web.pid"
 BACKEND_LOG_FILE="${STATE_DIR}/mediaforce-web.log"

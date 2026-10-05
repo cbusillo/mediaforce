@@ -2,7 +2,7 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
+import select
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -21,6 +21,10 @@ def prepare_dev_service(
     scripts.mkdir(parents=True)
     script = scripts / "mediaforce-dev.sh"
     shutil.copyfile(Path(__file__).resolve().parents[1] / "scripts/mediaforce-dev.sh", script)
+    if service == "symlink":
+        alias = tmp_path / "checkout alias"
+        alias.symlink_to(repo, target_is_directory=True)
+        script = alias / "scripts/mediaforce-dev.sh"
     home = tmp_path / "home"
     state = home / "Library/Application Support/mediaforce"
     state.mkdir(parents=True)
@@ -51,17 +55,24 @@ elif name == "launchctl" and sys.argv[1] == "print":
     service = os.environ["DEV_TEST_SERVICE"]
     if service == "absent":
         sys.exit(1)
-    repo = os.environ["DEV_TEST_REPO"] if service != "other_checkout" else "/other/checkout"
+    repo = os.environ["DEV_TEST_REPO"] if service not in {"other_checkout", "other_directory"} else "/other/checkout"
     if service == "sibling_checkout":
         repo += "-sibling"
     elif service == "nested_checkout":
         repo += "/nested"
     program = repo + "/.venv/bin/mediaforce-web" if service != "other_program" else "/other/mediaforce-web-wrapper"
+    if service == "other_directory":
+        program = os.environ["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web"
     print(f"\\tworking directory = {repo}\\n\\tprogram = {program}\\narguments = {{\\nmediaforce-web\\n}}")
 elif name == "launchctl" and sys.argv[1] == "bootout":
     Path(os.environ["DEV_TEST_LOG"]).with_suffix(".unloaded").touch()
 elif name == "ps" and "DEV_TEST_TREE" in os.environ:
     rows = json.loads(Path(os.environ["DEV_TEST_TREE"]).read_text())
+    rows = [row for row in rows if not row.get("finished") or not Path(row["finished"]).exists()]
+    started = os.environ.get("DEV_TEST_STARTED")
+    if started and Path(started).exists():
+        rows.append({"pid": json.loads(Path(started).read_text())["pid"], "parent": 0,
+                     "command": os.environ["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web"})
     if sys.argv[1:] == ["-axo", "pid=,ppid="]:
         for row in rows:
             print(row["pid"], row["parent"])
@@ -128,6 +139,8 @@ elif name == "mkdir":
     target = Path(sys.argv[-1])
     assert target.resolve().is_relative_to(Path(os.environ["HOME"]).resolve())
     target.mkdir(parents=True, exist_ok=True)
+elif name == "nohup":
+    os.execv(sys.argv[1], sys.argv[1:])
 elif name == "rm":
     for argument in sys.argv[1:]:
         if argument.startswith("-"):
@@ -138,7 +151,7 @@ elif name == "rm":
 elif name not in {"launchctl", "ps", "lsof", "sleep"}:
     raise AssertionError(name)
 '''
-    for command in ("id", "launchctl", "ps", "lsof", "python3", "sleep", "dirname", "sed", "awk", "sort", "paste", "tr", "rm", "mkdir"):
+    for command in ("id", "launchctl", "ps", "lsof", "python3", "sleep", "dirname", "sed", "awk", "sort", "paste", "tr", "rm", "mkdir", "nohup"):
         binary = binaries / command
         binary.write_text(stub)
         binary.chmod(0o755)
@@ -147,7 +160,7 @@ elif name not in {"launchctl", "ps", "lsof", "sleep"}:
         "HOME": str(home),
         "DEV_TEST_LOG": str(log),
         "DEV_TEST_LABEL": LOGIN_ITEM_LABEL,
-        "DEV_TEST_SERVICE": service,
+        "DEV_TEST_SERVICE": "matching" if service == "symlink" else service,
         "DEV_TEST_REPO": str(repo),
         "DEV_TEST_RUNNING": running,
         "DEV_TEST_PROCESS": process,
@@ -159,7 +172,7 @@ elif name not in {"launchctl", "ps", "lsof", "sleep"}:
 
 @pytest.mark.parametrize("service,running,process", [
     (service, "idle", "owned") for service in (
-        "matching", "other_checkout", "sibling_checkout", "nested_checkout", "other_program", "absent",
+        "matching", "symlink", "other_checkout", "other_directory", "sibling_checkout", "nested_checkout", "other_program", "absent",
     )
 ] + [
     ("absent", running, process) for running in ("pid_file", "listener", "lock")
@@ -197,12 +210,13 @@ def test_stop_unloads_only_this_checkout_and_preserves_runtime_lock(
 
     assert result.returncode == 0, result.stderr
     assert lock.read_bytes() == lock_bytes
-    assert not pid_file.exists()
+    if running == "idle" or process in {"owned", "python_owned"}:
+        assert not pid_file.exists()
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     target = "gui/4242/" + LOGIN_ITEM_LABEL
     assert ["launchctl", "print", target] in calls
     bootouts = [call for call in calls if call[:2] == ["launchctl", "bootout"]]
-    assert bootouts == ([["launchctl", "bootout", target]] if service == "matching" else [])
+    assert bootouts == ([["launchctl", "bootout", target]] if service in {"matching", "symlink"} else [])
 
 
 @pytest.mark.parametrize("action,process", [("start", "owned"), ("start", "foreign"), ("restart", "foreign")])
@@ -248,6 +262,9 @@ class ProcessTree:
     root: subprocess.Popen[bytes]
     child_pid: int
     finished: Path
+    child_finished: Path
+    cleanup_writer: int
+    lifetime_reader: int
 
 
 @pytest.fixture
@@ -257,30 +274,60 @@ def process_trees() -> Iterator[list[ProcessTree]]:
         yield trees
     finally:
         for tree in trees:
-            # A missing completion record means the root did not confirm it reaped its child.
-            if not tree.finished.exists():
+            try:
                 try:
-                    os.kill(tree.child_pid, signal.SIGTERM)
-                except ProcessLookupError:
+                    os.write(tree.cleanup_writer, b"done")
+                except BrokenPipeError:
                     pass
-            if tree.root.poll() is None:
                 tree.root.wait(timeout=5)
-            if tree.root.stdout is not None:
-                tree.root.stdout.close()
-            if tree.root.stderr is not None:
-                tree.root.stderr.close()
+                assert select.select([tree.lifetime_reader], [], [], 5)[0], "fixture tree still alive"
+                assert os.read(tree.lifetime_reader, 1) == b""
+            finally:
+                os.close(tree.cleanup_writer)
+                os.close(tree.lifetime_reader)
+                if tree.root.stdout is not None:
+                    tree.root.stdout.close()
+                if tree.root.stderr is not None:
+                    tree.root.stderr.close()
 
 
 def start_process_tree(tmp_path: Path, trees: list[ProcessTree], name: str) -> ProcessTree:
     finished = tmp_path / f"{name}-finished.json"
+    child_finished = tmp_path / f"{name}-child-finished"
+    cleanup_reader, cleanup_writer = os.pipe()
+    lifetime_reader, lifetime_writer = os.pipe()
+    child_code = '''
+import os
+from pathlib import Path
+import signal
+import sys
+
+def terminate(signum, frame):
+    Path(sys.argv[2]).touch()
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGTERM)
+signal.signal(signal.SIGTERM, terminate)
+os.write(int(sys.argv[3]), b"ready")
+os.close(int(sys.argv[3]))
+os.read(int(sys.argv[1]), 4)
+'''
     code = '''
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
 
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+cleanup_reader, lifetime_writer = int(sys.argv[2]), int(sys.argv[3])
+ready_reader, ready_writer = os.pipe()
+child = subprocess.Popen(
+    [sys.executable, "-c", sys.argv[4], str(cleanup_reader), sys.argv[5], str(ready_writer)],
+    pass_fds=(cleanup_reader, lifetime_writer, ready_writer),
+)
+os.close(ready_writer)
+assert os.read(ready_reader, 1) == b"r"
+os.close(ready_reader)
 root_signaled = False
 def finish(signum, frame):
     global root_signaled
@@ -291,11 +338,14 @@ result = child.wait()
 Path(sys.argv[1]).write_text(json.dumps({"child_returncode": result, "root_signaled": root_signaled}))
 '''
     root = subprocess.Popen(
-        [sys.executable, "-c", code, str(finished)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        [sys.executable, "-c", code, str(finished), str(cleanup_reader), str(lifetime_writer), child_code, str(child_finished)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=(cleanup_reader, lifetime_writer),
     )
+    os.close(cleanup_reader)
+    os.close(lifetime_writer)
     assert root.stdout is not None
     child_pid = int(root.stdout.readline())
-    tree = ProcessTree(root, child_pid, finished)
+    tree = ProcessTree(root, child_pid, finished, child_finished, cleanup_writer, lifetime_reader)
     trees.append(tree)
     return tree
 
@@ -311,16 +361,16 @@ def test_stop_discovers_owned_parent_and_descendants_and_preserves_foreign_tree(
     rows = []
     for tree, repo in ((owned, environment["DEV_TEST_REPO"]), (foreign, "/foreign/checkout")):
         rows.extend([
-            {"pid": tree.root.pid, "parent": 0, "command": repo + "/.venv/bin/mediaforce-web"},
+            {"pid": tree.root.pid, "parent": 0, "command": repo + "/.venv/bin/mediaforce-web", "finished": str(tree.finished)},
             {"pid": tree.child_pid, "parent": tree.root.pid, "command": "uvicorn worker",
-             "port": "8777", "finished": str(tree.finished)},
+             "port": "8777", "finished": str(tree.child_finished)},
         ])
     frontend = None
     if component == "all":
         frontend = start_process_tree(tmp_path, process_trees, "frontend")
         rows.extend([
-            {"pid": frontend.root.pid, "parent": 0, "command": "vite " + environment["DEV_TEST_REPO"] + "/frontend"},
-            {"pid": frontend.child_pid, "parent": frontend.root.pid, "command": "vite worker"},
+            {"pid": frontend.root.pid, "parent": 0, "command": "vite " + environment["DEV_TEST_REPO"] + "/frontend", "finished": str(frontend.finished)},
+            {"pid": frontend.child_pid, "parent": frontend.root.pid, "command": "vite worker", "finished": str(frontend.child_finished)},
         ])
         (pid_file.parent / "mediaforce-frontend.pid").write_text(str(frontend.root.pid))
     table = tmp_path / "process-table.json"
@@ -349,3 +399,68 @@ def test_stop_discovers_owned_parent_and_descendants_and_preserves_foreign_tree(
     assert lock.read_bytes() == lock_bytes
     assert not pid_file.exists()
     assert "unloaded launch agent" not in result.stdout
+
+
+def test_restart_stops_owned_tree_unloads_once_and_starts_backend_with_retained_lock(
+    tmp_path: Path, process_trees: list[ProcessTree],
+) -> None:
+    script, lock, pid_file, log, environment = prepare_dev_service(tmp_path, "matching", "pid_file", "owned")
+    owned = start_process_tree(tmp_path, process_trees, "restart")
+    table = tmp_path / "process-table.json"
+    table.write_text(json.dumps([
+        {"pid": owned.root.pid, "parent": 0, "command": environment["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web",
+         "finished": str(owned.finished)},
+        {"pid": owned.child_pid, "parent": owned.root.pid, "command": "uvicorn worker",
+         "finished": str(owned.child_finished)},
+    ]))
+    environment["DEV_TEST_TREE"] = str(table)
+    pid_file.write_text(str(owned.child_pid))
+    lock_bytes = json.dumps({"pid": owned.child_pid, "owner": "retained runtime"}).encode()
+    lock.write_bytes(lock_bytes)
+    started = tmp_path / "started.json"
+    environment["DEV_TEST_STARTED"] = str(started)
+    cleanup_reader, cleanup_writer = os.pipe()
+    lifetime_reader, lifetime_writer = os.pipe()
+    environment["DEV_TEST_START_CLEANUP_FD"] = str(cleanup_reader)
+    binary = Path(environment["DEV_TEST_REPO"]) / ".venv/bin/mediaforce-web"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!" + sys.executable + "\n" + '''
+import json
+import os
+from pathlib import Path
+import sys
+
+Path(os.environ["DEV_TEST_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "args": sys.argv}))
+os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
+''')
+    binary.chmod(0o755)
+    try:
+        result = subprocess.run(
+            ["/bin/bash", str(script), "restart", "backend"], cwd=tmp_path, env=environment,
+            capture_output=True, text=True, timeout=20, pass_fds=(cleanup_reader, lifetime_writer),
+        )
+        assert result.returncode == 0, result.stderr
+        assert owned.root.wait(timeout=5) == 0
+        completion = json.loads(owned.finished.read_text())
+        assert completion["root_signaled"] and completion["child_returncode"] < 0
+        new_backend = json.loads(started.read_text())
+        assert int(pid_file.read_text()) == new_backend["pid"]
+        assert new_backend["pid"] != owned.root.pid
+        assert new_backend["args"][0] == str(binary)
+        assert "backend: started" in result.stdout
+        assert lock.read_bytes() == lock_bytes
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        assert [call for call in calls if call[:2] == ["launchctl", "bootout"]] == [
+            ["launchctl", "bootout", "gui/4242/" + LOGIN_ITEM_LABEL],
+        ]
+    finally:
+        os.close(cleanup_reader)
+        os.close(lifetime_writer)
+        try:
+            os.write(cleanup_writer, b"done")
+        except BrokenPipeError:
+            pass
+        os.close(cleanup_writer)
+        assert select.select([lifetime_reader], [], [], 5)[0], "started fixture backend still alive"
+        assert os.read(lifetime_reader, 1) == b""
+        os.close(lifetime_reader)
