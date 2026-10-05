@@ -1,10 +1,14 @@
 import subprocess
-from pathlib import Path
+from dataclasses import replace
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from sqlalchemy import select
 
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.encoding.staged_host import pull_output, staged_job_for_host
+from mediaforce.hosts.config import ssh_target_for_host
+from mediaforce.remote import ssh_client_options
 
 
 def encode_preview_clips(
@@ -34,6 +38,7 @@ def encode_preview_clips(
     if host_mode == "ssh":
         return encode_preview_clips_remote_fn(
             host=host or {},
+            process_controller=process_controller,
             source_path=source_path,
             source_codec=source_codec,
             output_dir=output_dir,
@@ -99,9 +104,13 @@ def encode_preview_clips_remote(
         copy_remote_file_to_local: Callable[..., None],
         slug_seconds: Callable[[float], str],
         encoded_preview_clip_factory: Callable[..., Any],
+        process_controller: Any = None,
 ) -> list[Any]:
-    remote_root = Path("/tmp") / f"mediaforce-preview-{uuid_factory().hex[:12]}"
-    run_remote_command(host, ["mkdir", "-p", str(remote_root)], 30)
+    staged = staged_job_for_host(host)
+    remote_base = Path(str(staged.scratch_dir)) if staged is not None else Path("/tmp")
+    remote_root = remote_base / f"mediaforce-preview-{uuid_factory().hex[:12]}"
+    managed_kwargs = {"process_controller": process_controller} if process_controller is not None else {}
+    run_remote_command(host, ["mkdir", "-p", str(remote_root)], 30, **managed_kwargs)
     encoded: list[Any] = []
     try:
         for clip_number, clip_time in enumerate(timestamps, start=1):
@@ -110,6 +119,7 @@ def encode_preview_clips_remote(
             remote_output_path = remote_root / file_name
             render_encoded_preview_clip_remote(
                 host=host,
+                **managed_kwargs,
                 source_path=source_path,
                 source_codec=source_codec,
                 remote_output_path=remote_output_path,
@@ -123,7 +133,18 @@ def encode_preview_clips_remote(
                 audio_plan=audio_plan,
                 video_filter=video_filter,
             )
-            copy_remote_file_to_local(host, remote_output_path, output_path, remote_preview_timeout_seconds)
+            if staged is not None:
+                try:
+                    pull_output(
+                        replace(staged, output_path=PurePosixPath(str(remote_output_path))), output_path,
+                        ssh_target=ssh_target_for_host(host), ssh_options=ssh_client_options(),
+                        process_controller=process_controller,
+                    )
+                except Exception:
+                    output_path.unlink(missing_ok=True)
+                    raise
+            else:
+                copy_remote_file_to_local(host, remote_output_path, output_path, remote_preview_timeout_seconds)
             encoded.append(
                 encoded_preview_clip_factory(
                     output_path=output_path,
@@ -133,10 +154,11 @@ def encode_preview_clips_remote(
                 )
             )
     finally:
-        try:
-            run_remote_command(host, ["rm", "-rf", str(remote_root)], 30)
-        except (OSError, RuntimeError, subprocess.SubprocessError):
-            pass
+        if staged is None:
+            try:
+                run_remote_command(host, ["rm", "-rf", str(remote_root)], 30)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                pass
     return encoded
 
 
@@ -280,6 +302,7 @@ def render_source_review_clips(
     if execution_mode_for_host(host) == "ssh":
         return render_source_review_clips_remote_fn(
             host=host,
+            process_controller=process_controller,
             source_path=source_path,
             source_codec=source_codec,
             output_dir=output_dir,
@@ -327,9 +350,13 @@ def render_source_review_clips_remote(
         copy_remote_file_to_local: Callable[..., None],
         slug_seconds: Callable[[float], str],
         browser_review_clip_factory: Callable[..., Any],
+        process_controller: Any = None,
 ) -> list[Any]:
-    remote_root = Path("/tmp") / f"mediaforce-source-review-{uuid_factory().hex[:12]}"
-    run_remote_command(host, ["mkdir", "-p", str(remote_root)], 30)
+    staged = staged_job_for_host(host)
+    remote_base = Path(str(staged.scratch_dir)) if staged is not None else Path("/tmp")
+    remote_root = remote_base / f"mediaforce-source-review-{uuid_factory().hex[:12]}"
+    managed_kwargs = {"process_controller": process_controller} if process_controller is not None else {}
+    run_remote_command(host, ["mkdir", "-p", str(remote_root)], 30, **managed_kwargs)
     rendered: list[Any] = []
     try:
         for clip_number, clip_time in enumerate(timestamps, start=1):
@@ -338,6 +365,7 @@ def render_source_review_clips_remote(
             remote_output_path = remote_root / file_name
             render_source_review_clip_remote(
                 host=host,
+                **managed_kwargs,
                 source_path=source_path,
                 source_codec=source_codec,
                 remote_output_path=remote_output_path,
@@ -347,7 +375,14 @@ def render_source_review_clips_remote(
             )
             output_path.unlink(missing_ok=True)
             try:
-                copy_remote_file_to_local(host, remote_output_path, output_path, remote_preview_timeout_seconds)
+                if staged is not None:
+                    pull_output(
+                        replace(staged, output_path=PurePosixPath(str(remote_output_path))), output_path,
+                        ssh_target=ssh_target_for_host(host), ssh_options=ssh_client_options(),
+                        process_controller=process_controller,
+                    )
+                else:
+                    copy_remote_file_to_local(host, remote_output_path, output_path, remote_preview_timeout_seconds)
             except Exception:
                 output_path.unlink(missing_ok=True)
                 raise
@@ -360,8 +395,9 @@ def render_source_review_clips_remote(
                 )
             )
     finally:
-        try:
-            run_remote_command(host, ["rm", "-rf", str(remote_root)], 30)
-        except Exception:
-            pass
+        if staged is None:
+            try:
+                run_remote_command(host, ["rm", "-rf", str(remote_root)], 30)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                pass
     return rendered

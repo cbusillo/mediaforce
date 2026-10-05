@@ -2,7 +2,7 @@
 
 A stream host normally receives its source through a pipe, which cannot seek and keeps the
 quality search on the controller. When the host declares a ``scratch_root`` the controller
-instead copies the source into a per-job scratch directory, runs the search and the encode on
+instead copies the source into a per-job scratch directory, runs the search and encoding on
 the host against that local file, pulls the output back, and removes the directory.
 
 Scratch space is recovered three ways: the controller removes the directory when the job
@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from mediaforce.core.type_defs import object_dict
+from mediaforce.core.process_control import ManagedProcessController
 
 STAGED_JOB_KEY = "staged_job"
 SCRATCH_DIR_PREFIX = ".mediaforce-staged-"
@@ -186,7 +187,8 @@ def staged_job(
         ssh_target: str,
         ssh_options: list[str],
         run_remote_command: RunRemoteCommand,
-        process_controller: Any | None = None,
+        process_controller: ManagedProcessController | None = None,
+        reserved_bytes: int = 0,
         popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
 ) -> Iterator[StagedJob]:
     """Stage ``source_path`` on the host for the duration of the block."""
@@ -199,14 +201,15 @@ def staged_job(
 
     remote(sweep_script(scratch_root))
     source_size = source_path.stat().st_size
+    required_bytes = required_scratch_bytes(source_size) + reserved_bytes
     free_result = remote(_free_bytes_script(scratch_root))
     free_kib = (free_result.stdout or "").strip().splitlines()[-1:] or [""]
     if free_result.returncode != 0 or not free_kib[0].isdigit():
         raise StagedScratchError(f"Could not measure scratch space on the encode host: {free_result.stderr.strip()}")
-    if int(free_kib[0]) * 1024 < required_scratch_bytes(source_size):
+    if int(free_kib[0]) * 1024 < required_bytes:
         raise StagedScratchError(
             f"The encode host scratch folder has {int(free_kib[0]) // (1024 * 1024)} GiB free; "
-            f"this file needs about {required_scratch_bytes(source_size) // (1024 ** 3) + 1} GiB."
+            f"this file and reserved work need about {required_bytes // (1024 ** 3) + 1} GiB."
         )
 
     scratch_dir = scratch_root / f"{SCRATCH_DIR_PREFIX}{uuid.uuid4().hex}"
@@ -245,7 +248,7 @@ def _copy_source(
         ssh_target: str,
         ssh_options: list[str],
         remote: Callable[..., subprocess.CompletedProcess[str]],
-        process_controller: Any | None,
+        process_controller: ManagedProcessController | None,
         popen: Callable[..., subprocess.Popen[bytes]],
 ) -> None:
     writer = popen(
@@ -270,6 +273,8 @@ def _copy_source(
         writer.kill()
         writer.wait()
         detail = (writer.stderr.read().decode(errors="replace") if writer.stderr else "").strip()
+        if process_controller is not None:
+            process_controller.throw_if_cancelled()
         raise StagedScratchError(f"Copying the source to the encode host failed: {detail or exc}") from exc
     finally:
         if process_controller is not None:
@@ -291,7 +296,7 @@ def pull_output(
         *,
         ssh_target: str,
         ssh_options: list[str],
-        process_controller: Any | None = None,
+        process_controller: ManagedProcessController | None = None,
         popen: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
 ) -> None:
     """Copy the encoded output from the scratch directory to the controller's staging path."""

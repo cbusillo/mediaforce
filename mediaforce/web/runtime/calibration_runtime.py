@@ -4,6 +4,8 @@ import shutil
 import threading
 import time
 import uuid
+from contextlib import nullcontext
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -18,11 +20,12 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.helpers import resolve_item_source_path
-from mediaforce.encoding.quality import RemoteQualityTimeoutError, default_local_quality_temp_root, \
+from mediaforce.encoding.quality import RemoteQualityTimeoutError, SampleEncodeResult, default_local_quality_temp_root, \
     quality_error_message, resolve_local_quality_temp_root
 from mediaforce.encoding.video_filters import build_video_filter, planned_output_dimensions
-from mediaforce.hosts.config import host_media_access_for_host, host_targets_current_machine
-from mediaforce.remote import execution_mode_for_host
+from mediaforce.encoding.staged_host import STAGED_JOB_KEY, host_scratch_root, staged_job, staged_job_for_host
+from mediaforce.hosts.config import host_media_access_for_host, host_targets_current_machine, ssh_target_for_host
+from mediaforce.remote import execution_mode_for_host, run_remote_command, ssh_client_options
 from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.content_intent_observations import (
@@ -32,6 +35,9 @@ from mediaforce.tuning.content_intent_observations import (
 )
 from mediaforce.tuning.av1_cold_start import unavailable_av1_cold_start_prediction
 from mediaforce.tuning.target_size_search import MAX_TARGET_SIZE_CANDIDATES, TargetSizeSearchError
+from mediaforce.web.runtime.encode_runtime import running_staged_scratch_reservations
+from mediaforce.web.runtime.scratch_reservations import host_identity_tokens
+from mediaforce.encoding.staged_host import StagedScratchError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -65,13 +71,13 @@ class CalibrationRunDeps:
     validate_manifest_items: Any
     generate_compare_clips: Any
     staged_artifact_columns: tuple[str, ...]
-    recommend_review_moments: Any | None = None
-    review_moment_payload: Any | None = None
-    default_review_timestamps: Any | None = None
-    quality_toolchain_identity: Any | None = None
-    select_quality_metric: Any | None = None
-    plan_av1_cold_start: Any | None = None
-    secure_review_artifacts: Any | None = None
+    recommend_review_moments: Callable[..., Any] | None = None
+    review_moment_payload: Callable[..., Any] | None = None
+    default_review_timestamps: Callable[..., Any] | None = None
+    quality_toolchain_identity: Callable[..., Any] | None = None
+    select_quality_metric: Callable[..., Any] | None = None
+    plan_av1_cold_start: Callable[..., Any] | None = None
+    secure_review_artifacts: Callable[..., Any] | None = None
 
 
 class _CalibrationTelemetry:
@@ -100,11 +106,12 @@ class _CalibrationTelemetry:
 
     def start(self) -> None:
         self._persist(progress=self.progress)
-        self.thread = threading.Thread(
+        thread = threading.Thread(
             target=self._heartbeat_loop,
             name=f"calibration-heartbeat-{self.job_id[:8]}",
         )
-        self.thread.start()
+        self.thread = thread
+        thread.start()
 
     def update(self, stage: str, *, completed: int | None = None, total: int | None = None) -> None:
         now = self.deps.now_iso()
@@ -554,6 +561,7 @@ def run_calibration_job(
                     process_controller=process_controller,
                     deps=deps,
                     progress_callback=telemetry.update,
+                    calibration_job_id=job_id,
                 )
 
         telemetry.update("saving_results")
@@ -676,10 +684,70 @@ def run_sampled_calibration(
         process_controller: ManagedProcessController,
         deps: CalibrationRunDeps,
         source_path_override: Path | None = None,
-        progress_callback: Any | None = None,
+        progress_callback: Callable[..., None] | None = None,
+        calibration_job_id: str | None = None,
+) -> tuple[dict[str, Any], Path | None]:
+    sample_host = {**(_configured_host_record(config, host_data) or {}), **host_data}
+    stage_source = (
+        execution_mode_for_host(sample_host) == "ssh"
+        and host_media_access_for_host(sample_host) == "stream"
+        and host_scratch_root(sample_host) is not None
+    )
+    if stage_source and progress_callback is not None:
+        progress_callback("preparing_source")
+    source = source_path_override if source_path_override is not None else Path(sample_item["source_path"])
+    reserved_bytes = 0
+    if stage_source:
+        with open_db(config.paths.db_path) as connection:
+            reservations = running_staged_scratch_reservations(
+                connection, config, exclude_calibration_job_id=calibration_job_id,
+            )
+        active_budgets = [reservations.get(token, 0) for token in host_identity_tokens(sample_host)]
+        if any(budget is None for budget in active_budgets):
+            raise StagedScratchError(
+                "Cannot check scratch space because active work has an unknown file size. Retry after it finishes."
+            )
+        reserved_bytes = max((budget for budget in active_budgets if budget is not None), default=0)
+    stage = staged_job(
+        sample_host,
+        source,
+        output_suffix=".mp4",
+        ssh_target=ssh_target_for_host(sample_host),
+        ssh_options=ssh_client_options(),
+        run_remote_command=run_remote_command,
+        process_controller=process_controller,
+        reserved_bytes=reserved_bytes,
+    ) if stage_source else nullcontext(None)
+    with stage as job:
+        quality_host = {**sample_host, STAGED_JOB_KEY: job.to_payload()} if job is not None else sample_host
+        return _run_sampled_calibration_on_host(
+            config=config, prefix=prefix, action=action, host_data=host_data,
+            quality_host=quality_host, notes=notes, policy=policy, seed_metadata=seed_metadata,
+            sample_item=sample_item, calibration_run_id=calibration_run_id,
+            process_controller=process_controller, deps=deps,
+            source_path_override=source_path_override, progress_callback=progress_callback,
+        )
+
+
+def _run_sampled_calibration_on_host(
+        *,
+        config: MediaforceConfig,
+        prefix: str,
+        action: str,
+        host_data: dict[str, Any],
+        quality_host: dict[str, Any],
+        notes: str,
+        policy: dict[str, Any],
+        seed_metadata: dict[str, Any] | None,
+        sample_item: dict[str, Any],
+        calibration_run_id: str,
+        process_controller: ManagedProcessController,
+        deps: CalibrationRunDeps,
+        source_path_override: Path | None,
+        progress_callback: Callable[..., None] | None,
 ) -> tuple[dict[str, Any], Path | None]:
     _ = prefix
-    quality_host = _quality_host_data(config, host_data)
+    quality_host = _quality_host_data(config, quality_host)
     remote_review = execution_mode_for_host(quality_host) == "ssh"
     if source_path_override is None:
         controller_source_path = Path(sample_item["source_path"])
@@ -692,6 +760,9 @@ def run_sampled_calibration(
     else:
         controller_source_path = source_path_override
         quality_source_path = source_path_override
+    staged = staged_job_for_host(quality_host)
+    if staged is not None:
+        quality_source_path = Path(str(staged.source_path))
     quality_temp_dir = _quality_temp_dir_for_host(config, quality_host)
     video_policy = object_dict(policy.get("video"))
     stream_budget = deps.resolve_stream_budget_ledger(
@@ -832,7 +903,7 @@ def run_sampled_calibration(
     quality_result = deps.search_quality_for_source(quality_source_path, video_policy, **quality_kwargs)
     if progress_callback is not None:
         progress_callback("measuring_quality")
-    sample_result = deps.run_sample_encode(
+    sample_result: SampleEncodeResult = deps.run_sample_encode(
         quality_source_path,
         source_codec=str(sample_item.get("video_codec") or ""),
         preferred_metric=str(video_policy.get("quality_metric", "auto")),
@@ -988,7 +1059,7 @@ def run_sampled_calibration(
             "predicted_video_size_bytes": sample_result.predicted_encode_size_bytes,
             "predicted_total_size_bytes": estimated_total_size_bytes,
             "predicted_encode_percent": (
-                (estimated_total_size_bytes / int(sample_item["source_size_bytes"])) * 100
+                (estimated_total_size_bytes / int_value(sample_item["source_size_bytes"])) * 100
                 if estimated_total_size_bytes is not None
                 else None
             ),
@@ -1068,21 +1139,27 @@ def _configured_host_record(config: MediaforceConfig, host_data: dict[str, Any])
 
 def _quality_host_data(config: MediaforceConfig, host_data: dict[str, Any]) -> dict[str, Any]:
     configured_host = _configured_host_record(config, host_data)
-    if configured_host is None:
+    if configured_host is None and staged_job_for_host(host_data) is None:
         return host_data
-
+    configured_host = configured_host or {}
     media_access = str(host_data.get("media_access") or configured_host.get("media_access") or "").strip()
     merged = {
         **configured_host,
         **host_data,
         "media_access": media_access or configured_host.get("media_access") or "",
     }
-    if str(merged.get("media_access") or "").strip().lower() == "stream":
+    if staged_job_for_host(merged) is not None:
+        # The ephemeral source is seekable and all sample work belongs on this computer.
+        merged["media_access"] = "mounted"
+    elif str(merged.get("media_access") or "").strip().lower() == "stream":
         merged["mode"] = "local"
     return merged
 
 
 def _quality_temp_dir_for_host(config: MediaforceConfig, host_data: dict[str, Any]) -> Path:
+    staged = staged_job_for_host(host_data)
+    if staged is not None:
+        return Path(str(staged.scratch_dir))
     if (
             str(host_data.get("mode") or "").strip().lower() == "ssh"
             and host_targets_current_machine(host_data)
