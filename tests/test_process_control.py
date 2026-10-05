@@ -275,7 +275,7 @@ class ProcessControlTests(TestCase):
             helper_path.write_bytes(captured_bytes)
             captured_marker = Path(directory) / "captured-helper-executed"
             substituted_marker = Path(directory) / "substituted-helper-executed"
-            with patch.dict(vars(process_control_module), {"__file__": str(Path(directory) / "process_control.py")}):
+            with patch.object(process_control_module, "__file__", str(Path(directory) / "process_control.py"), create=True):
                 snapshot = process_control_module._read_process_deadline_helper_bytes()
                 module = ast.parse(snapshot)
                 marker = ast.parse(

@@ -28,6 +28,7 @@ def test_capture_seed_request_reuses_existing_case_contract(tmp_path: Path) -> N
     spec = capture_seed_request(project_root=tmp_path, case=case)
 
     assert spec.task == AdvisorTask.SEED_POLICY
+    assert spec.prompt_version == advisor.SEED_PROMPT_VERSION
     assert spec.max_seconds > 0
     assert spec.schema["additionalProperties"] is False
     assert "300 MB" in spec.message

@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -69,15 +68,37 @@ elif name == "python3":
     assert sys.argv[1] == "-c"
     assert Path(sys.argv[-1]) == Path(os.environ["DEV_TEST_LOCK"])
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
-elif name not in {"launchctl", "ps", "lsof", "python3", "sleep"}:
+elif name == "dirname":
+    print(Path(sys.argv[1]).parent)
+elif name == "sed":
+    print(sys.stdin.read().strip())
+elif name == "awk":
+    if "-v" not in sys.argv:
+        for line in sys.stdin:
+            if line.split():
+                print(line.split()[0])
+elif name == "sort":
+    print("\\n".join(sorted(set(sys.stdin.read().splitlines()))))
+elif name == "paste":
+    print(",".join(sys.stdin.read().splitlines()))
+elif name == "tr":
+    print(sys.stdin.read().lower(), end="")
+elif name == "rm":
+    for argument in sys.argv[1:]:
+        if argument.startswith("-"):
+            continue
+        target = Path(argument)
+        assert target.resolve().is_relative_to(Path(os.environ["HOME"]).resolve())
+        target.unlink(missing_ok=True)
+elif name not in {"launchctl", "ps", "lsof", "sleep"}:
     raise AssertionError(name)
 '''
-    for command in ("id", "launchctl", "ps", "lsof", "python3", "sleep"):
+    for command in ("id", "launchctl", "ps", "lsof", "python3", "sleep", "dirname", "sed", "awk", "sort", "paste", "tr", "rm"):
         binary = binaries / command
         binary.write_text(stub)
         binary.chmod(0o755)
     environment = {
-        "PATH": str(binaries) + os.pathsep + "/usr/bin:/bin",
+        "PATH": str(binaries),
         "HOME": str(home),
         "DEV_TEST_LOG": str(log),
         "DEV_TEST_LABEL": LOGIN_ITEM_LABEL,
@@ -101,7 +122,7 @@ elif name not in {"launchctl", "ps", "lsof", "python3", "sleep"}:
             lock_bytes = json.dumps({"pid": child.pid, "owner": "runtime fixture"}).encode()
             lock.write_bytes(lock_bytes)
         result = subprocess.run(
-            ["bash", str(script), "stop", "backend"], cwd=tmp_path,
+            ["/bin/bash", str(script), "stop", "backend"], cwd=tmp_path,
             env=environment, capture_output=True, text=True, timeout=10,
         )
         if running == "idle" or process == "foreign":
