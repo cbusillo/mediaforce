@@ -10,10 +10,13 @@ import pytest
 from mediaforce.ops.login_item import LOGIN_ITEM_LABEL
 
 
-@pytest.mark.parametrize("service", ["matching", "other_checkout", "other_program", "absent"])
-@pytest.mark.parametrize("running", ["idle", "pid_file", "listener"])
+@pytest.mark.parametrize("service,running,process", [
+    (service, "idle", "owned") for service in ("matching", "other_checkout", "other_program", "absent")
+] + [
+    ("absent", running, process) for running in ("pid_file", "listener", "lock") for process in ("owned", "foreign")
+])
 def test_stop_unloads_only_this_checkout_and_preserves_runtime_lock(
-    tmp_path: Path, service: str, running: str,
+    tmp_path: Path, service: str, running: str, process: str,
 ) -> None:
     repo = tmp_path / "checkout with spaces"
     scripts = repo / "scripts"
@@ -24,7 +27,7 @@ def test_stop_unloads_only_this_checkout_and_preserves_runtime_lock(
     state = home / "Library/Application Support/mediaforce"
     state.mkdir(parents=True)
     lock = state / "mediaforce-web.lock"
-    lock_bytes = b'{"pid":424242,"owner":"preserve this runtime"}\n'
+    lock_bytes = b'{"owner":"preserve this runtime"}\n'
     lock.write_bytes(lock_bytes)
     pid_file = state / "mediaforce-web.pid"
     pid_file.write_text("")
@@ -53,7 +56,8 @@ elif name == "launchctl" and sys.argv[1] == "print":
     print(f"working directory = {repo}\\nprogram = {program}")
 elif name == "ps" and sys.argv[1:3] == ["-p", os.environ["DEV_TEST_PID"]]:
     if sys.argv[-1] == "command=":
-        print(os.environ["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web")
+        repo = os.environ["DEV_TEST_REPO"] if os.environ["DEV_TEST_PROCESS"] == "owned" else "/foreign/checkout"
+        print(repo + "/.venv/bin/mediaforce-web")
     elif sys.argv[-1] == "ppid=":
         print(0)
 elif name == "lsof" and os.environ["DEV_TEST_RUNNING"] == "listener":
@@ -61,6 +65,10 @@ elif name == "lsof" and os.environ["DEV_TEST_RUNNING"] == "listener":
     if not seen.exists():
         seen.touch()
         print(os.environ["DEV_TEST_PID"])
+elif name == "python3":
+    assert sys.argv[1] == "-c"
+    assert Path(sys.argv[-1]) == Path(os.environ["DEV_TEST_LOCK"])
+    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 elif name not in {"launchctl", "ps", "lsof", "python3", "sleep"}:
     raise AssertionError(name)
 '''
@@ -76,6 +84,8 @@ elif name not in {"launchctl", "ps", "lsof", "python3", "sleep"}:
         "DEV_TEST_SERVICE": service,
         "DEV_TEST_REPO": str(repo),
         "DEV_TEST_RUNNING": running,
+        "DEV_TEST_PROCESS": process,
+        "DEV_TEST_LOCK": str(lock),
         "DEV_TEST_LISTENER_SEEN": str(tmp_path / "listener-seen"),
     }
 
@@ -87,11 +97,14 @@ elif name not in {"launchctl", "ps", "lsof", "python3", "sleep"}:
         environment["DEV_TEST_PID"] = str(child.pid)
         if running == "pid_file":
             pid_file.write_text(str(child.pid))
+        elif running == "lock":
+            lock_bytes = json.dumps({"pid": child.pid, "owner": "runtime fixture"}).encode()
+            lock.write_bytes(lock_bytes)
         result = subprocess.run(
             ["bash", str(script), "stop", "backend"], cwd=tmp_path,
             env=environment, capture_output=True, text=True, timeout=10,
         )
-        if running == "idle":
+        if running == "idle" or process == "foreign":
             assert child.poll() is None
         else:
             assert child.wait(timeout=5) != 0
