@@ -2,6 +2,7 @@
   "defaultBranch": "main",
   "projectType": "media-workstation-app",
   "docs": {
+    "direction": "DIRECTION.md",
     "index": "docs/README.md",
     "acceptanceGate": "docs/policies/acceptance-gate.md",
     "codingStandards": "docs/policies/coding-standards.md",
@@ -41,13 +42,13 @@
       "packageContents": "uv run python scripts/verify_package_contents.py dist/*.whl dist/*.tar.gz"
     },
     "smoke": {
-      "cli": "uv run mediaforce --help"
+      "cli": "uv run mediaforce --help",
+      "web": "npm --prefix frontend run smoke:web"
     },
     "acceptance": {
       "default": "bash scripts/pre-commit-check.sh"
     },
     "inspection": {
-      "tool": "jetbrains",
       "scopePreference": ["changed_files", "directory", "whole_project"],
       "profile": "Mediaforce",
       "prepare": "bash scripts/prepare-jetbrains-inspection.sh",
@@ -115,17 +116,7 @@
     "Dependency Graph",
     "Dependabot Updates"
   ],
-  "requiredStatusChecks": ["acceptance", "file-integrity-macos"],
-  "codeScanningMergeProtection": {
-    "ruleset": "Require code scanning results",
-    "tool": "CodeQL",
-    "alertsThreshold": "errors",
-    "securityAlertsThreshold": "high_or_higher",
-    "dependabotDefaultSetupException": true
-  },
-  "qaLabels": [],
-  "deployLabels": [],
-  "healthUrls": [],
+  "requiredStatusChecks": ["acceptance"],
   "relatedRepos": [],
   "githubSignals": {
     "postMerge": {
@@ -134,7 +125,7 @@
     },
     "capabilities": {
       "codeScanning": "available",
-      "secretScanning": "available",
+      "secretScanning": "unavailable",
       "dependabotAlerts": "available",
       "securityAdvisories": "available"
     },
@@ -155,6 +146,7 @@
       "validation gates change",
       "primary commands change",
       "important workflows change",
+      "required status checks or rulesets change",
       "repo relationship changes",
       "cleanup policy changes",
       "ownership boundaries change"
