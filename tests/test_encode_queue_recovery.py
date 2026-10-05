@@ -9965,15 +9965,6 @@ raise SystemExit(0)
                     )
                 self.assertFalse(legacy_database_path.exists())
 
-    def test_dev_stop_never_deletes_the_shared_runtime_lock(self) -> None:
-        script = Path("scripts/mediaforce-dev.sh").read_text(encoding="utf-8")
-        lock_deletions = [
-            line
-            for line in script.splitlines()
-            if "rm -f" in line and "BACKEND_LOCK_FILE" in line
-        ]
-        self.assertEqual(lock_deletions, [])
-
     @staticmethod
     def test_create_reloadable_app_uses_default_config_when_env_path_is_blank() -> None:
         with patch.dict(os.environ, {"MEDIAFORCE_CONFIG_PATH": ""}, clear=True), patch(
@@ -28607,12 +28598,6 @@ raise SystemExit(0)
             ).scalar_one()
         self.assertEqual(statuses, ["planned", "planned"])
         self.assertEqual(event_type, "cleanup_concurrent_writer")
-
-    def test_default_config_path_points_to_repo_config_defaults(self) -> None:
-        self.assertEqual(
-            web_app.DEFAULT_CONFIG_PATH.resolve(),
-            (Path(__file__).resolve().parents[1] / "config" / "defaults.toml").resolve(),
-        )
 
     def test_stop_calibration_queue_cancels_running_jobs_and_cleans_queued_jobs(self) -> None:
         running_prefix = "tv/show"

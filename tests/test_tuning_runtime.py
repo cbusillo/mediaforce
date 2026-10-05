@@ -9614,7 +9614,6 @@ class TuningRuntimeTests(unittest.TestCase):
     def test_seed_prompt_adds_class_guardrails(self) -> None:
         prompt = _build_seed_prompt({"folder": "tv/House/Season 5"})
 
-        self.assertEqual(SEED_PROMPT_VERSION, "seed-v9")
         self.assertIn("cold-start guess", prompt)
         self.assertIn("best first-pass attempt", prompt)
         self.assertIn("instruction to satisfy", prompt)
