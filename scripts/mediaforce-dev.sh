@@ -268,7 +268,7 @@ start_backend() {
 	fi
 	foreign_pids="$(foreign_listener_pids "${BACKEND_PORT}" pid_matches_mediaforce_backend)"
 	if [[ -n "${foreign_pids}" ]]; then
-		echo "backend: port ${BACKEND_PORT} is used by a non-mediaforce process; refusing to start" >&2
+		echo "backend: port ${BACKEND_PORT} is used by a process outside this checkout; refusing to start" >&2
 		return 1
 	fi
 	rm -f "${BACKEND_PID_FILE}"

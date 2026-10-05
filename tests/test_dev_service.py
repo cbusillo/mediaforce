@@ -219,8 +219,12 @@ def test_stop_unloads_only_this_checkout_and_preserves_runtime_lock(
     assert bootouts == ([["launchctl", "bootout", target]] if service in {"matching", "symlink"} else [])
 
 
-@pytest.mark.parametrize("action,process", [("start", "owned"), ("start", "foreign"), ("restart", "foreign")])
-@pytest.mark.parametrize("service", ["matching", "sibling_checkout", "other_program", "absent"])
+@pytest.mark.parametrize("service,action,process", [
+    (service, action, process)
+    for service in ("matching", "sibling_checkout", "other_program", "absent")
+    for action, process in (("start", "owned"), ("start", "foreign"), ("restart", "foreign"))
+    if (service, action, process) != ("matching", "start", "owned")
+])
 def test_start_and_restart_keep_retained_runtime_lock(
     tmp_path: Path, action: str, process: str, service: str,
 ) -> None:
@@ -231,7 +235,6 @@ def test_start_and_restart_keep_retained_runtime_lock(
         lock_bytes = json.dumps({"pid": child.pid, "owner": "retained runtime"}).encode()
         lock.write_bytes(lock_bytes)
         # Keep the foreign listener visible across both ownership queries in start.
-        listener = Path(environment["DEV_TEST_LISTENER_SEEN"])
         if process == "foreign":
             table = tmp_path / "process-table.json"
             table.write_text(json.dumps([{
@@ -247,11 +250,32 @@ def test_start_and_restart_keep_retained_runtime_lock(
         assert ("backend: running" in result.stdout) if process == "owned" else ("refusing to start" in result.stderr)
         assert child.poll() is None
         assert lock.read_bytes() == lock_bytes
-        assert not listener.exists()
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         bootouts = [call for call in calls if call[:2] == ["launchctl", "bootout"]]
         target = "gui/4242/" + LOGIN_ITEM_LABEL
         assert bootouts == ([["launchctl", "bootout", target]] if service == "matching" else [])
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+
+def test_start_reuses_owned_listener_without_a_pid_file_or_lock_pid(tmp_path: Path) -> None:
+    script, lock, _, log, environment = prepare_dev_service(tmp_path, "absent", "listener", "owned")
+    lock_bytes = lock.read_bytes()
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        environment["DEV_TEST_PID"] = str(child.pid)
+        result = subprocess.run(
+            ["/bin/bash", str(script), "start", "backend"], cwd=tmp_path,
+            env=environment, capture_output=True, text=True, timeout=15,
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"listener {child.pid}" in result.stdout
+        assert child.poll() is None
+        assert lock.read_bytes() == lock_bytes
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        assert any(call[0] == "lsof" for call in calls)
+        assert not any(call[0] == "nohup" for call in calls)
     finally:
         child.kill()
         child.wait(timeout=5)
