@@ -26,36 +26,12 @@ uv run --no-project "$python_prepare" \
 	--sync
 
 module_file="$repo_root/.idea/mediaforce.iml"
-node - "$module_file" <<'NODE'
-const fs = require('node:fs');
-
-const moduleFile = process.argv[2];
-const original = fs.readFileSync(moduleFile, 'utf8');
-if (!original.includes('<module type="PYTHON_MODULE"') || !original.includes('    </content>')) {
-	throw new Error('Unexpected Python preparation module format; no normalization applied');
-}
-let normalized = original
-	.replace(
-		'<module type="PYTHON_MODULE"',
-		'<module external.system.id="pyproject.toml" type="PYTHON_MODULE"'
-	);
-const frontendExclusion = '      <excludeFolder url="file://$MODULE_DIR$/frontend" />';
-if (!normalized.includes(frontendExclusion)) {
-	normalized = normalized.replace('    </content>', `${frontendExclusion}\n    </content>`);
-}
-if (normalized !== original) fs.writeFileSync(moduleFile, normalized);
-NODE
+node "$repo_root/scripts/prepare-jetbrains-state.mjs" normalize "$module_file"
 
 frontend_root="$repo_root/frontend"
 dependency_stamp="$frontend_root/node_modules/.mediaforce-dependencies.sha256"
 dependency_digest="$(
-	node -e '
-const crypto = require("node:crypto");
-const fs = require("node:fs");
-const digest = crypto.createHash("sha256");
-for (const path of process.argv.slice(1)) digest.update(fs.readFileSync(path));
-process.stdout.write(digest.digest("hex"));
-' "$frontend_root/package.json" "$frontend_root/package-lock.json"
+	node "$repo_root/scripts/prepare-jetbrains-state.mjs" digest "$frontend_root/package.json" "$frontend_root/package-lock.json"
 )"
 
 if [[ ! -f "$dependency_stamp" ]] || [[ ! -f "$frontend_root/node_modules/.package-lock.json" ]] || [[ "$(<"$dependency_stamp")" != "$dependency_digest" ]]; then
