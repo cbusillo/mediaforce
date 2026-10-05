@@ -71,7 +71,7 @@ def render_review_contact_sheet(
         output_path: Path,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
-    return render_review_contact_sheet_impl(
+    render_review_contact_sheet_impl(
         source_clip_path=source_clip_path,
         preview_clip_path=preview_clip_path,
         output_path=output_path,
@@ -89,7 +89,7 @@ def render_review_timeline_strip(
         frame_count: int = 6,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
-    return render_review_timeline_strip_impl(
+    render_review_timeline_strip_impl(
         clip_path=clip_path,
         output_path=output_path,
         duration_seconds=duration_seconds,
@@ -251,9 +251,11 @@ def _encode_preview_clips_remote(
         svt_params: list[str],
         audio_plan: dict[str, Any] | None = None,
         video_filter: str | None = None,
+        process_controller: ManagedProcessController | None = None,
 ) -> list[EncodedPreviewClip]:
     return _encode_preview_clips_remote_impl(
         host=host,
+        process_controller=process_controller,
         source_path=source_path,
         source_codec=source_codec,
         output_dir=output_dir,
@@ -355,9 +357,11 @@ def _render_source_review_clips_remote(
         timestamps: list[float],
         duration_seconds: float,
         audio_plan: dict[str, Any] | None = None,
+        process_controller: ManagedProcessController | None = None,
 ) -> list[BrowserReviewClip]:
     return _render_source_review_clips_remote_impl(
         host=host,
+        process_controller=process_controller,
         source_path=source_path,
         source_codec=source_codec,
         output_dir=output_dir,
@@ -384,7 +388,7 @@ def _render_compare_clip(
         source_codec: str | None = None,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
-    return _render_compare_clip_impl(
+    _render_compare_clip_impl(
         source_path,
         staged_path,
         output_path,
@@ -414,7 +418,7 @@ def _render_encoded_preview_clip(
         video_filter: str | None = None,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
-    return _render_encoded_preview_clip_impl(
+    _render_encoded_preview_clip_impl(
         source_path=source_path,
         source_codec=source_codec,
         output_path=output_path,
@@ -450,9 +454,11 @@ def _render_encoded_preview_clip_remote(
         svt_params: list[str],
         audio_plan: dict[str, Any] | None = None,
         video_filter: str | None = None,
+        process_controller: ManagedProcessController | None = None,
 ) -> None:
-    return _render_encoded_preview_clip_remote_impl(
+    _render_encoded_preview_clip_remote_impl(
         host=host,
+        process_controller=process_controller,
         source_path=source_path,
         source_codec=source_codec,
         remote_output_path=remote_output_path,
@@ -481,7 +487,7 @@ def _render_compare_clip_from_review_pair(
         duration_seconds: float,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
-    return _render_compare_clip_from_review_pair_impl(
+    _render_compare_clip_from_review_pair_impl(
         source_clip_path=source_clip_path,
         preview_clip_path=preview_clip_path,
         output_path=output_path,
@@ -502,7 +508,7 @@ def _render_source_review_clip(
         audio_plan: dict[str, Any] | None = None,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
-    return _render_source_review_clip_impl(
+    _render_source_review_clip_impl(
         source_path=source_path,
         source_codec=source_codec,
         output_path=output_path,
@@ -525,9 +531,11 @@ def _render_source_review_clip_remote(
         clip_time: float,
         duration_seconds: float,
         audio_plan: dict[str, Any] | None = None,
+        process_controller: ManagedProcessController | None = None,
 ) -> None:
-    return _render_source_review_clip_remote_impl(
+    _render_source_review_clip_remote_impl(
         host=host,
+        process_controller=process_controller,
         source_path=source_path,
         source_codec=source_codec,
         remote_output_path=remote_output_path,
@@ -550,7 +558,7 @@ def _render_audio_spectrogram(
         audio_track: dict[str, Any] | None = None,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
-    return _render_audio_spectrogram_impl(
+    _render_audio_spectrogram_impl(
         source_path=source_path,
         output_path=output_path,
         clip_time=clip_time,
@@ -572,7 +580,7 @@ def _render_encoded_audio_clip(
         bitrate: str,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
-    return _render_encoded_audio_clip_impl(
+    _render_encoded_audio_clip_impl(
         source_path=source_path,
         output_path=output_path,
         clip_time=clip_time,
@@ -592,7 +600,7 @@ def _stack_review_images(
         output_path: Path,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
-    return _stack_review_images_impl(
+    _stack_review_images_impl(
         top_path=top_path,
         bottom_path=bottom_path,
         output_path=output_path,

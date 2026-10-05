@@ -20554,6 +20554,75 @@ raise SystemExit(0)
             self.assertEqual(selected["job_id"], "next")
 
     @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
+    def test_encode_admission_keeps_scratch_promised_to_active_sample(self) -> None:
+        host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
+        host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce")
+        self.config.raw["remote_hosts"] = [{**host, "host": "scratch-worker"}]
+        required = encode_runtime.required_scratch_bytes(1024)
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("sample-shared-scratch.json", [self._estimate_manifest_item(600)])
+            self._save_job(connection, job_id="next-encode", manifest_name="sample-shared-scratch.json",
+                           host={}, status="queued", attempt_count=0)
+            save_calibration_job(connection, {
+                "job_id": "active-sample", "prefix": "tv/another-show", "status": "running", "lane": "sample",
+                "action": "baseline", "host": {"key": "scratch-worker", "mode": "ssh"},
+                "sample_item": {"source_size_bytes": 1024},
+                "created_at": web_app._now_iso(), "updated_at": web_app._now_iso(),
+            })
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[host])
+            deps.encode_reserve_preflight = Mock(return_value=SimpleNamespace(allowed=True, waiting_reason=None))
+            with patch("mediaforce.web.runtime.encode_runtime.measure_scratch_free_bytes", return_value=required):
+                self.assertIsNone(encode_runtime.load_next_runnable_encode_job(connection, self.config, deps))
+                queued = load_encode_job(connection, "next-encode")
+                assert queued is not None
+                self.assertEqual(queued["attempt_count"], 0)
+                self.assertIn("scratch", queued["waiting_reason"])
+                connection.execute(calibration_jobs.update().where(calibration_jobs.c.job_id == "active-sample")
+                                   .values(status="pending_review"))
+                selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+            assert selected is not None
+            self.assertEqual(selected["job_id"], "next-encode")
+
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
+    def test_encode_claim_rechecks_new_sample_promise_without_holding_lock_during_selection(self) -> None:
+        host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
+        host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce")
+        with open_db(self.config.paths.db_path) as connection:
+            self._write_manifest("scratch-claim-race.json", [self._estimate_manifest_item(600)])
+            self._save_job(connection, job_id="claim-race", manifest_name="scratch-claim-race.json",
+                           host={}, status="queued", attempt_count=0)
+            connection.commit()
+            selected = load_encode_job(connection, "claim-race")
+            assert selected is not None
+            selected["host"] = host
+
+            def select_while_sample_claims(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                with open_db(self.config.paths.db_path) as sample_connection:
+                    sample_connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    save_calibration_job(sample_connection, {
+                        "job_id": "new-sample", "prefix": "tv/other-show", "status": "running", "lane": "sample",
+                        "action": "baseline", "host": {"key": "scratch-worker", "mode": "ssh"},
+                        "sample_item": {"source_size_bytes": 1024},
+                        "created_at": web_app._now_iso(), "updated_at": web_app._now_iso(),
+                    })
+                return selected
+
+            deps = web_app._encode_queue_runtime_deps()
+            with patch.object(encode_runtime, "load_next_runnable_encode_job", side_effect=select_while_sample_claims):
+                self.assertIsNone(encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps))
+            queued = load_encode_job(connection, "claim-race")
+            assert queued is not None
+            self.assertEqual(queued["status"], "queued")
+            self.assertEqual(queued["attempt_count"], 0)
+            connection.commit()
+            with patch.object(encode_runtime, "load_next_runnable_encode_job", return_value=selected):
+                claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
+            assert claimed is not None
+            self.assertEqual(claimed["attempt_count"], 1)
+
+    @patch("mediaforce.hosts.config._host_lookup_targets_current_machine", new=_scratch_fixture_is_local)
     def test_scratch_admission_requires_all_source_sizes(self) -> None:
         host = self._encode_host_row("scratch-worker", schedule_closes_at=None)
         host.update(mode="ssh", media_access="stream", scratch_root="/scratch/mediaforce")

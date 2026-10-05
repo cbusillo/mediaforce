@@ -87,6 +87,43 @@ across all claims and preparation in one scheduler pass.
 The staged paths travel in the host payload under `staged_job` for the length of
 one encode. That key is never persisted with the job.
 
+## Sample and review flow
+
+Sample calibration on a staged computer uses the same scratch lifecycle. It
+copies and verifies the source once, then keeps the keeper connection open
+through crop detection, target-size search, quality measurement, and rendering
+both sides of the browser comparison. Search working files and review renders
+stay inside that job's scratch directory. Review clips return to the controller's
+normal review directory through managed, size-checked transfers; failed transfers
+remove their partial local clips. Stop reaches the remote render and copy
+processes as well as the search. The initial output-size query retains its
+existing 60-second timeout before the managed copy starts. Releasing the keeper removes remote scratch
+after success, failure, or cancellation.
+
+The saved sample retains the original source identity and host settings; transient
+scratch paths are never saved. Mounted computers keep their existing sample
+flow, and stream computers without scratch keep the controller-local fallback.
+The sample's worker check also includes scratch promised to active encodes and
+other samples on that computer. Starting/running calibration rows reserve their
+full source/output/search budget before bytes reach disk; the production
+scheduler includes those rows too. A sample excludes its own row from that
+additional reservation. Unknown active budgets leave production work queued.
+Samples retain their existing failure/retry behavior: if active work's budget
+is unknown or space is insufficient, the sample reports the reason and can be
+retried after that work finishes or on another computer.
+As with parallel encodes, the full reservation is conservative because bytes
+already written also reduce measured free space. Completed samples waiting for
+review reserve no remote space: their keeper has already removed scratch.
+The encode claim atomically rejects a new or changed sample reservation that
+arrives after selection; the next pass selects again without consuming an
+attempt. Selection and probes retain their existing transaction boundaries.
+Encode completion and admission cleanup keep a computer running while a staged
+sample is using it.
+
+Review moments follow the existing remote-computer path: stored evidence and
+default moments are used without another controller-side source analysis or a
+redundant comparison composite. The browser still receives both comparison clips.
+
 ## Recovering scratch space
 
 Three layers cover every exit.
