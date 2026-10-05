@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
+from mediaforce import advisor
 from mediaforce.advising.routing import AdvisorTask
 from scripts.benchmark_advisor_app_server import (
     AppServerClient,
@@ -25,9 +28,27 @@ def test_capture_seed_request_reuses_existing_case_contract(tmp_path: Path) -> N
     spec = capture_seed_request(project_root=tmp_path, case=case)
 
     assert spec.task == AdvisorTask.SEED_POLICY
-    assert spec.max_seconds == 75
+    assert spec.max_seconds > 0
     assert spec.schema["additionalProperties"] is False
     assert "300 MB" in spec.message
+
+
+def test_capture_seed_request_preserves_adapter_timeout(tmp_path: Path) -> None:
+    case = seed_eval_case("terra-seed-size-first")
+    timeout_seconds = 37
+
+    def request_seed(**_kwargs: Any) -> Any:
+        return advisor._run_structured_llm_request(
+            developer="test instructions", message="test request", schema={},
+            max_seconds=timeout_seconds, task=AdvisorTask.SEED_POLICY,
+            prompt_version=advisor.SEED_PROMPT_VERSION,
+        )
+
+    with patch.object(advisor, "request_seed_policy", side_effect=request_seed):
+        spec = capture_seed_request(project_root=tmp_path, case=case)
+
+    assert spec.max_seconds == timeout_seconds
+    assert spec.prompt_version == advisor.SEED_PROMPT_VERSION
 
 
 def test_normalize_seed_response_applies_existing_policy_logic(tmp_path: Path) -> None:

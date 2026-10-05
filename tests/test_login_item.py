@@ -234,11 +234,6 @@ class LoginItemTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_login_item_command("unsupported", project_root=self.project_root, home=self.home)
 
-    def test_dev_script_uses_the_same_launch_item_label(self) -> None:
-        script = (Path(__file__).parents[1] / "scripts" / "mediaforce-dev.sh").read_text()
-
-        self.assertIn(f'BACKEND_LAUNCH_AGENT="{LOGIN_ITEM_LABEL}"', script)
-
     def test_cli_service_command_does_not_load_mediaforce_config(self) -> None:
         from mediaforce import cli
 

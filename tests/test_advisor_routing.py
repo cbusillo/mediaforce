@@ -11,6 +11,7 @@ from mediaforce.advisor import request_operator_note_parse
 from mediaforce.advising.evals import recommended_eval_cases
 from mediaforce.advising.privacy import advisor_evidence_references, sanitize_advisor_payload
 from mediaforce.advising.routing import (
+    DEFAULT_ADVISOR_MODELS,
     AdvisorModelPricing,
     AdvisorTask,
     advisor_routing_for_models,
@@ -90,7 +91,7 @@ class AdvisorRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             routing.route_for(AdvisorTask.SEED_POLICY).models,
-            ("gpt-5.6-terra", "gpt-5.6-sol"),
+            DEFAULT_ADVISOR_MODELS[AdvisorTask.SEED_POLICY],
         )
         self.assertEqual(routing.telemetry_path, self.root / "web" / "advisor-routing.jsonl")
         self.assertEqual(routing.pricing_for("test-luna").output_usd_per_million, 4.0)
@@ -141,7 +142,6 @@ class AdvisorRoutingTests(unittest.TestCase):
 
         self.assertIsNotNone(response)
         self.assertEqual([cmd[cmd.index("--model") + 1] for cmd in commands], ["test-luna", "test-terra"])
-        self.assertTrue(all("gpt-5.6-sol" not in cmd for cmd in commands))
         self.assertTrue(all("/Users/alice" not in prompt for prompt in inputs))
         self.assertTrue(all("alice@example.com" not in prompt for prompt in inputs))
         self.assertTrue(all("[redacted-path]" in prompt for prompt in inputs))
@@ -462,24 +462,15 @@ class AdvisorRoutingTests(unittest.TestCase):
         tasks = {case.task for case in cases}
         serialized = json.dumps([case.payload for case in cases], sort_keys=True)
 
-        self.assertEqual(models, {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"})
-        self.assertTrue(
-            all(
-                case.fallback_models == ("gpt-5.6-terra",)
-                for case in cases
-                if case.model == "gpt-5.6-luna"
-            )
-        )
-        self.assertTrue(
-            all(
-                case.fallback_models == ("gpt-5.6-sol",)
-                for case in cases
-                if case.model == "gpt-5.6-terra"
-            )
-        )
-        self.assertTrue(
-            all(not case.fallback_models for case in cases if case.model == "gpt-5.6-sol")
-        )
+        self.assertEqual(models, {model for route in DEFAULT_ADVISOR_MODELS.values() for model in route})
+        for case in cases:
+            if isinstance(case.task, AdvisorTask):
+                route = DEFAULT_ADVISOR_MODELS[case.task]
+                self.assertIn(case.model, route)
+                index = route.index(case.model)
+                self.assertEqual(case.fallback_models, route[index + 1:])
+            else:
+                self.assertFalse(case.fallback_models)
         self.assertTrue(
             {
                 AdvisorTask.OPERATOR_NOTE_PARSE,

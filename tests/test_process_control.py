@@ -267,29 +267,29 @@ class ProcessControlTests(TestCase):
         "requires retained descriptor helper execution",
     )
     def test_managed_command_uses_captured_helper_after_source_path_swap(self) -> None:
-        helper_path = Path(process_control_module.__file__).with_name(
-            "_process_deadline.py"
-        )
-        original_helper = helper_path.read_bytes()
+        captured_bytes = process_control_module._PROCESS_DEADLINE_HELPER_BYTES
+        assert captured_bytes is not None
         with tempfile.TemporaryDirectory() as directory:
+            helper_path = Path(directory) / "_process_deadline.py"
+            helper_path.write_bytes(captured_bytes)
             substituted_marker = Path(directory) / "substituted-helper-executed"
-            helper_path.write_text(
-                "from pathlib import Path\n"
-                f"Path({str(substituted_marker)!r}).write_text('executed')\n"
-                "raise SystemExit(91)\n",
-                encoding="utf-8",
-            )
-            try:
-                result = run_command(
-                    [sys.executable, "-c", "print('captured-helper')"],
-                    process_controller=ManagedProcessController(),
+            with patch.object(process_control_module, "__file__", str(Path(directory) / "process_control.py")):
+                snapshot = process_control_module._read_process_deadline_helper_bytes()
+                helper_path.write_text(
+                    "from pathlib import Path\n"
+                    f"Path({str(substituted_marker)!r}).write_text('executed')\n"
+                    "raise SystemExit(91)\n",
+                    encoding="utf-8",
                 )
-            finally:
-                helper_path.write_bytes(original_helper)
+                with patch.object(process_control_module, "_PROCESS_DEADLINE_HELPER_BYTES", snapshot):
+                    result = run_command(
+                        [sys.executable, "-c", "print('captured-helper')"],
+                        process_controller=ManagedProcessController(),
+                    )
+                self.assertFalse(substituted_marker.exists())
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "captured-helper\n")
-        self.assertFalse(substituted_marker.exists())
 
     @skipUnless(
         sys.platform == "darwin" or sys.platform.startswith("linux"),
