@@ -105,8 +105,8 @@ class PackageContentsTests(unittest.TestCase):
         source.write_text("[config]\ninclude_files=[]\n")
         (project / "pyproject.toml").touch()
         (project / "hatch_build.py").touch()
-        with patch.object(config_module, "_SOURCE_PROJECT_ROOT", project), patch.object(
-            config_module.resources, "files", return_value=self.root / "packaged"
+        with patch.object(config_module, "_SOURCE_PROJECT_ROOT", project), patch(
+            "mediaforce.core.config.resources.files", return_value=self.root / "packaged"
         ) as packaged:
             self.assertEqual(config_module._default_config_path(), source)
         packaged.assert_not_called()
@@ -117,8 +117,8 @@ class PackageContentsTests(unittest.TestCase):
         unrelated_config.parent.mkdir(parents=True)
         unrelated_config.write_text("[config]\ninclude_files=[]\n")
         packaged = self.root / "packaged"
-        with patch.object(config_module, "_SOURCE_PROJECT_ROOT", project), patch.object(
-            config_module.resources, "files", return_value=packaged
+        with patch.object(config_module, "_SOURCE_PROJECT_ROOT", project), patch(
+            "mediaforce.core.config.resources.files", return_value=packaged
         ):
             self.assertEqual(config_module._default_config_path(), packaged / "defaults.toml")
 
@@ -127,7 +127,7 @@ class PackageContentsTests(unittest.TestCase):
         fallback = self.root / "fallback/defaults.toml"
         with patch.object(config_module, "_SOURCE_PROJECT_ROOT", project), patch.object(
             config_module, "_SOURCE_DEFAULT_CONFIG_PATH", fallback
-        ), patch.object(config_module.resources, "files", side_effect=ModuleNotFoundError):
+        ), patch("mediaforce.core.config.resources.files", side_effect=ModuleNotFoundError):
             self.assertEqual(config_module._default_config_path(), fallback)
 
     def test_source_checkout_defaults_require_repository_markers(self) -> None:

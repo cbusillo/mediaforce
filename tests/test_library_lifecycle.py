@@ -331,7 +331,7 @@ class LibraryLifecycleTests(unittest.TestCase):
                 "tv/A Plex Show/Season 1/Episode 01.mkv",
                 age_days=200,
             )
-            discovered_item = self._insert_item(
+            self._insert_item(
                 connection,
                 "tv/B Discovered Show/Season 1/Episode 01.mkv",
                 age_days=1_000,
