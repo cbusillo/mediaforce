@@ -4,6 +4,8 @@ import json
 import hashlib
 import os
 import subprocess
+import sys
+import threading
 import time
 from dataclasses import fields
 from pathlib import Path
@@ -73,6 +75,9 @@ def local_stage(run: dict[str, Any], *, fault: str | None = None, free_kib: int 
     real_stage = staged_host.staged_job
 
     def remote(_host: dict[str, Any], command: list[str], _timeout: int, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        controller = _kwargs.get("process_controller")
+        if controller is not None:
+            controller.throw_if_cancelled()
         if "df -Pk" in command[-1]:
             return subprocess.CompletedProcess(command, 0, f"{free_kib}\n", "")
         if "sha256sum" in command[-1]:
@@ -245,8 +250,11 @@ def test_stop_reaches_real_remote_renderer_and_cleans_keeper(sample_run: dict[st
         observed.append(command)
         if "-i" in command:
             assert kwargs["process_controller"] is sample_run["process_controller"]
+            Path(command[-1]).write_bytes(b"unfinished review render")
             sample_run["process_controller"].cancel()
             sample_run["process_controller"].throw_if_cancelled()
+        if command[0] == "mkdir":
+            return subprocess.run(command, capture_output=True, text=True, timeout=10)
         return subprocess.CompletedProcess(command, 0, "", "")
 
     with local_stage(sample_run), patch("mediaforce.review.run_remote_command", side_effect=remote), patch(
@@ -268,25 +276,47 @@ def test_stop_cancels_real_review_pull_process_and_removes_local_clip(sample_run
             render_source_review_clips if source_review else encode_preview_clips)
     readers: list[subprocess.Popen[bytes]] = []
     local_paths: list[Path] = []
+    attached = threading.Event()
+    controller = sample_run["process_controller"]
+    original_attach = controller.attach
+
+    def attach(process: subprocess.Popen[bytes], **kwargs: Any) -> None:
+        original_attach(process, **kwargs)
+        attached.set()
+
+    def stop_after_attachment() -> None:
+        if attached.wait(timeout=5):
+            controller.cancel()
+
+    stopper = threading.Thread(target=stop_after_attachment)
 
     def pull(job: staged_host.StagedJob, path: Path, **kwargs: Any) -> None:
         def popen(_argv: list[str], **process_kwargs: Any) -> subprocess.Popen[bytes]:
-            reader = subprocess.Popen(["sh", "-c", "printf partial; sleep 30"], **process_kwargs)
+            reader = subprocess.Popen([sys.executable, "-c",
+                                       "import sys,time; sys.stdout.buffer.write(b'partial'); sys.stdout.buffer.flush(); time.sleep(30)"],
+                                      **process_kwargs)
             readers.append(reader)
-            sample_run["process_controller"].cancel()
             return reader
 
         local_paths.append(path)
-        with patch.object(staged_host.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "100", "")):
+        stopper.start()
+        with patch.object(staged_host.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "100", "")), patch.object(
+            controller, "attach", side_effect=attach
+        ):
             staged_host.pull_output(job, path, popen=popen, **kwargs)
 
     renderer = "mediaforce.review._render_source_review_clip_remote" if source_review else "mediaforce.review._render_encoded_preview_clip_remote"
-    with local_stage(sample_run), patch("mediaforce.review.run_remote_command") as remote, patch(renderer), patch(
-        "mediaforce.reviewing.clips.pull_output", side_effect=pull
-    ), pytest.raises(ProcessCancelledError):
-        runtime.run_sampled_calibration(**sample_run)
+    try:
+        with local_stage(sample_run), patch("mediaforce.review.run_remote_command") as remote, patch(renderer), patch(
+            "mediaforce.reviewing.clips.pull_output", side_effect=pull
+        ), pytest.raises(ProcessCancelledError):
+            runtime.run_sampled_calibration(**sample_run)
+    finally:
+        if stopper.ident is not None:
+            stopper.join(timeout=6)
+    assert not stopper.is_alive()
     assert len(readers) == 1
-    assert readers[0].poll() is not None
+    assert readers[0].returncode is not None and readers[0].returncode < 0
     assert not local_paths[0].exists()
     assert not any(call.args[1][:2] == ["rm", "-rf"] for call in remote.call_args_list)
     assert_scratch_empty(sample_run)

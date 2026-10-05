@@ -95,8 +95,9 @@ through crop detection, target-size search, quality measurement, and rendering
 both sides of the browser comparison. Search working files and review renders
 stay inside that job's scratch directory. Review clips return to the controller's
 normal review directory through managed, size-checked transfers; failed transfers
-remove their partial local clips. Stop reaches the remote render and transfer
-processes as well as the search. Releasing the keeper removes remote scratch
+remove their partial local clips. Stop reaches the remote render and copy
+processes as well as the search. The initial output-size query retains its
+existing 60-second timeout before the managed copy starts. Releasing the keeper removes remote scratch
 after success, failure, or cancellation.
 
 The saved sample retains the original source identity and host settings; transient
