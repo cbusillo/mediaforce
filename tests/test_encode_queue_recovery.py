@@ -2185,7 +2185,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             staging_runtime.StagedOutputHeldForReviewError(str(probe_timeout)),
             TargetSizeSearchError(
                 "Every quality-safe candidate stayed above the target band.",
-                status="quality_conflict",
+                status="bound_exhausted",
                 trace={},
             ),
         )
