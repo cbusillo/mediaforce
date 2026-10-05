@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 STATE_DIR="${HOME}/Library/Application Support/mediaforce"
 BACKEND_PID_FILE="${STATE_DIR}/mediaforce-web.pid"
 BACKEND_LOG_FILE="${STATE_DIR}/mediaforce-web.log"
@@ -62,21 +62,22 @@ port_listener_pids() {
 	lsof -nP -tiTCP:"${port}" -sTCP:LISTEN 2>/dev/null | sort -u || true
 }
 
+command_matches_backend_binary() {
+	local command="${1:-}"
+	local managed_binary
+	managed_binary="$(web_binary)"
+	[[ "${command}" == "${managed_binary}" || "${command}" == "${managed_binary} "* ||
+		"${command}" == *" ${managed_binary}" || "${command}" == *" ${managed_binary} "* ]]
+}
+
 pid_matches_mediaforce_backend() {
 	local pid="${1:-}"
-	local managed_binary
 	local depth=0
-	managed_binary="$(web_binary)"
 	while [[ -n "${pid}" && "${pid}" != "0" && ${depth} -lt 8 ]]; do
 		local command
 		command="$(pid_command "${pid}")"
-		if [[ -n "${command}" ]]; then
-			if [[ "${command}" == *"${managed_binary}"* ]]; then
-				return 0
-			fi
-			if [[ "${command}" == *"mediaforce-web"* && "${command}" == *"${ROOT_DIR}"* ]]; then
-				return 0
-			fi
+		if command_matches_backend_binary "${command}"; then
+			return 0
 		fi
 		pid="$(trim "$(pid_parent "${pid}")")"
 		depth=$((depth + 1))
@@ -88,14 +89,12 @@ mediaforce_backend_root_pid() {
 	local pid="${1:-}"
 	local root="${pid}"
 	local depth=0
-	local managed_binary
-	managed_binary="$(web_binary)"
 	while [[ -n "${pid}" && "${pid}" != "0" && ${depth} -lt 8 ]]; do
 		local parent command
 		parent="$(trim "$(pid_parent "${pid}")")"
 		[[ -n "${parent}" && "${parent}" != "0" ]] || break
 		command="$(pid_command "${parent}")"
-		if [[ "${command}" == *"${managed_binary}"* || "${command}" == *"uv run mediaforce-web"* ]]; then
+		if command_matches_backend_binary "${command}" || [[ "${command}" == *"uv run mediaforce-web"* ]]; then
 			root="${parent}"
 			pid="${parent}"
 			depth=$((depth + 1))
@@ -216,9 +215,16 @@ backend_lock_pid() {
 }
 
 backend_launch_agent_loaded() {
-	local info
-	info="$(launchctl print "gui/$(id -u)/${BACKEND_LAUNCH_AGENT}" 2>/dev/null || true)"
-	[[ "${info}" == *"working directory = ${ROOT_DIR}"* && "${info}" == *"mediaforce-web"* ]]
+	local info line working_directory="" program=""
+	info="$(launchctl print "gui/$(id -u)/${BACKEND_LAUNCH_AGENT}" 2>/dev/null)" || return 1
+	while IFS= read -r line; do
+		line="$(trim "${line}")"
+		case "${line}" in
+		"working directory = "*) working_directory="${line#working directory = }" ;;
+		"program = "*) program="${line#program = }" ;;
+		esac
+	done <<<"${info}"
+	[[ "${working_directory}" == "${ROOT_DIR}" && "${program}" == "$(web_binary)" ]]
 }
 
 stop_backend_launch_agent() {
@@ -262,7 +268,7 @@ start_backend() {
 	fi
 	foreign_pids="$(foreign_listener_pids "${BACKEND_PORT}" pid_matches_mediaforce_backend)"
 	if [[ -n "${foreign_pids}" ]]; then
-		echo "backend: port ${BACKEND_PORT} is used by a non-mediaforce process; refusing to start" >&2
+		echo "backend: port ${BACKEND_PORT} is used by a process outside this checkout; refusing to start" >&2
 		return 1
 	fi
 	rm -f "${BACKEND_PID_FILE}"
