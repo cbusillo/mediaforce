@@ -101,10 +101,17 @@ The service manager rotates either log to a single `.1` file when it exceeds
 
 ## Development Handoff
 
-`scripts/mediaforce-dev.sh start backend` unloads the LaunchAgent before
-starting the development backend so both processes cannot compete for the same
-runtime lock or port. This bootout is temporary; the persistent enable/disable
-state remains owned by `mediaforce service`.
+`scripts/mediaforce-dev.sh` unloads the LaunchAgent during backend start,
+stop, or restart only when its working directory and program exactly match
+that checkout and its `.venv/bin/mediaforce-web`. A sibling or nested checkout's
+service stays loaded. The helper preserves the shared runtime lock during
+these actions. This bootout is temporary; the persistent enable/disable state
+remains owned by `mediaforce service`.
+
+Backend process discovery also requires that checkout's exact executable in
+the command, including when a Python interpreter launches it. Start the local
+development backend with `scripts/mediaforce-dev.sh start backend`; a sibling
+checkout's PID file, port listener, or runtime-lock owner is left running.
 
 ## Verification
 
