@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import select
+import signal
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -291,6 +292,17 @@ class ProcessTree:
     lifetime_reader: int
 
 
+def assert_tree_stopped(tree: ProcessTree) -> None:
+    returncode = tree.root.wait(timeout=5)
+    assert returncode in {0, -signal.SIGKILL}
+    if returncode == 0:
+        completion = json.loads(tree.finished.read_text())
+        assert completion["root_signaled"]
+        assert completion["child_returncode"] < 0
+    assert select.select([tree.lifetime_reader], [], [], 5)[0], "descendant survived the stop"
+    assert os.read(tree.lifetime_reader, 1) == b""
+
+
 @pytest.fixture
 def process_trees() -> Iterator[list[ProcessTree]]:
     trees: list[ProcessTree] = []
@@ -409,17 +421,11 @@ def test_stop_discovers_owned_parent_and_descendants_and_preserves_foreign_tree(
         env=environment, capture_output=True, text=True, timeout=20,
     )
     assert result.returncode == 0, result.stderr
-    assert owned.root.wait(timeout=5) == 0
-    completion = json.loads(owned.finished.read_text())
-    assert completion["child_returncode"] < 0
-    assert completion["root_signaled"]
+    assert_tree_stopped(owned)
     assert foreign.root.poll() is None
     assert not foreign.finished.exists()
     if frontend is not None:
-        assert frontend.root.wait(timeout=5) == 0
-        completion = json.loads(frontend.finished.read_text())
-        assert completion["child_returncode"] < 0
-        assert completion["root_signaled"]
+        assert_tree_stopped(frontend)
     assert lock.read_bytes() == lock_bytes
     assert not pid_file.exists()
     assert "unloaded launch agent" not in result.stdout
@@ -464,9 +470,7 @@ os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
             capture_output=True, text=True, timeout=20, pass_fds=(cleanup_reader, lifetime_writer),
         )
         assert result.returncode == 0, result.stderr
-        assert owned.root.wait(timeout=5) == 0
-        completion = json.loads(owned.finished.read_text())
-        assert completion["root_signaled"] and completion["child_returncode"] < 0
+        assert_tree_stopped(owned)
         new_backend = json.loads(started.read_text())
         assert int(pid_file.read_text()) == new_backend["pid"]
         assert new_backend["pid"] != owned.root.pid

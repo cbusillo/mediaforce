@@ -109,7 +109,8 @@ these actions. This bootout is temporary; the persistent enable/disable state
 remains owned by `mediaforce service`.
 
 Backend process discovery also requires that checkout's exact executable in
-the command, including when a Python interpreter launches it. Start the local
+the process's command or a parent process's command, including when a Python
+interpreter launches it. Start the local
 development backend with `scripts/mediaforce-dev.sh start backend`. A sibling
 checkout's backend stays running when discovered through a PID file, port
 listener, or runtime lock. Stop may remove the shared development PID file;
