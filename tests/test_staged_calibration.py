@@ -13,6 +13,10 @@ from unittest.mock import Mock, patch
 import pytest
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.core.db import open_db
+from mediaforce.encoding.encode_queue import save_encode_job
+from mediaforce.tuning.calibration_jobs import save_job
+from mediaforce.web.runtime import encode_runtime
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.encoding import staged_host
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
@@ -64,13 +68,13 @@ def sample_run(tmp_path: Path) -> dict[str, Any]:
             "progress_callback": progress}
 
 
-def local_stage(run: dict[str, Any], *, fault: str | None = None) -> Any:
+def local_stage(run: dict[str, Any], *, fault: str | None = None, free_kib: int = 10000000) -> Any:
     """Use real keeper/copy shells, pinned capacity and synthetic source bytes; never SSH."""
     real_stage = staged_host.staged_job
 
     def remote(_host: dict[str, Any], command: list[str], _timeout: int, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         if "df -Pk" in command[-1]:
-            return subprocess.CompletedProcess(command, 0, "10000000\n", "")
+            return subprocess.CompletedProcess(command, 0, f"{free_kib}\n", "")
         if "sha256sum" in command[-1]:
             scratch = Path(run["config"].remote_hosts[0]["scratch_root"])
             source = next(scratch.glob(f"{staged_host.SCRATCH_DIR_PREFIX}*/source.*"))
@@ -83,7 +87,20 @@ def local_stage(run: dict[str, Any], *, fault: str | None = None) -> Any:
         if script.startswith("cat >") and fault in {"full", "disconnect"}:
             detail = "No space left on device" if fault == "full" else "Connection reset by peer"
             script = f"cat >/dev/null; echo '{detail}' >&2; exit 1"
-        return subprocess.Popen(["sh", "-c", script], **kwargs)
+        process = subprocess.Popen(["sh", "-c", script], **kwargs)
+        if script.startswith("cat >") and fault == "cancelcopy":
+            pipe = process.stdin
+            assert pipe is not None
+            cancelled_pipe = Mock(wraps=pipe)
+
+            def cancelled_write(_chunk: bytes) -> None:
+                run["process_controller"].cancel()
+                cancelled_pipe.close()
+                raise BrokenPipeError("copy was stopped")
+
+            cancelled_pipe.write.side_effect = cancelled_write
+            process.stdin = cancelled_pipe
+        return process
 
     def stage(*args: Any, **kwargs: Any) -> Any:
         kwargs.update(run_remote_command=remote, popen=popen)
@@ -283,3 +300,77 @@ def test_low_space_refuses_sample_before_copy_or_search(sample_run: dict[str, An
     processes.assert_not_called()
     sample_run["deps"].search_quality_for_source.assert_not_called()
     assert_scratch_empty(sample_run)
+
+
+def test_stop_during_source_copy_is_cancellation(sample_run: dict[str, Any]) -> None:
+    with local_stage(sample_run, fault="cancelcopy"), pytest.raises(ProcessCancelledError):
+        runtime.run_sampled_calibration(**sample_run)
+    sample_run["deps"].search_quality_for_source.assert_not_called()
+    assert_scratch_empty(sample_run)
+
+
+def running_encode(sample_run: dict[str, Any], tmp_path: Path) -> int:
+    manifest = tmp_path / "encode.json"
+    manifest.write_text(json.dumps({"items": [dict(sample_run["sample_item"])]}))
+    with open_db(sample_run["config"].paths.db_path) as connection:
+        save_encode_job(connection, {"job_id": "production", "prefix": "tv/approved", "status": "running",
+                                     "manifest_path": str(manifest), "host": sample_run["config"].remote_hosts[0],
+                                     "created_at": "2026-10-04T00:00:00+00:00", "updated_at": "2026-10-04T00:00:00+00:00"})
+    return staged_host.required_scratch_bytes(sample_run["sample_item"]["source_size_bytes"])
+
+
+def test_sample_preserves_scratch_reserved_by_running_encode_and_recovers_after_finish(sample_run: dict[str, Any], tmp_path: Path) -> None:
+    from sqlalchemy import update
+    from mediaforce.core.db_tables import encode_jobs
+
+    budget = running_encode(sample_run, tmp_path)
+    free_kib = (budget + 1023) // 1024
+    with local_stage(sample_run, free_kib=free_kib), pytest.raises(staged_host.StagedScratchError, match="reserved work"):
+        runtime.run_sampled_calibration(**sample_run)
+    sample_run["deps"].search_quality_for_source.assert_not_called()
+    assert_scratch_empty(sample_run)
+    with open_db(sample_run["config"].paths.db_path) as connection:
+        connection.execute(update(encode_jobs).where(encode_jobs.c.job_id == "production").values(status="completed"))
+    with local_stage(sample_run, free_kib=free_kib):
+        runtime.run_sampled_calibration(**sample_run)
+    sample_run["deps"].search_quality_for_source.assert_called_once()
+    assert_scratch_empty(sample_run)
+
+
+def test_sample_can_share_computer_when_space_covers_both_reservations(sample_run: dict[str, Any], tmp_path: Path) -> None:
+    budget = running_encode(sample_run, tmp_path)
+    with local_stage(sample_run, free_kib=(2 * budget + 1023) // 1024) as stage:
+        runtime.run_sampled_calibration(**sample_run)
+    assert stage.call_args.kwargs["reserved_bytes"] == budget
+    assert_scratch_empty(sample_run)
+
+
+def test_encode_reservations_include_active_samples_and_exclude_finished_or_own_sample(sample_run: dict[str, Any]) -> None:
+    config = sample_run["config"]
+    budget = staged_host.required_scratch_bytes(sample_run["sample_item"]["source_size_bytes"])
+    with open_db(config.paths.db_path) as connection:
+        for job_id, status in (("own-sample", "running"), ("other-sample", "starting"), ("review-ready", "pending_review")):
+            save_job(connection, {"job_id": job_id, "prefix": f"tv/{job_id}", "status": status, "lane": "sample",
+                                  "action": "baseline", "host": sample_run["host_data"], "sample_item": sample_run["sample_item"],
+                                  "created_at": "2026-10-04T00:00:00+00:00", "updated_at": "2026-10-04T00:00:00+00:00"})
+        reservations = encode_runtime.running_staged_scratch_reservations(connection, config)
+        assert reservations["scratch-worker"] == 2 * budget
+        reservations = encode_runtime.running_staged_scratch_reservations(connection, config, exclude_calibration_job_id="own-sample")
+        assert reservations["scratch-worker"] == budget
+    sample_run["calibration_job_id"] = "own-sample"
+    with local_stage(sample_run, free_kib=(2 * budget + 1023) // 1024) as stage:
+        runtime.run_sampled_calibration(**sample_run)
+    assert stage.call_args.kwargs["reserved_bytes"] == budget
+    assert_scratch_empty(sample_run)
+
+
+def test_unknown_active_sample_size_holds_other_staged_work(sample_run: dict[str, Any]) -> None:
+    with open_db(sample_run["config"].paths.db_path) as connection:
+        save_job(connection, {"job_id": "unknown", "prefix": "tv/unknown", "status": "running", "lane": "sample",
+                              "action": "baseline", "host": sample_run["host_data"], "sample_item": {},
+                              "created_at": "2026-10-04T00:00:00+00:00", "updated_at": "2026-10-04T00:00:00+00:00"})
+        assert encode_runtime.running_staged_scratch_reservations(connection, sample_run["config"])["scratch-worker"] is None
+    with local_stage(sample_run) as stage, pytest.raises(staged_host.StagedScratchError, match="active work"):
+        runtime.run_sampled_calibration(**sample_run)
+    stage.assert_not_called()
+    sample_run["deps"].search_quality_for_source.assert_not_called()

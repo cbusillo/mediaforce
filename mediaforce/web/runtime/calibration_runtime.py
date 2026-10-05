@@ -35,6 +35,9 @@ from mediaforce.tuning.content_intent_observations import (
 )
 from mediaforce.tuning.av1_cold_start import unavailable_av1_cold_start_prediction
 from mediaforce.tuning.target_size_search import MAX_TARGET_SIZE_CANDIDATES, TargetSizeSearchError
+from mediaforce.web.runtime.encode_runtime import running_staged_scratch_reservations
+from mediaforce.web.runtime.scratch_reservations import host_identity_tokens
+from mediaforce.encoding.staged_host import StagedScratchError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -558,6 +561,7 @@ def run_calibration_job(
                     process_controller=process_controller,
                     deps=deps,
                     progress_callback=telemetry.update,
+                    calibration_job_id=job_id,
                 )
 
         telemetry.update("saving_results")
@@ -681,6 +685,7 @@ def run_sampled_calibration(
         deps: CalibrationRunDeps,
         source_path_override: Path | None = None,
         progress_callback: Callable[..., None] | None = None,
+        calibration_job_id: str | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     sample_host = {**(_configured_host_record(config, host_data) or {}), **host_data}
     stage_source = (
@@ -691,6 +696,16 @@ def run_sampled_calibration(
     if stage_source and progress_callback is not None:
         progress_callback("preparing_source")
     source = source_path_override if source_path_override is not None else Path(sample_item["source_path"])
+    reserved_bytes = 0
+    if stage_source:
+        with open_db(config.paths.db_path) as connection:
+            reservations = running_staged_scratch_reservations(
+                connection, config, exclude_calibration_job_id=calibration_job_id,
+            )
+        active_budgets = [reservations.get(token, 0) for token in host_identity_tokens(sample_host)]
+        if any(budget is None for budget in active_budgets):
+            raise StagedScratchError("Waiting for the active work's scratch-space requirement on this computer.")
+        reserved_bytes = max((budget for budget in active_budgets if budget is not None), default=0)
     stage = staged_job(
         sample_host,
         source,
@@ -699,6 +714,7 @@ def run_sampled_calibration(
         ssh_options=ssh_client_options(),
         run_remote_command=run_remote_command,
         process_controller=process_controller,
+        reserved_bytes=reserved_bytes,
     ) if stage_source else nullcontext(None)
     with stage as job:
         quality_host = {**sample_host, STAGED_JOB_KEY: job.to_payload()} if job is not None else sample_host
@@ -1121,6 +1137,8 @@ def _configured_host_record(config: MediaforceConfig, host_data: dict[str, Any])
 
 def _quality_host_data(config: MediaforceConfig, host_data: dict[str, Any]) -> dict[str, Any]:
     configured_host = _configured_host_record(config, host_data)
+    if configured_host is None and staged_job_for_host(host_data) is None:
+        return host_data
     configured_host = configured_host or {}
     media_access = str(host_data.get("media_access") or configured_host.get("media_access") or "").strip()
     merged = {

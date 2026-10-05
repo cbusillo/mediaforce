@@ -102,8 +102,18 @@ after success, failure, or cancellation.
 The saved sample retains the original source identity and host settings; transient
 scratch paths are never saved. Mounted computers keep their existing sample
 flow, and stream computers without scratch keep the controller-local fallback.
-The production scheduler's capacity admission remains separate from the sample
-queue; samples use the worker's existing scratch check before copying.
+The sample's worker check also includes scratch promised to active encodes and
+other samples on that computer. Starting/running calibration rows reserve their
+full source/output/search budget before bytes reach disk; the production
+scheduler includes those rows too. A sample excludes its own row from that
+additional reservation. Unknown active budgets hold further scratch work.
+As with parallel encodes, the full reservation is conservative because bytes
+already written also reduce measured free space. Completed samples waiting for
+review reserve no remote space: their keeper has already removed scratch.
+
+Review moments follow the existing remote-computer path: stored evidence and
+default moments are used without another controller-side source analysis or a
+redundant comparison composite. The browser still receives both comparison clips.
 
 ## Recovering scratch space
 
