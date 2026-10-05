@@ -119,6 +119,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         self.config = self._build_config()
+        # Queue fixtures are local storage; mount policy has its own dedicated tests.
+        for target in (
+                "mediaforce.web.runtime.controller_storage_recovery.finder_mount_roots_for_paths",
+                "mediaforce.web.runtime.encode_runtime.finder_mount_roots_for_paths",
+        ):
+            mount_roots = patch(target, return_value=[])
+            mount_roots.start()
+            self.addCleanup(mount_roots.stop)
         web_app._reset_background_worker_leadership_for_tests()
 
     def tearDown(self) -> None:
@@ -1784,12 +1792,28 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "updated_at": web_app._now_iso(),
                 },
             )
-            with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
-                host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
-        assert host_payload is not None
-        self.assertEqual(host_payload["key"], "remote-b")
-        self.assertIsNone(waiting_reason)
+            for root in (Path("/synthetic-temp/queue-fixture"), Path("/Volumes/Queue Fixture/queue-fixture")):
+                raw = copy.deepcopy(self.config.raw)
+                raw["media"]["source_roots"] = {"tv": str(root / "source" / "tv")}
+                raw["media"]["staging_root"] = str(root / "staging")
+                config = replace(self.config, raw=raw)
+                for candidates, expected_key in ((statuses, "remote-b"), (statuses[:1], None)):
+                    with self.subTest(root=root, backup_available=expected_key is not None), patch(
+                            "mediaforce.web.app._host_runtime_rows", return_value=candidates,
+                    ), patch.object(Path, "exists", return_value=True), patch.object(
+                            Path, "is_dir", return_value=True,
+                    ), patch("mediaforce.web.runtime.encode_runtime.os.access", return_value=True):
+                        host_payload, waiting_reason = web_app._select_encode_host(connection, config, job)
+                    if expected_key is None:
+                        self.assertIsNone(host_payload)
+                        self.assertIsNotNone(waiting_reason)
+                        assert waiting_reason is not None
+                        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on remote-a.internal")
+                    else:
+                        self.assertIsNotNone(host_payload)
+                        assert host_payload is not None
+                        self.assertEqual(host_payload["key"], expected_key)
+                        self.assertIsNone(waiting_reason)
 
     def test_host_selection_merges_global_quarantine_rows_across_alias_drift(self) -> None:
         job = {}
