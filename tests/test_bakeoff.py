@@ -128,6 +128,15 @@ class BakeoffPlanTests(unittest.TestCase):
         self.assertEqual(item["target_video_size_bytes"], 454_080_000)
         self.assertEqual(command[command.index("--target-size-mb") + 1], "454.08")
 
+    def test_build_bakeoff_plan_forwards_custom_configuration_defaults(self) -> None:
+        config = self._config()
+        config.raw["video"].update(target_size_bytes=470_000_000, target_size_mb=470, min_target_vmaf=72.5)
+
+        plan = build_bakeoff_plan(config, _manifest(), indexes=[0])
+
+        self.assertEqual(plan["default_targets"]["target_size_bytes"], config.video["target_size_bytes"])
+        self.assertEqual(plan["default_targets"]["min_target_vmaf"], config.video["min_target_vmaf"])
+
     def test_build_bakeoff_plan_can_limit_engines(self) -> None:
         config = self._config()
         plan = build_bakeoff_plan(config, _manifest(), indexes=[0], engines=["av1an"])

@@ -17,7 +17,7 @@ class PackageContentsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
-        home = patch("scripts.verify_package_contents.Path.home", return_value=Path("/srv/test-operator"))
+        home = patch.object(Path, "home", return_value=Path("/srv/test-operator"))
         home.start()
         self.addCleanup(home.stop)
 
@@ -113,6 +113,9 @@ class PackageContentsTests(unittest.TestCase):
 
     def test_default_config_selection_uses_packaged_defaults_without_checkout_markers(self) -> None:
         project = self.root / "installed"
+        unrelated_config = project / "config/defaults.toml"
+        unrelated_config.parent.mkdir(parents=True)
+        unrelated_config.write_text("[config]\ninclude_files=[]\n")
         packaged = self.root / "packaged"
         with patch.object(config_module, "_SOURCE_PROJECT_ROOT", project), patch.object(
             config_module.resources, "files", return_value=packaged

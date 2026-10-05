@@ -390,7 +390,9 @@ uv run mediaforce compare \
 
 ## Policy model
 
-`config/defaults.toml` is the source of truth for checked-in encode defaults.
+Source checkouts use `config/defaults.toml` for runtime encode defaults.
+Installed packages use the separate install-safe resource
+`mediaforce/package_defaults/defaults.toml`; see [Package Builds](docs/development/package-builds.md).
 Machine-specific libraries, transcode roots, and remote hosts should live in
 runtime settings instead of repo-tracked config. Mediaforce resolves settings
 in this order:
