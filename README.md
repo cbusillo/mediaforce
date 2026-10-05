@@ -633,7 +633,8 @@ Mediaforce can install this Mac's SSH public key, then let the prep step
 create remote paths and install `ffmpeg-full` plus `ab-av1` for
 `sample_calibration` hosts when possible. Those sample hosts now verify
 `libvmaf`/`xpsnr` metric support and `libsvtav1` before they show as ready.
-The controller reconnects required SMB storage through the macOS NetFS API
+The controller's automatic background recovery reconnects required SMB storage
+through the macOS NetFS API
 with `UIOption=NoUI`, using existing Keychain credentials without reading,
 storing, or transporting passwords. Its background recovery runs even when
 processing is paused or the work window is closed; reconnecting storage does
@@ -652,11 +653,13 @@ may supply the same `source` and `/Volumes/...` `mount_point` fields until a
 healthy mount can be observed and learned.
 
 Remote mounted-media macOS hosts reconnect through Finder before preparation,
-sampling, or encode dispatch. The signed-in console user must already have the
-share password saved in the login Keychain. Repeated automatic failures use a
-bounded cooldown, and a missing GUI session remains suppressed until the console
-login session changes. The user can use Prepare for an explicit retry. Each
-remote host keeps at most one Finder request per share: a request Finder has not
+sampling, or encode dispatch. Explicit Prepare on the controller also uses
+Finder. These Finder paths require a signed-in console user with the share
+password saved in the login Keychain. Repeated automatic failures use a bounded
+cooldown. After a missing desktop session, sign in on that computer and use
+Prepare to retry; on the controller, attempts remain suppressed until its
+console login session changes. Each computer keeps at most one Finder request
+per share: a request Finder has not
 answered within the attempt, usually because a dialog is open, is left running
 rather than ended, since ending it would not close the dialog. Later attempts,
 explicit or automatic, report that request instead of opening another dialog
