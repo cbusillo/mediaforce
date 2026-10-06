@@ -108,14 +108,9 @@ service stays loaded. The helper preserves the shared runtime lock during
 these actions. This bootout is temporary; the persistent enable/disable state
 remains owned by `mediaforce service`.
 
-Backend process discovery also requires that checkout's exact executable in
-the process's command or a parent process's command, including when a Python
-interpreter launches it. Start the local
-development backend with `scripts/mediaforce-dev.sh start backend`. A sibling
-checkout's backend stays running when discovered through a PID file, port
-listener, or runtime lock. Development PID bookkeeping and frontend
-ownership follow the [local development helper](../../README.md#local-web-development)
-behavior described in the README; the runtime lock is preserved.
+For development process ownership, cleanup and the supported start/stop commands,
+see [local web development](../../README.md#local-web-development). The runtime lock remains
+separate from development PID bookkeeping.
 
 ## Verification
 

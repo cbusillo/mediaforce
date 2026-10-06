@@ -537,6 +537,17 @@ and keeps the command lines aligned with the actual configured ports. Pass
 `backend` or `frontend` as a second argument when you intentionally want only
 one side, for example `scripts/mediaforce-dev.sh restart backend`.
 
+Backend ownership requires this checkout's executable as the command itself
+or as the script launched by Python. A wrapper merely mentioning that path
+does not own the backend or its siblings. Stop captures the owned subtree's
+native process identities before signalling, so workers remain eligible for
+forced cleanup after their parent exits without targeting a reused PID.
+If identity custody or cleanup cannot be proved, stop reports failure, retains
+PID bookkeeping, and restart does not launch another process. Resolve the
+reported error and retry the same stop command. Development stop requires the
+checkout's prepared Python environment (`uv sync --locked`); unsupported native
+custody fails visibly rather than falling back to bare PID signals.
+
 Development PID files live in a directory under that state path keyed by the
 physical checkout: `development/<checkout hash>/`. Each checkout manages its
 own records, so a reused PID cannot wedge start or discard another checkout's

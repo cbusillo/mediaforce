@@ -68,8 +68,14 @@ command_matches_backend_binary() {
 	local command="${1:-}"
 	local managed_binary
 	managed_binary="$(web_binary)"
-	[[ "${command}" == "${managed_binary}" || "${command}" == "${managed_binary} "* ||
-		"${command}" == *" ${managed_binary}" || "${command}" == *" ${managed_binary} "* ]]
+	local interpreter="${command%%" ${managed_binary}"*}"
+	local arguments="${command#"${interpreter} "}"
+	if [[ "${command}" == "${managed_binary}" || "${command}" == "${managed_binary} "* ]]; then
+		return 0
+	fi
+	[[ "${interpreter##*/}" =~ ^python([0-9]+(\.[0-9]+)*)?$ &&
+		( "${interpreter}" != *" "* || -x "${interpreter}" ) &&
+		( "${arguments}" == "${managed_binary}" || "${arguments}" == "${managed_binary} "* ) ]]
 }
 
 pid_matches_mediaforce_backend() {
@@ -96,7 +102,7 @@ mediaforce_backend_root_pid() {
 		parent="$(trim "$(pid_parent "${pid}")")"
 		[[ -n "${parent}" && "${parent}" != "0" ]] || break
 		command="$(pid_command "${parent}")"
-		if command_matches_backend_binary "${command}" || [[ "${command}" == *"uv run mediaforce-web"* ]]; then
+		if command_matches_backend_binary "${command}"; then
 			root="${parent}"
 			pid="${parent}"
 			depth=$((depth + 1))
@@ -165,35 +171,11 @@ foreign_listener_pids() {
 	done
 }
 
-collect_descendant_pids() {
-	local root_pid="${1:-}"
-	local child
-	for child in $(ps -axo pid=,ppid= | awk -v ppid="${root_pid}" '$2 == ppid {print $1}'); do
-		printf '%s\n' "${child}"
-		collect_descendant_pids "${child}"
-	done
-}
-
 kill_pid_tree() {
 	local root_pid="${1:-}"
-	local descendants
-	descendants="$(collect_descendant_pids "${root_pid}")"
-	kill "${root_pid}" 2>/dev/null || true
-	if [[ -n "${descendants}" ]]; then
-		while IFS= read -r child_pid; do
-			[[ -n "${child_pid}" ]] || continue
-			kill "${child_pid}" 2>/dev/null || true
-		done <<<"${descendants}"
-	fi
-	sleep 0.5
-	descendants="$(collect_descendant_pids "${root_pid}")"
-	kill -9 "${root_pid}" 2>/dev/null || true
-	if [[ -n "${descendants}" ]]; then
-		while IFS= read -r child_pid; do
-			[[ -n "${child_pid}" ]] || continue
-			kill -9 "${child_pid}" 2>/dev/null || true
-		done <<<"${descendants}"
-	fi
+	local component="${2:-}"
+	uv run --no-sync --project "${ROOT_DIR}" python -m mediaforce.ops.dev_processes \
+		"${root_pid}" "${ROOT_DIR}/scripts/mediaforce-dev.sh" "${component}"
 }
 
 wait_for_no_managed_listener() {
@@ -347,7 +329,7 @@ stop_backend() {
 	pid="$(backend_running_pid)"
 	if [[ -n "${pid}" ]]; then
 		pid="$(mediaforce_backend_root_pid "${pid}")"
-		kill_pid_tree "${pid}"
+		kill_pid_tree "${pid}" backend || return 1
 		wait_for_no_managed_listener "${BACKEND_PORT}" pid_matches_mediaforce_backend || true
 		rm -f "${BACKEND_PID_FILE}"
 		echo "backend: stopped pid ${pid}"
@@ -358,7 +340,7 @@ stop_backend() {
 		while IFS= read -r listener_pid; do
 			[[ -n "${listener_pid}" ]] || continue
 			listener_pid="$(mediaforce_backend_root_pid "${listener_pid}")"
-			kill_pid_tree "${listener_pid}"
+			kill_pid_tree "${listener_pid}" backend || return 1
 		done <<<"${managed_pids}"
 		wait_for_no_managed_listener "${BACKEND_PORT}" pid_matches_mediaforce_backend || true
 		rm -f "${BACKEND_PID_FILE}"
@@ -375,7 +357,7 @@ stop_frontend() {
 	pid="$(frontend_running_pid)"
 	if [[ -n "${pid}" ]]; then
 		pid="$(mediaforce_frontend_root_pid "${pid}")"
-		kill_pid_tree "${pid}"
+		kill_pid_tree "${pid}" frontend || return 1
 		wait_for_no_managed_listener "${FRONTEND_PORT}" pid_matches_mediaforce_frontend || true
 		rm -f "${FRONTEND_PID_FILE}"
 		echo "frontend: stopped pid ${pid}"
@@ -386,7 +368,7 @@ stop_frontend() {
 		while IFS= read -r listener_pid; do
 			[[ -n "${listener_pid}" ]] || continue
 			listener_pid="$(mediaforce_frontend_root_pid "${listener_pid}")"
-			kill_pid_tree "${listener_pid}"
+			kill_pid_tree "${listener_pid}" frontend || return 1
 		done <<<"${managed_pids}"
 		wait_for_no_managed_listener "${FRONTEND_PORT}" pid_matches_mediaforce_frontend || true
 		rm -f "${FRONTEND_PID_FILE}"
@@ -456,24 +438,21 @@ run_for_component() {
 	start:backend) start_backend ;;
 	start:frontend) start_frontend ;;
 	stop:all)
-		stop_frontend
-		stop_backend
+		stop_frontend || return 1
+		stop_backend || return 1
 		;;
 	stop:backend) stop_backend ;;
 	stop:frontend) stop_frontend ;;
 	restart:all)
-		stop_frontend
-		stop_backend
-		start_backend
-		start_frontend
+		stop_frontend || return 1
+		stop_backend || return 1
+		start_backend && start_frontend
 		;;
 	restart:backend)
-		stop_backend
-		start_backend
+		stop_backend && start_backend
 		;;
 	restart:frontend)
-		stop_frontend
-		start_frontend
+		stop_frontend && start_frontend
 		;;
 	status:all)
 		status_backend || true
@@ -494,4 +473,12 @@ run_for_component() {
 	esac
 }
 
-run_for_component "${1:-status}" "${2:-all}"
+if [[ "${1:-}" == "check-owner" ]]; then
+	case "${2:-}" in
+	backend) pid_matches_mediaforce_backend "${3:-}" ;;
+	frontend) pid_matches_mediaforce_frontend "${3:-}" ;;
+	*) exit 1 ;;
+	esac
+else
+	run_for_component "${1:-status}" "${2:-all}"
+fi
