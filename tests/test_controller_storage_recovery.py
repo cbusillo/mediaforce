@@ -8,6 +8,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.core.db import open_db
 from mediaforce.hosts.controller_mount import ControllerMountProbe, ControllerMountResult
 from mediaforce.hosts.mount_runtime import (
     ControllerSmbMount,
@@ -15,6 +16,7 @@ from mediaforce.hosts.mount_runtime import (
     save_controller_smb_mounts,
 )
 from mediaforce.web.runtime import controller_storage_recovery as recovery
+from mediaforce.web import app as web_app
 
 
 NOW = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
@@ -101,6 +103,42 @@ class ControllerStorageRecoveryTest(TestCase):
         mount.assert_not_called()
         snapshot = recovery.controller_storage_recovery_snapshot(self.config)
         self.assertEqual({item["status"] for item in snapshot["mounts"]}, {"ready"})
+
+    def test_host_selection_requires_recovery_readiness_for_volume_storage(self) -> None:
+        self.config.raw["encode_queue"] = {"scheduler": {"mode": "anytime"}}
+        host = {
+            "key": "stream", "host": "stream", "label": "Stream Encoder",
+            "mode": "ssh", "media_access": "stream", "priority": 10,
+            "capabilities": ["encode_queue"], "available": True,
+            "active_encode_count": 0, "max_parallel_encodes": 1,
+        }
+
+        def ready_probe(mount: ControllerSmbMount, _paths: object) -> ControllerMountProbe:
+            return ControllerMountProbe(True, True, mount.mount_point, mount.source, "smbfs", True)
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._host_runtime_rows", return_value=[host],
+        ), patch.object(recovery, "_utc_now", return_value=NOW):
+            selected, reason = web_app._select_encode_host(connection, self.config, {})
+            self.assertIsNone(selected)
+            self.assertEqual(reason, "Controller storage at /Volumes/media has not been checked.")
+
+            with patch.object(recovery, "probe_controller_mount", side_effect=ready_probe), patch.object(
+                    recovery, "mount_controller_smb_no_ui",
+            ) as mount:
+                recovery.process_controller_storage_recovery_once(self.config)
+            mount.assert_not_called()
+
+            with patch.object(Path, "exists", return_value=True), patch.object(
+                    Path, "is_dir", return_value=True,
+            ), patch("mediaforce.web.runtime.encode_runtime.os.access", side_effect=AssertionError(
+                    "Volume readiness belongs to the recovery worker, not an unbounded access probe.",
+            )):
+                selected, reason = web_app._select_encode_host(connection, self.config, {})
+            self.assertIsNotNone(selected)
+            assert selected is not None
+            self.assertEqual(selected["key"], host["key"])
+            self.assertIsNone(reason)
 
     def test_retry_backoff_does_not_repeat_or_slide_before_due(self) -> None:
         absent = ControllerMountProbe(

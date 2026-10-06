@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 LOGIN_ITEM_LABEL = "com.mediaforce.web"
+BOOTOUT_ACCEPTED_EXIT_CODES = frozenset({0, 3, 36, 113})
 LOGIN_ITEM_LOG_ROTATION_BYTES = 16 * 1024 * 1024
 LOGIN_ITEM_PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -237,7 +238,7 @@ def _carry_forward_runtime_env(paths: LoginItemPaths) -> None:
 
 def _bootout(runner: CommandRunner, target: str) -> None:
     result = runner(["/bin/launchctl", "bootout", target])
-    if result.returncode not in {0, 3, 36, 113}:
+    if result.returncode not in BOOTOUT_ACCEPTED_EXIT_CODES:
         _require_success(result, "stop the existing login item")
 
 
@@ -319,6 +320,7 @@ def _show_logs(path: Path, *, follow: bool, lines: int) -> int:
 
 
 __all__ = [
+    "BOOTOUT_ACCEPTED_EXIT_CODES",
     "LOGIN_ITEM_LABEL",
     "LoginItemError",
     "LoginItemPaths",
