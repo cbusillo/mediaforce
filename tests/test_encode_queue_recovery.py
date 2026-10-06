@@ -23,7 +23,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, cast
+from typing import Any, Callable, NoReturn, cast
 from unittest.mock import ANY, Mock, patch
 
 from fastapi import HTTPException
@@ -54,12 +54,12 @@ from mediaforce.core.process_control import ManagedProcessController, ProcessCan
 from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, SCHEDULE_DEADLINE_MARKER
 from mediaforce.core.schedule_deadline import ScheduleDeadlineConfigurationError
 from mediaforce.core.type_defs import object_dict, object_list
-from mediaforce.encoding import manifest as manifest
+from mediaforce.encoding import manifest as manifest_runtime
 from mediaforce.encoding import quality as encoding_quality
 from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding import video_filters
-from mediaforce.encoding.free_space import ReservePreflight, VolumeCapacity
+from mediaforce.encoding.free_space import ReservePreflight, VolumeCapacity, encode_reserve_preflight
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence, reclassify_cadence_summary
 from mediaforce.encoding.duration_estimate import EncodeDurationSample, load_encode_duration_samples
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
@@ -112,6 +112,14 @@ def _remote_host_unreachable(*_args: object, **_kwargs: object) -> subprocess.Co
 
 def _scratch_fixture_is_local(_lookup_host: str) -> bool:
     return False
+
+
+def _record_advice_payload(
+        recorded: list[dict[str, Any]], payload: dict[str, Any],
+) -> dict[str, Any]:
+    saved = dict(payload)
+    recorded.append(saved)
+    return saved
 
 
 class EncodeQueueRecoveryTests(unittest.TestCase):
@@ -511,13 +519,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
     def test_progress_write_does_not_put_back_a_lease_a_heartbeat_renewed_meanwhile(self) -> None:
         from mediaforce.web.runtime import encode_runtime
 
-        with open_db(self.config.paths.db_path) as connection:
-            self._running_job_with_expired_lease(connection, progress_age=timedelta(seconds=5))
-            job = load_encode_job(connection, "job-live")
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            self._running_job_with_expired_lease(fixture_connection, progress_age=timedelta(seconds=5))
+            job = load_encode_job(fixture_connection, "job-live")
             assert job is not None
             job["worker_id"] = "worker-a"
-            save_encode_job(connection, job)
-            connection.commit()
+            save_encode_job(fixture_connection, job)
+            fixture_connection.commit()
         deps = replace(web_app._encode_queue_runtime_deps(), load_config=Mock(return_value=self.config), logger=Mock())
         heartbeat_stop = Mock()
         heartbeat_stop.wait.side_effect = [False, True]
@@ -547,8 +555,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
         heartbeat.join(timeout=30)
 
-        with open_db(self.config.paths.db_path) as connection:
-            job = load_encode_job(connection, "job-live")
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            job = load_encode_job(fixture_connection, "job-live")
         assert job is not None
         self.assertFalse(heartbeat.is_alive())
         self.assertGreater(deps.parse_iso(job["lease_expires_at"]), datetime.now(tz=UTC))
@@ -559,14 +567,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         staging_path = self._staging_path("episode-fresh-heartbeat.mkv")
         future_lease = "2999-01-01T00:00:00+00:00"
 
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path, status="encoding")
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            item_id = self._insert_library_item(fixture_connection, source_path, status="encoding")
             self._write_manifest(
                 "manifest-fresh-heartbeat.json",
                 [{"library_item_id": item_id, "staging_path": str(staging_path)}],
             )
             self._save_job(
-                connection,
+                fixture_connection,
                 job_id="job-fresh-heartbeat",
                 manifest_name="manifest-fresh-heartbeat.json",
                 host={"key": "local", "label": "Local", "mode": "local"},
@@ -596,14 +604,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     save_encode_job(heartbeat_connection, refreshed)
             return payload
 
-        with open_db(self.config.paths.db_path) as connection, patch(
+        with open_db(self.config.paths.db_path) as fixture_connection, patch(
             "mediaforce.web.runtime.encode_runtime.load_encode_job",
             side_effect=load_with_interleaved_heartbeat,
         ):
-            web_app._reconcile_encode_jobs(connection, self.config)
+            web_app._reconcile_encode_jobs(fixture_connection, self.config)
 
-        with open_db(self.config.paths.db_path) as connection:
-            job = real_load_encode_job(connection, "job-fresh-heartbeat")
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            job = real_load_encode_job(fixture_connection, "job-fresh-heartbeat")
         assert job is not None
         self.assertEqual(job["status"], "running")
         self.assertEqual(job["lease_expires_at"], future_lease)
@@ -2201,7 +2209,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             staging_runtime.StagedOutputHeldForReviewError(str(probe_timeout)),
             TargetSizeSearchError(
                 "Every quality-safe candidate stayed above the target band.",
-                status="smallest_quality_safe_candidate_over_target_band",
+                status="bound_exhausted",
                 trace={},
             ),
         )
@@ -2603,7 +2611,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         real_write_text = Path.write_text
 
         def write_then_fail(path: Path, data: str, *args: Any, **kwargs: Any) -> int:
-            real_write_text(path, data[: len(data) // 2], *args, **kwargs)
+            real_write_text.__get__(path, Path)(data[: len(data) // 2], *args, **kwargs)
             raise OSError(errno.ENOSPC, "No space left on device")
 
         with patch.object(Path, "write_text", write_then_fail), self.assertRaises(OSError):
@@ -6019,7 +6027,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def test_scan_cancellation_unblocks_waiter_and_unregisters_runtime(self) -> None:
         job_id = "cancelled-scan"
-        process_controller = ManagedProcessController()
+        fixture_process_controller = ManagedProcessController()
         started = threading.Event()
         waiter_finished = threading.Event()
         poll = threading.Event()
@@ -6050,7 +6058,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     config_path=self.config.paths.config_path,
                     prefix=None,
                     job_id=job_id,
-                    process_controller=process_controller,
+                    process_controller=fixture_process_controller,
                 )
                 self.assertTrue(started.wait(timeout=1))
                 with web_app.SCAN_JOB_THREADS_CONDITION:
@@ -6069,7 +6077,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 waiter.join(timeout=1)
                 self.assertFalse(waiter.is_alive())
             finally:
-                process_controller.cancel()
+                fixture_process_controller.cancel()
                 web_app._wait_for_scan_job_threads()
 
         self.assertNotIn(job_id, web_app.SCAN_JOB_THREADS)
@@ -8533,14 +8541,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 ),
             )
 
-        payload = folder_episodes_payload(self.config, season)
+        fixture_payload = folder_episodes_payload(self.config, season)
         show_payload = folder_episodes_payload(self.config, "tv/show")
 
-        self.assertTrue(payload["available"])
+        self.assertTrue(fixture_payload["available"])
         self.assertEqual(
             [
                 (episode["rel_path"], episode["stage"], episode["detail"], episode["percent_complete"])
-                for episode in payload["episodes"]
+                for episode in fixture_payload["episodes"]
             ],
             [
                 (f"{season}/Episode 04.mkv", "needs_you", "much smaller than expected; keep it or make it again", None),
@@ -8551,7 +8559,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 (rel_paths[2], "published", None, None),
             ],
         )
-        self.assertEqual(payload["episodes"][5]["bytes_saved"], 700_000_000)
+        self.assertEqual(fixture_payload["episodes"][5]["bytes_saved"], 700_000_000)
         self.assertFalse(show_payload["available"])
 
     def test_folder_delivery_badge_ignores_fully_promoted_folders(self) -> None:
@@ -10108,9 +10116,9 @@ raise SystemExit(0)
             calibration_state[prefix] = dict(payload)
 
         cleared_proposals: list[str] = []
-        with open_db(self.config.paths.db_path) as connection:
+        with open_db(self.config.paths.db_path) as fixture_connection:
             save_calibration_job(
-                connection,
+                fixture_connection,
                 {
                     "job_id": "sample-1",
                     "prefix": "tv/show",
@@ -10151,11 +10159,11 @@ raise SystemExit(0)
         self.assertTrue(calibration.get("accepted_policy_hash"))
         self.assertEqual(calibration_status_during_save, ["pending_review"])
         self.assertEqual(cleared_proposals, ["tv/show"])
-        with open_db(self.config.paths.db_path) as connection:
-            queued_count = connection.scalar(
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            queued_count = fixture_connection.scalar(
                 select(func.count()).select_from(encode_jobs).where(encode_jobs.c.prefix == "tv/show")
             )
-            calibration_status = connection.scalar(
+            calibration_status = fixture_connection.scalar(
                 select(calibration_jobs.c.status).where(calibration_jobs.c.job_id == "sample-1")
             )
         self.assertEqual(queued_count, 0)
@@ -10337,7 +10345,7 @@ raise SystemExit(0)
     def test_retry_failed_encode_queue_action_retries_latest_approved_failures_only(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             now = web_app._now_iso()
-            for prefix, status in (
+            for fixture_prefix, status in (
                     ("tv/approved-a", "needs_attention"),
                     ("tv/approved-b", "failed"),
                     ("tv/review-blocked", "stopped"),
@@ -10346,12 +10354,12 @@ raise SystemExit(0)
                 save_encode_job(
                     connection,
                     {
-                        "job_id": f"job-{prefix.rsplit('/', 1)[-1]}",
-                        "prefix": prefix,
+                        "job_id": f"job-{fixture_prefix.rsplit('/', 1)[-1]}",
+                        "prefix": fixture_prefix,
                         "job_kind": "folder",
                         "parent_job_id": None,
                         "status": status,
-                        "manifest_path": str(self.root / "runs" / f"{prefix.rsplit('/', 1)[-1]}.json"),
+                        "manifest_path": str(self.root / "runs" / f"{fixture_prefix.rsplit('/', 1)[-1]}.json"),
                         "item_count": 1,
                         "saved_profile_path": None,
                         "host": {},
@@ -10422,16 +10430,16 @@ raise SystemExit(0)
     def test_retry_failed_encode_prefix_action_retries_only_requested_prefix(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             now = web_app._now_iso()
-            for prefix in ("tv/approved-a", "tv/approved-b"):
+            for fixture_prefix in ("tv/approved-a", "tv/approved-b"):
                 save_encode_job(
                     connection,
                     {
-                        "job_id": f"job-{prefix.rsplit('/', 1)[-1]}",
-                        "prefix": prefix,
+                        "job_id": f"job-{fixture_prefix.rsplit('/', 1)[-1]}",
+                        "prefix": fixture_prefix,
                         "job_kind": "folder",
                         "parent_job_id": None,
                         "status": "needs_attention",
-                        "manifest_path": str(self.root / "runs" / f"{prefix.rsplit('/', 1)[-1]}.json"),
+                        "manifest_path": str(self.root / "runs" / f"{fixture_prefix.rsplit('/', 1)[-1]}.json"),
                         "item_count": 1,
                         "saved_profile_path": None,
                         "host": {},
@@ -10826,7 +10834,7 @@ raise SystemExit(0)
                 },
             },
             record_visual_approval_artifact=lambda *_args, **_kwargs: {"artifact_id": "approval-1"},
-            merge_advice_state=lambda _config, _prefix, payload: merged_advice.append(dict(payload)),
+            merge_advice_state=lambda _config, _prefix, payload: _record_advice_payload(merged_advice, payload),
             upsert_override=lambda *_args, **_kwargs: None,
             confirm_size_tradeoff=True,
             reviewed_draft_hash=web_app._calibration_draft_hash(calibration_payload),
@@ -10971,7 +10979,7 @@ raise SystemExit(0)
                 },
             },
             record_visual_approval_artifact=lambda *_args, **_kwargs: {"artifact_id": "approval-1"},
-            merge_advice_state=lambda _config, _prefix, payload: merged_advice.append(dict(payload)),
+            merge_advice_state=lambda _config, _prefix, payload: _record_advice_payload(merged_advice, payload),
             upsert_override=lambda *_args, **_kwargs: None,
             confirm_high_impact=True,
             reviewed_draft_hash=web_app._calibration_draft_hash(calibration_payload),
@@ -11024,7 +11032,7 @@ raise SystemExit(0)
                 },
             },
             record_visual_approval_artifact=lambda *_args, **_kwargs: {"artifact_id": "approval-1"},
-            merge_advice_state=lambda _config, _prefix, payload: merged_advice.append(dict(payload)),
+            merge_advice_state=lambda _config, _prefix, payload: _record_advice_payload(merged_advice, payload),
             upsert_override=lambda *_args, **_kwargs: None,
             confirm_high_impact=True,
             reviewed_draft_hash=web_app._calibration_draft_hash(calibration_payload),
@@ -12418,10 +12426,10 @@ raise SystemExit(0)
         self.config.raw["remote_hosts"] = configured_hosts
         second_started = threading.Event()
 
-        def _status_for(host: dict[str, object]) -> HostStatus:
+        def _status_for(host: dict[str, str]) -> HostStatus:
             return HostStatus(
-                key=str(host["host"]),
-                label=str(host["label"]),
+                key=host["host"],
+                label=host["label"],
                 mode="ssh",
                 priority=0,
                 capabilities=["encode_queue"],
@@ -12431,9 +12439,8 @@ raise SystemExit(0)
                 repo_path=None,
             )
 
-        def _fake_remote_host_status(config: MediaforceConfig, host: dict[str, object]) -> HostStatus:
-            _ = config
-            if str(host.get("host")) == "first-host":
+        def _fake_remote_host_status(_config: MediaforceConfig, host: dict[str, str]) -> HostStatus:
+            if host.get("host") == "first-host":
                 self.assertTrue(second_started.wait(timeout=0.5))
                 return _status_for(host)
             second_started.set()
@@ -14828,32 +14835,20 @@ raise SystemExit(0)
                 "media_root": "tv",
             }
 
-            class FailingUpdateConnection:
-                @staticmethod
-                def execute(statement: Any, *args: Any, **kwargs: Any) -> Any:
-                    if getattr(statement, "table", None) is library_items:
-                        raise sqlite3.OperationalError("database is locked")
-                    return connection.execute(statement, *args, **kwargs)
+            original_execute = connection.execute
 
-                @staticmethod
-                def commit() -> None:
-                    connection.commit()
-
-                @staticmethod
-                def rollback() -> None:
-                    connection.rollback()
+            def fail_library_update(statement: Any, *args: Any, **kwargs: Any) -> Any:
+                if getattr(statement, "table", None) is library_items:
+                    raise sqlite3.OperationalError("database is locked")
+                return original_execute(statement, *args, **kwargs)
 
             with patch("mediaforce.execution.probe_media", return_value=promoted_probe), patch(
                     "mediaforce.execution.file_fingerprint",
                     return_value="promoted-fingerprint",
             ):
                 with self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
-                    execution.promote_one_item(
-                        cast(DBClient, FailingUpdateConnection()),
-                        self.config,
-                        item,
-                        force=False,
-                    )
+                    with patch.object(connection, "execute", side_effect=fail_library_update):
+                        execution.promote_one_item(connection, self.config, item, force=False)
 
             library_row = self._library_item_value(connection, item_id, library_items.c.status)
             staged_row = self._staged_artifact_value(
@@ -15186,8 +15181,7 @@ raise SystemExit(0)
             if path == temp_output and replace_calls == 0:
                 replace_calls += 1
                 raise OSError(errno.EBUSY, "Resource busy", str(path))
-            replace = cast(Callable[[Path, Path], Path], original_replace)
-            return replace(path, target)
+            return original_replace.__get__(path, Path)(target)
 
         with patch("pathlib.Path.replace", autospec=True, side_effect=flaky_replace), patch(
                 "mediaforce.encoding.staging.time.sleep"
@@ -15241,7 +15235,7 @@ raise SystemExit(0)
                     return subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr="")
 
                 item_id = self._insert_library_item(connection, source_path)
-                item = {
+                item: dict[str, Any] = {
                     "library_item_id": item_id,
                     "resolved_policy": {"video": {"preset": 4, "encoder": "libsvtav1"}, "audio": {}, "subtitle": {}},
                     "rel_path": f"tv/show/episode-unreadable-{label}.mkv",
@@ -15317,7 +15311,7 @@ raise SystemExit(0)
 
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path)
-            item = {
+            item: dict[str, Any] = {
                 "library_item_id": item_id,
                 "resolved_policy": {
                     "video": {"preset": 4, "encoder": "libsvtav1"},
@@ -15815,7 +15809,7 @@ raise SystemExit(0)
                 "mediaforce.quality._quality_temp_root_is_writable",
                 side_effect=[False, True],
         ):
-            resolved = manifest._quality_temp_dir_for_encode_host(
+            resolved = manifest_runtime._quality_temp_dir_for_encode_host(
                 self.config,
                 {"mode": "ssh", "media_access": "stream"},
             )
@@ -15858,7 +15852,7 @@ raise SystemExit(0)
                 "mediaforce.quality._quality_temp_root_is_writable",
                 side_effect=[False, False, True],
         ):
-            resolved = manifest._quality_temp_dir_for_encode_host(
+            resolved = manifest_runtime._quality_temp_dir_for_encode_host(
                 self.config,
                 {"mode": "ssh", "media_access": "stream"},
             )
@@ -16285,7 +16279,6 @@ raise SystemExit(0)
 
     def test_run_crf_search_preserves_quality_error_when_cleanup_also_fails(self) -> None:
         host = {"mode": "ssh", "host": "cbusillo@stream-host"}
-        scoped_temp_dir = "/tmp/mediaforce-transcode/.mediaforce-ab-av1-test"
         remote_results = [
             subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
             subprocess.CompletedProcess(args=["ssh"], returncode=1, stdout="", stderr="quality failed"),
@@ -18237,8 +18230,7 @@ raise SystemExit(0)
         output_dir = self.root / "review"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        def create_preview_file(*_args: object, **kwargs: object) -> None:
-            output_path = Path(str(kwargs["output_path"]))
+        def create_preview_file(*_args: object, output_path: Path, **_kwargs: object) -> None:
             output_path.write_bytes(b"preview")
 
         with patch("mediaforce.review._render_encoded_preview_clip") as render_mock, patch(
@@ -18427,8 +18419,8 @@ raise SystemExit(0)
     def test_render_source_review_clips_localhost_ssh_executes_locally(self) -> None:
         output_dir = self.root / "source-review-localhost"
 
-        def create_source_clip(*_args: object, **kwargs: object) -> None:
-            Path(str(kwargs["output_path"])).write_bytes(b"source")
+        def create_source_clip(*_args: object, output_path: Path, **_kwargs: object) -> None:
+            output_path.write_bytes(b"source")
 
         with patch("mediaforce.review._render_source_review_clip", side_effect=create_source_clip) as render_mock, patch(
                 "mediaforce.review._render_source_review_clips_remote"
@@ -18516,18 +18508,18 @@ raise SystemExit(0)
         self.assertEqual(cmd[-2:], ["1", "/tmp/timeline-strip.png"])
 
     def test_render_audio_spectrogram_compare_renders_assets_and_cleans_temp_dir(self) -> None:
-        output_path = self.root / "review-assets" / "spectrogram.png"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_output_path = self.root / "review-assets" / "spectrogram.png"
+        artifact_output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        def create_file(*_args: object, **kwargs: object) -> None:
-            Path(str(kwargs["output_path"])).write_bytes(b"artifact")
+        def create_file(*_args: object, output_path: Path, **_kwargs: object) -> None:
+            output_path.write_bytes(b"artifact")
 
         with patch("mediaforce.review._render_audio_spectrogram", side_effect=create_file) as spectrogram_mock, patch(
                 "mediaforce.review._render_encoded_audio_clip", side_effect=create_file
         ) as encoded_audio_mock, patch("mediaforce.review._stack_review_images", side_effect=create_file) as stack_mock:
             result = review.render_audio_spectrogram_compare(
                 source_path=Path("/tmp/input.mkv"),
-                output_path=output_path,
+                output_path=artifact_output_path,
                 clip_time=12.0,
                 duration_seconds=8.0,
                 audio_track={"codec_name": "aac", "channels": 6, "index": 2},
@@ -18540,11 +18532,11 @@ raise SystemExit(0)
         self.assertEqual(result["bitrate"], "256k")
         self.assertEqual(result["channels"], 6)
         self.assertEqual(result["codec_name"], "aac")
-        self.assertTrue(output_path.exists())
+        self.assertTrue(artifact_output_path.exists())
         self.assertEqual(spectrogram_mock.call_count, 2)
         encoded_audio_mock.assert_called_once()
         stack_mock.assert_called_once()
-        self.assertFalse((output_path.parent / ".spectrogram-artifacts").exists())
+        self.assertFalse((artifact_output_path.parent / ".spectrogram-artifacts").exists())
         self.assertEqual(spectrogram_mock.call_args_list[0].kwargs["audio_track"]["index"], 2)
         self.assertEqual(encoded_audio_mock.call_args.kwargs["audio_track"]["index"], 2)
 
@@ -18886,7 +18878,7 @@ raise SystemExit(0)
                 self.assertFalse(handle.thread.is_alive())
 
     def test_concurrent_duplicate_encode_dispatch_preserves_owner_and_shutdown_drain(self) -> None:
-        job_id = "duplicate-dispatch"
+        fixture_job_id = "duplicate-dispatch"
         started = threading.Event()
         cancellation_observed = threading.Event()
         cleanup_requested = threading.Event()
@@ -18917,7 +18909,7 @@ raise SystemExit(0)
             try:
                 web_app._dispatch_encode_job(
                     config_path=self.config.paths.config_path,
-                    job_id=job_id,
+                    job_id=fixture_job_id,
                 )
             except BaseException as exc:
                 outcome: BaseException | None = exc
@@ -18957,14 +18949,14 @@ raise SystemExit(0)
                 self.assertIn("already running", str(rejected[0]))
                 self.assertTrue(started.wait(1))
                 with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
-                    controller = web_app.ENCODE_QUEUE_PROCESSES[job_id]
+                    controller = web_app.ENCODE_QUEUE_PROCESSES[fixture_job_id]
                 with web_app.ENCODE_QUEUE_THREADS_CONDITION:
-                    thread = web_app.ENCODE_QUEUE_THREADS[job_id]
+                    thread = web_app.ENCODE_QUEUE_THREADS[fixture_job_id]
                 self.assertTrue(thread.is_alive())
                 with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
-                    self.assertIs(web_app.ENCODE_QUEUE_PROCESSES[job_id], controller)
+                    self.assertIs(web_app.ENCODE_QUEUE_PROCESSES[fixture_job_id], controller)
                 with web_app.ENCODE_QUEUE_THREADS_CONDITION:
-                    self.assertIs(web_app.ENCODE_QUEUE_THREADS[job_id], thread)
+                    self.assertIs(web_app.ENCODE_QUEUE_THREADS[fixture_job_id], thread)
 
                 web_app._cancel_active_encode_processes()
                 self.assertTrue(controller.cancelled)
@@ -18977,9 +18969,9 @@ raise SystemExit(0)
                 web_app._wait_for_encode_queue_threads()
 
         with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
-            self.assertNotIn(job_id, web_app.ENCODE_QUEUE_PROCESSES)
+            self.assertNotIn(fixture_job_id, web_app.ENCODE_QUEUE_PROCESSES)
         with web_app.ENCODE_QUEUE_THREADS_CONDITION:
-            self.assertNotIn(job_id, web_app.ENCODE_QUEUE_THREADS)
+            self.assertNotIn(fixture_job_id, web_app.ENCODE_QUEUE_THREADS)
 
     def test_encode_dispatch_start_failure_clears_matching_registration(self) -> None:
         failing_thread = Mock(spec=threading.Thread)
@@ -19179,13 +19171,16 @@ raise SystemExit(0)
                 call_order.append(f"join:{self.name}")
 
         class FakeBackgroundRuntime:
-            def stop(self) -> None:
+            @staticmethod
+            def stop() -> None:
                 call_order.append("workers:stop")
 
-            def join(self) -> None:
+            @staticmethod
+            def join() -> None:
                 call_order.append("workers:join")
 
-            def release(self) -> None:
+            @staticmethod
+            def release() -> None:
                 call_order.append("leadership:release")
 
         cleanup_mock = Mock(side_effect=AssertionError("cleanup should not run synchronously"))
@@ -20097,10 +20092,10 @@ raise SystemExit(0)
         deps.stop_encode_host_if_configured.assert_called_once()
         probe.assert_not_called()
         with open_db(self.config.paths.db_path) as connection:
-            queued = load_encode_job(connection, "scratch-startup")
-            assert queued is not None
-            self.assertEqual(queued["attempt_count"], 0)
-            self.assertIn("scratch space", queued["waiting_reason"])
+            fixture_queued = load_encode_job(connection, "scratch-startup")
+            assert fixture_queued is not None
+            self.assertEqual(fixture_queued["attempt_count"], 0)
+            self.assertIn("scratch space", fixture_queued["waiting_reason"])
 
         deps.scratch_admission_history.clear()
         deps.scratch_capacity_samples.clear()
@@ -21967,7 +21962,7 @@ raise SystemExit(0)
             def tracked_read_text(path: Path, *args: object, **kwargs: object) -> str:
                 if path == manifest_path:
                     manifest_reads.append(path)
-                return original_read_text(path, *args, **kwargs)
+                return original_read_text.__get__(path, Path)(*args, **kwargs)
 
             with patch(
                 "mediaforce.web.runtime.encode_runtime.select_encode_host",
@@ -22033,7 +22028,7 @@ raise SystemExit(0)
         def tracked_read_text(path: Path, *args: object, **kwargs: object) -> str:
             if path == manifest_path:
                 manifest_reads.append(path)
-            return original_read_text(path, *args, **kwargs)
+            return original_read_text.__get__(path, Path)(*args, **kwargs)
 
         encode_runtime._cached_encode_estimate_manifest_items.cache_clear()
         try:
@@ -22216,7 +22211,7 @@ raise SystemExit(0)
                 items: list[dict[str, Any]],
                 **kwargs: Any,
         ) -> Any:
-            return encode_runtime.encode_reserve_preflight(
+            return encode_reserve_preflight(
                 config,
                 items,
                 host=object_dict(kwargs.get("host")),
@@ -23905,9 +23900,9 @@ raise SystemExit(0)
         class _LoadStagedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
-                    _normalized_prefix: str,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    normalized_prefix: str,
                     *,
                     statuses: set[str],
             ) -> list[folder_actions_runtime.FolderItem]:
@@ -23917,9 +23912,9 @@ raise SystemExit(0)
         class _ValidateManifestItems(folder_actions_runtime.ValidateManifestItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
-                    _manifest: folder_actions_runtime.ManifestPayload,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    manifest: folder_actions_runtime.ManifestPayload,
                     indexes: list[int],
             ) -> list[folder_actions_runtime.ActionPayload]:
                 return [{"passed": indexes[0] == 0}]
@@ -23944,9 +23939,9 @@ raise SystemExit(0)
         class _SingleStagedItem(folder_actions_runtime.LoadFolderStagedItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
-                    _normalized_prefix: str,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    normalized_prefix: str,
                     *,
                     statuses: set[str],
             ) -> list[folder_actions_runtime.FolderItem]:
@@ -23956,8 +23951,8 @@ raise SystemExit(0)
         class _PassedValidation(folder_actions_runtime.ValidateManifestItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
+                    connection: DBClient,
+                    config: MediaforceConfig,
                     manifest: folder_actions_runtime.ManifestPayload,
                     indexes: list[int],
             ) -> list[folder_actions_runtime.ActionPayload]:
@@ -23971,9 +23966,9 @@ raise SystemExit(0)
 
         for status in ("queued", "running", "retry_backoff"):
             prefix = f"tv/show-{status}"
-            with open_db(self.config.paths.db_path) as connection:
+            with open_db(self.config.paths.db_path) as fixture_connection:
                 save_encode_job(
-                    connection,
+                    fixture_connection,
                     {
                         "job_id": f"active-validate-{status}",
                         "prefix": prefix,
@@ -24033,15 +24028,15 @@ raise SystemExit(0)
         connection.exec_driver_sql("SELECT count(*) FROM lock_probe").fetchall()
 
     def test_validate_folder_outputs_action_records_each_file_while_other_work_writes(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            connection.exec_driver_sql("CREATE TABLE lock_probe (value TEXT)")
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            fixture_connection.exec_driver_sql("CREATE TABLE lock_probe (value TEXT)")
 
         class _TwoStagedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
-                    _normalized_prefix: str,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    normalized_prefix: str,
                     *,
                     statuses: set[str],
             ) -> list[folder_actions_runtime.FolderItem]:
@@ -24051,8 +24046,8 @@ raise SystemExit(0)
             def __call__(
                     self,
                     connection: DBClient,
-                    _config: MediaforceConfig,
-                    _manifest: folder_actions_runtime.ManifestPayload,
+                    config: MediaforceConfig,
+                    manifest: folder_actions_runtime.ManifestPayload,
                     indexes: list[int],
             ) -> list[folder_actions_runtime.ActionPayload]:
                 # An encode or another folder action commits while this file is being checked.
@@ -24074,20 +24069,20 @@ raise SystemExit(0)
 
         self.assertTrue(result["ok"])
         self.assertEqual((result["validated_count"], result["failed_count"]), (1, 1))
-        with open_db(self.config.paths.db_path) as connection:
-            values = {row[0] for row in connection.exec_driver_sql("SELECT value FROM lock_probe")}
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            values = {row[0] for row in fixture_connection.exec_driver_sql("SELECT value FROM lock_probe")}
         self.assertEqual(values, {"other-0", "other-1", "file-1"})
 
     def test_promote_folder_outputs_action_publishes_while_other_work_writes(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            connection.exec_driver_sql("CREATE TABLE lock_probe (value TEXT)")
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            fixture_connection.exec_driver_sql("CREATE TABLE lock_probe (value TEXT)")
 
         class _OneValidatedItem(folder_actions_runtime.LoadFolderStagedItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
-                    _normalized_prefix: str,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    normalized_prefix: str,
                     *,
                     statuses: set[str],
             ) -> list[folder_actions_runtime.FolderItem]:
@@ -24097,8 +24092,8 @@ raise SystemExit(0)
             def __call__(
                     self,
                     connection: DBClient,
-                    _config: MediaforceConfig,
-                    _manifest: folder_actions_runtime.ManifestPayload,
+                    config: MediaforceConfig,
+                    manifest: folder_actions_runtime.ManifestPayload,
                     indexes: list[int],
                     *,
                     force: bool,
@@ -24143,14 +24138,21 @@ raise SystemExit(0)
         promoted_rel_paths: list[str] = []
 
         class _ValidatedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
-            def __call__(self, *_args: Any, statuses: set[str]) -> list[folder_actions_runtime.FolderItem]:
+            def __call__(
+                    self,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    normalized_prefix: str,
+                    *,
+                    statuses: set[str],
+            ) -> list[folder_actions_runtime.FolderItem]:
                 return items
 
         class _Promote(folder_actions_runtime.PromoteManifestItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
+                    connection: DBClient,
+                    config: MediaforceConfig,
                     manifest: folder_actions_runtime.ManifestPayload,
                     indexes: list[int],
                     *,
@@ -24182,11 +24184,26 @@ raise SystemExit(0)
         (staged / "a.mkv").write_text("encoded")
 
         class _ValidatedItem(folder_actions_runtime.LoadFolderStagedItemsFn):
-            def __call__(self, *_args: Any, statuses: set[str]) -> list[folder_actions_runtime.FolderItem]:
+            def __call__(
+                    self,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    normalized_prefix: str,
+                    *,
+                    statuses: set[str],
+            ) -> list[folder_actions_runtime.FolderItem]:
                 return [{"library_item_id": 1, "rel_path": "tv/show/a.avi", "staging_path": str(staged / "a.mkv")}]
 
         class _Promote(folder_actions_runtime.PromoteManifestItemsFn):
-            def __call__(self, *_args: Any, force: bool) -> execution.PromotionResult:
+            def __call__(
+                    self,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+                    *,
+                    force: bool,
+            ) -> execution.PromotionResult:
                 return execution.PromotionResult(
                     promoted_paths=[],
                     held=[execution.HeldFile("tv/show/a.avi", "Waiting for room", waiting=True)],
@@ -24210,11 +24227,26 @@ raise SystemExit(0)
         (staged / "a.mkv").write_text("encoded")
 
         class _ValidatedItem(folder_actions_runtime.LoadFolderStagedItemsFn):
-            def __call__(self, *_args: Any, statuses: set[str]) -> list[folder_actions_runtime.FolderItem]:
+            def __call__(
+                    self,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    normalized_prefix: str,
+                    *,
+                    statuses: set[str],
+            ) -> list[folder_actions_runtime.FolderItem]:
                 return [{"library_item_id": 1, "rel_path": "tv/show/a.avi", "staging_path": str(staged / "a.mkv")}]
 
         class _Promote(folder_actions_runtime.PromoteManifestItemsFn):
-            def __call__(self, *_args: Any, force: bool) -> execution.PromotionResult:
+            def __call__(
+                    self,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+                    *,
+                    force: bool,
+            ) -> execution.PromotionResult:
                 failed = [execution.HeldFile(f"tv/show/f{index}.avi", "Could not publish", waiting=False) for index in range(4)]
                 unsafe = execution.HeldFile("tv/show/last.avi", "Check this file now", waiting=False, unsafe=True)
                 return execution.PromotionResult(promoted_paths=[Path("/library/tv/show/a.mkv")], held=[*failed, unsafe])
@@ -24237,7 +24269,14 @@ raise SystemExit(0)
         checked: list[int] = []
 
         class _EncodedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
-            def __call__(self, *_args: Any, statuses: set[str]) -> list[folder_actions_runtime.FolderItem]:
+            def __call__(
+                    self,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    normalized_prefix: str,
+                    *,
+                    statuses: set[str],
+            ) -> list[folder_actions_runtime.FolderItem]:
                 return [
                     {"library_item_id": 1, "rel_path": "tv/show/here.avi", "staging_path": str(staged / "here.mkv")},
                     {
@@ -24251,8 +24290,8 @@ raise SystemExit(0)
         class _Validate(folder_actions_runtime.ValidateManifestItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
+                    connection: DBClient,
+                    config: MediaforceConfig,
                     manifest: folder_actions_runtime.ManifestPayload,
                     indexes: list[int],
             ) -> list[folder_actions_runtime.ActionPayload]:
@@ -24279,9 +24318,9 @@ raise SystemExit(0)
         class _NoStagedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
-                    _normalized_prefix: str,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    normalized_prefix: str,
                     *,
                     statuses: set[str],
             ) -> list[folder_actions_runtime.FolderItem]:
@@ -24291,9 +24330,9 @@ raise SystemExit(0)
         class _PromoteManifestItems(folder_actions_runtime.PromoteManifestItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
-                    _manifest: folder_actions_runtime.ManifestPayload,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    manifest: folder_actions_runtime.ManifestPayload,
                     indexes: list[int],
                     *,
                     force: bool,
@@ -24320,9 +24359,9 @@ raise SystemExit(0)
         class _SingleValidatedItem(folder_actions_runtime.LoadFolderStagedItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
-                    _normalized_prefix: str,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    normalized_prefix: str,
                     *,
                     statuses: set[str],
             ) -> list[folder_actions_runtime.FolderItem]:
@@ -24332,9 +24371,9 @@ raise SystemExit(0)
         class _PromoteManifestItems(folder_actions_runtime.PromoteManifestItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
-                    _manifest: folder_actions_runtime.ManifestPayload,
+                    connection: DBClient,
+                    config: MediaforceConfig,
+                    manifest: folder_actions_runtime.ManifestPayload,
                     indexes: list[int],
                     *,
                     force: bool,
@@ -24349,9 +24388,9 @@ raise SystemExit(0)
 
         for status in ("queued", "running", "retry_backoff"):
             prefix = f"tv/show-{status}-promote"
-            with open_db(self.config.paths.db_path) as connection:
+            with open_db(self.config.paths.db_path) as fixture_connection:
                 save_encode_job(
-                    connection,
+                    fixture_connection,
                     {
                         "job_id": f"active-promote-{status}",
                         "prefix": prefix,
@@ -24455,16 +24494,16 @@ raise SystemExit(0)
         self.assertNotIn(sibling_id, [item["library_item_id"] for item in items])
 
     def test_validate_exact_file_uses_only_matching_staged_item(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            exact_id, sibling_id = self._insert_exact_root_staged_items(connection, status="encoded")
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            exact_id, sibling_id = self._insert_exact_root_staged_items(fixture_connection, status="encoded")
 
         validated_item_ids: list[int] = []
 
         class _ValidateManifestItems(folder_actions_runtime.ValidateManifestItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
+                    connection: DBClient,
+                    config: MediaforceConfig,
                     manifest: folder_actions_runtime.ManifestPayload,
                     indexes: list[int],
             ) -> list[folder_actions_runtime.ActionPayload]:
@@ -24490,16 +24529,16 @@ raise SystemExit(0)
         self.assertNotIn(sibling_id, validated_item_ids)
 
     def test_promote_exact_file_uses_only_matching_staged_item(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            exact_id, sibling_id = self._insert_exact_root_staged_items(connection, status="validated")
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            exact_id, sibling_id = self._insert_exact_root_staged_items(fixture_connection, status="validated")
 
         promoted_item_ids: list[int] = []
 
         class _PromoteManifestItems(folder_actions_runtime.PromoteManifestItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
+                    connection: DBClient,
+                    config: MediaforceConfig,
                     manifest: folder_actions_runtime.ManifestPayload,
                     indexes: list[int],
                     *,
@@ -25373,10 +25412,14 @@ raise SystemExit(0)
         self._clear_cadence(item_ids["Episode 2.mkv"])
         queued: list[Any] = []
 
+        def unexpected_queue(group: production_holds_runtime.ClearedHoldGroup) -> NoReturn:
+            queued.append(group)
+            raise AssertionError("A file with a changed approval must not be queued")
+
         results = production_holds_runtime.join_cleared_held_files(
             lambda: open_db(self.config.paths.db_path),
             current_approval=lambda _prefix: "a-newer-approval",
-            queue_held_files=queued.append,
+            queue_held_files=unexpected_queue,
             now_iso=web_app._now_iso,
         )
 
@@ -25857,19 +25900,19 @@ raise SystemExit(0)
         encoded_stage.write_text("encoded")
         validated_stage.write_text("validated")
 
-        with open_db(self.config.paths.db_path) as connection:
-            encoded_id = self._insert_library_item(connection, encoded_source, status="encoded")
-            validated_id = self._insert_library_item(connection, validated_source, status="validated")
-            self._insert_staged_artifact(connection, encoded_id, encoded_stage)
-            self._insert_staged_artifact(connection, validated_id, validated_stage)
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            encoded_id = self._insert_library_item(fixture_connection, encoded_source, status="encoded")
+            validated_id = self._insert_library_item(fixture_connection, validated_source, status="validated")
+            self._insert_staged_artifact(fixture_connection, encoded_id, encoded_stage)
+            self._insert_staged_artifact(fixture_connection, validated_id, validated_stage)
 
         validated_item_ids: list[int] = []
 
         class _ValidateManifestItems(folder_actions_runtime.ValidateManifestItemsFn):
             def __call__(
                     self,
-                    _connection: DBClient,
-                    _config: MediaforceConfig,
+                    connection: DBClient,
+                    config: MediaforceConfig,
                     manifest: folder_actions_runtime.ManifestPayload,
                     indexes: list[int],
             ) -> list[folder_actions_runtime.ActionPayload]:
@@ -26433,13 +26476,13 @@ raise SystemExit(0)
                 },
             )
 
-        with open_db(self.config.paths.db_path) as connection:
-            save_active_job(connection, job_id="series-active", prefix="tv/show", offset_seconds=0)
-            child_match = load_active_encode_job_for_prefix(connection, "tv/show/Season 2")
-            sibling_miss = load_active_encode_job_for_prefix(connection, "tv/show-special")
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            save_active_job(fixture_connection, job_id="series-active", prefix="tv/show", offset_seconds=0)
+            child_match = load_active_encode_job_for_prefix(fixture_connection, "tv/show/Season 2")
+            sibling_miss = load_active_encode_job_for_prefix(fixture_connection, "tv/show-special")
 
-            save_active_job(connection, job_id="season-active", prefix="tv/show/Season 3", offset_seconds=1)
-            parent_match = load_active_encode_job_for_prefix(connection, "tv/show")
+            save_active_job(fixture_connection, job_id="season-active", prefix="tv/show/Season 3", offset_seconds=1)
+            parent_match = load_active_encode_job_for_prefix(fixture_connection, "tv/show")
 
         self.assertEqual(child_match["job_id"], "series-active")
         self.assertIsNone(sibling_miss)
@@ -26536,13 +26579,13 @@ raise SystemExit(0)
                 },
             )
 
-        with open_db(self.config.paths.db_path) as connection:
-            save_display_job(connection, job_id="series-latest", prefix="tv/show", offset_seconds=0)
-            child_match = load_latest_encode_job(connection, "tv/show/Season 2")
-            sibling_miss = load_latest_encode_job(connection, "tv/show-special")
+        with open_db(self.config.paths.db_path) as fixture_connection:
+            save_display_job(fixture_connection, job_id="series-latest", prefix="tv/show", offset_seconds=0)
+            child_match = load_latest_encode_job(fixture_connection, "tv/show/Season 2")
+            sibling_miss = load_latest_encode_job(fixture_connection, "tv/show-special")
 
-            save_display_job(connection, job_id="season-latest", prefix="tv/show/Season 3", offset_seconds=1)
-            parent_match = load_latest_encode_job(connection, "tv/show")
+            save_display_job(fixture_connection, job_id="season-latest", prefix="tv/show/Season 3", offset_seconds=1)
+            parent_match = load_latest_encode_job(fixture_connection, "tv/show")
 
         self.assertEqual(child_match["job_id"], "series-latest")
         self.assertIsNone(sibling_miss)
@@ -28566,9 +28609,9 @@ raise SystemExit(0)
         source_b = self._create_source_file("cleanup-writer-b.mkv")
         staging_a = self._staging_path("cleanup-writer-a.mkv")
         staging_b = self._staging_path("cleanup-writer-b.mkv")
-        for path in (staging_a, staging_b):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("staged")
+        for fixture_path in (staging_a, staging_b):
+            fixture_path.parent.mkdir(parents=True, exist_ok=True)
+            fixture_path.write_text("staged")
 
         with open_db(self.config.paths.db_path) as connection:
             item_a = self._insert_library_item(connection, source_a, status="encoding")

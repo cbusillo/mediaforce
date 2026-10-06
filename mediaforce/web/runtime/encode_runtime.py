@@ -22,7 +22,6 @@ from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy import and_, or_
-from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.runtime.scratch_reservations import calibration_scratch_reservations
@@ -47,9 +46,9 @@ from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, parse
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, EncodeDurationSample, \
     estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples
-from mediaforce.encoding.free_space import CapacityCache, encode_reserve_preflight, large_job_requires_serialization
-from mediaforce.encoding.quality import REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, QualitySearchError, \
-    QualityTempCleanupError, QualityTempSetupError, RemoteQualityTimeoutError, analyze_quality_policy_failure, \
+from mediaforce.encoding.free_space import CapacityCache, large_job_requires_serialization
+from mediaforce.encoding.quality import REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, \
+    QualityTempSetupError, RemoteQualityTimeoutError, analyze_quality_policy_failure, \
     quality_error_message
 from mediaforce.encoding.staged_host import StagedScratchError, host_scratch_root, measure_scratch_free_bytes, \
     required_scratch_bytes
@@ -128,7 +127,7 @@ class EncodeQueueRuntimeDeps:
     encode_job_retry_max_delay_seconds: int
     encode_job_max_attempts: int
     encode_host_cooldown_seconds: int
-    live_encode_job_controller: Any = None
+    live_encode_job_controller: Callable[[str], ManagedProcessController | None] | None = None
     scratch_admission_history: dict[str, "_ScratchAdmissionSnapshot"] = field(default_factory=dict)
     scratch_capacity_samples: dict[str, "_ScratchAdmissionSnapshot"] = field(default_factory=dict)
     scratch_ready_hosts: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -365,7 +364,10 @@ def _renew_lease_for_live_worker(
 ) -> bool:
     """Keep a job whose worker still runs in this process; end a silent worker's encoder before the job is reclaimed."""
     job_id = str(payload.get("job_id") or "")
-    controller = deps.live_encode_job_controller(job_id) if deps.live_encode_job_controller is not None else None
+    live_controller = deps.live_encode_job_controller
+    if live_controller is None:
+        return False
+    controller = live_controller(job_id)
     if controller is None:
         return False
     progress_at = deps.parse_iso(object_dict(payload.get("progress")).get("updated_at"))
@@ -1060,7 +1062,7 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
             group.setdefault("size_questions", []).append(question)
     return sorted(
         groups.values(),
-        key=lambda group: (not group["needs_owner"], -int(group["count"]), str(group["reason"])),
+        key=lambda entry: (not entry["needs_owner"], -int(entry["count"]), str(entry["reason"])),
     )
 
 
@@ -2062,15 +2064,15 @@ def _controller_staging_access_issue(
 
 
 def select_encode_host(
-        connection: DBClient,
+        connection: DBClient | None,
         config: MediaforceConfig,
         job: dict[str, Any],
         deps: EncodeQueueRuntimeDeps,
         *,
         host_rows: list[dict[str, Any]] | None = None,
         now: datetime | None = None,
-        host_admission: Any | None = None,
-        host_rank: Any | None = None,
+        host_admission: Callable[[dict[str, Any]], bool] | None = None,
+        host_rank: Callable[[dict[str, Any]], tuple[int, float, int, str]] | None = None,
         globally_blocked_hosts: dict[str, dict[str, Any]] | None = None,
         scratch_admission_issue: Callable[[dict[str, Any]], str | None] | None = None,
         scratch_admission_pending: Callable[[dict[str, Any]], bool] | None = None,
@@ -2250,7 +2252,7 @@ def select_encode_host(
 
 
 def _globally_backed_off_encode_hosts(
-        connection: DBClient,
+        connection: DBClient | None,
         deps: EncodeQueueRuntimeDeps,
         *,
         now: datetime,
@@ -2371,8 +2373,7 @@ def _encode_failure_last_host_payload(
         return payload
     previous_streak = int_value(previous_last_host.get("failure_streak"))
     if _host_identity_matches(assigned_host, previous_last_host):
-        payload = {**previous_last_host, **payload}
-        payload["failure_streak"] = previous_streak + 1
+        payload = {**previous_last_host, **payload, "failure_streak": previous_streak + 1}
     else:
         payload["failure_streak"] = 1
     return payload
@@ -2493,7 +2494,6 @@ def _encode_job_estimate_items(
 
 def _encode_reserve_items(
         connection: DBClient,
-        config: MediaforceConfig,
         items: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     item_ids = {
@@ -2686,7 +2686,6 @@ def _running_encode_reserve_state(
             continue
         running_items = _encode_reserve_items(
             connection,
-            config,
             _encode_job_estimate_items(running_job, manifest_items_cache=manifest_items_cache),
         )
         running_host = object_dict(running_job.get("host"))
@@ -2909,7 +2908,6 @@ def encode_job_heartbeat_loop(
         deps: EncodeQueueRuntimeDeps,
 ) -> None:
     while not stop_event.wait(deps.encode_job_heartbeat_seconds):
-        # noinspection PyBroadException
         try:
             with open_db(deps.load_config(config_path).paths.db_path) as connection:
                 # Read and write in one locked transaction: a writer that saved a row it read before
@@ -3036,7 +3034,7 @@ def process_encode_queue_once(
         with deps.scratch_admission_lock:
             sample = deps.scratch_capacity_samples.get(key)
         if sample is not None and (
-            (previous_pass_started > 0 and sample.measured_at_monotonic >= previous_pass_started)
+            (0 < previous_pass_started <= sample.measured_at_monotonic)
             or time.monotonic() - sample.measured_at_monotonic <= 3 * deps.encode_queue_poll_seconds
         ):
             scratch_capacity_cache[key] = sample.free_bytes
@@ -3199,10 +3197,10 @@ def load_next_runnable_encode_job(
 ) -> dict[str, Any] | None:
     parent_sync_jobs: dict[str, dict[str, Any]] = {}
 
-    def defer_parent_sync(job: dict[str, Any]) -> None:
-        parent_job_id = str(job.get("parent_job_id") or "").strip()
+    def defer_parent_sync(candidate_job: dict[str, Any]) -> None:
+        parent_job_id = str(candidate_job.get("parent_job_id") or "").strip()
         if parent_job_id:
-            parent_sync_jobs[parent_job_id] = job
+            parent_sync_jobs[parent_job_id] = candidate_job
 
     def sync_deferred_parents() -> None:
         for pending_job in parent_sync_jobs.values():
@@ -3248,42 +3246,42 @@ def load_next_runnable_encode_job(
     ] = []
 
     def prepare_selected_job(
-            job: dict[str, Any],
-            host_payload: dict[str, Any],
-            estimate: EncodeDurationEstimate | None,
+            candidate_job: dict[str, Any],
+            candidate_host: dict[str, Any],
+            host_estimate: EncodeDurationEstimate | None,
     ) -> dict[str, Any] | None:
-        if _uses_staged_scratch(host_payload) and not bool(host_payload.get("available")):
+        if _uses_staged_scratch(candidate_host) and not bool(candidate_host.get("available")):
             if staged_hosts_to_prepare is not None:
-                staged_hosts_to_prepare[_encode_duration_host_cache_key(host_payload)] = host_payload
-            name = str(host_payload.get("label") or host_payload.get("key") or "the encode computer")
+                staged_hosts_to_prepare[_encode_duration_host_cache_key(candidate_host)] = candidate_host
+            name = str(candidate_host.get("label") or candidate_host.get("key") or "the encode computer")
             reason = f"Waiting to start {name} before checking scratch space."
-            if job.get("waiting_reason") != reason:
-                job.update(waiting_reason=reason, updated_at=deps.now_iso(), schedule_close_deadline_at=None)
-                save_encode_job(connection, job)
-                defer_parent_sync(job)
+            if candidate_job.get("waiting_reason") != reason:
+                candidate_job.update(waiting_reason=reason, updated_at=deps.now_iso(), schedule_close_deadline_at=None)
+                save_encode_job(connection, candidate_job)
+                defer_parent_sync(candidate_job)
             return None
-        if estimate is not None and not bool(job.get("bypass_schedule")):
-            job["admission_estimate"] = _encode_duration_estimate_payload(estimate)
-        schedule_close_deadline_at = _selected_encode_schedule_close_deadline(job, host_payload)
+        if host_estimate is not None and not bool(candidate_job.get("bypass_schedule")):
+            candidate_job["admission_estimate"] = _encode_duration_estimate_payload(host_estimate)
+        schedule_close_deadline_at = _selected_encode_schedule_close_deadline(candidate_job, candidate_host)
         schedule_close_deadline = parse_schedule_close_deadline(schedule_close_deadline_at)
         if schedule_close_deadline is not None and schedule_close_deadline <= now:
-            job.update(
+            candidate_job.update(
                 {
                     "waiting_reason": SCHEDULE_CLOSE_WAITING_REASON,
                     "schedule_close_deadline_at": None,
                     "updated_at": deps.now_iso(),
                 }
             )
-            save_encode_job(connection, job)
-            defer_parent_sync(job)
+            save_encode_job(connection, candidate_job)
+            defer_parent_sync(candidate_job)
             return None
-        persisted_host_payload = persisted_encode_host_payload(host_payload)
+        persisted_host_payload = persisted_encode_host_payload(candidate_host)
         if (
-                job.get("waiting_reason")
-                or job.get("host") != persisted_host_payload
-                or job.get("schedule_close_deadline_at") != schedule_close_deadline_at
+                candidate_job.get("waiting_reason")
+                or candidate_job.get("host") != persisted_host_payload
+                or candidate_job.get("schedule_close_deadline_at") != schedule_close_deadline_at
         ):
-            job.update(
+            candidate_job.update(
                 {
                     "waiting_reason": None,
                     "host": persisted_host_payload,
@@ -3291,13 +3289,13 @@ def load_next_runnable_encode_job(
                     "updated_at": deps.now_iso(),
                 }
             )
-            save_encode_job(connection, job)
-            defer_parent_sync(job)
-        return job
+            save_encode_job(connection, candidate_job)
+            defer_parent_sync(candidate_job)
+        return candidate_job
 
     def reserve_waiting_reason(
-            reserve_items: list[dict[str, Any]],
-            host_payload: dict[str, Any],
+            candidate_items: list[dict[str, Any]],
+            candidate_host: dict[str, Any],
     ) -> str | None:
         if running_reserve_state.reserve_unmeasurable:
             return (
@@ -3306,8 +3304,8 @@ def load_next_runnable_encode_job(
             )
         reserve = deps.encode_reserve_preflight(
             config,
-            reserve_items,
-            host=host_payload,
+            candidate_items,
+            host=candidate_host,
             capacity_cache=shared_capacity_cache,
             reserved_by_volume=running_reserve_state.reserved_by_volume,
         )
@@ -3315,7 +3313,7 @@ def load_next_runnable_encode_job(
             return str(reserve.waiting_reason or "Waiting for a measurable free-space reserve.")
         return _large_job_serialization_waiting_reason(
             config,
-            reserve_items,
+            candidate_items,
             running_reserve_state,
         )
 
@@ -3340,14 +3338,14 @@ def load_next_runnable_encode_job(
 
         def estimate_for_host(host: dict[str, Any]) -> EncodeDurationEstimate:
             host_key = _encode_duration_host_cache_key(host)
-            estimate = estimates_by_host.get(host_key)
-            if estimate is None:
-                estimate = estimate_encode_job_duration(estimate_items, host, duration_samples)
-                estimates_by_host[host_key] = estimate
-            return estimate
+            host_estimate = estimates_by_host.get(host_key)
+            if host_estimate is None:
+                host_estimate = estimate_encode_job_duration(estimate_items, host, duration_samples)
+                estimates_by_host[host_key] = host_estimate
+            return host_estimate
 
-        host_admission = None
-        host_rank = None
+        host_admission: Callable[[dict[str, Any]], bool] | None = None
+        host_rank: Callable[[dict[str, Any]], tuple[int, float, int, str]] | None = None
         admission_key: tuple[tuple[str, int, bool], ...] | None = None
         if estimate_items and not bool(job.get("bypass_schedule")):
             admission_entries = [
@@ -3376,7 +3374,7 @@ def load_next_runnable_encode_job(
         best_fit_host_selection = host_rank is not None
         scratch_source_size = (
             _scratch_source_size(_encode_reserve_items(
-                connection, config, _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
+                connection, _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
             )) if scratch_relevant else None
         )
 
@@ -3506,7 +3504,6 @@ def load_next_runnable_encode_job(
             continue
         reserve_items = _encode_reserve_items(
             connection,
-            config,
             _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
         )
         waiting_reason = reserve_waiting_reason(reserve_items, host_payload)
@@ -3543,7 +3540,6 @@ def load_next_runnable_encode_job(
     for _score, job, host_payload, estimate in sorted(best_fit_candidates, key=lambda candidate: candidate[0]):
         reserve_items = _encode_reserve_items(
             connection,
-            config,
             _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
         )
         waiting_reason = reserve_waiting_reason(reserve_items, host_payload)
