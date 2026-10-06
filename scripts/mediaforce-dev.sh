@@ -230,24 +230,96 @@ backend_lock_pid() {
 }
 
 backend_launch_agent_loaded() {
-	local info line working_directory="" program=""
-	info="$(launchctl print "gui/$(id -u)/${BACKEND_LAUNCH_AGENT}" 2>/dev/null)" || return 1
+	local line
+	BACKEND_AGENT_DIRECTORY=""
+	BACKEND_AGENT_PROGRAM=""
+	BACKEND_AGENT_PID=""
+	BACKEND_AGENT_INFO="$(launchctl print "gui/$(id -u)/${BACKEND_LAUNCH_AGENT}" 2>/dev/null)" || return 1
 	while IFS= read -r line; do
 		line="$(trim "${line}")"
 		case "${line}" in
-		"working directory = "*) working_directory="${line#working directory = }" ;;
-		"program = "*) program="${line#program = }" ;;
+		"working directory = "*) BACKEND_AGENT_DIRECTORY="${line#working directory = }" ;;
+		"program = "*) BACKEND_AGENT_PROGRAM="${line#program = }" ;;
+		"pid = "*) BACKEND_AGENT_PID="${line#pid = }" ;;
 		esac
-	done <<<"${info}"
-	[[ "${working_directory}" == "${ROOT_DIR}" && "${program}" == "$(web_binary)" ]]
+	done <<<"${BACKEND_AGENT_INFO}"
+	[[ "${BACKEND_AGENT_DIRECTORY}" == "${ROOT_DIR}" && "${BACKEND_AGENT_PROGRAM}" == "$(web_binary)" ]]
 }
 
 stop_backend_launch_agent() {
-	if backend_launch_agent_loaded; then
-		launchctl bootout "gui/$(id -u)/${BACKEND_LAUNCH_AGENT}" 2>/dev/null || true
-		sleep 0.5
-		echo "backend: unloaded launch agent ${BACKEND_LAUNCH_AGENT}"
+	local shutdown_file="${DEV_STATE_DIR}/backend-shutdown.pids"
+	local target observed_pids service_pids="" pid attempt=0 pending bootout_status=0
+	target="gui/$(id -u)/${BACKEND_LAUNCH_AGENT}"
+	if ! backend_launch_agent_loaded; then
+		if [[ "${BACKEND_AGENT_PROGRAM}" == "$(web_binary)" ]]; then
+			echo "backend: login item uses this checkout's binary with a different working directory; refusing to manage it" >&2
+			return 1
+		fi
+		[[ -f "${shutdown_file}" ]] || return 0
+		service_pids="$(<"${shutdown_file}")"
+	else
+		observed_pids="${BACKEND_AGENT_PID}"
+		if [[ -f "${shutdown_file}" ]]; then
+			service_pids="$(<"${shutdown_file}")"$'\n'
+		fi
+		while IFS= read -r pid; do
+			[[ -n "${pid}" ]] || continue
+			service_pids+="${pid}"$'\n'"$(mediaforce_backend_root_pid "${pid}")"$'\n'
+		done <<<"${observed_pids}"
+		mkdir -p "${DEV_STATE_DIR}" || return 1
+		printf '%s' "${service_pids}" >"${shutdown_file}" || return 1
+		launchctl bootout "${target}" 2>/dev/null || bootout_status=$?
+		case "${bootout_status}" in
+		0 | 3 | 36 | 113) ;;
+		*)
+			echo "backend: could not unload login item ${BACKEND_LAUNCH_AGENT}; refusing to continue" >&2
+			return 1
+			;;
+		esac
 	fi
+	while [[ ${attempt} -lt 20 ]]; do
+		pending=false
+		if backend_launch_agent_loaded; then
+			pending=true
+		fi
+		while IFS= read -r pid; do
+			if pid_is_alive "${pid}" && pid_matches_mediaforce_backend "${pid}"; then
+				pending=true
+			fi
+		done <<<"${service_pids}"
+		if [[ "${pending}" == false ]]; then
+			rm -f "${shutdown_file}" || return 1
+			echo "backend: unloaded launch agent ${BACKEND_LAUNCH_AGENT} and completed shutdown"
+			return 0
+		fi
+		attempt=$((attempt + 1))
+		sleep 0.25
+	done
+	echo "backend: login item shutdown did not finish within 20 checks; refusing to continue" >&2
+	return 1
+}
+
+backend_has_listener_for_pid() {
+	local pid="${1:-}" listener root
+	root="$(mediaforce_backend_root_pid "${pid}")"
+	for listener in $(managed_listener_pids "${BACKEND_PORT}" pid_matches_mediaforce_backend); do
+		if [[ "$(mediaforce_backend_root_pid "${listener}")" == "${root}" ]]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+wait_for_backend_listener() {
+	local pid="${1:-}" attempt=0
+	while [[ ${attempt} -lt 20 ]]; do
+		if pid_is_alive "${pid}" && pid_matches_mediaforce_backend "${pid}" && backend_has_listener_for_pid "${pid}"; then
+			return 0
+		fi
+		attempt=$((attempt + 1))
+		sleep 0.25
+	done
+	return 1
 }
 
 frontend_running_pid() {
@@ -268,10 +340,14 @@ reload_arg() {
 start_backend() {
 	load_env
 	mkdir -p "${DEV_STATE_DIR}"
-	stop_backend_launch_agent
+	stop_backend_launch_agent || return 1
 	local running_pid
 	running_pid="$(backend_running_pid)"
 	if [[ -n "${running_pid}" ]]; then
+		if ! wait_for_backend_listener "${running_pid}"; then
+			echo "backend: pid ${running_pid} has not started listening on port ${BACKEND_PORT}; refusing to start another backend; see ${BACKEND_LOG_FILE}" >&2
+			return 1
+		fi
 		echo "backend: running http://${BACKEND_HOST}:${BACKEND_PORT} pid ${running_pid}"
 		return 0
 	fi
@@ -296,9 +372,8 @@ start_backend() {
 		nohup "${command[@]}" >>"${BACKEND_LOG_FILE}" 2>&1 &
 		echo $! >"${BACKEND_PID_FILE}"
 	)
-	sleep 1
-	running_pid="$(backend_running_pid)"
-	if [[ -z "${running_pid}" ]]; then
+	running_pid="$(pid_from_file "${BACKEND_PID_FILE}")"
+	if ! wait_for_backend_listener "${running_pid}"; then
 		echo "backend: failed to start; see ${BACKEND_LOG_FILE}" >&2
 		return 1
 	fi
@@ -342,7 +417,7 @@ start_frontend() {
 
 stop_backend() {
 	load_env
-	stop_backend_launch_agent
+	stop_backend_launch_agent || return 1
 	local pid managed_pids
 	pid="$(backend_running_pid)"
 	if [[ -n "${pid}" ]]; then
@@ -463,12 +538,12 @@ run_for_component() {
 	stop:frontend) stop_frontend ;;
 	restart:all)
 		stop_frontend
-		stop_backend
-		start_backend
+		stop_backend || return 1
+		start_backend || return 1
 		start_frontend
 		;;
 	restart:backend)
-		stop_backend
+		stop_backend || return 1
 		start_backend
 		;;
 	restart:frontend)
