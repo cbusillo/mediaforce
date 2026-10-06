@@ -522,6 +522,8 @@ That means the two useful local URLs are:
 - `http://127.0.0.1:4173` while actively editing the frontend in dev mode
 - `http://127.0.0.1:8777` when checking the backend-served built app
 
+## Local web development
+
 The web UI is now split cleanly:
 
 - FastAPI serves the backend API and review media.
@@ -537,19 +539,34 @@ and keeps the command lines aligned with the actual configured ports. Pass
 `backend` or `frontend` as a second argument when you intentionally want only
 one side, for example `scripts/mediaforce-dev.sh restart backend`.
 
+Development PID files live in a directory under that state path keyed by the
+physical checkout: `development/<checkout hash>/`. Each checkout manages its
+own records, so a reused PID cannot wedge start or discard another checkout's
+bookkeeping. Legacy shared PID files are left in place. Different checkouts can
+run frontends on different configured ports; port collisions still refuse start.
+
+Frontend discovery checks the npm/Vite process or its ancestors against the
+exact checkout working directory. Managed npm starts in `frontend/` so its
+rewritten process title remains attributable. For a legacy frontend launched
+from the repository root, stop targets its owned Vite child; npm exits after
+the child ends. Stop and restart preserve another checkout's process tree. Stale records in this checkout's development directory can be
+replaced; the shared backend runtime lock is always preserved.
+
 Backend actions temporarily unload a login item only when its working directory
 and executable both match the physical checkout. Before continuing, the helper
 waits for the item to unload and its backend processes to finish, checking up to
-20 times at quarter-second intervals. Failed unload or unfinished shutdown stops
+20 times at quarter-second intervals. The item's reported PID attributes its
+process group; a PID file or runtime lock alone does not make an independent
+development backend part of that group. Failed unload or unfinished shutdown stops
 the command with a clear error, without force-killing the service or starting a
 replacement. Pending shutdown PIDs are kept outside the checkout in a record
 keyed by its physical path; retrying keeps waiting instead of reusing a dying
 service. The record is removed only after shutdown completes. A login item
-that uses this binary with a different working
-directory is preserved and reported for correction; regenerate it from the
+that uses this binary with a different working directory is preserved and
+reported for correction; regenerate it from the
 intended service checkout with `uv run mediaforce service restart` before
-retrying. Other checkouts' services
-and backend processes stay running. The shared runtime lock is preserved.
+retrying. Other checkouts' services and backend processes stay running.
+The shared runtime lock is preserved.
 
 Ordinary development backends can still be reused through their PID file,
 runtime lock or listener. Fresh starts and PID-based reuse get the same bounded

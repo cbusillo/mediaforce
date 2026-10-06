@@ -105,7 +105,7 @@ The [local web development helper](../../README.md#local-web-development) owns d
 process reuse, checkout isolation and bounded login-item shutdown/startup.
 Its bootout is temporary; the persistent enable/disable state remains owned
 by `mediaforce service`. The source lifecycle tests use fake launchctl output
-and fixture-owned processes. Native `program` output for the generated
+and fixture-owned processes. Native `program` and `pid` output for the generated
 ProgramArguments-only plist and installed service lifecycle remain unverified
 by those tests.
 
