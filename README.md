@@ -559,8 +559,14 @@ run frontends on different configured ports; port collisions still refuse start.
 Frontend discovery checks the npm/Vite process or its ancestors against the
 exact checkout working directory. The launcher must be the command or the
 script launched by Node or Python; a shared wrapper merely mentioning npm or
-Vite's path is preserved with its unrelated children. Direct Node debugger
-launches with `--inspect` or `--inspect-brk` remain supported. Managed npm starts in `frontend/` so its
+Vite's path is preserved with its unrelated children. Native argument readers
+on macOS and Linux keep interpreter and script paths separate, including spaces
+and an interpreter alias removed after startup. Direct Node launches support
+`--inspect`, `--inspect-brk`, and `--max-old-space-size` before the script.
+Other Node options are not inferred; use the managed npm path with `NODE_OPTIONS`
+for runtime options. If native arguments cannot be read, ownership is unknown:
+stop preserves the process and its PID record and reports the error.
+Managed npm starts in `frontend/` so its
 rewritten process title remains attributable. For a legacy frontend launched
 from the repository root, stop targets its owned Vite child; npm exits after
 the child ends. Stop and restart preserve another checkout's process tree. Stale records in this checkout's development directory can be
