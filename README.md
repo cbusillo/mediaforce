@@ -522,6 +522,8 @@ That means the two useful local URLs are:
 - `http://127.0.0.1:4173` while actively editing the frontend in dev mode
 - `http://127.0.0.1:8777` when checking the backend-served built app
 
+## Local web development
+
 The web UI is now split cleanly:
 
 - FastAPI serves the backend API and review media.
@@ -534,6 +536,19 @@ uses the repo-local `.env`, writes pid files and logs under
 and keeps the command lines aligned with the actual configured ports. Pass
 `backend` or `frontend` as a second argument when you intentionally want only
 one side, for example `scripts/mediaforce-dev.sh restart backend`.
+
+Development PID files live in a directory under that state path keyed by the
+physical checkout: `development/<checkout hash>/`. Each checkout manages its
+own records, so a reused PID cannot wedge start or discard another checkout's
+bookkeeping. Legacy shared PID files are left in place. Different checkouts can
+run frontends on different configured ports; port collisions still refuse start.
+
+Frontend discovery checks the npm/Vite process or its ancestors against the
+exact checkout working directory. Managed npm starts in `frontend/` so its
+rewritten process title remains attributable. For a legacy frontend launched
+from the repository root, stop targets its owned Vite child; npm exits after
+the child ends. Stop and restart preserve another checkout's process tree. Stale records in this checkout's development directory can be
+replaced; the shared backend runtime lock is always preserved.
 
 The backend also holds a Python-level singleton lock while running, so a second
 `mediaforce-web` process exits instead of binding another port and confusing the
