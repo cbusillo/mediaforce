@@ -113,6 +113,58 @@ mediaforce_backend_root_pid() {
 	printf '%s\n' "${root}"
 }
 
+command_matches_frontend_script() {
+	local command="${1:-}"
+	local cwd="${2:-}"
+	local launcher
+	local vite_binary="${ROOT_DIR}/frontend/node_modules/.bin/vite"
+	launcher="${command%%" --prefix "*}"
+	launcher="${launcher%%" run dev"*}"
+	if [[ "${launcher}" == */npm || "${launcher}" == */npm-cli.js ]]; then
+		[[ "${launcher}" != *" "* || -x "${launcher}" ]] || return 1
+		command="npm${command#"${launcher}"}"
+	fi
+	case "${command}" in
+	"npm --prefix frontend run dev" | "npm --prefix frontend run dev "*)
+		[[ "${cwd}" == "${ROOT_DIR}" ]] && return 0 ;;
+	"npm --prefix ${ROOT_DIR}/frontend run dev" | "npm --prefix ${ROOT_DIR}/frontend run dev "*)
+		[[ "${cwd}" == "${ROOT_DIR}" || "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
+	"npm run dev" | "npm run dev "* | "vite" | "vite "* | "${vite_binary}" | "${vite_binary} "*)
+		[[ "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
+	esac
+	return 1
+}
+
+command_matches_frontend_launcher() {
+	local command="${1:-}"
+	local cwd="${2:-}"
+	command_matches_frontend_script "${command}" "${cwd}" && return 0
+	local interpreter="" part arguments
+	local remaining="${command}"
+	# Resolve an interpreter prefix without consuming a wrapper's later arguments.
+	while [[ "${remaining}" == *" "* ]]; do
+		part="${remaining%% *}"
+		interpreter="${interpreter:+${interpreter} }${part}"
+		remaining="${remaining#"${part} "}"
+		if [[ "${interpreter##*/}" =~ ^([Nn]ode|[Pp]ython([0-9]+(\.[0-9]+)*t?)?)$ &&
+			( "${interpreter}" != *" "* || ( -f "${interpreter}" && -x "${interpreter}" ) ) ]]; then
+			arguments="${remaining}"
+			if [[ "${interpreter##*/}" =~ ^[Nn]ode$ ]]; then
+				while [[ "${arguments}" == *" "* ]]; do
+					case "${arguments%% *}" in
+					--inspect | --inspect=* | --inspect-brk | --inspect-brk=*) arguments="${arguments#* }" ;;
+					*) break ;;
+					esac
+				done
+			fi
+			command_matches_frontend_script "${arguments}" "${cwd}" && return 0
+			[[ "${interpreter}" != */* || ( -f "${interpreter}" && -x "${interpreter}" ) ]] && return 1
+		fi
+		[[ "${interpreter}" == /* ]] || break
+	done
+	return 1
+}
+
 pid_matches_mediaforce_frontend() {
 	local pid="${1:-}"
 	local depth=0
@@ -120,16 +172,7 @@ pid_matches_mediaforce_frontend() {
 		local command cwd
 		command="$(pid_command "${pid}")"
 		cwd="$(lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
-		case "${command}" in
-		"npm --prefix frontend run dev" | "npm --prefix frontend run dev "*)
-			[[ "${cwd}" == "${ROOT_DIR}" ]] && return 0 ;;
-		"npm --prefix ${ROOT_DIR}/frontend run dev" | "npm --prefix ${ROOT_DIR}/frontend run dev "* | \
-		*"/npm --prefix ${ROOT_DIR}/frontend run dev" | *"/npm --prefix ${ROOT_DIR}/frontend run dev "*)
-			[[ "${cwd}" == "${ROOT_DIR}" || "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
-		"npm run dev" | "npm run dev "* | "vite" | "vite "* | \
-		*" ${ROOT_DIR}/frontend/node_modules/.bin/vite" | *" ${ROOT_DIR}/frontend/node_modules/.bin/vite "*)
-			[[ "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
-		esac
+		command_matches_frontend_launcher "${command}" "${cwd}" && return 0
 		pid="$(trim "$(pid_parent "${pid}")")"
 		depth=$((depth + 1))
 	done
