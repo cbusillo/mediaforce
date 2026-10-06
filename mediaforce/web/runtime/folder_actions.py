@@ -91,6 +91,7 @@ _FINAL_SIZE_RECOVERY_BLOCKER_MESSAGE = (
 )
 # A file's final-size miss, kept on the file so it outlasts the run that recorded it.
 FINAL_SIZE_MISS_EVENT = "final_size_miss"
+FINAL_SIZE_MISS_RECOVERED_EVENT = "final_size_miss_recovered"
 _FINAL_SIZE_MISSED_REASON = (
     "Missed its approved final size under the same reviewed settings. "
     "Approve a fresh test with a changed goal before retrying it."
@@ -192,35 +193,43 @@ def _legacy_final_size_goal_changed(
 ) -> bool:
     """Compare a fresh size goal with a pre-contract manifest's measured target."""
     failure_analysis = object_dict(object_dict(job.get("progress")).get("failure_analysis"))
-    verification = object_dict(failure_analysis.get("target_size_verification"))
-    previous_target_bytes = _normalized_number(verification.get("target_size_bytes"))
+    analyses = [object_dict(item) for item in object_list(failure_analysis.get("item_analyses"))] or [failure_analysis]
+    size_misses = [analysis for analysis in analyses if str(analysis.get("kind") or "") == "final_size_target_miss"]
+    if not size_misses:
+        return False
     request = object_dict(current_contract.get("operator_intent"))
     size_goal = object_dict(request.get("size_goal"))
     value_mb = _normalized_number(size_goal.get("value_mb"))
-    if previous_target_bytes is None or value_mb is None:
+    if value_mb is None:
         return False
-    mode = str(size_goal.get("mode") or "").strip()
-    if mode == "absolute":
-        current_target_bytes = value_mb * 1_000_000
-    elif mode == "normalized":
-        reference_minutes = _normalized_number(size_goal.get("reference_runtime_minutes"))
-        manifest_value = str(job.get("manifest_path") or "").strip()
-        if reference_minutes is None or reference_minutes <= 0 or not manifest_value:
+    items = _manifest_items(job)
+    for analysis in size_misses:
+        verification = object_dict(analysis.get("target_size_verification"))
+        previous_target_bytes = _normalized_number(verification.get("target_size_bytes"))
+        if previous_target_bytes is None:
             return False
-        try:
-            manifest = object_dict(json.loads(Path(manifest_value).read_text()))
-        except (OSError, json.JSONDecodeError):
+        mode = str(size_goal.get("mode") or "").strip()
+        if mode == "absolute":
+            current_target_bytes = value_mb * 1_000_000
+        elif mode == "normalized":
+            reference_minutes = _normalized_number(size_goal.get("reference_runtime_minutes"))
+            index = analysis.get("manifest_index")
+            if index is None:
+                indexes = object_list(analysis.get("manifest_indexes")) or object_list(job.get("manifest_indexes"))
+                index = indexes[0] if len(indexes) == 1 else (0 if len(items) == 1 else None)
+            if reference_minutes is None or reference_minutes <= 0 or not isinstance(index, int):
+                return False
+            if not 0 <= index < len(items):
+                return False
+            duration_seconds = _normalized_number(items[index].get("duration_seconds"))
+            if duration_seconds is None or duration_seconds <= 0:
+                return False
+            current_target_bytes = value_mb * 1_000_000 * duration_seconds / (reference_minutes * 60)
+        else:
             return False
-        items = object_list(manifest.get("items"))
-        if len(items) != 1:
+        if math.isclose(previous_target_bytes, current_target_bytes, rel_tol=1e-6, abs_tol=1.0):
             return False
-        duration_seconds = _normalized_number(object_dict(items[0]).get("duration_seconds"))
-        if duration_seconds is None or duration_seconds <= 0:
-            return False
-        current_target_bytes = value_mb * 1_000_000 * duration_seconds / (reference_minutes * 60)
-    else:
-        return False
-    return not math.isclose(previous_target_bytes, current_target_bytes, rel_tol=1e-6, abs_tol=1.0)
+    return True
 
 
 def _final_size_requeue_contract_blocker(
@@ -315,12 +324,13 @@ def _record_final_size_misses(
         misses = _final_size_miss_item_ids_by_index(job)
         if misses is None:
             continue  # No file can be named; the latest-run check refuses the whole requeue.
+        item_ids, covered_indexes = misses
         contract = _terminal_production_approval_contract(job)
         if contract is None:
             if _final_size_requeue_contract_blocker(job, current_contract) is None:
+                _record_legacy_final_size_recovery(connection, job, item_ids, current_contract, now=now)
                 continue  # A legacy run whose size goal has since changed may retry.
             contract = _valid_production_approval_contract(current_contract) or {}
-        item_ids, covered_indexes = misses
         in_library = set(connection.execute(
             select(library_items.c.id).where(library_items.c.id.in_(sorted(set(item_ids.values()))))
         ).scalars())
@@ -353,6 +363,44 @@ def _record_final_size_misses(
             )
 
 
+def _record_legacy_final_size_recovery(
+        connection: DBClient,
+        job: JobPayload,
+        item_ids: dict[int, int],
+        current_contract: ActionPayload | None,
+        *,
+        now: str,
+) -> None:
+    """An earlier legacy comparison may have recorded the miss under today's new goal.
+
+    Preserve that evidence and append its verified recovery under the current approval.
+    """
+    current = _valid_production_approval_contract(current_contract)
+    if current is None:
+        return
+    latest: dict[int, ActionPayload] = {}
+    for row in connection.execute(
+        select(item_events.c.library_item_id, item_events.c.details_json)
+        .where(item_events.c.event_type.in_([FINAL_SIZE_MISS_EVENT, FINAL_SIZE_MISS_RECOVERED_EVENT]))
+        .where(item_events.c.library_item_id.in_(list(item_ids.values())))
+        .order_by(item_events.c.id.asc())
+    ).mappings():
+        details = object_dict(json.loads(row["details_json"] or "{}"))
+        latest[int(row["library_item_id"])] = details
+    for item_id, details in latest.items():
+        if str(details.get("job_id") or "") != str(job.get("job_id") or ""):
+            continue
+        if details.get("resolved") and details.get("operator_intent_hash") == current["operator_intent_hash"]:
+            continue
+        connection.execute(item_events.insert().values(
+            library_item_id=item_id, created_at=now, event_type=FINAL_SIZE_MISS_RECOVERED_EVENT,
+            details_json=json.dumps({**details, "resolved": True, "manifest_path": job.get("manifest_path"),
+                "legacy_failure_analysis": object_dict(object_dict(job.get("progress")).get("failure_analysis")),
+                "sample_job_id": current["sample_job_id"], "operator_intent_hash": current["operator_intent_hash"]},
+                separators=(",", ":")),
+        ))
+
+
 def _recorded_final_size_miss_left_out(
         connection: DBClient,
         items: list[ActionPayload],
@@ -366,7 +414,7 @@ def _recorded_final_size_miss_left_out(
     latest: dict[int, ActionPayload] = {}
     for row in connection.execute(
             select(item_events.c.library_item_id, item_events.c.details_json)
-            .where(item_events.c.event_type == FINAL_SIZE_MISS_EVENT)
+            .where(item_events.c.event_type.in_([FINAL_SIZE_MISS_EVENT, FINAL_SIZE_MISS_RECOVERED_EVENT]))
             .where(item_events.c.library_item_id.in_(sorted(item_id for item_id in rel_paths if item_id > 0)))
             .order_by(item_events.c.id.asc())
     ).mappings():
@@ -374,7 +422,14 @@ def _recorded_final_size_miss_left_out(
     current = _valid_production_approval_contract(current_contract)
     left_out: list[LeftOutFile] = []
     for item_id, details in sorted(latest.items()):
-        if (
+        if current is not None and details.get("resolved"):
+            if details.get("operator_intent_hash") == current["operator_intent_hash"]:
+                continue
+            legacy_job = {"manifest_path": details.get("manifest_path"),
+                          "progress": {"failure_analysis": details.get("legacy_failure_analysis")}}
+            if object_dict(details.get("legacy_failure_analysis")) and _final_size_requeue_contract_blocker(legacy_job, current) is None:
+                continue
+        elif (
                 current is not None
                 and details.get("sample_job_id") is not None
                 and str(details.get("sample_job_id")) != str(current.get("sample_job_id"))

@@ -1,9 +1,4 @@
-"""The owner's answer for one file that came out far smaller than its sample predicted.
-
-Validation holds such a file instead of letting it be published (#633). Keeping it records the owner's
-decision and checks the file again, so it can be replaced like any other checked file. Making it again
-removes the finished file and queues only that file under the mode its run was queued with.
-"""
+"""Per-file decisions for unpublished outputs that need to be kept or made again."""
 
 from __future__ import annotations
 
@@ -15,19 +10,22 @@ from typing import Any
 from sqlalchemy import delete, select, update
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import open_db
+from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
-from mediaforce.core.type_defs import object_dict
+from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding.encode_queue import load_active_encode_jobs_for_prefix
-from mediaforce.encoding.staging import partial_output_path
+from mediaforce.encoding.staging import FINAL_SIZE_GOAL_CHECK, partial_output_path
 from mediaforce.library.media_scopes import path_matches_scope
+from mediaforce.library.staged_integrity import staged_validation_outcome
 from mediaforce.web.runtime.encode_runtime import remove_stale_staging_path
+from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, _staged_policy_states
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.production_holds import MODE_FOLDER
 
 NOT_HELD_MESSAGE = "This file is no longer waiting for a decision about its size."
 
 ValidateItemsFn = Callable[[str, Collection[int]], dict[str, Any]]
+CurrentApprovalFn = Callable[[str], dict[str, Any] | None]
 QueueItemsFn = Callable[[str, str, Collection[int]], dict[str, Any]]
 
 
@@ -40,6 +38,7 @@ def decide_size_held_file(
         now_iso: Callable[[], str],
         validate_items: ValidateItemsFn,
         queue_items: QueueItemsFn,
+        current_approval: CurrentApprovalFn = lambda _prefix: None,
 ) -> dict[str, Any]:
     """Keep a held file (then check it again) or make it again; only this file is touched."""
     queue_mode = MODE_FOLDER
@@ -47,7 +46,8 @@ def decide_size_held_file(
     with open_db(config.paths.db_path) as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         row = connection.execute(
-            select(staged_artifacts, library_items.c.rel_path, library_items.c.status.label("library_status"))
+            select(staged_artifacts, library_items.c.rel_path,
+                   library_items.c.source_path.label("original_source_path"))
             .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
             .where(staged_artifacts.c.library_item_id == int(library_item_id))
         ).mappings().fetchone()
@@ -57,9 +57,14 @@ def decide_size_held_file(
                 row is None
                 or row["promoted_at"] is not None
                 or not path_matches_scope(str(row["rel_path"] or ""), prefix)
-                or not size_prediction.get("held")
         ):
             return {"ok": False, "message": NOT_HELD_MESSAGE}
+        recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval)
+        held = staged_validation_outcome(row["validation_json"]) == "size_held"
+        if (keep and not held) or (not keep and recovery is None):
+            return {"ok": False, "message": NOT_HELD_MESSAGE}
+        if not keep and recovery and recovery["blocked_reason"]:
+            return {"ok": False, "message": recovery["blocked_reason"]}
         name = Path(str(row["rel_path"])).name
         now = now_iso()
         if keep:
@@ -71,21 +76,7 @@ def decide_size_held_file(
             )
             _record_decision(connection, int(library_item_id), "keep", size_prediction, now)
         else:
-            queue_mode = _run_queue_mode(row["manifest_path"])
-            # A show-level run (older seasons, say) must be queued at its own scope, not the page's.
-            run_prefix = str(
-                connection.execute(
-                    select(encode_jobs.c.prefix).where(encode_jobs.c.job_id == str(row["encode_job_id"] or ""))
-                ).scalar_one_or_none()
-                or prefix
-            )
-            # A run still working on this scope would take over the new request (or refuse it) after the
-            # finished file was already gone, so nothing is removed until that run is done.
-            if load_active_encode_jobs_for_prefix(connection, run_prefix):
-                return {
-                    "ok": False,
-                    "message": f"Mediaforce is still compressing here. Make {name} again once that run finishes.",
-                }
+            run_prefix, queue_mode = _run_context(connection, row, prefix)
             if not _remove_finished_output(config, row):
                 return {
                     "ok": False,
@@ -101,7 +92,8 @@ def decide_size_held_file(
                 .where(library_items.c.id == int(library_item_id))
                 .values(status="planned", updated_at=now)
             )
-            _record_decision(connection, int(library_item_id), "remake", size_prediction, now)
+            _record_decision(connection, int(library_item_id), "remake",
+                             {**size_prediction, "recovery_reason": recovery["reason"]}, now)
     if keep:
         checked = validate_items(prefix, [int(library_item_id)])
         passed = bool(checked.get("ok")) and int(checked.get("validated_count") or 0) > 0
@@ -127,6 +119,84 @@ def decide_size_held_file(
     }
 
 
+def staged_remake_details(
+        connection: DBClient,
+        row: Any,
+        prefix: str,
+        *,
+        current_approval: CurrentApprovalFn,
+) -> dict[str, Any] | None:
+    """Offer recovery only for a size-only failure or missing settings history.
+
+    The action calls this again under its write lock before removing the output.
+    """
+    if row is None or row["promoted_at"] is not None:
+        return None
+    validation = _stored_validation(row)
+    failed = [str(object_dict(check).get("message") or "") for check in object_list(validation.get("checks"))
+              if object_dict(check).get("passed") is False]
+    held = staged_validation_outcome(row["validation_json"]) == "size_held"
+    final_size = validation.get("passed") is False and failed == [FINAL_SIZE_GOAL_CHECK]
+    missing_policy = validation.get("passed") is True and _staged_policy_states(
+        connection, {int(row["library_item_id"])}, accepted_policy_hash="",
+    ).get(int(row["library_item_id"])) == "season_policy_provenance_missing"
+    if not (held or final_size or missing_policy):
+        return None
+    run_prefix, _mode = _run_context(connection, row, prefix)
+    blocked_reasons: list[str] = []
+    if not held:
+        approval = current_approval(run_prefix)
+        if approval is None:
+            blocked_reasons.append("Approve a fresh sample before making this file again.")
+        elif final_size:
+            blocker = _final_size_requeue_contract_blocker({
+                "manifest_path": row["manifest_path"],
+                "progress": {"failure_analysis": {
+                    "kind": "final_size_target_miss",
+                    "manifest_index": row["item_index"],
+                    "target_size_verification": object_dict(validation.get("final_size_goal")),
+                }},
+            }, approval)
+            if blocker:
+                blocked_reasons.append(
+                    "Approve a fresh sample with a changed size or quality goal before making this file again."
+                )
+    original = Path(str(row["original_source_path"] or ""))
+    staging = Path(str(row["staging_path"] or ""))
+    if not original.is_file():
+        blocked_reasons.append("Restore access to the original file before making it again. Nothing was removed.")
+    elif original.resolve() in {staging.resolve(), partial_output_path(staging).resolve()}:
+        blocked_reasons.append(
+            "The compressed copy points at the original. Check this file’s paths before making it again."
+        )
+    if load_active_encode_jobs_for_prefix(connection, run_prefix):
+        blocked_reasons.append("Mediaforce is still compressing here. Make this file again once that run finishes.")
+    return {"reason": "size_held" if held else "final_size" if final_size else "settings_history",
+            "blocked_reason": " ".join(blocked_reasons)}
+
+
+def staged_remake_records(
+        connection: DBClient,
+        records: list[dict[str, Any]],
+        prefix: str,
+        *,
+        current_approval: CurrentApprovalFn,
+) -> list[dict[str, Any]]:
+    """Attach per-file action availability to the already paginated integrity rows."""
+    ids = [int(record["item_id"]) for record in records if record.get("item_id") is not None]
+    rows = {int(row["library_item_id"]): row for row in connection.execute(
+        select(staged_artifacts, library_items.c.source_path.label("original_source_path"))
+        .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
+        .where(staged_artifacts.c.library_item_id.in_(ids))
+    ).mappings()}
+    for record in records:
+        recovery = staged_remake_details(connection, rows.get(record.get("item_id")), prefix,
+                                        current_approval=current_approval)
+        if recovery is not None:
+            record["remake"] = recovery
+    return records
+
+
 def _stored_validation(row: Any) -> dict[str, Any]:
     if row is None:
         return {}
@@ -136,13 +206,18 @@ def _stored_validation(row: Any) -> dict[str, Any]:
         return {}
 
 
-def _run_queue_mode(manifest_path: Any) -> str:
-    """The mode the file's run was queued with, so the new encode joins the same way."""
+def _run_context(connection: DBClient, row: Any, prefix: str) -> tuple[str, str]:
+    """Recover the run scope and mode even after its terminal job has been cleared."""
     try:
-        manifest = object_dict(json.loads(Path(str(manifest_path or "")).read_text()))
+        manifest = object_dict(json.loads(Path(str(row["manifest_path"] or "")).read_text()))
     except (OSError, json.JSONDecodeError):
-        return MODE_FOLDER
-    return str(object_dict(manifest.get("selection")).get("queue_mode") or MODE_FOLDER)
+        manifest = {}
+    selection = object_dict(manifest.get("selection"))
+    recorded_prefix = object_dict(selection.get("media_scope")).get("prefix")
+    run_prefix = str(connection.execute(
+        select(encode_jobs.c.prefix).where(encode_jobs.c.job_id == str(row["encode_job_id"] or ""))
+    ).scalar_one_or_none() or recorded_prefix or prefix)
+    return run_prefix, str(selection.get("queue_mode") or MODE_FOLDER)
 
 
 def _remove_finished_output(config: MediaforceConfig, row: Any) -> bool:
@@ -156,8 +231,9 @@ def _remove_finished_output(config: MediaforceConfig, row: Any) -> bool:
         else {"mode": str(row["encode_host_mode"] or ""), "media_access": str(row["encode_media_access"] or "")}
     )
     staging_path = Path(staging_value)
-    removed = remove_stale_staging_path(staging_path, host=host)
-    return remove_stale_staging_path(partial_output_path(staging_path), host=host) and removed
+    if not remove_stale_staging_path(partial_output_path(staging_path), host=host):
+        return False
+    return remove_stale_staging_path(staging_path, host=host)
 
 
 def _record_decision(connection: Any, library_item_id: int, answer: str, size_prediction: dict[str, Any], now: str) -> None:

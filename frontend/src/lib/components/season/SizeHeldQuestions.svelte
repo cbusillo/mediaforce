@@ -25,24 +25,35 @@
 				<li>
 					<span class="size-held__file">{fileName(record.rel_path)}</span>
 					<span class="size-held__detail">
-						Came out at {formatDecimalFileSize(record.size_prediction?.actual_bytes)}; its sample
-						predicted {formatDecimalFileSize(record.size_prediction?.predicted_bytes)}. Nothing is
-						replaced until you choose.
+						{#if record.remake?.reason === 'final_size'}
+							Missed its approved size goal.
+						{:else if record.remake?.reason === 'settings_history'}
+							Its approved settings were not recorded.
+						{:else}
+							Came out at {formatDecimalFileSize(record.size_prediction?.actual_bytes)}; its sample
+							predicted {formatDecimalFileSize(record.size_prediction?.predicted_bytes)}.
+						{/if}
+						Making it again removes only this compressed copy and queues this file. The original stays.
+						{#if record.remake?.blocked_reason}
+							{record.remake.blocked_reason}
+						{/if}
 					</span>
 					<span class="size-held__actions">
+						{#if record.disposition === 'size_held'}
+							<button
+								type="button"
+								disabled={busy}
+								onclick={() => onDecision(record.item_id as number, true)}
+							>
+								Keep this file
+							</button>
+						{/if}
 						<button
 							type="button"
-							disabled={busy}
-							onclick={() => onDecision(record.item_id as number, true)}
-						>
-							Keep this file
-						</button>
-						<button
-							type="button"
-							disabled={busy}
+							disabled={busy || Boolean(record.remake?.blocked_reason)}
 							onclick={() => onDecision(record.item_id as number, false)}
 						>
-							Make it again
+							Make again
 						</button>
 					</span>
 				</li>

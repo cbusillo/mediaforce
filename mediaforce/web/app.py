@@ -193,9 +193,9 @@ from mediaforce.web.routes.queues import (
 )
 from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_child_recovery
 from mediaforce.web.runtime.size_exception import decide_size_exception
-from mediaforce.web.runtime.size_held import decide_size_held_file
+from mediaforce.web.runtime.size_held import decide_size_held_file, staged_remake_records
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
-from mediaforce.web.runtime.folder_actions import production_approval_identity
+from mediaforce.web.runtime.folder_actions import production_approval_identity, _production_approval_contract
 from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
@@ -944,10 +944,11 @@ def create_app(
                 items,
                 load_calibration_state_fn=_load_calibration_state,
             )
-        return {
-            **report.detail_payload(offset=offset, limit=limit),
-            "promotion_readiness": promotion_readiness,
-        }
+            detail = report.detail_payload(offset=offset, limit=limit)
+            detail["records"] = staged_remake_records(
+                connection, detail["records"], normalized_prefix, current_approval=_remake_current_approval,
+            )
+        return {**detail, "promotion_readiness": promotion_readiness}
 
     def _save_settings_action(
             *,
@@ -2025,6 +2026,12 @@ def create_app(
             ),
         )
 
+    def _remake_current_approval(prefix: str) -> ActionPayload | None:
+        calibration = _load_calibration_state(config, prefix)
+        if calibration is None or not _review_gate(calibration).get("can_confirm_full"):
+            return None
+        return _production_approval_contract(object_dict(calibration))
+
     def _decide_size_held_action(normalized_prefix: str, library_item_id: int, keep: bool) -> ActionPayload:
         blocker = production_action_blocker(config, normalized_prefix)
         if blocker is not None:
@@ -2044,7 +2051,7 @@ def create_app(
             try:
                 return _queue_encode_action(
                     prefix,
-                    "Made again after the owner looked at a file far smaller than predicted.",
+                    "Made again at the owner’s request under the current approved settings.",
                     False,
                     override_policy_holds=mode == HOLD_MODE_SEASON_OVERRIDE,
                     override_older_seasons=mode == HOLD_MODE_OLDER_SEASONS,
@@ -2062,6 +2069,7 @@ def create_app(
             now_iso=_now_iso,
             validate_items=validate_items,
             queue_items=queue_items,
+            current_approval=_remake_current_approval,
         )
 
     def _promote_folder_outputs_action(

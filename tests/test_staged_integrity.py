@@ -4,13 +4,13 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from sqlalchemy import select
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
-from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
+from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
 from mediaforce.library.staged_integrity import (
     MAX_DETAIL_PAGE_SIZE,
     CheckedStagedOutputUnavailable,
@@ -18,10 +18,11 @@ from mediaforce.library.staged_integrity import (
     integrity_disposition_blocks_promotion,
     staged_integrity_report,
 )
-from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
+from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK, FINAL_SIZE_GOAL_CHECK
 from mediaforce.execution import PromotionResult
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action
-from mediaforce.web.runtime.size_held import decide_size_held_file
+from mediaforce.web.runtime import folder_actions
+from mediaforce.web.runtime.size_held import decide_size_held_file, staged_remake_records
 
 
 class StagedIntegrityTests(unittest.TestCase):
@@ -250,6 +251,227 @@ class StagedIntegrityTests(unittest.TestCase):
         )
 
         self.assertFalse(result["ok"])
+
+    def _final_size_file(self, *, extra_failure: bool = False) -> tuple[int, Path, Path]:
+        from mediaforce.core.evidence import stable_json_hash
+        request = {"size_goal": {"mode": "normalized", "value_mb": 300, "reference_runtime_minutes": 45}}
+        contract = {"schema_version": 1, "sample_job_id": "old-sample", "policy_hash": "old-policy",
+                    "operator_intent": request, "operator_intent_hash": f"sha256:{stable_json_hash(request)}"}
+        manifest = self.root / "runs" / "remake.json"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(json.dumps({
+            "selection": {"queue_mode": "older_seasons", "production_approval_contract": contract,
+                          "media_scope": {"prefix": "tv/Show"}},
+            "items": [{"duration_seconds": 2700}, {"duration_seconds": 438.058}],
+        }))
+        checks = [{"passed": False, "message": FINAL_SIZE_GOAL_CHECK}]
+        if extra_failure:
+            checks.append({"passed": False, "message": "staged duration closely matches the source"})
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, "tv/Show/Season 1/TooLarge.mkv", status="encoded")
+            stage = self._write_stage("tv/Show/Season 1/TooLarge.mkv", b"compressed")
+            self._insert_artifact(connection, item_id, stage, manifest_path=manifest, item_index=1)
+            connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
+                encode_job_id="finished-show", validation_json=json.dumps({"passed": False, "checks": checks,
+                    "final_size_goal": {"target_size_bytes": 48_673_111}})))
+            connection.execute(encode_jobs.insert().values(
+                job_id="finished-show", prefix="tv/Show", status="completed", job_kind="folder", host_json="{}",
+                manifest_path=str(manifest), item_count=2, created_at="now", updated_at="now"))
+        return item_id, stage, manifest
+
+    @staticmethod
+    def _new_remake_approval(*, sample: str = "new-sample", value_mb: float = 220) -> dict[str, object]:
+        from mediaforce.core.evidence import stable_json_hash
+        request = {"size_goal": {"mode": "normalized", "value_mb": value_mb, "reference_runtime_minutes": 45}}
+        return {"schema_version": 1, "sample_job_id": sample, "policy_hash": "new-policy",
+                "operator_intent": request, "operator_intent_hash": f"sha256:{stable_json_hash(request)}"}
+
+    def test_final_size_remake_requires_new_sample_and_goal_before_removal(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        for approval in (None, self._new_remake_approval(sample="old-sample"), self._new_remake_approval(value_mb=300)):
+            with self.subTest(approval=approval):
+                result = decide_size_held_file(
+                    self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+                    validate_items=lambda *_args: self.fail("no validation"),
+                    queue_items=lambda *_args: self.fail("no queue before a fresh approval"),
+                    current_approval=lambda _prefix: approval,
+                )
+                self.assertFalse(result["ok"])
+                self.assertTrue(stage.exists())
+                with open_db(self.config.paths.db_path) as connection:
+                    self.assertIsNotNone(connection.execute(select(staged_artifacts).where(
+                        staged_artifacts.c.library_item_id == item_id)).first())
+
+    def test_final_size_remake_queues_one_file_at_the_show_scope(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        queued: list[tuple[str, str, list[int]]] = []
+        with open_db(self.config.paths.db_path) as connection:
+            other_id, other_stage = self._held_file(connection, "Untouched.mkv")
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no old-file validation"),
+            queue_items=lambda prefix, mode, ids: queued.append((prefix, mode, list(ids))) or {"ok": True},
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(stage.exists())
+        self.assertTrue(other_stage.exists())
+        self.assertEqual((self.root / "source/tv/Show/Season 1/TooLarge.mkv").read_bytes(), b"source")
+        self.assertEqual(queued, [("tv/Show", "older_seasons", [item_id])])
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertIsNotNone(connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == other_id)).first())
+
+    def test_other_validation_failures_and_keep_cannot_bypass_the_size_contract(self) -> None:
+        item_id, stage, _manifest = self._final_size_file(extra_failure=True)
+        for keep in (False, True):
+            result = decide_size_held_file(
+                self.config, "tv/Show/Season 1", item_id, keep=keep, now_iso=lambda: "now",
+                validate_items=lambda *_args: self.fail("must refuse"), queue_items=lambda *_args: self.fail("must refuse"),
+                current_approval=lambda _prefix: self._new_remake_approval(),
+            )
+            self.assertFalse(result["ok"])
+            self.assertTrue(stage.exists())
+
+    def test_missing_settings_history_can_be_remade_but_never_kept(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, "tv/Show/Season 1/Old.mkv", status="validated")
+            stage = self._write_stage("tv/Show/Season 1/Old.mkv", b"old")
+            self._insert_artifact(connection, item_id, stage, passed=True)
+            records = staged_remake_records(connection, [{"item_id": item_id}], "tv/Show/Season 1",
+                current_approval=lambda _prefix: None)
+        self.assertEqual(records[0]["remake"]["reason"], "settings_history")
+        self.assertTrue(records[0]["remake"]["blocked_reason"])
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=True, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("must refuse"), queue_items=lambda *_args: self.fail("must refuse"),
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertFalse(result["ok"])
+        queued: list[int] = []
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no old-file validation"),
+            queue_items=lambda _prefix, _mode, ids: queued.extend(ids) or {"ok": True},
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(queued, [item_id])
+        self.assertFalse(stage.exists())
+
+    def test_remake_preserves_the_output_when_the_original_is_unavailable(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        original = self.root / "source/tv/Show/Season 1/TooLarge.mkv"
+        original.unlink()
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no validation"), queue_items=lambda *_args: self.fail("no queue"),
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("Restore access to the original", result["message"])
+        self.assertTrue(stage.exists())
+
+    def test_remake_refuses_a_staging_path_that_points_at_the_original(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        original = self.root / "source/tv/Show/Season 1/TooLarge.mkv"
+        stage.unlink()
+        stage.symlink_to(original)
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no validation"), queue_items=lambda *_args: self.fail("no queue"),
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(original.read_bytes(), b"source")
+        self.assertTrue(stage.is_symlink())
+
+    def test_remake_keeps_show_scope_and_mode_after_its_job_row_was_cleared(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(encode_jobs.delete().where(encode_jobs.c.job_id == "finished-show"))
+        queued: list[tuple[str, str, list[int]]] = []
+        requested_approvals: list[str] = []
+
+        def approval(prefix: str) -> dict[str, object] | None:
+            requested_approvals.append(prefix)
+            return self._new_remake_approval() if prefix == "tv/Show" else None
+
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no validation"),
+            queue_items=lambda prefix, mode, ids: queued.append((prefix, mode, list(ids))) or {"ok": True},
+            current_approval=approval,
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(requested_approvals, ["tv/Show"])
+        self.assertEqual(queued, [("tv/Show", "older_seasons", [item_id])])
+        self.assertFalse(stage.exists())
+
+    def test_changed_legacy_goal_clears_an_existing_misrecorded_miss_without_erasing_history(self) -> None:
+        item_id, _stage, manifest = self._final_size_file()
+        payload = json.loads(manifest.read_text())
+        payload["selection"].pop("production_approval_contract")
+        payload["items"][1]["library_item_id"] = item_id
+        manifest.write_text(json.dumps(payload))
+        current = self._new_remake_approval()
+        analysis = {"kind": "final_size_target_miss", "manifest_index": 1,
+                    "target_size_verification": {"target_size_bytes": 48_673_111}}
+        items = [{"library_item_id": item_id, "rel_path": "tv/Show/Season 1/TooLarge.mkv"}]
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == "finished-show").values(
+                progress_json=json.dumps({"failure_analysis": analysis})))
+            connection.execute(item_events.insert().values(
+                library_item_id=item_id, created_at="before", event_type=folder_actions.FINAL_SIZE_MISS_EVENT,
+                details_json=json.dumps({"job_id": "finished-show", "sample_job_id": current["sample_job_id"],
+                    "operator_intent_hash": current["operator_intent_hash"], "named": True})))
+            self.assertEqual(len(folder_actions._recorded_final_size_miss_left_out(connection, items, current)), 1)
+            folder_actions._record_final_size_misses(connection, "tv/Show", current, now="after")
+            self.assertEqual(folder_actions._recorded_final_size_miss_left_out(connection, items, current), [])
+            folder_actions._record_final_size_misses(connection, "tv/Show", current, now="after-again")
+            events = connection.execute(select(item_events.c.event_type).where(
+                item_events.c.library_item_id == item_id)).scalars().all()
+            self.assertEqual(events, [folder_actions.FINAL_SIZE_MISS_EVENT, folder_actions.FINAL_SIZE_MISS_RECOVERED_EVENT])
+            connection.execute(encode_jobs.delete().where(encode_jobs.c.job_id == "finished-show"))
+            self.assertEqual(folder_actions._recorded_final_size_miss_left_out(connection, items, current), [])
+            self.assertEqual(len(folder_actions._recorded_final_size_miss_left_out(
+                connection, items, self._new_remake_approval(sample="another-sample", value_mb=300))), 1)
+            self.assertEqual(len(folder_actions._recorded_final_size_miss_left_out(connection, items, None)), 1)
+
+    def test_partial_cleanup_failure_does_not_remove_the_finished_output(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        attempted: list[Path] = []
+
+        def remove(path: Path, **_kwargs: object) -> bool:
+            attempted.append(path)
+            if path != stage:
+                return False
+            path.unlink()
+            return True
+
+        with patch("mediaforce.web.runtime.size_held.remove_stale_staging_path", side_effect=remove):
+            result = decide_size_held_file(
+                self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+                validate_items=lambda *_args: self.fail("no validation"), queue_items=lambda *_args: self.fail("no queue"),
+                current_approval=lambda _prefix: self._new_remake_approval(),
+            )
+        self.assertFalse(result["ok"])
+        self.assertTrue(stage.exists())
+        self.assertNotIn(stage, attempted)
+
+    def test_failed_removal_retains_record_and_does_not_queue(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        with patch("mediaforce.web.runtime.size_held.remove_stale_staging_path", return_value=False):
+            result = decide_size_held_file(
+                self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+                validate_items=lambda *_args: self.fail("no validation"), queue_items=lambda *_args: self.fail("no queue"),
+                current_approval=lambda _prefix: self._new_remake_approval(),
+            )
+        self.assertFalse(result["ok"])
+        self.assertTrue(stage.exists())
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertIsNotNone(connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id)).first())
 
     def test_remote_only_is_distinct_from_missing(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
