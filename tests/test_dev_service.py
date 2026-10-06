@@ -652,7 +652,7 @@ def frontend_tree_rows(tree: ProcessTree, checkout: str, command: str) -> list[d
 
 @pytest.mark.parametrize("checkout_kind,command_kind", [
     (checkout, command) for checkout in ("owned", "sibling", "nested", "foreign", "unavailable")
-    for command in ("relative", "rewritten", "absolute", "interpreter", "vite")
+    for command in ("relative", "rewritten", "absolute", "interpreter", "vite", "debug_vite", "paused_vite")
 ])
 @pytest.mark.parametrize("running", ["pid_file", "listener"])
 def test_frontend_stop_requires_exact_checkout_and_stops_the_whole_tree(
@@ -667,7 +667,9 @@ def test_frontend_stop_requires_exact_checkout_and_stops_the_whole_tree(
                "rewritten": "npm run dev --host 127.0.0.1",
                "absolute": "npm --prefix " + checkout + "/frontend run dev -- --strictPort",
                "interpreter": sys.executable + " /fixture/bin/npm --prefix " + checkout + "/frontend run dev -- --strictPort",
-               "vite": sys.executable + " " + checkout + "/frontend/node_modules/.bin/vite --strictPort"}[command_kind]
+               "vite": sys.executable + " " + checkout + "/frontend/node_modules/.bin/vite --strictPort",
+               "debug_vite": "node --inspect=0 " + checkout + "/frontend/node_modules/.bin/vite --strictPort",
+               "paused_vite": "node --inspect-brk=0 " + checkout + "/frontend/node_modules/.bin/vite --strictPort"}[command_kind]
     rows = frontend_tree_rows(tree, checkout, command)
     if checkout_kind == "unavailable":
         for row in rows:
@@ -942,7 +944,7 @@ def test_frontend_stop_climbs_through_an_intermediate_shell(
 
 
 @pytest.mark.parametrize("running", ["pid_file", "listener"])
-@pytest.mark.parametrize("launcher_kind", ["terminal", "npm_argument", "node_npm_argument", "node_vite_argument"])
+@pytest.mark.parametrize("launcher_kind", ["terminal", "npm_argument", "node_npm_argument", "node_vite_argument", "debug_node_vite_argument"])
 def test_frontend_stop_preserves_the_unrelated_launching_parent(
     tmp_path: Path, process_trees: list[ProcessTree], running: str, launcher_kind: str,
 ) -> None:
@@ -955,6 +957,7 @@ def test_frontend_stop_preserves_the_unrelated_launching_parent(
         "npm_argument": sys.executable + " /fixture/shared-wrapper.py /fixture/bin/npm --prefix " + repo + "/frontend run dev",
         "node_npm_argument": "node /fixture/shared-wrapper.js /fixture/bin/npm --prefix " + repo + "/frontend run dev",
         "node_vite_argument": "node /fixture/shared-wrapper.js " + repo + "/frontend/node_modules/.bin/vite dev",
+        "debug_node_vite_argument": "node --inspect=0 /fixture/shared-wrapper.js " + repo + "/frontend/node_modules/.bin/vite dev",
     }[launcher_kind]
     # Fake ps supplies this parent relationship; every PID is fixture-owned.
     rows = frontend_tree_rows(owned, repo, "npm run dev")

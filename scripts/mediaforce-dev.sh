@@ -113,23 +113,11 @@ mediaforce_backend_root_pid() {
 	printf '%s\n' "${root}"
 }
 
-command_matches_frontend_launcher() {
+command_matches_frontend_script() {
 	local command="${1:-}"
 	local cwd="${2:-}"
-	local interpreter="" launcher part
-	local remaining="${command}"
-	# Accept a launcher as the script argument, never later in a wrapper's argv.
-	while [[ "${remaining}" == *" "* ]]; do
-		part="${remaining%% *}"
-		interpreter="${interpreter:+${interpreter} }${part}"
-		remaining="${remaining#"${part} "}"
-		if [[ "${interpreter##*/}" =~ ^([Nn]ode|[Pp]ython([0-9]+(\.[0-9]+)*t?)?)$ &&
-			( "${interpreter}" != */* || ( -f "${interpreter}" && -x "${interpreter}" ) ) ]]; then
-			command="${remaining}"
-			break
-		fi
-		[[ "${interpreter}" == /* ]] || break
-	done
+	local launcher
+	local vite_binary="${ROOT_DIR}/frontend/node_modules/.bin/vite"
 	launcher="${command%%" --prefix "*}"
 	launcher="${launcher%%" run dev"*}"
 	if [[ "${launcher}" == */npm || "${launcher}" == */npm-cli.js ]]; then
@@ -141,10 +129,39 @@ command_matches_frontend_launcher() {
 		[[ "${cwd}" == "${ROOT_DIR}" ]] && return 0 ;;
 	"npm --prefix ${ROOT_DIR}/frontend run dev" | "npm --prefix ${ROOT_DIR}/frontend run dev "*)
 		[[ "${cwd}" == "${ROOT_DIR}" || "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
-	"npm run dev" | "npm run dev "* | "vite" | "vite "* | \
-	"${ROOT_DIR}/frontend/node_modules/.bin/vite" | "${ROOT_DIR}/frontend/node_modules/.bin/vite "*)
+	"npm run dev" | "npm run dev "* | "vite" | "vite "* | "${vite_binary}" | "${vite_binary} "*)
 		[[ "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
 	esac
+	return 1
+}
+
+command_matches_frontend_launcher() {
+	local command="${1:-}"
+	local cwd="${2:-}"
+	command_matches_frontend_script "${command}" "${cwd}" && return 0
+	local interpreter="" part arguments
+	local remaining="${command}"
+	# Resolve an interpreter prefix without consuming a wrapper's later arguments.
+	while [[ "${remaining}" == *" "* ]]; do
+		part="${remaining%% *}"
+		interpreter="${interpreter:+${interpreter} }${part}"
+		remaining="${remaining#"${part} "}"
+		if [[ "${interpreter##*/}" =~ ^([Nn]ode|[Pp]ython([0-9]+(\.[0-9]+)*t?)?)$ &&
+			( "${interpreter}" != *" "* || ( -f "${interpreter}" && -x "${interpreter}" ) ) ]]; then
+			arguments="${remaining}"
+			if [[ "${interpreter##*/}" =~ ^[Nn]ode$ ]]; then
+				while [[ "${arguments}" == *" "* ]]; do
+					case "${arguments%% *}" in
+					--inspect | --inspect=* | --inspect-brk | --inspect-brk=*) arguments="${arguments#* }" ;;
+					*) break ;;
+					esac
+				done
+			fi
+			command_matches_frontend_script "${arguments}" "${cwd}" && return 0
+			[[ "${interpreter}" != */* || ( -f "${interpreter}" && -x "${interpreter}" ) ]] && return 1
+		fi
+		[[ "${interpreter}" == /* ]] || break
+	done
 	return 1
 }
 
