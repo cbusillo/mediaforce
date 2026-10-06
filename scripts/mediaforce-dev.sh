@@ -4,11 +4,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 STATE_DIR="${HOME}/Library/Application Support/mediaforce"
-BACKEND_PID_FILE="${STATE_DIR}/mediaforce-web.pid"
+CHECKOUT_ID="$(printf '%s' "${ROOT_DIR}" | shasum -a 256 | awk '{print $1}')"
+DEV_STATE_DIR="${STATE_DIR}/development/${CHECKOUT_ID}"
+BACKEND_PID_FILE="${DEV_STATE_DIR}/mediaforce-web.pid"
 BACKEND_LOG_FILE="${STATE_DIR}/mediaforce-web.log"
 BACKEND_LOCK_FILE="${STATE_DIR}/mediaforce-web.lock"
 BACKEND_LAUNCH_AGENT="com.mediaforce.web"
-FRONTEND_PID_FILE="${STATE_DIR}/mediaforce-frontend.pid"
+FRONTEND_PID_FILE="${DEV_STATE_DIR}/mediaforce-frontend.pid"
 FRONTEND_LOG_FILE="${STATE_DIR}/mediaforce-frontend.log"
 
 trim() {
@@ -115,7 +117,8 @@ pid_matches_mediaforce_frontend() {
 		case "${command}" in
 		"npm --prefix frontend run dev" | "npm --prefix frontend run dev "*)
 			[[ "${cwd}" == "${ROOT_DIR}" ]] && return 0 ;;
-		"npm --prefix ${ROOT_DIR}/frontend run dev" | "npm --prefix ${ROOT_DIR}/frontend run dev "*)
+		"npm --prefix ${ROOT_DIR}/frontend run dev" | "npm --prefix ${ROOT_DIR}/frontend run dev "* | \
+		*"/npm --prefix ${ROOT_DIR}/frontend run dev" | *"/npm --prefix ${ROOT_DIR}/frontend run dev "*)
 			[[ "${cwd}" == "${ROOT_DIR}" || "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
 		"npm run dev" | "npm run dev "* | "vite" | "vite "* | \
 		*" ${ROOT_DIR}/frontend/node_modules/.bin/vite" | *" ${ROOT_DIR}/frontend/node_modules/.bin/vite "*)
@@ -138,23 +141,6 @@ mediaforce_frontend_root_pid() {
 		depth=$((depth + 1))
 	done
 	printf '%s\n' "${pid}"
-}
-
-remove_managed_pid_file() {
-	local pid_file="${1}" matcher="${2}" pid
-	pid="$(pid_from_file "${pid_file}")"
-	if ! pid_is_alive "${pid}" || "${matcher}" "${pid}"; then
-		rm -f "${pid_file}"
-	fi
-}
-
-require_available_pid_file() {
-	local pid_file="${1}" matcher="${2}" component="${3}" pid
-	pid="$(pid_from_file "${pid_file}")"
-	if pid_is_alive "${pid}" && ! "${matcher}" "${pid}"; then
-		echo "${component}: PID file belongs to a process outside this checkout; stop it from its owning checkout before starting" >&2
-		return 1
-	fi
 }
 
 managed_listener_pids() {
@@ -281,7 +267,7 @@ reload_arg() {
 
 start_backend() {
 	load_env
-	mkdir -p "${STATE_DIR}"
+	mkdir -p "${DEV_STATE_DIR}"
 	stop_backend_launch_agent
 	local running_pid
 	running_pid="$(backend_running_pid)"
@@ -300,8 +286,7 @@ start_backend() {
 		echo "backend: port ${BACKEND_PORT} is used by a process outside this checkout; refusing to start" >&2
 		return 1
 	fi
-	require_available_pid_file "${BACKEND_PID_FILE}" pid_matches_mediaforce_backend backend || return 1
-	remove_managed_pid_file "${BACKEND_PID_FILE}" pid_matches_mediaforce_backend
+	rm -f "${BACKEND_PID_FILE}"
 	local command=("$(web_binary)" --host "${BACKEND_HOST}" --port "${BACKEND_PORT}" "$(reload_arg)")
 	if [[ -n "${MEDIAFORCE_CONFIG_PATH:-}" ]]; then
 		command+=(--config "${MEDIAFORCE_CONFIG_PATH}")
@@ -322,7 +307,7 @@ start_backend() {
 
 start_frontend() {
 	load_env
-	mkdir -p "${STATE_DIR}"
+	mkdir -p "${DEV_STATE_DIR}"
 	local running_pid
 	running_pid="$(frontend_running_pid)"
 	if [[ -n "${running_pid}" ]]; then
@@ -340,8 +325,7 @@ start_frontend() {
 		echo "frontend: port ${FRONTEND_PORT} is used by a process outside this checkout; refusing to start" >&2
 		return 1
 	fi
-	require_available_pid_file "${FRONTEND_PID_FILE}" pid_matches_mediaforce_frontend frontend || return 1
-	remove_managed_pid_file "${FRONTEND_PID_FILE}" pid_matches_mediaforce_frontend
+	rm -f "${FRONTEND_PID_FILE}"
 	(
 		cd "${ROOT_DIR}/frontend"
 		nohup npm --prefix "${ROOT_DIR}/frontend" run dev -- --host "${FRONTEND_HOST}" --port "${FRONTEND_PORT}" --strictPort >>"${FRONTEND_LOG_FILE}" 2>&1 &
@@ -365,7 +349,7 @@ stop_backend() {
 		pid="$(mediaforce_backend_root_pid "${pid}")"
 		kill_pid_tree "${pid}"
 		wait_for_no_managed_listener "${BACKEND_PORT}" pid_matches_mediaforce_backend || true
-		remove_managed_pid_file "${BACKEND_PID_FILE}" pid_matches_mediaforce_backend
+		rm -f "${BACKEND_PID_FILE}"
 		echo "backend: stopped pid ${pid}"
 		return 0
 	fi
@@ -377,11 +361,11 @@ stop_backend() {
 			kill_pid_tree "${listener_pid}"
 		done <<<"${managed_pids}"
 		wait_for_no_managed_listener "${BACKEND_PORT}" pid_matches_mediaforce_backend || true
-		remove_managed_pid_file "${BACKEND_PID_FILE}" pid_matches_mediaforce_backend
+		rm -f "${BACKEND_PID_FILE}"
 		echo "backend: stopped listener $(printf '%s' "${managed_pids}" | paste -sd ',' -)"
 		return 0
 	fi
-	remove_managed_pid_file "${BACKEND_PID_FILE}" pid_matches_mediaforce_backend
+	rm -f "${BACKEND_PID_FILE}"
 	echo "backend: stopped"
 }
 
@@ -393,7 +377,7 @@ stop_frontend() {
 		pid="$(mediaforce_frontend_root_pid "${pid}")"
 		kill_pid_tree "${pid}"
 		wait_for_no_managed_listener "${FRONTEND_PORT}" pid_matches_mediaforce_frontend || true
-		remove_managed_pid_file "${FRONTEND_PID_FILE}" pid_matches_mediaforce_frontend
+		rm -f "${FRONTEND_PID_FILE}"
 		echo "frontend: stopped pid ${pid}"
 		return 0
 	fi
@@ -405,11 +389,11 @@ stop_frontend() {
 			kill_pid_tree "${listener_pid}"
 		done <<<"${managed_pids}"
 		wait_for_no_managed_listener "${FRONTEND_PORT}" pid_matches_mediaforce_frontend || true
-		remove_managed_pid_file "${FRONTEND_PID_FILE}" pid_matches_mediaforce_frontend
+		rm -f "${FRONTEND_PID_FILE}"
 		echo "frontend: stopped listener $(printf '%s' "${managed_pids}" | paste -sd ',' -)"
 		return 0
 	fi
-	remove_managed_pid_file "${FRONTEND_PID_FILE}" pid_matches_mediaforce_frontend
+	rm -f "${FRONTEND_PID_FILE}"
 	echo "frontend: stopped"
 }
 
