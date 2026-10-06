@@ -9,6 +9,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 
 import pytest
 
@@ -114,6 +115,11 @@ elif name == "lsof" and "DEV_TEST_TREE" in os.environ:
     for row in rows:
         if row.get("port") == port and not Path(row["finished"]).exists():
             print(row["pid"])
+    started = os.environ.get("DEV_TEST_STARTED")
+    if started and Path(started).exists() and Path(started).with_suffix(".listening").exists():
+        backend = json.loads(Path(started).read_text())
+        if backend["args"][backend["args"].index("--port") + 1] == port:
+            print(backend["pid"])
 elif name == "lsof" and os.environ["DEV_TEST_RUNNING"] == "listener":
     seen = Path(os.environ["DEV_TEST_LISTENER_SEEN"])
     if not seen.exists():
@@ -140,6 +146,9 @@ elif name == "awk":
                 print(line.split()[0])
 elif name == "sort":
     print("\\n".join(sorted(set(sys.stdin.read().splitlines()))))
+elif name == "shasum":
+    import hashlib
+    print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest(), " -")
 elif name == "paste":
     print(",".join(sys.stdin.read().splitlines()))
 elif name == "tr":
@@ -178,7 +187,7 @@ elif name == "rm":
 elif name not in {"launchctl", "ps", "lsof", "sleep"}:
     raise AssertionError(name)
 '''
-    for command in ("id", "launchctl", "ps", "lsof", "python3", "sleep", "dirname", "sed", "awk", "sort", "paste", "tr", "rm", "mkdir", "nohup"):
+    for command in ("id", "launchctl", "ps", "lsof", "python3", "sleep", "dirname", "sed", "awk", "sort", "shasum", "paste", "tr", "rm", "mkdir", "nohup"):
         binary = binaries / command
         binary.write_text(stub)
         binary.chmod(0o755)
@@ -193,6 +202,8 @@ elif name not in {"launchctl", "ps", "lsof", "sleep"}:
         "DEV_TEST_PROCESS": process,
         "DEV_TEST_LOCK": str(lock),
         "DEV_TEST_LISTENER_SEEN": str(tmp_path / "listener-seen"),
+        "MEDIAFORCE_WEB_HOST": "127.0.0.1",
+        "MEDIAFORCE_WEB_PORT": "8777",
     }
     return script, lock, pid_file, log, environment
 
@@ -530,6 +541,7 @@ from pathlib import Path
 import sys
 
 Path(os.environ["DEV_TEST_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "args": sys.argv}))
+Path(os.environ["DEV_TEST_STARTED"]).with_suffix(".listening").touch()
 os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
 ''')
     binary.chmod(0o755)
@@ -594,12 +606,13 @@ cleanup = int(os.environ["DEV_TEST_START_CLEANUP_FD"])
 required = os.environ["DEV_TEST_REQUIRED_SHUTDOWN"]
 if required:
     assert Path(required).exists(), "new backend launched before service shutdown completed"
+Path(os.environ["DEV_TEST_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "args": sys.argv}))
 if os.environ["DEV_TEST_SLOW_START"] == "True":
     ready = Path(os.environ["DEV_TEST_LOG"]).with_suffix(".startup-ready")
     while not ready.exists():
         if select.select([cleanup], [], [], 0.01)[0]:
             sys.exit(0)
-Path(os.environ["DEV_TEST_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "args": sys.argv}))
+Path(os.environ["DEV_TEST_STARTED"]).with_suffix(".listening").touch()
 os.read(cleanup, 4)
 ''')
     binary.chmod(0o755)
@@ -636,10 +649,20 @@ def test_fresh_backend_polls_until_discovery_or_reports_bounded_failure(tmp_path
             assert int(pid_file.read_text()) == json.loads(started.read_text())["pid"]
             assert "backend: started" in result.stdout
         else:
-            assert not started.exists()
+            assert started.exists()
+            assert not started.with_suffix(".listening").exists()
+            assert "backend: started" not in result.stdout
             assert "backend: failed to start; see " in result.stderr
+            result = subprocess.run(
+                ["/bin/bash", str(script), "start", "backend"], cwd=tmp_path, env=environment,
+                capture_output=True, text=True, timeout=30, pass_fds=descriptors,
+            )
+            assert result.returncode == 1
+            assert "has not started listening" in result.stderr
+            assert "backend: running" not in result.stdout
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         assert sum(call[0] == "sleep" for call in calls) > 1
+        assert sum(call[0] == "nohup" for call in calls) == 1
         assert not any(call[:2] == ["launchctl", "bootout"] for call in calls)
 
 
@@ -703,6 +726,81 @@ def test_backend_waits_for_service_unload_and_process_completion(
             assert "unloaded launch agent" not in result.stdout
             if shutdown in {"stuck_process", "failed"}:
                 assert service.root.poll() is None
+
+
+@pytest.mark.parametrize("replacement", ["fresh", "already_listening"])
+def test_shutdown_timeout_retry_waits_for_old_process_then_clears_only_own_record(
+    tmp_path: Path, process_trees: list[ProcessTree], replacement: str,
+) -> None:
+    script, lock, pid_file, log, environment = prepare_dev_service(tmp_path, "matching", "lock", "owned")
+    service = start_process_tree(tmp_path, process_trees, "retry-service")
+    foreign = start_process_tree(tmp_path, process_trees, "foreign-record")
+    table = tmp_path / "processes.json"
+    table.write_text(json.dumps([{
+        "pid": service.root.pid, "parent": 0,
+        "command": environment["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web", "finished": str(service.finished),
+    }]))
+    environment.update({
+        "DEV_TEST_TREE": str(table), "DEV_TEST_SERVICE_PID": str(service.root.pid),
+        "DEV_TEST_SHUTDOWN": "stuck_process", "DEV_TEST_SERVICE_CLEANUP_FD": str(service.cleanup_writer),
+    })
+    lock_bytes = json.dumps({"pid": service.root.pid, "owner": "retained"}).encode()
+    lock.write_bytes(lock_bytes)
+    records = pid_file.parent / "backend-shutdown"
+    records.mkdir()
+    foreign_key = hashlib.sha256(b"/foreign/checkout").hexdigest()
+    foreign_record = records / f"{foreign_key}.pids"
+    foreign_bytes = f"{foreign.root.pid}\n".encode()
+    foreign_record.write_bytes(foreign_bytes)
+    own_key = hashlib.sha256(environment["DEV_TEST_REPO"].encode()).hexdigest()
+    own_record = records / f"{own_key}.pids"
+    with fixture_backend(tmp_path, environment, shutdown_finished=service.finished) as (started, descriptors):
+        for _ in range(2):
+            result = subprocess.run(
+                ["/bin/bash", str(script), "start", "backend"], cwd=tmp_path, env=environment,
+                capture_output=True, text=True, timeout=40, pass_fds=(*descriptors, service.cleanup_writer),
+            )
+            assert result.returncode == 1
+            assert "shutdown did not finish" in result.stderr
+            assert "backend: running" not in result.stdout
+            assert service.root.poll() is None
+            assert str(service.root.pid) in own_record.read_text().splitlines()
+            assert not started.exists()
+        os.write(service.cleanup_writer, b"done" * 2)
+        assert service.root.wait(timeout=5) == 0
+        assert select.select([service.lifetime_reader], [], [], 5)[0]
+        assert os.read(service.lifetime_reader, 1) == b""
+        ready_backend = None
+        if replacement == "already_listening":
+            ready_backend = start_process_tree(tmp_path, process_trees, "ready-backend")
+            rows = json.loads(table.read_text())
+            rows.extend([
+                {"pid": ready_backend.root.pid, "parent": 0,
+                 "command": environment["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web", "finished": str(ready_backend.finished)},
+                {"pid": ready_backend.child_pid, "parent": ready_backend.root.pid,
+                 "command": "uvicorn worker", "port": "8777", "finished": str(ready_backend.child_finished)},
+            ])
+            table.write_text(json.dumps(rows))
+            pid_file.write_text(str(ready_backend.root.pid))
+        result = subprocess.run(
+            ["/bin/bash", str(script), "start", "backend"], cwd=tmp_path, env=environment,
+            capture_output=True, text=True, timeout=30, pass_fds=(*descriptors, service.cleanup_writer),
+        )
+        assert result.returncode == 0, result.stderr
+        if ready_backend is None:
+            assert "backend: started" in result.stdout
+        else:
+            assert "backend: running" in result.stdout
+            assert f"pid {ready_backend.root.pid}" in result.stdout
+            assert ready_backend.root.poll() is None
+            assert not started.exists()
+        assert not own_record.exists()
+        assert foreign_record.read_bytes() == foreign_bytes
+        assert foreign.root.poll() is None
+        assert lock.read_bytes() == lock_bytes
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        assert sum(call[:2] == ["launchctl", "bootout"] for call in calls) == 1
+        assert sum(call[0] == "nohup" for call in calls) == (1 if ready_backend is None else 0)
 
 
 @pytest.mark.parametrize("action,component", [("start", "all"), ("restart", "all"), ("stop", "backend")])
