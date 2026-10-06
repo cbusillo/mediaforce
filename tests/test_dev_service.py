@@ -332,10 +332,11 @@ class ProcessTree:
 
 def assert_tree_stopped(tree: ProcessTree) -> None:
     returncode = tree.root.wait(timeout=5)
+    # Native cleanup signals deepest children first; the parent can finish or
+    # receive SIGTERM during interpreter teardown. EOF still proves every child exited.
     assert returncode in {0, -signal.SIGTERM, -signal.SIGKILL}
     if returncode == 0:
         completion = json.loads(tree.finished.read_text())
-        assert completion["root_signaled"]
         assert completion["child_returncode"] < 0
     assert select.select([tree.lifetime_reader], [], [], 5)[0], "descendant survived the stop"
     assert os.read(tree.lifetime_reader, 1) == b""

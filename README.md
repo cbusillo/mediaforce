@@ -545,8 +545,9 @@ forced cleanup after their parent exits without targeting a reused PID.
 If identity custody or cleanup cannot be proved, stop reports failure, retains
 PID bookkeeping, and restart does not launch another process. Resolve the
 reported error and retry the same stop command. Development stop requires the
-checkout's prepared Python environment (`uv sync --locked`); unsupported native
-custody fails visibly rather than falling back to bare PID signals.
+checkout's prepared Python environment (`uv sync --locked`) and always loads
+that checkout's cleanup code, even when invoked from another directory. Native
+custody failures remain visible rather than falling back to bare PID signals.
 
 Development PID files live in a directory under that state path keyed by the
 physical checkout: `development/<checkout hash>/`. Each checkout manages its

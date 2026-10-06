@@ -73,7 +73,7 @@ command_matches_backend_binary() {
 	if [[ "${command}" == "${managed_binary}" || "${command}" == "${managed_binary} "* ]]; then
 		return 0
 	fi
-	[[ "${interpreter##*/}" =~ ^python([0-9]+(\.[0-9]+)*)?$ &&
+	[[ "${interpreter##*/}" =~ ^[Pp]ython([0-9]+(\.[0-9]+)*t?)?$ &&
 		( "${interpreter}" != *" "* || -x "${interpreter}" ) &&
 		( "${arguments}" == "${managed_binary}" || "${arguments}" == "${managed_binary} "* ) ]]
 }
@@ -174,8 +174,11 @@ foreign_listener_pids() {
 kill_pid_tree() {
 	local root_pid="${1:-}"
 	local component="${2:-}"
-	uv run --no-sync --project "${ROOT_DIR}" python -m mediaforce.ops.dev_processes \
-		"${root_pid}" "${ROOT_DIR}/scripts/mediaforce-dev.sh" "${component}"
+	(
+		cd "${ROOT_DIR}"
+		uv run --no-sync --project "${ROOT_DIR}" python -m mediaforce.ops.dev_processes \
+			"${root_pid}" "${ROOT_DIR}/scripts/mediaforce-dev.sh" "${component}"
+	)
 }
 
 wait_for_no_managed_listener() {
