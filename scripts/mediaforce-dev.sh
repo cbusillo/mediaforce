@@ -215,24 +215,63 @@ backend_lock_pid() {
 }
 
 backend_launch_agent_loaded() {
-	local info line working_directory="" program=""
-	info="$(launchctl print "gui/$(id -u)/${BACKEND_LAUNCH_AGENT}" 2>/dev/null)" || return 1
+	local line
+	BACKEND_AGENT_DIRECTORY=""
+	BACKEND_AGENT_PROGRAM=""
+	BACKEND_AGENT_PID=""
+	BACKEND_AGENT_INFO="$(launchctl print "gui/$(id -u)/${BACKEND_LAUNCH_AGENT}" 2>/dev/null)" || return 1
 	while IFS= read -r line; do
 		line="$(trim "${line}")"
 		case "${line}" in
-		"working directory = "*) working_directory="${line#working directory = }" ;;
-		"program = "*) program="${line#program = }" ;;
+		"working directory = "*) BACKEND_AGENT_DIRECTORY="${line#working directory = }" ;;
+		"program = "*) BACKEND_AGENT_PROGRAM="${line#program = }" ;;
+		"pid = "*) BACKEND_AGENT_PID="${line#pid = }" ;;
 		esac
-	done <<<"${info}"
-	[[ "${working_directory}" == "${ROOT_DIR}" && "${program}" == "$(web_binary)" ]]
+	done <<<"${BACKEND_AGENT_INFO}"
+	[[ "${BACKEND_AGENT_DIRECTORY}" == "${ROOT_DIR}" && "${BACKEND_AGENT_PROGRAM}" == "$(web_binary)" ]]
 }
 
 stop_backend_launch_agent() {
-	if backend_launch_agent_loaded; then
-		launchctl bootout "gui/$(id -u)/${BACKEND_LAUNCH_AGENT}" 2>/dev/null || true
-		sleep 0.5
-		echo "backend: unloaded launch agent ${BACKEND_LAUNCH_AGENT}"
+	if ! backend_launch_agent_loaded; then
+		if [[ "${BACKEND_AGENT_PROGRAM}" == "$(web_binary)" ]]; then
+			echo "backend: login item uses this checkout's binary with a different working directory; refusing to manage it" >&2
+			return 1
+		fi
+		return 0
 	fi
+	local target observed_pids service_pids="" pid attempt=0 pending
+	target="gui/$(id -u)/${BACKEND_LAUNCH_AGENT}"
+	observed_pids="${BACKEND_AGENT_PID}
+$(backend_running_pid)
+$(managed_listener_pids "${BACKEND_PORT}" pid_matches_mediaforce_backend)"
+	while IFS= read -r pid; do
+		[[ -n "${pid}" ]] || continue
+		service_pids+="${pid}"$'\n'"$(mediaforce_backend_root_pid "${pid}")"$'\n'
+	done <<<"${observed_pids}"
+	if ! launchctl bootout "${target}" 2>/dev/null; then
+		echo "backend: could not unload login item ${BACKEND_LAUNCH_AGENT}; refusing to continue" >&2
+		return 1
+	fi
+	while [[ ${attempt} -lt 20 ]]; do
+		pending=false
+		if launchctl print "${target}" >/dev/null 2>&1; then
+			pending=true
+		fi
+		while IFS= read -r pid; do
+			if pid_is_alive "${pid}" && pid_matches_mediaforce_backend "${pid}"; then
+				pending=true
+			fi
+		done <<<"${service_pids}"
+		if [[ "${pending}" == false && -z "$(backend_running_pid)" &&
+			-z "$(managed_listener_pids "${BACKEND_PORT}" pid_matches_mediaforce_backend)" ]]; then
+			echo "backend: unloaded launch agent ${BACKEND_LAUNCH_AGENT} and completed shutdown"
+			return 0
+		fi
+		attempt=$((attempt + 1))
+		sleep 0.25
+	done
+	echo "backend: login item shutdown did not finish within 20 checks; refusing to continue" >&2
+	return 1
 }
 
 frontend_running_pid() {
@@ -253,7 +292,7 @@ reload_arg() {
 start_backend() {
 	load_env
 	mkdir -p "${STATE_DIR}"
-	stop_backend_launch_agent
+	stop_backend_launch_agent || return 1
 	local running_pid
 	running_pid="$(backend_running_pid)"
 	if [[ -n "${running_pid}" ]]; then
@@ -281,8 +320,13 @@ start_backend() {
 		nohup "${command[@]}" >>"${BACKEND_LOG_FILE}" 2>&1 &
 		echo $! >"${BACKEND_PID_FILE}"
 	)
-	sleep 1
-	running_pid="$(backend_running_pid)"
+	local attempt=0
+	while [[ ${attempt} -lt 20 ]]; do
+		running_pid="$(backend_running_pid)"
+		[[ -z "${running_pid}" ]] || break
+		attempt=$((attempt + 1))
+		sleep 0.25
+	done
 	if [[ -z "${running_pid}" ]]; then
 		echo "backend: failed to start; see ${BACKEND_LOG_FILE}" >&2
 		return 1
@@ -327,7 +371,7 @@ start_frontend() {
 
 stop_backend() {
 	load_env
-	stop_backend_launch_agent
+	stop_backend_launch_agent || return 1
 	local pid managed_pids
 	pid="$(backend_running_pid)"
 	if [[ -n "${pid}" ]]; then
@@ -446,12 +490,12 @@ run_for_component() {
 	stop:frontend) stop_frontend ;;
 	restart:all)
 		stop_frontend
-		stop_backend
-		start_backend
+		stop_backend || return 1
+		start_backend || return 1
 		start_frontend
 		;;
 	restart:backend)
-		stop_backend
+		stop_backend || return 1
 		start_backend
 		;;
 	restart:frontend)

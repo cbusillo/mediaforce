@@ -101,20 +101,13 @@ The service manager rotates either log to a single `.1` file when it exceeds
 
 ## Development Handoff
 
-`scripts/mediaforce-dev.sh` unloads the LaunchAgent during backend start,
-stop, or restart only when its working directory and program exactly match
-that checkout and its `.venv/bin/mediaforce-web`. A sibling or nested checkout's
-service stays loaded. The helper preserves the shared runtime lock during
-these actions. This bootout is temporary; the persistent enable/disable state
-remains owned by `mediaforce service`.
-
-Backend process discovery also requires that checkout's exact executable in
-the process's command or a parent process's command, including when a Python
-interpreter launches it. Start the local
-development backend with `scripts/mediaforce-dev.sh start backend`. A sibling
-checkout's backend stays running when discovered through a PID file, port
-listener, or runtime lock. Stop may remove the shared development PID file;
-the runtime lock is preserved.
+The [local web development helper](../../README.md#local-web-development) owns development
+process reuse, checkout isolation and bounded login-item shutdown/startup.
+Its bootout is temporary; the persistent enable/disable state remains owned
+by `mediaforce service`. The source lifecycle tests use fake launchctl output
+and fixture-owned processes. Native `program` output for the generated
+ProgramArguments-only plist and installed service lifecycle remain unverified
+by those tests.
 
 ## Verification
 

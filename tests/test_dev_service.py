@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import pytest
@@ -65,8 +66,18 @@ elif name == "launchctl" and sys.argv[1] == "print":
     if service == "other_directory":
         program = os.environ["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web"
     print(f"\\tworking directory = {repo}\\n\\tprogram = {program}\\narguments = {{\\nmediaforce-web\\n}}")
+    if "DEV_TEST_SERVICE_PID" in os.environ:
+        print("pid = " + os.environ["DEV_TEST_SERVICE_PID"])
 elif name == "launchctl" and sys.argv[1] == "bootout":
-    Path(os.environ["DEV_TEST_LOG"]).with_suffix(".unloaded").touch()
+    mode = os.environ.get("DEV_TEST_SHUTDOWN", "immediate")
+    if mode == "failed":
+        sys.exit(5)
+    root = os.environ.get("DEV_TEST_SERVICE_PID", os.environ.get("DEV_TEST_BOOTOUT_ROOT"))
+    if root:
+        import signal
+        os.kill(int(root), signal.SIGTERM)
+    if mode not in {"delayed_unload", "stuck_unload"}:
+        Path(os.environ["DEV_TEST_LOG"]).with_suffix(".unloaded").touch()
 elif name == "ps" and "DEV_TEST_TREE" in os.environ:
     rows = json.loads(Path(os.environ["DEV_TEST_TREE"]).read_text())
     rows = [row for row in rows if not row.get("finished") or not Path(row["finished"]).exists()]
@@ -135,7 +146,22 @@ elif name == "tr":
     print(sys.stdin.read().lower(), end="")
 elif name == "sleep" and "DEV_TEST_TREE" in os.environ:
     import time
-    time.sleep(float(sys.argv[1]))
+    if "DEV_TEST_SHUTDOWN" in os.environ:
+        ticks = Path(os.environ["DEV_TEST_LOG"]).with_suffix(".ticks")
+        count = int(ticks.read_text()) + 1 if ticks.exists() else 1
+        ticks.write_text(str(count))
+        mode = os.environ["DEV_TEST_SHUTDOWN"]
+        if count == 2 and mode == "delayed_unload":
+            Path(os.environ["DEV_TEST_LOG"]).with_suffix(".unloaded").touch()
+        if count == 4 and "DEV_TEST_SERVICE_CLEANUP_FD" in os.environ and mode not in {"stuck_process", "failed"}:
+            os.write(int(os.environ["DEV_TEST_SERVICE_CLEANUP_FD"]), b"done")
+        if count == 6 and mode == "delayed_parent":
+            os.write(int(os.environ["DEV_TEST_SERVICE_CLEANUP_FD"]), b"done")
+        if count == 7 and mode != "startup_timeout":
+            Path(os.environ["DEV_TEST_LOG"]).with_suffix(".startup-ready").touch()
+        time.sleep(0.05)
+    else:
+        time.sleep(float(sys.argv[1]))
 elif name == "mkdir":
     target = Path(sys.argv[-1])
     assert target.resolve().is_relative_to(Path(os.environ["HOME"]).resolve())
@@ -209,9 +235,9 @@ def test_stop_unloads_only_this_checkout_and_preserves_runtime_lock(
             child.kill()
         child.wait(timeout=5)
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == (1 if service == "other_directory" else 0), result.stderr
     assert lock.read_bytes() == lock_bytes
-    if running == "idle" or process in {"owned", "python_owned"}:
+    if service != "other_directory" and (running == "idle" or process in {"owned", "python_owned"}):
         assert not pid_file.exists()
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     target = "gui/4242/" + LOGIN_ITEM_LABEL
@@ -312,7 +338,7 @@ def process_trees() -> Iterator[list[ProcessTree]]:
         for tree in trees:
             try:
                 try:
-                    os.write(tree.cleanup_writer, b"done")
+                    os.write(tree.cleanup_writer, b"done" * 2)
                 except BrokenPipeError:
                     pass
                 tree.root.wait(timeout=5)
@@ -329,6 +355,7 @@ def process_trees() -> Iterator[list[ProcessTree]]:
 
 def start_process_tree(
     tmp_path: Path, trees: list[ProcessTree], name: str, *, ignore_sigterm: bool = False,
+    hold_root_after_child: bool = False,
 ) -> ProcessTree:
     finished = tmp_path / f"{name}-finished.json"
     child_finished = tmp_path / f"{name}-child-finished"
@@ -348,6 +375,7 @@ signal.signal(signal.SIGTERM, signal.SIG_IGN if sys.argv[4] == "stubborn" else t
 os.write(int(sys.argv[3]), b"ready")
 os.close(int(sys.argv[3]))
 os.read(int(sys.argv[1]), 4)
+Path(sys.argv[2]).touch()
 '''
     code = '''
 import json
@@ -373,11 +401,13 @@ def finish(signum, frame):
 signal.signal(signal.SIGTERM, finish)
 print(child.pid, flush=True)
 result = child.wait()
+if sys.argv[7] == "hold":
+    os.read(cleanup_reader, 4)
 Path(sys.argv[1]).write_text(json.dumps({"child_returncode": result, "root_signaled": root_signaled}))
 '''
     root = subprocess.Popen(
         [sys.executable, "-c", code, str(finished), str(cleanup_reader), str(lifetime_writer), child_code,
-         str(child_finished), "stubborn" if ignore_sigterm else "normal"],
+         str(child_finished), "stubborn" if ignore_sigterm else "normal", "hold" if hold_root_after_child else "normal"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=(cleanup_reader, lifetime_writer),
     )
     os.close(cleanup_reader)
@@ -480,6 +510,9 @@ def test_restart_stops_owned_tree_unloads_once_and_starts_backend_with_retained_
          "finished": str(owned.child_finished)},
     ]))
     environment["DEV_TEST_TREE"] = str(table)
+    environment["DEV_TEST_SERVICE_PID"] = str(owned.root.pid)
+    environment["DEV_TEST_SHUTDOWN"] = "immediate"
+    environment["DEV_TEST_SERVICE_CLEANUP_FD"] = str(owned.cleanup_writer)
     pid_file.write_text(str(owned.child_pid))
     lock_bytes = json.dumps({"pid": owned.child_pid, "owner": "retained runtime"}).encode()
     lock.write_bytes(lock_bytes)
@@ -503,10 +536,14 @@ os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
     try:
         result = subprocess.run(
             ["/bin/bash", str(script), "restart", "backend"], cwd=tmp_path, env=environment,
-            capture_output=True, text=True, timeout=20, pass_fds=(cleanup_reader, lifetime_writer),
+            capture_output=True, text=True, timeout=30,
+            pass_fds=(cleanup_reader, lifetime_writer, owned.cleanup_writer),
         )
         assert result.returncode == 0, result.stderr
-        assert_tree_stopped(owned)
+        assert owned.root.wait(timeout=5) == 0
+        assert json.loads(owned.finished.read_text())["root_signaled"]
+        assert select.select([owned.lifetime_reader], [], [], 5)[0]
+        assert os.read(owned.lifetime_reader, 1) == b""
         new_backend = json.loads(started.read_text())
         assert int(pid_file.read_text()) == new_backend["pid"]
         assert new_backend["pid"] != owned.root.pid
@@ -528,3 +565,186 @@ os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
         assert select.select([lifetime_reader], [], [], 5)[0], "started fixture backend still alive"
         assert os.read(lifetime_reader, 1) == b""
         os.close(lifetime_reader)
+
+
+@contextmanager
+def fixture_backend(
+    tmp_path: Path, environment: dict[str, str], *, shutdown_finished: Path | None = None,
+    slow_start: bool = False,
+) -> Iterator[tuple[Path, tuple[int, ...]]]:
+    started = tmp_path / "new-backend.json"
+    cleanup_reader, cleanup_writer = os.pipe()
+    lifetime_reader, lifetime_writer = os.pipe()
+    environment.update({
+        "DEV_TEST_STARTED": str(started),
+        "DEV_TEST_START_CLEANUP_FD": str(cleanup_reader),
+        "DEV_TEST_REQUIRED_SHUTDOWN": str(shutdown_finished) if shutdown_finished else "",
+        "DEV_TEST_SLOW_START": str(slow_start),
+    })
+    binary = Path(environment["DEV_TEST_REPO"]) / ".venv/bin/mediaforce-web"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!" + sys.executable + "\n" + '''
+import json
+import os
+from pathlib import Path
+import select
+import sys
+
+cleanup = int(os.environ["DEV_TEST_START_CLEANUP_FD"])
+required = os.environ["DEV_TEST_REQUIRED_SHUTDOWN"]
+if required:
+    assert Path(required).exists(), "new backend launched before service shutdown completed"
+if os.environ["DEV_TEST_SLOW_START"] == "True":
+    ready = Path(os.environ["DEV_TEST_LOG"]).with_suffix(".startup-ready")
+    while not ready.exists():
+        if select.select([cleanup], [], [], 0.01)[0]:
+            sys.exit(0)
+Path(os.environ["DEV_TEST_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "args": sys.argv}))
+os.read(cleanup, 4)
+''')
+    binary.chmod(0o755)
+    try:
+        yield started, (cleanup_reader, lifetime_writer)
+    finally:
+        os.close(cleanup_reader)
+        os.close(lifetime_writer)
+        try:
+            os.write(cleanup_writer, b"done")
+        except BrokenPipeError:
+            pass
+        os.close(cleanup_writer)
+        assert select.select([lifetime_reader], [], [], 5)[0], "started backend survived fixture cleanup"
+        assert os.read(lifetime_reader, 1) == b""
+        os.close(lifetime_reader)
+
+
+@pytest.mark.parametrize("startup", ["startup", "startup_timeout"])
+def test_fresh_backend_polls_until_discovery_or_reports_bounded_failure(tmp_path: Path, startup: str) -> None:
+    script, lock, pid_file, log, environment = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    table = tmp_path / "empty-processes.json"
+    table.write_text("[]")
+    environment.update({"DEV_TEST_TREE": str(table), "DEV_TEST_SHUTDOWN": startup})
+    lock_bytes = lock.read_bytes()
+    with fixture_backend(tmp_path, environment, slow_start=True) as (started, descriptors):
+        result = subprocess.run(
+            ["/bin/bash", str(script), "start", "backend"], cwd=tmp_path, env=environment,
+            capture_output=True, text=True, timeout=30, pass_fds=descriptors,
+        )
+        assert result.returncode == (0 if startup == "startup" else 1), result.stderr
+        assert lock.read_bytes() == lock_bytes
+        if startup == "startup":
+            assert int(pid_file.read_text()) == json.loads(started.read_text())["pid"]
+            assert "backend: started" in result.stdout
+        else:
+            assert not started.exists()
+            assert "backend: failed to start; see " in result.stderr
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        assert sum(call[0] == "sleep" for call in calls) > 1
+        assert not any(call[:2] == ["launchctl", "bootout"] for call in calls)
+
+
+@pytest.mark.parametrize("action", ["start", "restart"])
+@pytest.mark.parametrize("shutdown", ["delayed_unload", "delayed_process", "delayed_parent", "stuck_unload", "stuck_process", "failed"])
+@pytest.mark.parametrize("discovery", ["lock", "service_pid", "listener"])
+def test_backend_waits_for_service_unload_and_process_completion(
+    tmp_path: Path, process_trees: list[ProcessTree], action: str, shutdown: str, discovery: str,
+) -> None:
+    script, lock, pid_file, log, environment = prepare_dev_service(tmp_path, "matching", "idle", "owned")
+    service = start_process_tree(tmp_path, process_trees, "service", hold_root_after_child=shutdown == "delayed_parent")
+    foreign = start_process_tree(tmp_path, process_trees, "foreign-service")
+    rows = [
+        {"pid": service.root.pid, "parent": 0, "command": environment["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web",
+         "finished": str(service.finished)},
+        {"pid": service.child_pid, "parent": service.root.pid, "command": "uvicorn worker",
+         "finished": str(service.child_finished), "port": "8777" if discovery == "listener" else ""},
+    ]
+    table = tmp_path / "service-processes.json"
+    table.write_text(json.dumps(rows))
+    environment.update({
+        "DEV_TEST_TREE": str(table),
+        "DEV_TEST_SERVICE_PID": str(service.root.pid),
+        "DEV_TEST_SHUTDOWN": shutdown,
+        "DEV_TEST_SERVICE_CLEANUP_FD": str(service.cleanup_writer),
+    })
+    if discovery != "service_pid":
+        # Prove lock/listener discovery also works when launchctl omits its PID.
+        environment.pop("DEV_TEST_SERVICE_PID")
+        environment["DEV_TEST_BOOTOUT_ROOT"] = str(service.root.pid)
+    lock_bytes = json.dumps({"pid": service.root.pid, "owner": "retained"}).encode() if discovery == "lock" else lock.read_bytes()
+    lock.write_bytes(lock_bytes)
+    succeeds = shutdown in {"delayed_unload", "delayed_process", "delayed_parent"}
+    with fixture_backend(tmp_path, environment, shutdown_finished=service.finished, slow_start=True) as (started, descriptors):
+        result = subprocess.run(
+            ["/bin/bash", str(script), action, "backend"], cwd=tmp_path, env=environment,
+            capture_output=True, text=True, timeout=40,
+            pass_fds=(*descriptors, service.cleanup_writer),
+        )
+        assert result.returncode == (0 if succeeds else 1), result.stderr
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        assert sum(call[:2] == ["launchctl", "bootout"] for call in calls) == 1
+        assert foreign.root.poll() is None
+        assert lock.read_bytes() == lock_bytes
+        if succeeds:
+            assert service.root.wait(timeout=5) == 0
+            assert json.loads(service.finished.read_text())["root_signaled"]
+            assert select.select([service.lifetime_reader], [], [], 5)[0]
+            assert os.read(service.lifetime_reader, 1) == b""
+            backend = json.loads(started.read_text())
+            assert int(pid_file.read_text()) == backend["pid"]
+            assert backend["pid"] != service.root.pid
+            assert "backend: started" in result.stdout
+            assert "backend: running" not in result.stdout
+            assert "completed shutdown" in result.stdout
+        else:
+            assert not started.exists()
+            assert not any(call[0] == "nohup" for call in calls)
+            assert "refusing to continue" in result.stderr
+            assert "backend: running" not in result.stdout
+            assert "unloaded launch agent" not in result.stdout
+            if shutdown in {"stuck_process", "failed"}:
+                assert service.root.poll() is None
+
+
+@pytest.mark.parametrize("action,component", [("start", "all"), ("restart", "all"), ("stop", "backend")])
+def test_failed_bootout_stops_combined_actions_without_launching_or_force_stopping(
+    tmp_path: Path, action: str, component: str,
+) -> None:
+    script, lock, _, log, environment = prepare_dev_service(tmp_path, "matching", "idle", "owned")
+    environment["DEV_TEST_SHUTDOWN"] = "failed"
+    lock_bytes = lock.read_bytes()
+    result = subprocess.run(
+        ["/bin/bash", str(script), action, component], cwd=tmp_path,
+        env=environment, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 1
+    assert "could not unload login item" in result.stderr
+    assert "unloaded launch agent" not in result.stdout
+    assert lock.read_bytes() == lock_bytes
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert sum(call[:2] == ["launchctl", "bootout"] for call in calls) == 1
+    assert not any(call[0] == "nohup" or call[:2] == ["ps", "-axo"] for call in calls)
+
+
+@pytest.mark.parametrize("action,component", [("start", "all"), ("restart", "all"), ("stop", "backend")])
+def test_mismatched_login_item_preserves_its_process_and_refuses_management(
+    tmp_path: Path, action: str, component: str,
+) -> None:
+    script, lock, _, log, environment = prepare_dev_service(tmp_path, "other_directory", "lock", "owned")
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        environment["DEV_TEST_PID"] = str(child.pid)
+        lock_bytes = json.dumps({"pid": child.pid}).encode()
+        lock.write_bytes(lock_bytes)
+        result = subprocess.run(
+            ["/bin/bash", str(script), action, component], cwd=tmp_path,
+            env=environment, capture_output=True, text=True, timeout=15,
+        )
+        assert result.returncode == 1
+        assert "different working directory; refusing to manage it" in result.stderr
+        assert child.poll() is None
+        assert lock.read_bytes() == lock_bytes
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        assert not any(call[:2] == ["launchctl", "bootout"] or call[0] == "nohup" for call in calls)
+    finally:
+        child.kill()
+        child.wait(timeout=5)

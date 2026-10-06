@@ -527,6 +527,8 @@ The web UI is now split cleanly:
 - FastAPI serves the backend API and review media.
 - A SvelteKit frontend lives under `frontend/`.
 
+### Local web development
+
 For local web work, use `scripts/mediaforce-dev.sh` with
 `start|stop|restart|status|smoke`. It manages the backend and frontend together,
 uses the repo-local `.env`, writes pid files and logs under
@@ -534,6 +536,25 @@ uses the repo-local `.env`, writes pid files and logs under
 and keeps the command lines aligned with the actual configured ports. Pass
 `backend` or `frontend` as a second argument when you intentionally want only
 one side, for example `scripts/mediaforce-dev.sh restart backend`.
+
+Backend actions temporarily unload a login item only when its working directory
+and executable both match the physical checkout. Before continuing, the helper
+waits for the item to unload and its backend processes to finish, checking up to
+20 times at quarter-second intervals. Failed unload or unfinished shutdown stops
+the command with a clear error, without force-killing the service or starting a
+replacement. A login item that uses this binary with a different working
+directory is preserved and reported for correction; regenerate it from the
+intended service checkout with `uv run mediaforce service restart` before
+retrying. Other checkouts' services
+and backend processes stay running. The shared runtime lock is preserved.
+
+Ordinary development backends can still be reused through their PID file,
+runtime lock or listener. A fresh backend gets the same bounded polling interval
+to become discoverable instead of a single startup sleep. These checks establish
+process discovery, not HTTP readiness; use `smoke backend` to check the API.
+An old backend launched through a logical symlink path before physical-path
+matching was introduced may remain unrecognized and is left running. Quit that
+older backend in Activity Monitor before starting a replacement.
 
 The backend also holds a Python-level singleton lock while running, so a second
 `mediaforce-web` process exits instead of binding another port and confusing the
