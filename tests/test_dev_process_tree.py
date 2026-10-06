@@ -23,6 +23,7 @@ class NativeDevTree:
     wrapper: subprocess.Popen[str]
     pids: dict[str, int]
     worker_lifetime: int
+    sibling_lifetime: int
     reparented: Path
 
 
@@ -70,8 +71,9 @@ os.close(int(sys.argv[5]))
 assert backend.stdout is not None
 rows = json.loads(backend.stdout.readline())
 ready_r, ready_w = os.pipe()
-sibling = subprocess.Popen([sys.executable, sys.argv[2], sys.argv[3], sys.argv[4], str(ready_w)],
-                          pass_fds=(int(sys.argv[3]), int(sys.argv[4]), ready_w))
+sibling = subprocess.Popen([sys.executable, sys.argv[2], sys.argv[3], sys.argv[7], str(ready_w)],
+                          pass_fds=(int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[7]), ready_w))
+os.close(int(sys.argv[7]))
 os.close(ready_w)
 assert os.read(ready_r, 1) == b"R"
 os.close(ready_r)
@@ -84,6 +86,7 @@ sibling.wait()
     cleanup_r, cleanup_w = os.pipe()
     lifetime_r, lifetime_w = os.pipe()
     worker_r, worker_w = os.pipe()
+    sibling_r, sibling_w = os.pipe()
     reparented = tmp_path / "worker-reparented.json"
     pass_interpreter, interpreter_name = getattr(request, "param", (False, "python"))
     interpreter = backend.parent / interpreter_name
@@ -91,13 +94,14 @@ sibling.wait()
     wrapper_args = [str(interpreter)] if pass_interpreter else []
     root = subprocess.Popen(
         [str(interpreter), str(wrapper), *wrapper_args, str(backend), str(worker), str(cleanup_r), str(lifetime_w),
-         str(worker_w), str(reparented)],
+         str(worker_w), str(reparented), str(sibling_w)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        pass_fds=(cleanup_r, lifetime_w, worker_w),
+        pass_fds=(cleanup_r, lifetime_w, worker_w, sibling_w),
     )
     os.close(cleanup_r)
     os.close(lifetime_w)
     os.close(worker_w)
+    os.close(sibling_w)
     try:
         assert root.stdout is not None
         assert select.select([root.stdout], [], [], 5)[0], "fixture wrapper failed to become ready"
@@ -106,7 +110,7 @@ sibling.wait()
         ps = Path(env["PATH"]) / "ps"
         ps.write_text("#!" + sys.executable + "\nimport os, sys\nos.execv('/bin/ps', ['ps', *sys.argv[1:]])\n")
         ps.chmod(0o755)
-        yield NativeDevTree(script, pid_file, env, root, rows, worker_r, reparented)
+        yield NativeDevTree(script, pid_file, env, root, rows, worker_r, sibling_r, reparented)
     finally:
         # Pipe EOF releases every fixture process, including workers reparented by a failed stop.
         os.close(cleanup_w)
@@ -115,6 +119,9 @@ sibling.wait()
         assert os.read(lifetime_r, 1) == b""
         assert select.select([worker_r], [], [], 5)[0], "fixture worker still alive"
         assert os.read(worker_r, 1) == b""
+        assert select.select([sibling_r], [], [], 5)[0], "fixture sibling still alive"
+        assert os.read(sibling_r, 1) == b""
+        os.close(sibling_r)
         os.close(lifetime_r)
         os.close(worker_r)
         if root.stdout is not None:
@@ -146,7 +153,7 @@ def test_stop_preserves_real_shared_wrapper_and_sibling(native_dev_tree: NativeD
     assert "wrapper.py" in native_command(rows["wrapper"])
     stop_native_backend(native_dev_tree)
     assert wrapper.poll() is None, "shared wrapper became the kill root"
-    assert native_command(rows["sibling"]), "foreign sibling was stopped"
+    assert not select.select([native_dev_tree.sibling_lifetime], [], [], 0)[0], "foreign sibling exited"
 
 
 def test_stop_uses_its_checkout_when_invoked_from_another_checkout(native_dev_tree: NativeDevTree, tmp_path: Path) -> None:
@@ -156,6 +163,26 @@ def test_stop_uses_its_checkout_when_invoked_from_another_checkout(native_dev_tr
     (package / "__init__.py").write_text('raise RuntimeError("foreign checkout imported")\n')
     stop_native_backend(native_dev_tree, cwd=foreign)
     assert native_dev_tree.wrapper.poll() is None
+
+
+def test_stop_resolves_shared_listener_tree_before_signalling(native_dev_tree: NativeDevTree) -> None:
+    tree = native_dev_tree
+    listeners = Path(tree.env["PATH"]) / "lsof"
+    listeners.write_text("#!" + sys.executable + "\n" + f'''
+from pathlib import Path
+seen = Path({str(tree.pid_file.parent / 'listeners-seen')!r})
+if not seen.exists():
+    seen.touch()
+    print({tree.pids['backend']})
+    print({tree.pids['worker']})
+''')
+    result = subprocess.run(["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert select.select([tree.worker_lifetime], [], [], 5)[0], "owned tree survived"
+    assert os.read(tree.worker_lifetime, 1) == b""
+    assert tree.wrapper.poll() is None
+    assert not select.select([tree.sibling_lifetime], [], [], 0)[0], "foreign sibling exited"
 
 
 def test_stop_cleans_stubborn_worker_after_native_reparenting(native_dev_tree: NativeDevTree) -> None:

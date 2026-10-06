@@ -160,6 +160,17 @@ managed_listener_pids() {
 	done
 }
 
+managed_listener_root_pids() {
+	local port="${1:-}"
+	local matcher="${2:-}"
+	local root_resolver="${3:-}"
+	local pid
+	# Resolve and deduplicate every root before stopping any listener's tree.
+	for pid in $(managed_listener_pids "${port}" "${matcher}"); do
+		"${root_resolver}" "${pid}"
+	done | sort -u
+}
+
 foreign_listener_pids() {
 	local port="${1:-}"
 	local matcher="${2:-}"
@@ -328,7 +339,7 @@ start_frontend() {
 stop_backend() {
 	load_env
 	stop_backend_launch_agent
-	local pid managed_pids
+	local pid managed_roots
 	pid="$(backend_running_pid)"
 	if [[ -n "${pid}" ]]; then
 		pid="$(mediaforce_backend_root_pid "${pid}")"
@@ -338,16 +349,15 @@ stop_backend() {
 		echo "backend: stopped pid ${pid}"
 		return 0
 	fi
-	managed_pids="$(managed_listener_pids "${BACKEND_PORT}" pid_matches_mediaforce_backend)"
-	if [[ -n "${managed_pids}" ]]; then
-		while IFS= read -r listener_pid; do
-			[[ -n "${listener_pid}" ]] || continue
-			listener_pid="$(mediaforce_backend_root_pid "${listener_pid}")"
-			kill_pid_tree "${listener_pid}" backend || return 1
-		done <<<"${managed_pids}"
+	managed_roots="$(managed_listener_root_pids "${BACKEND_PORT}" pid_matches_mediaforce_backend mediaforce_backend_root_pid)"
+	if [[ -n "${managed_roots}" ]]; then
+		while IFS= read -r root_pid; do
+			[[ -n "${root_pid}" ]] || continue
+			kill_pid_tree "${root_pid}" backend || return 1
+		done <<<"${managed_roots}"
 		wait_for_no_managed_listener "${BACKEND_PORT}" pid_matches_mediaforce_backend || true
 		rm -f "${BACKEND_PID_FILE}"
-		echo "backend: stopped listener $(printf '%s' "${managed_pids}" | paste -sd ',' -)"
+		echo "backend: stopped tree $(printf '%s' "${managed_roots}" | paste -sd ',' -)"
 		return 0
 	fi
 	rm -f "${BACKEND_PID_FILE}"
@@ -356,7 +366,7 @@ stop_backend() {
 
 stop_frontend() {
 	load_env
-	local pid managed_pids
+	local pid managed_roots
 	pid="$(frontend_running_pid)"
 	if [[ -n "${pid}" ]]; then
 		pid="$(mediaforce_frontend_root_pid "${pid}")"
@@ -366,16 +376,15 @@ stop_frontend() {
 		echo "frontend: stopped pid ${pid}"
 		return 0
 	fi
-	managed_pids="$(managed_listener_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend)"
-	if [[ -n "${managed_pids}" ]]; then
-		while IFS= read -r listener_pid; do
-			[[ -n "${listener_pid}" ]] || continue
-			listener_pid="$(mediaforce_frontend_root_pid "${listener_pid}")"
-			kill_pid_tree "${listener_pid}" frontend || return 1
-		done <<<"${managed_pids}"
+	managed_roots="$(managed_listener_root_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend mediaforce_frontend_root_pid)"
+	if [[ -n "${managed_roots}" ]]; then
+		while IFS= read -r root_pid; do
+			[[ -n "${root_pid}" ]] || continue
+			kill_pid_tree "${root_pid}" frontend || return 1
+		done <<<"${managed_roots}"
 		wait_for_no_managed_listener "${FRONTEND_PORT}" pid_matches_mediaforce_frontend || true
 		rm -f "${FRONTEND_PID_FILE}"
-		echo "frontend: stopped listener $(printf '%s' "${managed_pids}" | paste -sd ',' -)"
+		echo "frontend: stopped tree $(printf '%s' "${managed_roots}" | paste -sd ',' -)"
 		return 0
 	fi
 	rm -f "${FRONTEND_PID_FILE}"

@@ -539,7 +539,8 @@ one side, for example `scripts/mediaforce-dev.sh restart backend`.
 
 Backend ownership requires this checkout's executable as the command itself
 or as the script launched by Python. A wrapper merely mentioning that path
-does not own the backend or its siblings. Stop captures the owned subtree's
+does not own the backend or its siblings. Listener discovery resolves and
+deduplicates owned roots before stopping their trees. Stop captures the owned subtree's
 native process identities before signalling, so workers remain eligible for
 forced cleanup after their parent exits without targeting a reused PID.
 If identity custody or cleanup cannot be proved, stop reports failure, retains
