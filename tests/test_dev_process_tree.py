@@ -35,13 +35,14 @@ def native_dev_tree(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[
     worker.write_text('''
 import json, os, select, signal, sys
 from pathlib import Path
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
+sibling = len(sys.argv) > 4 and sys.argv[4] == "sibling"
+signal.signal(signal.SIGTERM, signal.SIG_DFL if sibling else signal.SIG_IGN)
 parent = os.getppid()
 recorded = False
 os.write(int(sys.argv[3]), b"R")
 os.close(int(sys.argv[3]))
 while not select.select([int(sys.argv[1])], [], [], .01)[0]:
-    if not recorded and len(sys.argv) > 4 and os.getppid() != parent:
+    if not sibling and not recorded and len(sys.argv) > 4 and os.getppid() != parent:
         Path(sys.argv[4]).write_text(json.dumps({"before": parent, "after": os.getppid()}))
         recorded = True
 os.read(int(sys.argv[1]), 1)
@@ -71,7 +72,7 @@ os.close(int(sys.argv[5]))
 assert backend.stdout is not None
 rows = json.loads(backend.stdout.readline())
 ready_r, ready_w = os.pipe()
-sibling = subprocess.Popen([sys.executable, sys.argv[2], sys.argv[3], sys.argv[7], str(ready_w)],
+sibling = subprocess.Popen([sys.executable, sys.argv[2], sys.argv[3], sys.argv[7], str(ready_w), "sibling"],
                           pass_fds=(int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[7]), ready_w))
 os.close(int(sys.argv[7]))
 os.close(ready_w)
@@ -143,17 +144,23 @@ def stop_native_backend(tree: NativeDevTree, *, cwd: Path | None = None) -> None
     assert os.read(tree.worker_lifetime, 1) == b""
 
 
+def assert_shared_workloads_survive(tree: NativeDevTree) -> None:
+    # The foreign sibling handles TERM normally. Allow an accidental signal to
+    # finish delivery before checking its unique lifetime pipe and the wrapper.
+    assert not select.select([tree.sibling_lifetime], [], [], .1)[0], "foreign sibling exited"
+    assert tree.wrapper.poll() is None, "shared wrapper became the kill root"
+
+
 @pytest.mark.parametrize("native_dev_tree", [
     (False, "python"), (True, "python"), (False, "Python"), (False, "python3.13t"),
 ], indirect=True)
 def test_stop_preserves_real_shared_wrapper_and_sibling(native_dev_tree: NativeDevTree) -> None:
-    env, wrapper, rows = native_dev_tree.env, native_dev_tree.wrapper, native_dev_tree.pids
+    env, rows = native_dev_tree.env, native_dev_tree.pids
     binary = str(Path(env["DEV_TEST_REPO"]) / ".venv/bin/mediaforce-web")
     assert binary in native_command(rows["wrapper"])
     assert "wrapper.py" in native_command(rows["wrapper"])
     stop_native_backend(native_dev_tree)
-    assert wrapper.poll() is None, "shared wrapper became the kill root"
-    assert not select.select([native_dev_tree.sibling_lifetime], [], [], 0)[0], "foreign sibling exited"
+    assert_shared_workloads_survive(native_dev_tree)
 
 
 def test_stop_uses_its_checkout_when_invoked_from_another_checkout(native_dev_tree: NativeDevTree, tmp_path: Path) -> None:
@@ -162,7 +169,7 @@ def test_stop_uses_its_checkout_when_invoked_from_another_checkout(native_dev_tr
     package.mkdir(parents=True)
     (package / "__init__.py").write_text('raise RuntimeError("foreign checkout imported")\n')
     stop_native_backend(native_dev_tree, cwd=foreign)
-    assert native_dev_tree.wrapper.poll() is None
+    assert_shared_workloads_survive(native_dev_tree)
 
 
 def test_stop_resolves_shared_listener_tree_before_signalling(native_dev_tree: NativeDevTree) -> None:
@@ -181,8 +188,7 @@ if not seen.exists():
     assert result.returncode == 0, result.stderr
     assert select.select([tree.worker_lifetime], [], [], 5)[0], "owned tree survived"
     assert os.read(tree.worker_lifetime, 1) == b""
-    assert tree.wrapper.poll() is None
-    assert not select.select([tree.sibling_lifetime], [], [], 0)[0], "foreign sibling exited"
+    assert_shared_workloads_survive(tree)
 
 
 def test_stop_cleans_stubborn_worker_after_native_reparenting(native_dev_tree: NativeDevTree) -> None:
