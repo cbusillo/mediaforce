@@ -529,8 +529,6 @@ The web UI is now split cleanly:
 - FastAPI serves the backend API and review media.
 - A SvelteKit frontend lives under `frontend/`.
 
-### Local web development
-
 For local web work, use `scripts/mediaforce-dev.sh` with
 `start|stop|restart|status|smoke`. It manages the backend and frontend together,
 uses the repo-local `.env`, writes pid files and logs under
@@ -555,8 +553,8 @@ replaced; the shared backend runtime lock is always preserved.
 Backend actions temporarily unload a login item only when its working directory
 and executable both match the physical checkout. Before continuing, the helper
 waits for the item to unload and its backend processes to finish, checking up to
-20 times at quarter-second intervals. The item's reported PID attributes its
-process group; a PID file or runtime lock alone does not make an independent
+20 times at quarter-second intervals. The wait tracks the item's reported PID
+and its backend root; a PID file or runtime lock alone does not make an independent
 development backend part of that group. Failed unload or unfinished shutdown stops
 the command with a clear error, without force-killing the service or starting a
 replacement. Pending shutdown PIDs are kept outside the checkout in a record
