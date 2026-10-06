@@ -113,6 +113,34 @@ mediaforce_backend_root_pid() {
 	printf '%s\n' "${root}"
 }
 
+command_matches_frontend_launcher() {
+	local command="${1:-}"
+	local cwd="${2:-}"
+	local interpreter launcher
+	# Accept a launcher as the script argument, never later in a wrapper's argv.
+	if [[ "${command}" =~ ^((.*/)?([Nn]ode|[Pp]ython([0-9]+(\.[0-9]+)*t?)?))\  ]]; then
+		interpreter="${BASH_REMATCH[1]}"
+		[[ "${interpreter}" != *" "* || -x "${interpreter}" ]] || return 1
+		command="${command#"${interpreter} "}"
+	fi
+	launcher="${command%%" --prefix "*}"
+	launcher="${launcher%%" run dev"*}"
+	if [[ "${launcher}" == */npm || "${launcher}" == */npm-cli.js ]]; then
+		[[ "${launcher}" != *" "* || -x "${launcher}" ]] || return 1
+		command="npm${command#"${launcher}"}"
+	fi
+	case "${command}" in
+	"npm --prefix frontend run dev" | "npm --prefix frontend run dev "*)
+		[[ "${cwd}" == "${ROOT_DIR}" ]] && return 0 ;;
+	"npm --prefix ${ROOT_DIR}/frontend run dev" | "npm --prefix ${ROOT_DIR}/frontend run dev "*)
+		[[ "${cwd}" == "${ROOT_DIR}" || "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
+	"npm run dev" | "npm run dev "* | "vite" | "vite "* | \
+	"${ROOT_DIR}/frontend/node_modules/.bin/vite" | "${ROOT_DIR}/frontend/node_modules/.bin/vite "*)
+		[[ "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
+	esac
+	return 1
+}
+
 pid_matches_mediaforce_frontend() {
 	local pid="${1:-}"
 	local depth=0
@@ -120,16 +148,7 @@ pid_matches_mediaforce_frontend() {
 		local command cwd
 		command="$(pid_command "${pid}")"
 		cwd="$(lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
-		case "${command}" in
-		"npm --prefix frontend run dev" | "npm --prefix frontend run dev "*)
-			[[ "${cwd}" == "${ROOT_DIR}" ]] && return 0 ;;
-		"npm --prefix ${ROOT_DIR}/frontend run dev" | "npm --prefix ${ROOT_DIR}/frontend run dev "* | \
-		*"/npm --prefix ${ROOT_DIR}/frontend run dev" | *"/npm --prefix ${ROOT_DIR}/frontend run dev "*)
-			[[ "${cwd}" == "${ROOT_DIR}" || "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
-		"npm run dev" | "npm run dev "* | "vite" | "vite "* | \
-		*" ${ROOT_DIR}/frontend/node_modules/.bin/vite" | *" ${ROOT_DIR}/frontend/node_modules/.bin/vite "*)
-			[[ "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
-		esac
+		command_matches_frontend_launcher "${command}" "${cwd}" && return 0
 		pid="$(trim "$(pid_parent "${pid}")")"
 		depth=$((depth + 1))
 	done

@@ -942,18 +942,25 @@ def test_frontend_stop_climbs_through_an_intermediate_shell(
 
 
 @pytest.mark.parametrize("running", ["pid_file", "listener"])
+@pytest.mark.parametrize("launcher_kind", ["terminal", "npm_argument", "node_npm_argument", "node_vite_argument"])
 def test_frontend_stop_preserves_the_unrelated_launching_parent(
-    tmp_path: Path, process_trees: list[ProcessTree], running: str,
+    tmp_path: Path, process_trees: list[ProcessTree], running: str, launcher_kind: str,
 ) -> None:
     script, lock, backend_pid_file, _, environment = prepare_dev_service(tmp_path, "absent", "idle", "owned")
     launcher = start_process_tree(tmp_path, process_trees, "terminal")
     owned = start_process_tree(tmp_path, process_trees, "owned-frontend")
     repo = environment["DEV_TEST_REPO"]
+    command = {
+        "terminal": "-zsh",
+        "npm_argument": sys.executable + " /fixture/shared-wrapper.py /fixture/bin/npm --prefix " + repo + "/frontend run dev",
+        "node_npm_argument": "node /fixture/shared-wrapper.js /fixture/bin/npm --prefix " + repo + "/frontend run dev",
+        "node_vite_argument": "node /fixture/shared-wrapper.js " + repo + "/frontend/node_modules/.bin/vite dev",
+    }[launcher_kind]
     # Fake ps supplies this parent relationship; every PID is fixture-owned.
     rows = frontend_tree_rows(owned, repo, "npm run dev")
     rows[0]["parent"] = launcher.root.pid
     rows.extend([
-        {"pid": launcher.root.pid, "parent": 0, "command": "-zsh", "cwd": repo + "/frontend",
+        {"pid": launcher.root.pid, "parent": 0, "command": command, "cwd": repo + "/frontend",
          "finished": str(launcher.finished)},
         {"pid": launcher.child_pid, "parent": launcher.root.pid, "command": "unrelated task", "cwd": repo + "/frontend",
          "finished": str(launcher.child_finished)},
