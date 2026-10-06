@@ -39,7 +39,7 @@ web_binary() {
 
 pid_command() {
 	local pid="${1:-}"
-	ps -p "${pid}" -o command= 2>/dev/null || true
+	ps -ww -p "${pid}" -o command= 2>/dev/null || true
 }
 
 pid_parent() {

@@ -54,6 +54,8 @@ from pathlib import Path
 import sys
 
 name = Path(sys.argv[0]).name
+if name == "ps":
+    sys.argv = [argument for argument in sys.argv if argument != "-ww"]
 with Path(os.environ["DEV_TEST_LOG"]).open("a") as output:
     output.write(json.dumps([name, *sys.argv[1:]]) + "\\n")
 if name == "shasum":

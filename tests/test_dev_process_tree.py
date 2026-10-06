@@ -108,6 +108,7 @@ sibling.wait()
         assert select.select([root.stdout], [], [], 5)[0], "fixture wrapper failed to become ready"
         rows = json.loads(root.stdout.readline())
         env["DEV_TEST_PID"] = str(rows["backend"])
+        env["COLUMNS"] = "80"
         ps = Path(env["PATH"]) / "ps"
         ps.write_text("#!" + sys.executable + "\nimport os, sys\nos.execv('/bin/ps', ['ps', *sys.argv[1:]])\n")
         ps.chmod(0o755)
@@ -132,7 +133,10 @@ sibling.wait()
 
 
 def native_command(pid: int) -> str:
-    return subprocess.check_output(["/bin/ps", "-p", str(pid), "-o", "command="], text=True).strip()
+    return subprocess.check_output(
+        ["/bin/ps", "-ww", "-p", str(pid), "-o", "command="],
+        env={**os.environ, "COLUMNS": "80"}, text=True,
+    ).strip()
 
 
 def stop_native_backend(tree: NativeDevTree, *, cwd: Path | None = None) -> None:
