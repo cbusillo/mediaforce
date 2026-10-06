@@ -18,15 +18,22 @@ class FrontendTree:
     script: Path
     pid_file: Path
     env: dict[str, str]
+    interpreter: Path
     wrapper: subprocess.Popen[str]
     rows: dict[str, int]
     owned_lifetime: int
     sibling_lifetime: int
 
 
-@pytest.fixture
-def frontend_tree(tmp_path: Path) -> Iterator[FrontendTree]:
-    script, _, backend_pid_file, _, env = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+@pytest.fixture(params=[
+    ("workspace", "node"), ("Python Projects", "node"), ("node work", "node"),
+    ("Python Projects", "node runtime/node"),
+])
+def frontend_tree(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[FrontendTree]:
+    checkout_name, interpreter_path = request.param
+    checkout_parent = tmp_path / checkout_name
+    checkout_parent.mkdir()
+    script, _, backend_pid_file, _, env = prepare_dev_service(checkout_parent, "absent", "idle", "owned")
     repo = Path(env["DEV_TEST_REPO"])
     frontend = repo / "frontend"
     vite = frontend / "node_modules/.bin/vite"
@@ -72,7 +79,8 @@ vite.wait()
 sibling.wait()
 ''')
     # Pin the node-shaped argv without requiring a host Node installation.
-    node = tmp_path / "node"
+    node = tmp_path / interpreter_path
+    node.parent.mkdir(parents=True, exist_ok=True)
     node.symlink_to(sys.executable)
     cleanup_r, cleanup_w = os.pipe()
     owned_r, owned_w = os.pipe()
@@ -98,7 +106,7 @@ sibling.wait()
         table = tmp_path / "cwd-table.json"
         table.write_text(json.dumps([{"pid": pid, "cwd": str(frontend)} for pid in rows.values()]))
         env.update(DEV_TEST_TREE=str(table), COLUMNS="80")
-        yield FrontendTree(script, backend_pid_file.with_name("mediaforce-frontend.pid"), env,
+        yield FrontendTree(script, backend_pid_file.with_name("mediaforce-frontend.pid"), env, node,
                            root, rows, owned_r, sibling_r)
     finally:
         os.close(cleanup_w)
@@ -120,7 +128,9 @@ def test_frontend_stop_preserves_native_shared_wrapper_and_sibling(frontend_tree
     command = native_command(tree.rows["wrapper"])
     assert "shared-wrapper.py" in command
     assert str(repo / "frontend/node_modules/.bin/vite") in command
-    assert str(repo / "frontend/node_modules/.bin/vite") in native_command(tree.rows["vite"])
+    vite_command = native_command(tree.rows["vite"])
+    assert vite_command.startswith(str(tree.interpreter) + " ")
+    assert str(repo / "frontend/node_modules/.bin/vite") in vite_command
     if discovery == "pid_file":
         tree.pid_file.write_text(str(tree.rows["worker"]))
     else:

@@ -116,13 +116,20 @@ mediaforce_backend_root_pid() {
 command_matches_frontend_launcher() {
 	local command="${1:-}"
 	local cwd="${2:-}"
-	local interpreter launcher
+	local interpreter="" launcher part
+	local remaining="${command}"
 	# Accept a launcher as the script argument, never later in a wrapper's argv.
-	if [[ "${command}" =~ ^((.*/)?([Nn]ode|[Pp]ython([0-9]+(\.[0-9]+)*t?)?))\  ]]; then
-		interpreter="${BASH_REMATCH[1]}"
-		[[ "${interpreter}" != *" "* || -x "${interpreter}" ]] || return 1
-		command="${command#"${interpreter} "}"
-	fi
+	while [[ "${remaining}" == *" "* ]]; do
+		part="${remaining%% *}"
+		interpreter="${interpreter:+${interpreter} }${part}"
+		remaining="${remaining#"${part} "}"
+		if [[ "${interpreter##*/}" =~ ^([Nn]ode|[Pp]ython([0-9]+(\.[0-9]+)*t?)?)$ &&
+			( "${interpreter}" != */* || ( -f "${interpreter}" && -x "${interpreter}" ) ) ]]; then
+			command="${remaining}"
+			break
+		fi
+		[[ "${interpreter}" == /* ]] || break
+	done
 	launcher="${command%%" --prefix "*}"
 	launcher="${launcher%%" run dev"*}"
 	if [[ "${launcher}" == */npm || "${launcher}" == */npm-cli.js ]]; then
