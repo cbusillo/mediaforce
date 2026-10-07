@@ -37,3 +37,10 @@ Inspection preparation uses Python tests with pinned UV, npm and Node stubs for
 orchestration, profile byte preservation and dependency-cache invalidation.
 The existing Vitest lane exercises the actual JavaScript module normalization
 and manifest digest, including its CLI, using temporary inputs.
+
+The development lifecycle fixture in `tests/test_dev_service.py` observes root
+lifetime separately from worker lifetime. Its root handler writes a SIGTERM
+receipt while the worker may still be running; preservation assertions reject
+that receipt. Shutdown cases that intentionally leave a signalled root alive
+explicitly require it. The final completion record derives its signal evidence
+from the same receipt.
