@@ -2,7 +2,6 @@ import fcntl
 import json
 import os
 import select
-import socket
 import signal
 import shutil
 import socket

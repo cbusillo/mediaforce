@@ -574,17 +574,17 @@ processes exited. Repeating stop cannot establish the missing custody. For Linux
 web development, keep the backend in its foreground terminal instead:
 
 ```bash
-uv run mediaforce-web --host 127.0.0.1 --port 8777 --no-reload
+uv run mediaforce-web --no-reload
 ```
 
 Run `npm --prefix frontend run dev` in a second terminal when editing the UI.
 End those foreground commands from their terminals; do not use development
-stop/restart to claim Linux descendant cleanup. If an earlier launcher session
-left unproven cleanup state, Stop preserves it until a verified system restart;
-retries cannot recover missing custody. Stop All attempts both components and
+stop/restart to claim Linux descendant cleanup. A launcher Stop against the
+foreground backend also leaves unproven cleanup state. Stop preserves that state
+until a verified system restart; retries cannot recover missing custody. Stop All attempts both components and
 reports failure; `stop backend` also attempts the backend independently.
-Start foreground development only after
-the earlier processes are resolved. This limitation does not apply to
+Start foreground development only after the earlier processes are resolved.
+This limitation does not apply to
 Linux commands launched inside Mediaforce's scoped subprocess supervisor, which
 establishes child custody before launch. Darwin retains its strict fork guard.
 
