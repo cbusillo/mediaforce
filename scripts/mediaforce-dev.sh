@@ -114,14 +114,23 @@ mediaforce_backend_root_pid() {
 }
 
 pid_is_frontend_launcher() {
-	local pid="${1:-}" cwd
+	local pid="${1:-}" cwd status=0
 	cwd="$(lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
 	[[ -n "${cwd}" ]] || return 1
 	(
 		cd "${ROOT_DIR}"
 		uv run --no-sync --project "${ROOT_DIR}" python "${ROOT_DIR}/mediaforce/ops/dev_frontend.py" \
 			"${pid}" "${ROOT_DIR}" "${cwd}"
-	)
+	) || status=$?
+	# dev_frontend.py reserves 3 for proven non-ownership; Python startup can exit 1.
+	case "${status}" in
+	0) return 0 ;;
+	3) return 1 ;;
+	*)
+		echo "frontend: native argument ownership unknown for pid ${pid}; reader exited ${status}" >&2
+		return 2
+		;;
+	esac
 }
 
 pid_matches_mediaforce_frontend() {
