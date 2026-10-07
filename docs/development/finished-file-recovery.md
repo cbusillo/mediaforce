@@ -38,3 +38,8 @@ hold. It cannot waive a final-size failure, another failed check, or missing
 settings history. The integrity response includes per-file `remake.reason` and
 `remake.blocked_reason` so the UI explains unavailable actions; the action
 rechecks these conditions rather than trusting the displayed response.
+
+Within one integrity-page response, remake checks reuse each run manifest's parsed
+record, including an unreadable result. The next page request reads it again.
+The per-file decision reads the manifest and current guards afresh under its
+write lock; displayed availability is never authorization to remove a copy.
