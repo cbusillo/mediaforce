@@ -14,10 +14,13 @@ def main() -> int:
             raise ValueError("invalid development process stop arguments")
 
         def owns_root() -> bool:
-            return subprocess.run(
+            result = subprocess.run(
                 ["/bin/bash", script, "check-owner", component, str(pid)],
                 check=False, stdout=subprocess.DEVNULL,
-            ).returncode == 0
+            )
+            if result.returncode not in {0, 1}:
+                raise RuntimeError("development process ownership unknown; preserving it")
+            return result.returncode == 0
 
         stop_existing_process_tree(pid, owns_root)
         return 0

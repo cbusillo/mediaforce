@@ -148,5 +148,27 @@ def test_linux_reader_rejects_unterminated_data(monkeypatch: pytest.MonkeyPatch)
 def test_argument_read_outcome_is_explicit(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], error: Exception, status: int) -> None:
     monkeypatch.setattr(sys, "argv", ["dev_frontend.py", "4242", "/checkout", "/checkout/frontend"])
     monkeypatch.setattr(dev_frontend, "process_arguments", Mock(side_effect=error))
+    monkeypatch.setattr(dev_frontend.os, "kill", Mock())
     assert dev_frontend.main() == status
     assert ("ownership unknown" in capsys.readouterr().err) == (status == 2)
+
+
+@pytest.mark.parametrize("exited", [False, True])
+def test_einval_requires_independent_exit_evidence(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], exited: bool) -> None:
+    monkeypatch.setattr(sys, "argv", ["dev_frontend.py", "4242", "/checkout", "/checkout/frontend"])
+    monkeypatch.setattr(dev_frontend, "process_arguments", Mock(side_effect=OSError(errno.EINVAL, "native read failed")))
+    alive = Mock(side_effect=ProcessLookupError() if exited else None)
+    monkeypatch.setattr(dev_frontend.os, "kill", alive)
+    assert dev_frontend.main() == (1 if exited else 2)
+    alive.assert_called_once_with(4242, 0)
+    assert ("ownership unknown" in capsys.readouterr().err) == (not exited)
+
+
+def test_pid_one_is_invalid_without_native_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["dev_frontend.py", "1", "/checkout", "/checkout/frontend"])
+    arguments, alive = Mock(), Mock()
+    monkeypatch.setattr(dev_frontend, "process_arguments", arguments)
+    monkeypatch.setattr(dev_frontend.os, "kill", alive)
+    assert dev_frontend.main() == 2
+    arguments.assert_not_called()
+    alive.assert_not_called()

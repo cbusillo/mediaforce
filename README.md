@@ -545,9 +545,10 @@ native process identities before signalling, so workers remain eligible for
 forced cleanup after their parent exits without targeting a reused PID.
 If identity custody or cleanup cannot be proved, stop reports failure, retains
 PID bookkeeping, and restart does not launch another process. Resolve the
-reported error and retry the same stop command. Development stop requires the
-checkout's prepared Python environment (`uv sync --locked`) and always loads
-that checkout's cleanup code, even when invoked from another directory. Native
+reported error and retry the same stop command. Development discovery and cleanup
+require `uv` and the checkout's prepared Python environment (`uv sync --locked`):
+frontend start and status also need them when a PID record or listener exists.
+The helper always loads this checkout's code, even when invoked from another directory. Native
 custody failures remain visible rather than falling back to bare PID signals.
 
 Development PID files live in a directory under that state path keyed by the
@@ -564,8 +565,18 @@ on macOS and Linux keep interpreter and script paths separate, including spaces
 and an interpreter alias removed after startup. Direct Node launches support
 `--inspect`, `--inspect-brk`, and `--max-old-space-size` before the script.
 Other Node options are not inferred; use the managed npm path with `NODE_OPTIONS`
-for runtime options. If native arguments cannot be read, ownership is unknown:
-stop preserves the process and its PID record and reports the error.
+for runtime options. If native arguments or the working directory cannot be read
+for a live candidate, discovery reports ownership unknown and retains processes
+and PID records; start and restart refuse a replacement. Restore the reported
+reader/environment prerequisite and retry. Status reports the uncertainty, including
+with `all`, rather than calling it stopped or foreign. A proven frontend may still
+be stopped below an unreadable parent: the helper reports that boundary, preserves
+the ancestors and their siblings, and removes its PID record after proven cleanup.
+An unavailable ownership recheck before signalling instead reports unknown and
+retains the record. A failed native argument read counts as exit only with independent
+process-absence evidence; macOS EINVAL alone remains unknown. The readers have
+macOS native and controlled Linux procfs coverage; the complete shell workflow's
+Linux/login-item behavior is not qualified by those reader tests.
 Managed npm starts in `frontend/` so its
 rewritten process title remains attributable. For a legacy frontend launched
 from the repository root, stop targets its owned Vite child; npm exits after
