@@ -358,11 +358,12 @@ def test_interrupted_disposal_does_not_leave_a_pending_marker(
         with pytest.raises(KeyboardInterrupt):
             dev_processes.remove_state(state)
     assert not state.exists()
-    assert dev_processes.publish_state(state), "interrupted disposal blocked the next session"
-    dev_processes.remove_state(state)
     remnants = list(tmp_path.glob(".backend.cleanup-removing-*"))
     assert len(remnants) == 1
     assert (remnants[0] / "boot").is_file()
+    assert dev_processes.publish_state(state), "interrupted disposal blocked the next session"
+    dev_processes.remove_state(state)
+    assert not list(tmp_path.glob(".backend.cleanup-removing-*"))
 
 
 def test_invalid_boot_receipt_preserves_pending_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
