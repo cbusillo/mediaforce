@@ -7,6 +7,8 @@ import re
 import struct
 import sys
 
+NOT_FRONTEND = 3
+
 
 def decode_darwin_arguments(data: bytes) -> list[str]:
     if len(data) < 4:
@@ -117,9 +119,9 @@ def main() -> int:
         checkout, cwd = sys.argv[2:4]
         if len(sys.argv) != 4 or pid <= 1:
             raise ValueError("invalid frontend ownership arguments")
-        return 0 if matches_frontend(process_arguments(pid), checkout, cwd) else 1
+        return 0 if matches_frontend(process_arguments(pid), checkout, cwd) else NOT_FRONTEND
     except (FileNotFoundError, ProcessLookupError):
-        return 1
+        return NOT_FRONTEND
     except (OSError, RuntimeError, ValueError, IndexError):
         print("frontend: native argument ownership unknown; preserving process and PID bookkeeping", file=sys.stderr)
         return 2

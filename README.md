@@ -580,6 +580,9 @@ and an interpreter alias removed after startup. Direct Node launches support
 Other Node options are not inferred; use the managed npm path with `NODE_OPTIONS`
 for runtime options. If native arguments cannot be read, ownership is unknown:
 stop preserves the process and its PID record and reports the error.
+Python startup or reader failures also leave ownership unknown; repair the
+reported environment error and retry the same command with `uv sync --locked`
+completed for this checkout. A reader crash does not prove a process is foreign.
 Managed npm starts in `frontend/` so its
 rewritten process title remains attributable. For a legacy frontend launched
 from the repository root, stop targets its owned Vite child; npm exits after
