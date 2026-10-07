@@ -405,6 +405,8 @@ def _recorded_final_size_miss_left_out(
         connection: DBClient,
         items: list[ActionPayload],
         current_contract: ActionPayload | None,
+        *,
+        recovered_legacy_job_ids: Collection[str] = (),
 ) -> list[LeftOutFile]:
     """Files whose latest recorded final-size miss was under an approval that has not been replaced.
 
@@ -422,6 +424,8 @@ def _recorded_final_size_miss_left_out(
     current = _valid_production_approval_contract(current_contract)
     left_out: list[LeftOutFile] = []
     for item_id, details in sorted(latest.items()):
+        if current is not None and str(details.get("job_id") or "") in recovered_legacy_job_ids:
+            continue
         if current is not None and details.get("resolved"):
             if details.get("operator_intent_hash") == current["operator_intent_hash"]:
                 continue
@@ -443,6 +447,39 @@ def _recorded_final_size_miss_left_out(
             _FINAL_SIZE_MISSED_REASON if details.get("named") else _FINAL_SIZE_POSSIBLY_MISSED_REASON,
         ))
     return left_out
+
+
+def staged_requeue_size_blocker(
+        connection: DBClient,
+        prefix: str,
+        library_item_id: int,
+        current_contract: ActionPayload | None,
+) -> ActionPayload | None:
+    """Preview the queue's run and saved-miss guards before discarding a finished copy."""
+    recovered_legacy_job_ids: set[str] = set()
+    for index, job in enumerate(list_terminal_encode_jobs_for_prefix(connection, prefix)):
+        analysis = object_dict(object_dict(job.get("progress")).get("failure_analysis"))
+        if str(analysis.get("kind") or "") != "final_size_target_miss":
+            continue
+        blocker = _final_size_requeue_contract_blocker(job, current_contract)
+        misses = _final_size_miss_item_ids_by_index(job)
+        if misses is None:
+            if index == 0 and blocker is not None:
+                return blocker
+            continue
+        if library_item_id not in misses[0].values():
+            continue
+        if blocker is not None:
+            return blocker
+        if _terminal_production_approval_contract(job) is None:
+            recovered_legacy_job_ids.add(str(job.get("job_id") or ""))
+    left_out = _recorded_final_size_miss_left_out(
+        connection, [{"library_item_id": library_item_id}], current_contract,
+        recovered_legacy_job_ids=recovered_legacy_job_ids,
+    )
+    if left_out:
+        return {"ok": False, "code": left_out[0].code, "message": left_out[0].reason}
+    return None
 
 
 def _normalized_number(value: Any) -> float | None:

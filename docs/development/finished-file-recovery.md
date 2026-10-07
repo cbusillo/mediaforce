@@ -15,12 +15,17 @@ without erasing the miss. The resolution survives removal of the terminal job
 record; a later return to the old missed goal still stays blocked. Missing settings history requires a current approval
 and a new encode rather than accepting the old output without that history.
 
-The action rechecks eligibility before removing the staged output. An active
+The action rechecks eligibility and the queue’s run-level and saved per-file
+size-miss guards before removing the staged output. These checks are read-only;
+verified legacy recoveries are recognized without rewriting their history. An active
 run blocks removal. The original must be accessible, and the staged path must
 not point at it; restore source access before retrying when it is unavailable. It then removes that file's staged copy and partial output,
 returns that library item to planned, and queues only that item at its run's
 scope and mode, including older seasons. If its terminal job was cleared,
-the saved run scope supplies the prefix. The original and other staged outputs
+the saved run scope supplies the prefix. If the manifest itself is unavailable,
+the existing database run selection preserves that scope and mode. If neither
+record can be read, restore the saved run settings from a run backup before
+retrying; the staged copy stays in place. The original and other staged outputs
 stay in place. If queuing fails after removal, the response says so and the item
 remains planned for the supported queue action.
 

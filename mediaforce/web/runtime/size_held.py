@@ -11,14 +11,15 @@ from sqlalchemy import delete, select, update
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
+from mediaforce.core.db_tables import encode_jobs, item_events, library_items, run_manifests, staged_artifacts
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding.encode_queue import load_active_encode_jobs_for_prefix
 from mediaforce.encoding.staging import FINAL_SIZE_GOAL_CHECK, partial_output_path
 from mediaforce.library.media_scopes import path_matches_scope
 from mediaforce.library.staged_integrity import staged_validation_outcome
 from mediaforce.web.runtime.encode_runtime import remove_stale_staging_path
-from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, _staged_policy_states
+from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, _staged_policy_states, \
+    staged_requeue_size_blocker
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.production_holds import MODE_FOLDER
 
@@ -76,7 +77,7 @@ def decide_size_held_file(
             )
             _record_decision(connection, int(library_item_id), "keep", size_prediction, now)
         else:
-            run_prefix, queue_mode = _run_context(connection, row, prefix)
+            run_prefix, queue_mode, _context_available = _run_context(connection, row, prefix)
             if not _remove_finished_output(config, row):
                 return {
                     "ok": False,
@@ -142,10 +143,12 @@ def staged_remake_details(
     ).get(int(row["library_item_id"])) == "season_policy_provenance_missing"
     if not (held or final_size or missing_policy):
         return None
-    run_prefix, _mode = _run_context(connection, row, prefix)
+    run_prefix, _mode, context_available = _run_context(connection, row, prefix)
     blocked_reasons: list[str] = []
-    if not held:
-        approval = current_approval(run_prefix)
+    approval = current_approval(run_prefix) if context_available else None
+    if not held and not context_available:
+        blocked_reasons.append("Restore the saved run settings before making this file again. Nothing was removed.")
+    elif not held:
         if approval is None:
             blocked_reasons.append("Approve a fresh sample before making this file again.")
         elif final_size:
@@ -161,6 +164,11 @@ def staged_remake_details(
                 blocked_reasons.append(
                     "Approve a fresh sample with a changed size or quality goal before making this file again."
                 )
+    queue_blocker = staged_requeue_size_blocker(connection, run_prefix, int(row["library_item_id"]), approval)
+    if queue_blocker is not None:
+        blocked_reasons.append(
+            "This file’s saved size checks still block a new encode. Review its run settings before making it again."
+        )
     original = Path(str(row["original_source_path"] or ""))
     staging = Path(str(row["staging_path"] or ""))
     if not original.is_file():
@@ -206,18 +214,27 @@ def _stored_validation(row: Any) -> dict[str, Any]:
         return {}
 
 
-def _run_context(connection: DBClient, row: Any, prefix: str) -> tuple[str, str]:
-    """Recover the run scope and mode even after its terminal job has been cleared."""
+def _run_context(connection: DBClient, row: Any, prefix: str) -> tuple[str, str, bool]:
+    """Use the existing saved selection when the manifest or terminal job is no longer available."""
     try:
         manifest = object_dict(json.loads(Path(str(row["manifest_path"] or "")).read_text()))
+        selection = object_dict(manifest.get("selection"))
+        available = True
     except (OSError, json.JSONDecodeError):
-        manifest = {}
-    selection = object_dict(manifest.get("selection"))
-    recorded_prefix = object_dict(selection.get("media_scope")).get("prefix")
+        stored = connection.execute(select(run_manifests.c.selection_json).where(
+            run_manifests.c.run_id == str(row["manifest_run_id"] or "")
+        )).scalar_one_or_none()
+        try:
+            selection = object_dict(json.loads(str(stored))) if stored is not None else {}
+            available = stored is not None and bool(selection)
+        except json.JSONDecodeError:
+            selection, available = {}, False
+    lifecycle_override = object_dict(selection.get("lifecycle_override"))
+    recorded_prefix = object_dict(selection.get("media_scope")).get("prefix") or lifecycle_override.get("series_prefix")
     run_prefix = str(connection.execute(
         select(encode_jobs.c.prefix).where(encode_jobs.c.job_id == str(row["encode_job_id"] or ""))
     ).scalar_one_or_none() or recorded_prefix or prefix)
-    return run_prefix, str(selection.get("queue_mode") or MODE_FOLDER)
+    return run_prefix, str(selection.get("queue_mode") or lifecycle_override.get("mode") or MODE_FOLDER), available
 
 
 def _remove_finished_output(config: MediaforceConfig, row: Any) -> bool:
