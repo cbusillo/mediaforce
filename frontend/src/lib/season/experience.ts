@@ -166,11 +166,13 @@ export function stagedIntegrityDispositionCopy(disposition: StagedIntegrityDispo
 	);
 }
 
-/** Files held for coming out far smaller than their sample predicted; each asks the owner to keep it or make it again. */
+/** Unpublished files with a supported per-file keep or remake action. */
 export function sizeHeldRecords(integrity: SeasonPromotionIntegrity): StagedIntegrityRecord[] {
 	return integrity.records.filter(
 		(record) =>
-			record.disposition === 'size_held' && record.item_id !== null && record.size_prediction
+			record.item_id !== null &&
+			(Boolean(record.remake) ||
+				(record.disposition === 'size_held' && Boolean(record.size_prediction)))
 	);
 }
 

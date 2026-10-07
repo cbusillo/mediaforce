@@ -81,3 +81,5 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   reserve contract, defaults, and fail-closed capacity behavior
 - `docs/development/macos-login-item.md`: install, operate, and verify the
   local `mediaforce-web` LaunchAgent
+- [Make a finished file again](development/finished-file-recovery.md): per-file
+  size and settings-history recovery.
