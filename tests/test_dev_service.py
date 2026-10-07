@@ -7,9 +7,11 @@ import select
 import signal
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from threading import Thread
 
 import pytest
 
@@ -380,6 +382,7 @@ class ProcessTree:
     child_finished: Path
     cleanup_writer: int
     lifetime_reader: int
+    reaper: Thread
     worker_pid: int | None = None
     worker_finished: Path | None = None
 
@@ -409,6 +412,8 @@ def process_trees() -> Iterator[list[ProcessTree]]:
                 except BrokenPipeError:
                     pass
                 tree.root.wait(timeout=5)
+                tree.reaper.join(timeout=5)
+                assert not tree.reaper.is_alive(), "fixture reaper still running"
                 assert select.select([tree.lifetime_reader], [], [], 5)[0], "fixture tree still alive"
                 assert os.read(tree.lifetime_reader, 1) == b""
             finally:
@@ -497,14 +502,29 @@ Path(sys.argv[1]).write_text(json.dumps({"child_returncode": result, "root_signa
     os.close(cleanup_reader)
     os.close(lifetime_writer)
     assert root.stdout is not None
-    tree = ProcessTree(root, 0, finished, child_finished, cleanup_writer, lifetime_reader)
+    reaper = Thread(target=root.wait, name=f"{name}-fixture-reaper")
+    tree = ProcessTree(root, 0, finished, child_finished, cleanup_writer, lifetime_reader, reaper)
     trees.append(tree)
+    reaper.start()
     assert select.select([root.stdout], [], [], 5)[0], "fixture root not ready"
     tree.child_pid = int(root.stdout.readline())
     if wrapper:
         tree.worker_pid = int(Path(str(child_finished) + "-worker-pid").read_text())
         tree.worker_finished = Path(str(child_finished) + "-worker-finished")
     return tree
+
+
+def test_fixture_reaps_a_completed_tree_while_the_command_is_still_running(
+    tmp_path: Path, process_trees: list[ProcessTree],
+) -> None:
+    tree = start_process_tree(tmp_path, process_trees, "completed-service")
+    os.write(tree.cleanup_writer, b"done")
+    assert select.select([tree.lifetime_reader], [], [], 5)[0], "fixture descendants did not exit"
+    assert os.read(tree.lifetime_reader, 1) == b""
+    deadline = time.monotonic() + 5
+    while tree.root.returncode is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert tree.root.returncode == 0, "completed fixture root was not reaped during the command"
 
 
 @pytest.mark.parametrize("running", ["pid_file", "lock", "listener"])

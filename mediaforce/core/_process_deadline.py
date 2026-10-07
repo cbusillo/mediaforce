@@ -1007,9 +1007,9 @@ def _terminate_tree(
     ):
         succeeded = tree.signal_all(termination_signal) and succeeded
         phase_deadline = time.monotonic() + grace_seconds
-        while time.monotonic() < phase_deadline:
+        while True:
             reap()
-            tree.refresh(_TREE_POLL_SECONDS)
+            tree.refresh(_TREE_POLL_SECONDS if time.monotonic() < phase_deadline else 0.0)
             if not tree.live():
                 reap()
                 if succeeded and not tree.compromised:
@@ -1021,6 +1021,8 @@ def _terminate_tree(
                     False,
                     reason or "managed process termination could not be proven",
                 )
+            if time.monotonic() >= phase_deadline:
+                break
             succeeded = tree.signal_all(termination_signal) and succeeded
     reason = "managed process tree remained live after SIGKILL grace"
     if tree.signal_failure_reason:

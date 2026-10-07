@@ -1540,6 +1540,34 @@ class ProcessControlTests(TestCase):
         self.assertFalse(result.succeeded)
         self.assertIn("managed process 12345 is unsignalable", str(result.reason))
 
+    def test_terminate_tree_observes_exit_after_a_paused_kill_deadline(self) -> None:
+        for outcome in ("exited", "signal_failed", "compromised", "survived"):
+            with self.subTest(outcome=outcome):
+                tree = Mock(
+                    signal_failure_reason="native signal refused" if outcome == "signal_failed" else None,
+                    compromised=outcome == "compromised",
+                )
+                tree.signal_all.return_value = outcome != "signal_failed"
+                tree.live.side_effect = [True, outcome == "survived"]
+                clock = 0.0
+
+                def after_controller_pause() -> float:
+                    nonlocal clock
+                    clock += 2 * (process_deadline_module._TERM_GRACE_SECONDS + process_deadline_module._KILL_GRACE_SECONDS)
+                    return clock
+
+                with patch.object(process_deadline_module.time, "monotonic", side_effect=after_controller_pause):
+                    result = process_deadline_module._terminate_tree(tree, Mock())
+
+                self.assertEqual(result.succeeded, outcome == "exited")
+                self.assertEqual(tree.signal_all.call_args_list, [call(signal.SIGTERM), call(signal.SIGKILL)])
+                if outcome == "signal_failed":
+                    self.assertIn("native signal refused", str(result.reason))
+                elif outcome == "compromised":
+                    self.assertIn("ownership was compromised", str(result.reason))
+                elif outcome == "survived":
+                    self.assertIn("remained live", str(result.reason))
+
     @skipUnless(sys.platform == "darwin", "requires Darwin process identities")
     def test_darwin_identity_pin_fails_closed_for_live_unsignalable_process(self) -> None:
         tree = process_deadline_module._DarwinProcessTree()
