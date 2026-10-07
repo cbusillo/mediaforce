@@ -230,6 +230,17 @@ wait_for_no_managed_listener() {
 	return 1
 }
 
+confirm_frontend_listener_clearance() {
+	local status=0
+	wait_for_no_managed_listener "${FRONTEND_PORT}" pid_matches_mediaforce_frontend || status=$?
+	case "${status}" in
+	0) return 0 ;;
+	1) echo "frontend: cleanup finished but a managed listener remains on port ${FRONTEND_PORT}; PID bookkeeping retained; retry stop" >&2 ;;
+	*) echo "frontend: cleanup finished but listener ownership unknown; PID bookkeeping retained; resolve the reader error and retry stop" >&2 ;;
+	esac
+	return 1
+}
+
 backend_running_pid() {
 	local pid
 	pid="$(pid_from_file "${BACKEND_PID_FILE}")"
@@ -432,7 +443,11 @@ start_frontend() {
 		echo $! >"${FRONTEND_PID_FILE}"
 	)
 	sleep 1
-	running_pid="$(frontend_running_pid)" || { frontend_discovery_unknown; return 1; }
+	running_pid="$(frontend_running_pid)" || {
+		echo "frontend: launched pid $(pid_from_file "${FRONTEND_PID_FILE}") but could not confirm ownership" >&2
+		frontend_discovery_unknown
+		return 1
+	}
 	if [[ -z "${running_pid}" ]]; then
 		echo "frontend: failed to start; see ${FRONTEND_LOG_FILE}" >&2
 		return 1
@@ -475,7 +490,7 @@ stop_frontend() {
 	if [[ -n "${pid}" ]]; then
 		pid="$(mediaforce_frontend_root_pid "${pid}")"
 		kill_pid_tree "${pid}" frontend || return 1
-		wait_for_no_managed_listener "${FRONTEND_PORT}" pid_matches_mediaforce_frontend || { echo "frontend: cleanup finished but listener clearance unproven; PID bookkeeping retained" >&2; return 1; }
+		confirm_frontend_listener_clearance || return 1
 		rm -f "${FRONTEND_PID_FILE}"
 		echo "frontend: stopped pid ${pid}"
 		return 0
@@ -486,7 +501,7 @@ stop_frontend() {
 			[[ -n "${root_pid}" ]] || continue
 			kill_pid_tree "${root_pid}" frontend || return 1
 		done <<<"${managed_roots}"
-		wait_for_no_managed_listener "${FRONTEND_PORT}" pid_matches_mediaforce_frontend || { echo "frontend: cleanup finished but listener clearance unproven; PID bookkeeping retained" >&2; return 1; }
+		confirm_frontend_listener_clearance || return 1
 		rm -f "${FRONTEND_PID_FILE}"
 		echo "frontend: stopped tree $(printf '%s' "${managed_roots}" | paste -sd ',' -)"
 		return 0

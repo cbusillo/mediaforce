@@ -1057,7 +1057,7 @@ cleanup = int(os.environ["DEV_TEST_START_CLEANUP_FD"])
 required = os.environ["DEV_TEST_REQUIRED_SHUTDOWN"]
 if required:
     assert Path(required).exists(), "new backend launched before service shutdown completed"
-Path(os.environ["DEV_TEST_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "args": sys.argv}))
+Path(os.environ["DEV_TEST_STARTED"]).write_text(json.dumps({"pid": os.getpid(), "args": sys.argv, "cwd": os.getcwd()}))
 if os.environ["DEV_TEST_SLOW_START"] == "True":
     ready = Path(os.environ["DEV_TEST_LOG"]).with_suffix(".startup-ready")
     while not ready.exists():
@@ -1517,7 +1517,7 @@ def test_listener_unknown_after_cleanup_reports_retained_record(
                             capture_output=True, text=True, timeout=20)
     assert result.returncode == 1
     assert "ownership unknown" in result.stderr
-    assert "cleanup finished but listener clearance unproven; PID bookkeeping retained" in result.stderr
+    assert "cleanup finished but listener ownership unknown; PID bookkeeping retained" in result.stderr
     assert "frontend: stopped" not in result.stdout
     assert "frontend: started" not in result.stdout
     assert_tree_stopped(owned)
@@ -1530,3 +1530,71 @@ def test_listener_unknown_after_cleanup_reports_retained_record(
     assert retry.returncode == 0, retry.stderr
     assert not pid_file.exists()
     assert foreign.root.poll() is None
+
+
+def test_fresh_frontend_reports_unconfirmed_launch_without_uv(tmp_path: Path) -> None:
+    script, _, backend_pid_file, _, env = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    table = tmp_path / "process-table.json"
+    table.write_text("[]")
+    env.update(DEV_TEST_TREE=str(table), DEV_TEST_STARTED_COMMAND="npm run dev")
+    uv = Path(env["PATH"]) / "uv"
+    uv_bytes = uv.read_bytes()
+    uv.unlink()
+    pid_file = backend_pid_file.with_name("mediaforce-frontend.pid")
+    with fixture_backend(tmp_path, env) as (started, descriptors):
+        # Use the pinned launch/lifetime fixture at the frontend npm path.
+        npm = Path(env["PATH"]) / "npm"
+        npm.write_bytes((Path(env["DEV_TEST_REPO"]) / ".venv/bin/mediaforce-web").read_bytes())
+        npm.chmod(0o755)
+        result = subprocess.run(["/bin/bash", str(script), "start", "frontend"], env=env,
+                                capture_output=True, text=True, timeout=20, pass_fds=descriptors)
+        assert result.returncode == 1
+        pid = json.loads(started.read_text())["pid"]
+        assert int(pid_file.read_text()) == pid
+        os.kill(pid, 0)
+        assert f"frontend: launched pid {pid} but could not confirm ownership" in result.stderr
+        assert "PID bookkeeping retained" in result.stderr
+        assert "frontend: started" not in result.stdout
+        uv.write_bytes(uv_bytes)
+        uv.chmod(0o755)
+        confirmed = subprocess.run(["/bin/bash", str(script), "start", "frontend"], env=env,
+                                   capture_output=True, text=True, timeout=20)
+        assert confirmed.returncode == 0, confirmed.stderr
+        assert "frontend: running http://" in confirmed.stdout
+        assert int(pid_file.read_text()) == pid
+        restored = subprocess.run(["/bin/bash", str(script), "stop", "frontend"], env=env,
+                                  capture_output=True, text=True, timeout=20)
+        assert restored.returncode == 0, restored.stderr
+        assert not pid_file.exists()
+
+
+def test_stop_reports_known_remaining_managed_listener(tmp_path: Path, process_trees: list[ProcessTree]) -> None:
+    script, _, backend_pid_file, _, env = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    env["MEDIAFORCE_FRONTEND_DEV_PORT"] = "4551"
+    first = start_process_tree(tmp_path, process_trees, "first")
+    second = start_process_tree(tmp_path, process_trees, "second")
+    rows = frontend_tree_rows(first, env["DEV_TEST_REPO"], ["npm run dev"])
+    rows += frontend_tree_rows(second, env["DEV_TEST_REPO"], ["npm run dev"])
+    for row in rows:
+        if "port" in row:
+            row["port"] = env["MEDIAFORCE_FRONTEND_DEV_PORT"]
+    table = tmp_path / "process-table.json"
+    table.write_text(json.dumps(rows))
+    env["DEV_TEST_TREE"] = str(table)
+    pid_file = backend_pid_file.with_name("mediaforce-frontend.pid")
+    pid_file.write_text(str(first.root.pid))
+    original = pid_file.read_bytes()
+    result = subprocess.run(["/bin/bash", str(script), "stop", "frontend"], env=env,
+                            capture_output=True, text=True, timeout=40)
+    assert result.returncode == 1
+    assert f"cleanup finished but a managed listener remains on port {env['MEDIAFORCE_FRONTEND_DEV_PORT']}; PID bookkeeping retained" in result.stderr
+    assert "ownership unknown" not in result.stderr
+    assert_tree_stopped(first)
+    assert second.root.poll() is None
+    assert not second.child_finished.exists()
+    assert pid_file.read_bytes() == original
+    retry = subprocess.run(["/bin/bash", str(script), "stop", "frontend"], env=env,
+                           capture_output=True, text=True, timeout=20)
+    assert retry.returncode == 0, retry.stderr
+    assert_tree_stopped(second)
+    assert not pid_file.exists()

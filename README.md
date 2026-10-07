@@ -547,7 +547,10 @@ If identity custody or cleanup cannot be proved, stop reports failure, retains
 PID bookkeeping, and restart does not launch another process. Resolve the
 reported error and retry the same stop command. Development discovery and cleanup
 require `uv` and the checkout's prepared Python environment (`uv sync --locked`):
-frontend start and status also need them when a PID record or listener exists.
+frontend start always needs them to confirm a launch, and status needs them
+when a PID record or listener exists. If a new launch cannot be confirmed,
+the error names the launched PID and retains its record; restore the reader and
+retry start to confirm and reuse it.
 The helper always loads this checkout's code, even when invoked from another directory. Native
 custody failures remain visible rather than falling back to bare PID signals.
 

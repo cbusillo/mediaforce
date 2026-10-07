@@ -101,12 +101,21 @@ sibling.wait()
         assert select.select([root.stdout], [], [], 5)[0], "frontend fixture failed to start"
         rows = json.loads(root.stdout.readline())
         assert rows.pop("cwd") == str(frontend)
-        # Command/parent readers and custody use the OS. Cwd is supplied from
-        # the fixture's actual startup report, not an assumed launcher location.
+        # Args, parentage inside the fixture and custody are native. Supply
+        # startup cwd and a controlled foreign controller boundary so unrelated
+        # harness ancestors cannot turn this into an unknown-ownership test.
         ps = Path(env["PATH"]) / "ps"
-        ps.write_text("#!" + sys.executable + "\nimport os, sys\nos.execv('/bin/ps', ['ps', *sys.argv[1:]])\n")
+        ps.write_text("#!" + sys.executable + f'''\nimport os, sys
+if sys.argv[1:] == ['-p', '{os.getpid()}', '-o', 'ppid=']:
+    print(0)
+else:
+    os.execv('/bin/ps', ['ps', *sys.argv[1:]])
+''')
         table = tmp_path / "cwd-table.json"
-        table.write_text(json.dumps([{"pid": pid, "cwd": str(frontend)} for pid in rows.values()]))
+        table.write_text(json.dumps([
+            *({"pid": pid, "cwd": str(frontend)} for pid in rows.values()),
+            {"pid": os.getpid(), "cwd": str(tmp_path)},
+        ]))
         env.update(DEV_TEST_TREE=str(table), COLUMNS="80")
         if remove_interpreter:
             node.unlink()
@@ -147,6 +156,7 @@ def test_frontend_stop_preserves_native_shared_wrapper_and_sibling(frontend_tree
     result = subprocess.run(["/bin/bash", str(tree.script), "stop", "frontend"],
                             env=tree.env, capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
+    assert "parent ownership unknown" not in result.stderr
     assert select.select([tree.owned_lifetime], [], [], 5)[0], "owned worker survived stop"
     assert os.read(tree.owned_lifetime, 1) == b""
     assert not select.select([tree.sibling_lifetime], [], [], .1)[0], "unrelated sibling exited"
@@ -186,7 +196,7 @@ def test_native_unknown_parent_and_custody_recheck(frontend_tree: FrontendTree, 
         assert tree.pid_file.read_text() == str(tree.rows["vite"])
         assert not select.select([tree.owned_lifetime], [], [], .1)[0]
     else:
-        assert "preserving process and PID bookkeeping" not in result.stderr
+        assert "native argument ownership unknown: controlled native argument unavailability" in result.stderr
         assert "stopping proven subtree" in result.stderr
         assert "frontend: stopped" in result.stdout
         assert select.select([tree.owned_lifetime], [], [], 5)[0]
