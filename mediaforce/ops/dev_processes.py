@@ -152,7 +152,7 @@ def publish_state(state: Path) -> bool:
             sync_directory(candidate)
             candidate.rename(state)
             try:
-                sync_directory(state.parent)
+                sync_directory(state.parent.resolve(strict=True))
             except BaseException:
                 try:
                     remove_state(state)  # No supervisor has been launched.

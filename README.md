@@ -560,6 +560,9 @@ Boot receipts are synced before publication, followed by their directory and
 the parent directory. Injected write/sync failures are qualified; physical
 power-loss durability has not been tested. An absent or invalid boot receipt
 never proves that pending custody belongs to a previous boot.
+If startup and its retirement both fail, the surviving marker has no persisted
+proof that custody was never acquired. Stop retains it until a new system boot
+can be verified, even after the original filesystem problem is resolved.
 Temporary errors while checking retained processes keep their native handles
 and save the last error for the next Stop. A concurrent Stop for a different
 root reports a conflict instead of consuming another tree's cleanup result.

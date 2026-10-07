@@ -69,10 +69,18 @@ def test_failed_retirement_keeps_completed_native_custody_retryable(native_dev_t
     tree = native_dev_tree
     helper = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_processes.py"
     repaired = tree.pid_file.parent / "repair-retirement"
+    retry_connected = tree.pid_file.parent / "retirement-retry-connected"
     helper.write_text(helper.read_text().replace("\ndef main()", f'''
 _original_rename = Path.rename
+class _RepairGateSocket(socket.socket):
+    def accept(self):
+        connection, address = super().accept()
+        if Path({str(repaired)!r}).exists():
+            Path({str(retry_connected)!r}).touch()
+        return connection, address
+socket.socket = _RepairGateSocket
 def _fault_rename(path, target):
-    if path.name == "backend.cleanup" and not Path({str(repaired)!r}).exists():
+    if path.name == "backend.cleanup" and not Path({str(retry_connected)!r}).exists():
         raise OSError({errno.ENOSPC}, "injected retirement rename failure")
     return _original_rename(path, target)
 Path.rename = _fault_rename
@@ -94,6 +102,7 @@ def main()'''))
                            capture_output=True, text=True, timeout=15)
     tree.retain_cleanup_marker = state.exists()
     assert retry.returncode == 0, retry.stderr
+    assert retry_connected.exists(), "retry never contacted the retained supervisor"
     assert not state.exists()
     assert not tree.pid_file.exists()
     assert_shared_workloads_survive(tree)
@@ -228,3 +237,59 @@ def test_disposal_sweep_preserves_foreign_artifacts(
     assert (foreign / "boot").read_text() == "foreign receipt"
     if foreign_artifact == "unknown contents":
         assert (artifact / "foreign-data").read_text() == "preserve this"
+
+
+def test_receipt_sync_supports_a_symlinked_state_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    actual = tmp_path / "actual-state"
+    actual.mkdir(mode=0o700)
+    alias = tmp_path / "state-alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    state = alias / "backend.cleanup"
+    monkeypatch.setattr(dev_processes, "boot_id", lambda: "00000000-0000-0000-0000-000000000001")
+    assert dev_processes.publish_state(state)
+    assert (actual / "backend.cleanup/boot").read_bytes() == (state / "boot").read_bytes()
+
+
+@pytest.mark.parametrize("startup_failure", ["parent sync", "spawn"])
+def test_consecutive_startup_and_retirement_failures_preserve_unproven_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, startup_failure: str,
+) -> None:
+    state = tmp_path / "backend.cleanup"
+    current_boot = "00000000-0000-0000-0000-000000000001"
+    monkeypatch.setattr(dev_processes, "boot_id", lambda: current_boot)
+    monkeypatch.setattr(dev_processes.sys, "argv", ["dev_processes.py", "stop", "4321", "unused", "backend", str(state)])
+    original_sync = dev_processes.sync_directory
+    original_rename = Path.rename
+
+    def fail_parent_sync(directory: Path) -> None:
+        if directory == state.parent:
+            raise OSError(errno.EIO, "injected parent sync failure")
+        original_sync(directory)
+
+    def fail_retirement(path: Path, target: Path) -> Path:
+        if path == state:
+            raise OSError(errno.ENOSPC, "injected retirement failure")
+        return original_rename.__get__(path, Path)(target)
+
+    with monkeypatch.context() as fault, patch.object(dev_processes.subprocess, "Popen") as spawn:
+        fault.setattr(Path, "rename", fail_retirement)
+        if startup_failure == "parent sync":
+            fault.setattr(dev_processes, "sync_directory", fail_parent_sync)
+        else:
+            spawn.side_effect = OSError(errno.EIO, "injected spawn failure")
+        assert dev_processes.main() == 1
+        if startup_failure == "parent sync":
+            spawn.assert_not_called()
+        else:
+            spawn.assert_called_once()
+    assert state.is_dir()
+    assert (state / "boot").read_text() == current_boot
+    monkeypatch.setattr(dev_processes.sys, "argv", ["dev_processes.py", "retry", "0", "unused", "backend", str(state)])
+    with patch.object(dev_processes, "DevelopmentProcessTree") as tree:
+        assert dev_processes.main() == 1
+        tree.assert_not_called()
+        assert state.exists()
+        monkeypatch.setattr(dev_processes, "boot_id", lambda: "00000000-0000-0000-0000-000000000002")
+        assert dev_processes.main() == 0
+        tree.assert_not_called()
+    assert not state.exists()
