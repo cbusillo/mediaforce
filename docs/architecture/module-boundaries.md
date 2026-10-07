@@ -49,8 +49,12 @@ after the package consolidation pass. Avoid growing them with new helper logic.
 - `process_control.py`
   - managed subprocess cancellation, absolute deadlines, containment status,
     and command helpers
-  - existing development-tree stop pins native custody before rechecking command
-    ownership, then keeps that custody through bounded graceful/forced cleanup
+  - delegates existing development-tree stop to `dev_processes.py`
+- `dev_processes.py`
+  - standalone development custody gateway, loadable without application imports
+  - pins native custody before rechecking command ownership and retains that
+    custody across bounded cleanup attempts; `ops/dev_processes.py` owns the
+    retry connection and pending-state lifecycle
 - `_process_deadline.py`
   - private per-command supervisor that keeps ownership until every observed
     descendant exits

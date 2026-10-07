@@ -29,7 +29,7 @@ def prepare_dev_service(
     for package in ("mediaforce", "mediaforce/core", "mediaforce/ops"):
         (repo / package).mkdir(exist_ok=True)
         (repo / package / "__init__.py").write_text("")
-    for module in ("mediaforce/core/_process_deadline.py", "mediaforce/core/process_control.py", "mediaforce/ops/dev_processes.py", "mediaforce/ops/dev_frontend.py"):
+    for module in ("mediaforce/core/_process_deadline.py", "mediaforce/core/process_control.py", "mediaforce/core/dev_processes.py", "mediaforce/ops/dev_processes.py", "mediaforce/ops/dev_frontend.py"):
         shutil.copyfile(source / module, repo / module)
     if service == "symlink":
         alias = tmp_path / "checkout alias"
@@ -1029,7 +1029,7 @@ def fixture_backend(
         "DEV_TEST_SLOW_START": str(slow_start),
     })
     binary = Path(environment["DEV_TEST_REPO"]) / ".venv/bin/mediaforce-web"
-    binary.parent.mkdir(parents=True)
+    binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("#!" + sys.executable + "\n" + '''
 import json
 import os

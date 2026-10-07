@@ -543,12 +543,26 @@ does not own the backend or its siblings. Listener discovery resolves and
 deduplicates owned roots before stopping their trees. Stop captures the owned subtree's
 native process identities before signalling, so workers remain eligible for
 forced cleanup after their parent exits without targeting a reused PID.
-If identity custody or cleanup cannot be proved, stop reports failure, retains
-PID bookkeeping, and restart does not launch another process. Resolve the
-reported error and retry the same stop command. Development stop requires the
-checkout's prepared Python environment (`uv sync --locked`) and always loads
-that checkout's cleanup code, even when invoked from another directory. Native
-custody failures remain visible rather than falling back to bare PID signals.
+If cleanup fails after capture, a small development cleanup supervisor keeps
+the native identities alive. Stop reports the error and retains PID bookkeeping;
+Start refuses to launch another process while cleanup is pending. Resolve the
+reported error and retry the same Stop or Restart command: it contacts that
+supervisor before looking for the original root, even after workers reparent.
+The supervisor exits when cleanup is proved or its whole captured tree exits
+with ownership still proven.
+Temporary errors while checking retained processes keep their native handles
+and save the last error for the next Stop. A concurrent Stop for a different
+root reports a conflict instead of consuming another tree's cleanup result.
+If the supervisor itself is lost, Stop fails visibly rather than reconstructing
+custody from saved PIDs. After the next system restart, Stop can clear its pending
+state using the kernel's boot identity; do not delete that state to bypass cleanup.
+Pending state also stays when [native containment cannot be proved](docs/architecture/module-boundaries.md),
+including incomplete capture or a strict Darwin fork.
+Development stop requires the checkout's prepared Python environment
+(`uv sync --locked`) and loads only that checkout's standalone cleanup and native
+custody modules, even when invoked from another directory or unrelated package
+edits cannot import. Native custody failures remain visible rather than falling
+back to bare PID signals.
 
 Development PID files live in a directory under that state path keyed by the
 physical checkout: `development/<checkout hash>/`. Each checkout manages its
