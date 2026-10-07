@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Collection, Mapping
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_b
     staged_requeue_size_blocker
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.production_holds import MODE_FOLDER
+from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
 
 NOT_HELD_MESSAGE = "This file is no longer waiting for a decision about its size."
 
@@ -129,6 +131,7 @@ def staged_remake_details(
         *,
         current_approval: CurrentApprovalFn,
         policy_states: Mapping[int, str | None] | None = None,
+        manifest_reader: ManifestReader = read_manifest,
 ) -> dict[str, Any] | None:
     """Offer recovery only for a size-only failure or missing settings history.
 
@@ -143,12 +146,12 @@ def staged_remake_details(
     final_size = validation.get("passed") is False and failed == [FINAL_SIZE_GOAL_CHECK]
     missing_policy = validation.get("passed") is True and (
         policy_states if policy_states is not None else _staged_policy_states(
-            connection, {int(row["library_item_id"])}, accepted_policy_hash="",
+            connection, {int(row["library_item_id"])}, accepted_policy_hash="", manifest_reader=manifest_reader,
         )
     ).get(int(row["library_item_id"])) == "season_policy_provenance_missing"
     if not (held or final_size or missing_policy):
         return None
-    run_prefix, _mode, context_available = _run_context(connection, row, prefix)
+    run_prefix, _mode, context_available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
     blocked_reasons: list[str] = []
     approval = current_approval(run_prefix)
     if not context_available:
@@ -156,7 +159,7 @@ def staged_remake_details(
     else:
         if approval is None:
             blocked_reasons.append("Approve a fresh sample before making this file again.")
-        elif final_size and not _readable_manifest(row):
+        elif final_size and not manifest_reader(Path(str(row["manifest_path"] or ""))):
             blocked_reasons.append(
                 "Restore the run manifest from a run backup before making this file again; "
                 "its size comparison cannot be verified. Nothing was removed."
@@ -169,13 +172,15 @@ def staged_remake_details(
                     "manifest_index": row["item_index"],
                     "target_size_verification": object_dict(validation.get("final_size_goal")),
                 }},
-            }, approval)
+            }, approval, manifest_reader=manifest_reader)
             if blocker:
                 blocked_reasons.append(
                     "Approve a fresh sample with changed size or quality settings before making this file again. "
                     "Older runs without approval history need a changed size goal."
                 )
-    queue_blocker = staged_requeue_size_blocker(connection, run_prefix, int(row["library_item_id"]), approval)
+    queue_blocker = staged_requeue_size_blocker(
+        connection, run_prefix, int(row["library_item_id"]), approval, manifest_reader=manifest_reader,
+    )
     if queue_blocker is not None:
         blocked_reasons.append(
             "This file’s saved size checks still block a new encode. Review its run settings before making it again."
@@ -205,6 +210,7 @@ def staged_remake_records(
         current_approval: CurrentApprovalFn,
 ) -> list[dict[str, Any]]:
     """Attach per-file action availability to the already paginated integrity rows."""
+    manifest_reader = cache(read_manifest)
     ids = [int(record["item_id"]) for record in records if record.get("item_id") is not None]
     rows = {int(row["library_item_id"]): row for row in connection.execute(
         select(staged_artifacts, library_items.c.source_path.label("original_source_path"))
@@ -213,7 +219,7 @@ def staged_remake_records(
     ).mappings()}
     policy_states = _staged_policy_states(connection, {
         item_id for item_id, row in rows.items() if _stored_validation(row).get("passed") is True
-    }, accepted_policy_hash="")
+    }, accepted_policy_hash="", manifest_reader=manifest_reader)
     approvals: dict[str, dict[str, Any] | None] = {}
 
     def approval_for_scope(scope: str) -> dict[str, Any] | None:
@@ -223,7 +229,8 @@ def staged_remake_records(
 
     for record in records:
         recovery = staged_remake_details(connection, rows.get(record.get("item_id")), prefix,
-                                        current_approval=approval_for_scope, policy_states=policy_states)
+                                        current_approval=approval_for_scope, policy_states=policy_states,
+                                        manifest_reader=manifest_reader)
         if recovery is not None:
             record["remake"] = recovery
     return records
@@ -238,20 +245,15 @@ def _stored_validation(row: Any) -> dict[str, Any]:
         return {}
 
 
-def _readable_manifest(row: Any) -> bool:
-    try:
-        return bool(object_dict(json.loads(Path(str(row["manifest_path"] or "")).read_text())))
-    except (OSError, json.JSONDecodeError):
-        return False
-
-
-def _run_context(connection: DBClient, row: Any, prefix: str) -> tuple[str, str, bool]:
+def _run_context(
+        connection: DBClient, row: Any, prefix: str, *, manifest_reader: ManifestReader = read_manifest,
+) -> tuple[str, str, bool]:
     """Use the existing saved selection when the manifest or terminal job is no longer available."""
-    try:
-        manifest = object_dict(json.loads(Path(str(row["manifest_path"] or "")).read_text()))
+    manifest = manifest_reader(Path(str(row["manifest_path"] or "")))
+    if manifest is not None:
         selection = object_dict(manifest.get("selection"))
         available = True
-    except (OSError, json.JSONDecodeError):
+    else:
         manifest = {}
         stored = connection.execute(select(run_manifests.c.selection_json).where(
             run_manifests.c.run_id == str(row["manifest_run_id"] or "")
