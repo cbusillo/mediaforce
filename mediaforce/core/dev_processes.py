@@ -46,7 +46,9 @@ class DevelopmentProcessTree:
     def finished(self) -> bool:
         self._tree.refresh()
         if self._tree.compromised and not self._tree.live():
-            raise DevelopmentCustodyLostError("development process ownership was compromised")
+            raise DevelopmentCustodyLostError(
+                self._tree.ownership_failure_reason or "development process ownership was compromised"
+            )
         return not self._tree.live() and not self._tree.compromised
 
     def close(self) -> None:
