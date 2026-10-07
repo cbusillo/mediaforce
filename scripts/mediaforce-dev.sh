@@ -113,66 +113,25 @@ mediaforce_backend_root_pid() {
 	printf '%s\n' "${root}"
 }
 
-command_matches_frontend_script() {
-	local command="${1:-}"
-	local cwd="${2:-}"
-	local launcher
-	local vite_binary="${ROOT_DIR}/frontend/node_modules/.bin/vite"
-	launcher="${command%%" --prefix "*}"
-	launcher="${launcher%%" run dev"*}"
-	if [[ "${launcher}" == */npm || "${launcher}" == */npm-cli.js ]]; then
-		[[ "${launcher}" != *" "* || -x "${launcher}" ]] || return 1
-		command="npm${command#"${launcher}"}"
-	fi
-	case "${command}" in
-	"npm --prefix frontend run dev" | "npm --prefix frontend run dev "*)
-		[[ "${cwd}" == "${ROOT_DIR}" ]] && return 0 ;;
-	"npm --prefix ${ROOT_DIR}/frontend run dev" | "npm --prefix ${ROOT_DIR}/frontend run dev "*)
-		[[ "${cwd}" == "${ROOT_DIR}" || "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
-	"npm run dev" | "npm run dev "* | "vite" | "vite "* | "${vite_binary}" | "${vite_binary} "*)
-		[[ "${cwd}" == "${ROOT_DIR}/frontend" ]] && return 0 ;;
-	esac
-	return 1
-}
-
-command_matches_frontend_launcher() {
-	local command="${1:-}"
-	local cwd="${2:-}"
-	command_matches_frontend_script "${command}" "${cwd}" && return 0
-	local interpreter="" part arguments
-	local remaining="${command}"
-	# Resolve an interpreter prefix without consuming a wrapper's later arguments.
-	while [[ "${remaining}" == *" "* ]]; do
-		part="${remaining%% *}"
-		interpreter="${interpreter:+${interpreter} }${part}"
-		remaining="${remaining#"${part} "}"
-		if [[ "${interpreter##*/}" =~ ^([Nn]ode|[Pp]ython([0-9]+(\.[0-9]+)*t?)?)$ &&
-			( "${interpreter}" != *" "* || ( -f "${interpreter}" && -x "${interpreter}" ) ) ]]; then
-			arguments="${remaining}"
-			if [[ "${interpreter##*/}" =~ ^[Nn]ode$ ]]; then
-				while [[ "${arguments}" == *" "* ]]; do
-					case "${arguments%% *}" in
-					--inspect | --inspect=* | --inspect-brk | --inspect-brk=*) arguments="${arguments#* }" ;;
-					*) break ;;
-					esac
-				done
-			fi
-			command_matches_frontend_script "${arguments}" "${cwd}" && return 0
-			[[ "${interpreter}" != */* || ( -f "${interpreter}" && -x "${interpreter}" ) ]] && return 1
-		fi
-		[[ "${interpreter}" == /* ]] || break
-	done
-	return 1
+pid_is_frontend_launcher() {
+	local pid="${1:-}" cwd
+	cwd="$(lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
+	[[ -n "${cwd}" ]] || return 1
+	(
+		cd "${ROOT_DIR}"
+		uv run --no-sync --project "${ROOT_DIR}" python "${ROOT_DIR}/mediaforce/ops/dev_frontend.py" \
+			"${pid}" "${ROOT_DIR}" "${cwd}"
+	)
 }
 
 pid_matches_mediaforce_frontend() {
 	local pid="${1:-}"
 	local depth=0
 	while [[ -n "${pid}" && "${pid}" != "0" && ${depth} -lt 8 ]]; do
-		local command cwd
-		command="$(pid_command "${pid}")"
-		cwd="$(lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
-		command_matches_frontend_launcher "${command}" "${cwd}" && return 0
+		local status=0
+		pid_is_frontend_launcher "${pid}" || status=$?
+		[[ ${status} -eq 0 ]] && return 0
+		[[ ${status} -eq 1 ]] || return 2
 		pid="$(trim "$(pid_parent "${pid}")")"
 		depth=$((depth + 1))
 	done
@@ -197,8 +156,12 @@ managed_listener_pids() {
 	local matcher="${2:-}"
 	local pid
 	for pid in $(port_listener_pids "${port}"); do
-		if "${matcher}" "${pid}"; then
+		local status=0
+		"${matcher}" "${pid}" || status=$?
+		if [[ ${status} -eq 0 ]]; then
 			printf '%s\n' "${pid}"
+		elif [[ ${status} -ne 1 ]]; then
+			return 2
 		fi
 	done
 }
@@ -209,7 +172,9 @@ managed_listener_root_pids() {
 	local root_resolver="${3:-}"
 	local pid
 	# Resolve and deduplicate every root before stopping any listener's tree.
-	for pid in $(managed_listener_pids "${port}" "${matcher}"); do
+	local listeners
+	listeners="$(managed_listener_pids "${port}" "${matcher}")" || return 2
+	for pid in ${listeners}; do
 		"${root_resolver}" "${pid}"
 	done | sort -u
 }
@@ -364,8 +329,13 @@ wait_for_backend_listener() {
 frontend_running_pid() {
 	local pid
 	pid="$(pid_from_file "${FRONTEND_PID_FILE}")"
-	if pid_is_alive "${pid}" && pid_matches_mediaforce_frontend "${pid}"; then
-		printf '%s\n' "${pid}"
+	if pid_is_alive "${pid}"; then
+		local status=0
+		pid_matches_mediaforce_frontend "${pid}" || status=$?
+		[[ ${status} -ne 2 ]] || return 2
+		if [[ ${status} -eq 0 ]]; then
+			printf '%s\n' "${pid}"
+		fi
 	fi
 }
 
@@ -423,7 +393,7 @@ start_frontend() {
 	load_env
 	mkdir -p "${DEV_STATE_DIR}"
 	local running_pid
-	running_pid="$(frontend_running_pid)"
+	running_pid="$(frontend_running_pid)" || return 1
 	if [[ -n "${running_pid}" ]]; then
 		echo "frontend: running http://${FRONTEND_HOST}:${FRONTEND_PORT} pid ${running_pid}"
 		return 0
@@ -446,7 +416,7 @@ start_frontend() {
 		echo $! >"${FRONTEND_PID_FILE}"
 	)
 	sleep 1
-	running_pid="$(frontend_running_pid)"
+	running_pid="$(frontend_running_pid)" || return 1
 	if [[ -z "${running_pid}" ]]; then
 		echo "frontend: failed to start; see ${FRONTEND_LOG_FILE}" >&2
 		return 1
@@ -485,7 +455,7 @@ stop_backend() {
 stop_frontend() {
 	load_env
 	local pid managed_roots
-	pid="$(frontend_running_pid)"
+	pid="$(frontend_running_pid)" || return 1
 	if [[ -n "${pid}" ]]; then
 		pid="$(mediaforce_frontend_root_pid "${pid}")"
 		kill_pid_tree "${pid}" frontend || return 1
@@ -494,7 +464,7 @@ stop_frontend() {
 		echo "frontend: stopped pid ${pid}"
 		return 0
 	fi
-	managed_roots="$(managed_listener_root_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend mediaforce_frontend_root_pid)"
+	managed_roots="$(managed_listener_root_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend mediaforce_frontend_root_pid)" || return 1
 	if [[ -n "${managed_roots}" ]]; then
 		while IFS= read -r root_pid; do
 			[[ -n "${root_pid}" ]] || continue
@@ -529,12 +499,12 @@ status_backend() {
 status_frontend() {
 	load_env
 	local pid listener_pids
-	pid="$(frontend_running_pid)"
+	pid="$(frontend_running_pid)" || return 1
 	if [[ -n "${pid}" ]]; then
 		echo "frontend: running http://${FRONTEND_HOST}:${FRONTEND_PORT} pid ${pid}"
 		return 0
 	fi
-	listener_pids="$(managed_listener_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend)"
+	listener_pids="$(managed_listener_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend)" || return 1
 	if [[ -n "${listener_pids}" ]]; then
 		echo "frontend: running http://${FRONTEND_HOST}:${FRONTEND_PORT} listener $(printf '%s' "${listener_pids}" | paste -sd ',' -)"
 		return 0

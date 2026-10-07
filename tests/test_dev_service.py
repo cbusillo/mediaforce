@@ -29,7 +29,7 @@ def prepare_dev_service(
     for package in ("mediaforce", "mediaforce/core", "mediaforce/ops"):
         (repo / package).mkdir(exist_ok=True)
         (repo / package / "__init__.py").write_text("")
-    for module in ("mediaforce/core/_process_deadline.py", "mediaforce/core/process_control.py", "mediaforce/ops/dev_processes.py"):
+    for module in ("mediaforce/core/_process_deadline.py", "mediaforce/core/process_control.py", "mediaforce/ops/dev_processes.py", "mediaforce/ops/dev_frontend.py"):
         shutil.copyfile(source / module, repo / module)
     if service == "symlink":
         alias = tmp_path / "checkout alias"
@@ -162,6 +162,24 @@ elif name == "uv":
         print("injected custody unavailable; PID bookkeeping retained", file=sys.stderr)
         sys.exit(1)
     os.environ["PYTHONPATH"] = sys.argv[4]
+    if sys.argv[6].endswith("/dev_frontend.py"):
+        import runpy
+        module = runpy.run_path(sys.argv[6])
+        native_arguments = module["process_arguments"]
+        if os.environ.get("DEV_TEST_ARGUMENT_FAILURE"):
+            def read_arguments(pid):
+                raise PermissionError("injected native argv refusal")
+            module["main"].__globals__["process_arguments"] = read_arguments
+        elif "DEV_TEST_TREE" in os.environ:
+            rows = json.loads(Path(os.environ["DEV_TEST_TREE"]).read_text())
+            def read_arguments(pid):
+                row = next((row for row in rows if row["pid"] == pid), None)
+                if not row or "command" not in row:
+                    return native_arguments(pid)
+                return row.get("argv", [])
+            module["main"].__globals__["process_arguments"] = read_arguments
+        sys.argv = sys.argv[6:]
+        sys.exit(module["main"]())
     os.execv(sys.executable, [sys.executable, *sys.argv[6:]])
 elif name == "dirname":
     print(Path(sys.argv[1]).parent)
@@ -508,8 +526,11 @@ def test_stop_discovers_owned_parent_and_descendants_and_preserves_foreign_tree(
     if component == "all":
         frontend = start_process_tree(tmp_path, process_trees, "frontend")
         rows.extend([
-            {"pid": frontend.root.pid, "parent": 0, "command": "vite " + environment["DEV_TEST_REPO"] + "/frontend", "cwd": environment["DEV_TEST_REPO"] + "/frontend", "finished": str(frontend.finished)},
-            {"pid": frontend.child_pid, "parent": frontend.root.pid, "command": "vite worker", "finished": str(frontend.child_finished)},
+            {"pid": frontend.root.pid, "parent": 0, "command": "vite " + environment["DEV_TEST_REPO"] + "/frontend",
+             "argv": ["vite", environment["DEV_TEST_REPO"] + "/frontend"],
+             "cwd": environment["DEV_TEST_REPO"] + "/frontend", "finished": str(frontend.finished)},
+            {"pid": frontend.child_pid, "parent": frontend.root.pid, "command": "vite worker",
+             "argv": ["vite", "worker"], "finished": str(frontend.child_finished)},
         ])
         (pid_file.parent / "mediaforce-frontend.pid").write_text(str(frontend.root.pid))
     table = tmp_path / "process-table.json"
@@ -641,11 +662,12 @@ os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
         os.close(lifetime_reader)
 
 
-def frontend_tree_rows(tree: ProcessTree, checkout: str, command: str) -> list[dict[str, object]]:
+def frontend_tree_rows(tree: ProcessTree, checkout: str, arguments: list[str]) -> list[dict[str, object]]:
     return [
-        {"pid": tree.root.pid, "parent": 0, "command": command, "cwd": checkout if command.startswith("npm --prefix ") else checkout + "/frontend",
+        {"pid": tree.root.pid, "parent": 0, "command": " ".join(arguments), "argv": arguments,
+         "cwd": checkout if arguments[:2] == ["npm", "--prefix"] else checkout + "/frontend",
          "finished": str(tree.finished)},
-        {"pid": tree.child_pid, "parent": tree.root.pid, "command": "vite worker",
+        {"pid": tree.child_pid, "parent": tree.root.pid, "command": "vite worker", "argv": ["vite", "worker"],
          "cwd": checkout + "/frontend", "port": "4173", "finished": str(tree.child_finished)},
     ]
 
@@ -663,14 +685,14 @@ def test_frontend_stop_requires_exact_checkout_and_stops_the_whole_tree(
     repo = environment["DEV_TEST_REPO"]
     checkout = {"owned": repo, "sibling": repo + "-sibling", "nested": repo + "/nested",
                 "foreign": "/foreign/checkout", "unavailable": ""}[checkout_kind]
-    command = {"relative": "npm --prefix frontend run dev -- --strictPort",
-               "rewritten": "npm run dev --host 127.0.0.1",
-               "absolute": "npm --prefix " + checkout + "/frontend run dev -- --strictPort",
-               "interpreter": sys.executable + " /fixture/bin/npm --prefix " + checkout + "/frontend run dev -- --strictPort",
-               "vite": sys.executable + " " + checkout + "/frontend/node_modules/.bin/vite --strictPort",
-               "debug_vite": "node --inspect=0 " + checkout + "/frontend/node_modules/.bin/vite --strictPort",
-               "paused_vite": "node --inspect-brk=0 " + checkout + "/frontend/node_modules/.bin/vite --strictPort"}[command_kind]
-    rows = frontend_tree_rows(tree, checkout, command)
+    arguments = {"relative": ["npm", "--prefix", "frontend", "run", "dev", "--", "--strictPort"],
+                 "rewritten": ["npm run dev --host 127.0.0.1"],
+                 "absolute": ["npm", "--prefix", checkout + "/frontend", "run", "dev", "--", "--strictPort"],
+                 "interpreter": [sys.executable, "/fixture/bin/npm", "--prefix", checkout + "/frontend", "run", "dev"],
+                 "vite": [sys.executable, checkout + "/frontend/node_modules/.bin/vite", "--strictPort"],
+                 "debug_vite": ["node", "--inspect=0", checkout + "/frontend/node_modules/.bin/vite", "--strictPort"],
+                 "paused_vite": ["node", "--inspect-brk=0", checkout + "/frontend/node_modules/.bin/vite", "--strictPort"]}[command_kind]
+    rows = frontend_tree_rows(tree, checkout, arguments)
     if checkout_kind == "unavailable":
         for row in rows:
             row["cwd"] = ""
@@ -707,7 +729,7 @@ def test_frontend_actions_preserve_foreign_trees_and_both_shared_pid_files(
     script, lock, backend_pid_file, _, environment = prepare_dev_service(tmp_path, "absent", "idle", "owned")
     frontend = start_process_tree(tmp_path, process_trees, "foreign-frontend")
     backend = start_process_tree(tmp_path, process_trees, "foreign-backend")
-    rows = frontend_tree_rows(frontend, environment["DEV_TEST_REPO"] + "-sibling", "npm --prefix frontend run dev")
+    rows = frontend_tree_rows(frontend, environment["DEV_TEST_REPO"] + "-sibling", ["npm", "--prefix", "frontend", "run", "dev"])
     rows.append({"pid": backend.root.pid, "parent": 0, "command": "/foreign/.venv/bin/mediaforce-web",
                  "port": "8777", "finished": str(backend.finished)})
     table = tmp_path / "process-table.json"
@@ -739,7 +761,7 @@ def test_owned_frontend_reuse_and_restart(
     script, lock, backend_pid_file, log, environment = prepare_dev_service(tmp_path, "absent", "idle", "owned")
     owned = start_process_tree(tmp_path, process_trees, "owned-frontend") if action == "restart" or running in {"pid_file", "listener"} else None
     foreign = start_process_tree(tmp_path, process_trees, "foreign-frontend")
-    rows = frontend_tree_rows(owned, environment["DEV_TEST_REPO"], "npm run dev") if owned is not None else []
+    rows = frontend_tree_rows(owned, environment["DEV_TEST_REPO"], ["npm run dev"]) if owned is not None else []
     legacy_pid_file = None
     if running == "legacy":
         assert owned is not None
@@ -747,7 +769,7 @@ def test_owned_frontend_reuse_and_restart(
         legacy_pid_file = lock.parent / "mediaforce-frontend.pid"
         legacy_pid_file.write_text(str(owned.root.pid))
     foreign_checkout = environment["DEV_TEST_REPO"] + "-sibling"
-    rows += frontend_tree_rows(foreign, foreign_checkout, "npm run dev")
+    rows += frontend_tree_rows(foreign, foreign_checkout, ["npm run dev"])
     # The foreign checkout runs on another port.
     rows[-1].pop("port")
     foreign_pid_file = None
@@ -849,8 +871,8 @@ def test_stop_owned_listener_preserves_foreign_pid_record(
     owned = start_process_tree(tmp_path, process_trees, "owned")
     foreign = start_process_tree(tmp_path, process_trees, "foreign")
     if component == "frontend":
-        rows = frontend_tree_rows(owned, environment["DEV_TEST_REPO"], "npm run dev")
-        rows += frontend_tree_rows(foreign, "/foreign/checkout", "npm --prefix frontend run dev")
+        rows = frontend_tree_rows(owned, environment["DEV_TEST_REPO"], ["npm run dev"])
+        rows += frontend_tree_rows(foreign, "/foreign/checkout", ["npm", "--prefix", "frontend", "run", "dev"])
         pid_file = lock.parent / "mediaforce-frontend.pid"
     else:
         rows = [
@@ -885,7 +907,7 @@ def test_rewritten_npm_in_repo_root_cannot_claim_a_foreign_prefix(
     script, lock, backend_pid_file, _, environment = prepare_dev_service(tmp_path, "absent", "idle", "owned")
     tree = start_process_tree(tmp_path, process_trees, "foreign-prefix")
     repo = environment["DEV_TEST_REPO"]
-    rows = frontend_tree_rows(tree, repo + "-sibling", "npm run dev")
+    rows = frontend_tree_rows(tree, repo + "-sibling", ["npm run dev"])
     rows[0]["cwd"] = repo
     table = tmp_path / "process-table.json"
     table.write_text(json.dumps(rows))
@@ -917,12 +939,13 @@ def test_frontend_stop_climbs_through_an_intermediate_shell(
     assert tree.worker_finished is not None
     repo = environment["DEV_TEST_REPO"]
     rows = [
-        {"pid": tree.root.pid, "parent": 0, "command": "npm run dev", "cwd": repo + "/frontend",
+        {"pid": tree.root.pid, "parent": 0, "command": "npm run dev", "argv": ["npm run dev"], "cwd": repo + "/frontend",
          "finished": str(tree.finished)},
-        {"pid": tree.child_pid, "parent": tree.root.pid, "command": "sh -c vite dev", "cwd": repo + "/frontend",
+        {"pid": tree.child_pid, "parent": tree.root.pid, "command": "sh -c vite dev", "argv": ["sh", "-c", "vite dev"], "cwd": repo + "/frontend",
          "finished": str(tree.child_finished)},
         {"pid": tree.worker_pid, "parent": tree.child_pid,
-         "command": "node " + repo + "/frontend/node_modules/.bin/vite dev", "cwd": repo + "/frontend",
+         "command": "node " + repo + "/frontend/node_modules/.bin/vite dev",
+         "argv": ["node", repo + "/frontend/node_modules/.bin/vite", "dev"], "cwd": repo + "/frontend",
          "port": "4173", "finished": str(tree.worker_finished)},
     ]
     table = tmp_path / "process-table.json"
@@ -952,18 +975,18 @@ def test_frontend_stop_preserves_the_unrelated_launching_parent(
     launcher = start_process_tree(tmp_path, process_trees, "terminal")
     owned = start_process_tree(tmp_path, process_trees, "owned-frontend")
     repo = environment["DEV_TEST_REPO"]
-    command = {
-        "terminal": "-zsh",
-        "npm_argument": sys.executable + " /fixture/shared-wrapper.py /fixture/bin/npm --prefix " + repo + "/frontend run dev",
-        "node_npm_argument": "node /fixture/shared-wrapper.js /fixture/bin/npm --prefix " + repo + "/frontend run dev",
-        "node_vite_argument": "node /fixture/shared-wrapper.js " + repo + "/frontend/node_modules/.bin/vite dev",
-        "debug_node_vite_argument": "node --inspect=0 /fixture/shared-wrapper.js " + repo + "/frontend/node_modules/.bin/vite dev",
+    arguments = {
+        "terminal": ["-zsh"],
+        "npm_argument": [sys.executable, "/fixture/shared-wrapper.py", "/fixture/bin/npm", "--prefix", repo + "/frontend", "run", "dev"],
+        "node_npm_argument": ["node", "/fixture/shared-wrapper.js", "/fixture/bin/npm", "--prefix", repo + "/frontend", "run", "dev"],
+        "node_vite_argument": ["node", "/fixture/shared-wrapper.js", repo + "/frontend/node_modules/.bin/vite", "dev"],
+        "debug_node_vite_argument": ["node", "--inspect=0", "/fixture/shared-wrapper.js", repo + "/frontend/node_modules/.bin/vite", "dev"],
     }[launcher_kind]
     # Fake ps supplies this parent relationship; every PID is fixture-owned.
-    rows = frontend_tree_rows(owned, repo, "npm run dev")
+    rows = frontend_tree_rows(owned, repo, ["npm run dev"])
     rows[0]["parent"] = launcher.root.pid
     rows.extend([
-        {"pid": launcher.root.pid, "parent": 0, "command": command, "cwd": repo + "/frontend",
+        {"pid": launcher.root.pid, "parent": 0, "command": " ".join(arguments), "argv": arguments, "cwd": repo + "/frontend",
          "finished": str(launcher.finished)},
         {"pid": launcher.child_pid, "parent": launcher.root.pid, "command": "unrelated task", "cwd": repo + "/frontend",
          "finished": str(launcher.child_finished)},
@@ -1346,3 +1369,24 @@ def test_dev_handoff_waits_after_every_exit_status_the_service_manager_accepts(
         assert lock.read_bytes() == lock_bytes
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         assert sum(call[:2] == ["launchctl", "bootout"] for call in calls) == 1
+
+
+@pytest.mark.parametrize("discovery", ["pid_file", "listener"])
+def test_unknown_arguments_preserve_frontend_bookkeeping(
+    tmp_path: Path, process_trees: list[ProcessTree], discovery: str,
+) -> None:
+    script, _, backend_pid_file, _, env = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    tree = start_process_tree(tmp_path, process_trees, "frontend")
+    table = tmp_path / "process-table.json"
+    table.write_text(json.dumps(frontend_tree_rows(tree, env["DEV_TEST_REPO"], ["npm run dev"])))
+    env.update(DEV_TEST_TREE=str(table), DEV_TEST_ARGUMENT_FAILURE="1")
+    pid_file = backend_pid_file.with_name("mediaforce-frontend.pid")
+    pid_file.write_text(str(tree.child_pid if discovery == "pid_file" else 999999))
+    original = pid_file.read_bytes()
+    result = subprocess.run(["/bin/bash", str(script), "stop", "frontend"], env=env,
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode != 0
+    assert "ownership unknown" in result.stderr
+    assert tree.root.poll() is None
+    assert not tree.child_finished.exists()
+    assert pid_file.read_bytes() == original

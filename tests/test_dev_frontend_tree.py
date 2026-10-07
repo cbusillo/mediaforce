@@ -28,6 +28,7 @@ class FrontendTree:
 @pytest.fixture(params=[
     ("workspace", "node", False), ("Python Projects", "node", False), ("node work", "node", False),
     ("Python Projects", "node runtime/node", False), ("workspace", "node", True),
+    ("workspace", "node runtime/node", True),
 ])
 def frontend_tree(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[FrontendTree]:
     checkout_name, interpreter_path, remove_interpreter = request.param
