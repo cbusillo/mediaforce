@@ -439,3 +439,30 @@ def test_interruption_after_publication_retains_unproven_setup(tmp_path: Path, m
         assert dev_processes.main() == 0
         tree.assert_not_called()
     assert not state.exists()
+
+
+@pytest.mark.parametrize("saved_error", [None, "native capture incomplete; next system restart"])
+def test_pending_diagnosis_only_reads_retained_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], saved_error: str | None,
+) -> None:
+    state = tmp_path / "frontend.cleanup"
+    state.mkdir(mode=0o700)
+    # Even an invalid receipt supplies no permission to clear custody here.
+    (state / "boot").write_text("unproven boot")
+    if saved_error is not None:
+        (state / "error").write_text(saved_error)
+    before = {path.name: path.read_bytes() for path in state.iterdir()}
+    monkeypatch.setattr(dev_processes.sys, "argv", ["dev_processes.py", "diagnose", "0", "unused", "frontend", str(state)])
+    with (patch.object(dev_processes, "clear_previous_boot") as boot_recovery,
+          patch.object(dev_processes, "request_stop") as stop,
+          patch.object(dev_processes, "DevelopmentProcessTree") as tree):
+        assert dev_processes.main() == 1
+        boot_recovery.assert_not_called()
+        stop.assert_not_called()
+        tree.assert_not_called()
+    assert {path.name: path.read_bytes() for path in state.iterdir()} == before
+    output = capsys.readouterr().err
+    if saved_error is None:
+        assert not output
+    else:
+        assert saved_error in output
