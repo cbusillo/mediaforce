@@ -362,9 +362,11 @@ class ManagedProcessController:
             if previous_guard is None:
                 active_guard = guard
             else:
-                def active_guard() -> None:
+                def combined_guard() -> None:
                     previous_guard()
                     guard()
+
+                active_guard = combined_guard
 
             self._activity_guard = active_guard
         try:
@@ -451,10 +453,10 @@ def _terminate_process(
             os.killpg(process_group_id, 0)
         except ProcessLookupError:
             return False
-        except OSError as exc:
-            if exc.errno == errno.ESRCH:
+        except OSError as probe_error:
+            if probe_error.errno == errno.ESRCH:
                 return False
-            if exc.errno == errno.EPERM:
+            if probe_error.errno == errno.EPERM:
                 return True
             raise
         return True
