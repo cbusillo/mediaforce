@@ -608,13 +608,15 @@ be stopped below an unreadable parent: the helper reports that boundary, preserv
 the ancestors and their siblings, and removes its PID record after proven cleanup.
 Restart then launches a replacement normally, leaving the unreadable ancestors alone.
 An unavailable ownership recheck before signalling instead reports unknown and
-retains the record. That failed capture closes its native handles and ends the
-cleanup supervisor: the first Stop or Restart reports incomplete capture and
-the next-system-restart requirement immediately. Restoring the reader alone
+retains the record. If native capture does not complete, the cleanup supervisor
+exits without descendant completion proof. The first Stop or Restart reports
+incomplete capture and the next-system-restart requirement immediately.
+Restoring the reader alone
 cannot recover that custody. Subsequent Stop and Restart retain the state;
 Start refuses a replacement and shows the saved failure. This is distinct from
 an error after completed capture, whose retained supervisor supports retry,
-and from setup that was proved unpublished before custody was acquired.
+and from setup that was proved unpublished before the cleanup supervisor was
+launched.
 A failed native argument read counts as exit only with independent
 process-absence evidence; macOS EINVAL alone remains unknown. The readers have
 macOS native and controlled Linux procfs coverage; the complete shell workflow's

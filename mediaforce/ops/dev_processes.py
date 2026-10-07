@@ -122,9 +122,13 @@ def sync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+CUSTODY_RECOVERY_ADVICE = ("custody cannot be recovered from a PID; "
+                          "pending state can be cleared by Stop after the next system restart")
+
+
 def unrecoverable_custody(reason: str) -> RuntimeError:
-    return RuntimeError(f"{reason}; custody cannot be recovered from a PID; "
-                        "pending state can be cleared by Stop after the next system restart")
+    original_reason = reason.replace(f"; {CUSTODY_RECOVERY_ADVICE}", "")
+    return RuntimeError(f"{original_reason}; {CUSTODY_RECOVERY_ADVICE}")
 
 
 def read_error(state: Path) -> str:
@@ -278,7 +282,7 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
                     if response == b"ok":
                         return 0
                     if tree is None:
-                        # Closed partial handles cannot prove descendant completion.
+                        # Failed capture cannot prove descendant completion.
                         return 1
     finally:
         if tree is not None:
@@ -328,7 +332,7 @@ def main() -> int:
             with state_directory(state):
                 error = read_error(state)
             if error:
-                print(f"development cleanup: {error}", file=sys.stderr)
+                print(f"development cleanup last failure: {error}", file=sys.stderr)
             return 1  # Observation never clears pending state or acquires custody.
         clear_previous_boot(state)
         if action == "stop":
@@ -351,7 +355,7 @@ def main() -> int:
         request_stop(state, pid if action == "stop" else 0)
         return 0
     except (OSError, RuntimeError, ValueError, IndexError) as exc:
-        print(f"development stop: {exc}; PID bookkeeping retained; retry the same stop command", file=sys.stderr)
+        print(f"development stop: {exc}; PID bookkeeping retained", file=sys.stderr)
         return 1
 
 
