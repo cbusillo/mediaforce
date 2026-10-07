@@ -198,7 +198,14 @@ class _LinuxProcessTree:
 
     @property
     def compromised(self) -> bool:
-        return False
+        # An external tree can reparent unseen children outside this helper.
+        return self._external_root
+
+    @property
+    def ownership_failure_reason(self) -> str | None:
+        if self._external_root:
+            return "Linux existing-tree descendant custody is unproven"
+        return None
 
     @property
     def requires_immediate_shutdown(self) -> bool:
@@ -400,6 +407,12 @@ class _DarwinProcessTree:
     @property
     def compromised(self) -> bool:
         return self._compromised
+
+    @property
+    def ownership_failure_reason(self) -> str | None:
+        if self._compromised:
+            return "managed process ownership was compromised"
+        return None
 
     @property
     def requires_immediate_shutdown(self) -> bool:
@@ -996,6 +1009,21 @@ def _reap_children(
             target_status = wait_status
 
 
+def _completed_termination_result(
+        tree: _LinuxProcessTree | _DarwinProcessTree,
+        succeeded: bool,
+) -> _TerminationResult:
+    if succeeded and not tree.compromised:
+        return _TerminationResult(True)
+    reason = tree.signal_failure_reason
+    if tree.compromised:
+        reason = reason or tree.ownership_failure_reason
+    return _TerminationResult(
+        False,
+        reason or "managed process termination could not be proven",
+    )
+
+
 def _terminate_tree(
         tree: _LinuxProcessTree | _DarwinProcessTree,
         reap: Callable[[], None],
@@ -1012,15 +1040,7 @@ def _terminate_tree(
             tree.refresh(_TREE_POLL_SECONDS if time.monotonic() < phase_deadline else 0.0)
             if not tree.live():
                 reap()
-                if succeeded and not tree.compromised:
-                    return _TerminationResult(True)
-                reason = tree.signal_failure_reason
-                if tree.compromised:
-                    reason = reason or "managed process ownership was compromised"
-                return _TerminationResult(
-                    False,
-                    reason or "managed process termination could not be proven",
-                )
+                return _completed_termination_result(tree, succeeded)
             if time.monotonic() >= phase_deadline:
                 break
             succeeded = tree.signal_all(termination_signal) and succeeded

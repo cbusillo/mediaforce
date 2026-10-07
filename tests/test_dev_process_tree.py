@@ -35,7 +35,7 @@ class NativeDevTree:
 
 @pytest.fixture
 def native_dev_tree(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[NativeDevTree]:
-    script, _, pid_file, _, env = prepare_dev_service(tmp_path, "absent", "pid_file", "owned")
+    script, _, pid_file, _, env = prepare_dev_service(tmp_path, "absent", "pid_file", "owned", native_custody=True)
     repo = Path(env["DEV_TEST_REPO"])
     worker = tmp_path / "worker.py"
     worker.write_text('''
@@ -48,6 +48,13 @@ recorded = False
 os.write(int(sys.argv[3]), b"R")
 os.close(int(sys.argv[3]))
 while not select.select([int(sys.argv[1])], [], [], .01)[0]:
+    if not sibling and len(sys.argv) > 4 and Path(sys.argv[4]).with_suffix(".fork").exists():
+        child = os.fork()
+        if child:
+            Path(sys.argv[4]).with_suffix(".late-fork.json").write_text(json.dumps({"worker": os.getpid(), "child": child}))
+            os._exit(0)
+        sibling = True
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     if not sibling and not recorded and len(sys.argv) > 4 and os.getppid() != parent:
         Path(sys.argv[4]).write_text(json.dumps({"before": parent, "after": os.getppid()}))
         recorded = True
@@ -136,13 +143,10 @@ sibling.wait()
         assert select.select([sibling_r], [], [], 5)[0], "fixture sibling still alive"
         assert os.read(sibling_r, 1) == b""
         cleanup_state = pid_file.parent / "backend.cleanup"
-        if owned_tree is not None and owned_tree.retain_cleanup_marker:
-            # Only test-owned artifacts are cleared, after every owned lifetime
-            # pipe has proved EOF and the failed supervisor no longer listens.
-            with dev_processes.state_directory(cleanup_state), socket.socket(socket.AF_UNIX) as client:
-                with pytest.raises(ConnectionRefusedError):
-                    client.connect("control.sock")
-            dev_processes.remove_state(cleanup_state)
+        if cleanup_state.exists() and (
+                sys.platform == "linux" or owned_tree is not None and owned_tree.retain_cleanup_marker
+        ):
+            clear_test_owned_lost_cleanup(cleanup_state)
         deadline = time.monotonic() + 5
         while cleanup_state.exists() and time.monotonic() < deadline:
             time.sleep(.02)
@@ -156,6 +160,22 @@ sibling.wait()
         root.stderr.close()
 
 
+def clear_test_owned_lost_cleanup(state: Path) -> None:
+    # Only fixture state is removed, after all descendant lifetime pipes proved
+    # EOF and the custody supervisor's own socket proves it no longer listens.
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            with dev_processes.state_directory(state), socket.socket(socket.AF_UNIX) as client:
+                client.connect("control.sock")
+        except (ConnectionRefusedError, FileNotFoundError):
+            if state.exists():
+                dev_processes.remove_state(state)
+            return
+        assert time.monotonic() < deadline, "fixture cleanup supervisor survived teardown"
+        time.sleep(0.5)
+
+
 def native_command(pid: int) -> str:
     return subprocess.check_output(
         ["/bin/ps", "-ww", "-p", str(pid), "-o", "command="],
@@ -167,7 +187,12 @@ def stop_native_backend(tree: NativeDevTree, *, cwd: Path | None = None) -> None
     tree.pid_file.write_text(str(tree.pids["backend"]))
     result = subprocess.run(["/bin/bash", str(tree.script), "stop", "backend"],
                             cwd=cwd, env=tree.env, capture_output=True, text=True, timeout=15)
-    assert result.returncode == 0, result.stderr
+    if sys.platform == "linux":
+        assert result.returncode != 0
+        assert "Linux existing-tree descendant custody is unproven" in result.stderr
+        assert tree.pid_file.read_text() == str(tree.pids["backend"])
+    else:
+        assert result.returncode == 0, result.stderr
     assert select.select([tree.worker_lifetime], [], [], 5)[0], "owned tree survived"
     assert os.read(tree.worker_lifetime, 1) == b""
 
@@ -202,10 +227,15 @@ def test_internal_stop_cleans_its_current_root_after_clearing_prior_boot_state(n
     result = subprocess.run([
         sys.executable, str(helper), "stop", str(tree.pids["backend"]), str(tree.script), "backend", str(state),
     ], env=tree.env, capture_output=True, text=True, timeout=15)
-    assert result.returncode == 0, result.stderr
+    if sys.platform == "linux":
+        assert result.returncode != 0
+        assert "Linux existing-tree descendant custody is unproven" in result.stderr
+        assert state.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert not state.exists()
     assert select.select([tree.worker_lifetime], [], [], 5)[0], "requested tree survived old-state cleanup"
     assert os.read(tree.worker_lifetime, 1) == b""
-    assert not state.exists()
     assert_shared_workloads_survive(tree)
 
 
@@ -247,7 +277,7 @@ def _process_tree(*args, **kwargs):
             Path({str(exit_trigger)!r}).touch()
             deadline = time.monotonic() + 3
             while not Path({str(tree.reparented)!r}).exists() and time.monotonic() < deadline:
-                time.sleep(.01)
+                time.sleep(0.01)
             assert Path({str(tree.reparented)!r}).exists(), "backend did not exit independently"
             raise RuntimeError("injected capture failure after root exit")
         return original_refresh(*args, **kwargs)
@@ -459,6 +489,15 @@ def _process_tree(*args, **kwargs):
     calls = [json.loads(line) for line in Path(tree.env["DEV_TEST_LOG"]).read_text().splitlines()]
     assert not any(call[0] == "nohup" for call in calls), "new backend launched before cleanup"
     repaired.touch()
+    if sys.platform == "linux":
+        stop_native_backend(tree)
+        assert tree.pid_file.read_text() == str(tree.pids["backend"])
+        assert (tree.pid_file.parent / "backend.cleanup").exists()
+        assert not completed.exists(), "external Linux custody was falsely certified"
+        calls = [json.loads(line) for line in Path(tree.env["DEV_TEST_LOG"]).read_text().splitlines()]
+        assert not any(call[0] == "nohup" for call in calls)
+        assert_shared_workloads_survive(tree)
+        return
     if blocked_action == "restart" and component == "backend":
         table = tmp_path / "listeners.json"
         table.write_text("[]")
@@ -512,9 +551,15 @@ if not seen.exists():
     print({tree.pids['backend']})
     print({tree.pids['worker']})
 ''')
-    result = subprocess.run(["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
-                            capture_output=True, text=True, timeout=15)
-    assert result.returncode == 0, result.stderr
+    result = subprocess.run(
+        ["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
+        capture_output=True, text=True, timeout=15,
+    )
+    if sys.platform == "linux":
+        assert result.returncode != 0
+        assert "Linux existing-tree descendant custody is unproven" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
     assert select.select([tree.worker_lifetime], [], [], 5)[0], "owned tree survived"
     assert os.read(tree.worker_lifetime, 1) == b""
     assert_shared_workloads_survive(tree)
@@ -613,3 +658,100 @@ def test_failed_custody_preserves_pid_file_and_prevents_restart(tmp_path: Path, 
     finally:
         child.kill()
         child.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="native Linux external-tree qualification")
+@pytest.mark.parametrize("action", ["stop", "restart"])
+def test_linux_late_fork_reports_unproven_custody_through_launcher(
+        native_dev_tree: NativeDevTree, action: str,
+) -> None:
+    tree = native_dev_tree
+    repo = Path(tree.env["DEV_TEST_REPO"])
+    source = Path(__file__).resolve().parents[1] / "mediaforce"
+    # Use the complete real package, rather than the fixture's empty initializers.
+    shutil.copytree(source, repo / "mediaforce", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    custody_module = repo / "mediaforce/core/_process_deadline.py"
+    trigger = tree.reparented.with_suffix(".fork")
+    record = tree.reparented.with_suffix(".late-fork.json")
+    with custody_module.open("a") as output:
+        output.write(f'''
+# Fixture-only scheduling hook: actual discovery/pinning precedes the fork.
+_native_refresh = _LinuxProcessTree.refresh
+_fork_triggered = False
+def _late_fork_refresh(self, timeout=0.0):
+    global _fork_triggered
+    _native_refresh(self, timeout)
+    if _fork_triggered or {tree.pids["worker"]} not in self._processes:
+        return
+    _fork_triggered = True
+    descriptor = self._processes[{tree.pids["worker"]}].process_descriptor
+    from pathlib import Path
+    Path({str(trigger)!r}).touch()
+    deadline = time.monotonic() + 5
+    while not _pidfd_exited(descriptor) and time.monotonic() < deadline:
+        time.sleep(.001)
+    assert _pidfd_exited(descriptor), "tracked worker did not exit"
+_LinuxProcessTree.refresh = _late_fork_refresh
+''')
+    tree.pid_file.write_text(str(tree.pids["backend"]))
+    lock = Path(tree.env["DEV_TEST_LOCK"])
+    lock_bytes = lock.read_bytes()
+    result = subprocess.run(["/bin/bash", str(tree.script), action, "backend"],
+                            env=tree.env, capture_output=True, text=True, timeout=15)
+    assert record.exists(), result.stderr
+    rows = json.loads(record.read_text())
+    assert rows["worker"] == tree.pids["worker"]
+    assert rows["child"] > 1
+    assert result.returncode != 0, result.stdout
+    assert "Linux existing-tree descendant custody is unproven" in result.stderr
+    if action == "restart":
+        assert "uv run mediaforce-web --no-reload" in result.stderr
+        assert "npm --prefix frontend run dev" in result.stderr
+    assert "backend: stopped" not in result.stdout
+    assert not select.select([tree.worker_lifetime], [], [], .1)[0], "late grandchild unexpectedly exited"
+    assert tree.pid_file.read_text() == str(tree.pids["backend"])
+    assert lock.read_bytes() == lock_bytes
+    calls = [json.loads(line) for line in Path(tree.env["DEV_TEST_LOG"]).read_text().splitlines()]
+    assert not any(call[0] == "nohup" for call in calls), "restart launched a replacement"
+    assert_shared_workloads_survive(tree)
+    # native_dev_tree's finally releases the grandchild via its inherited pipe
+    # and proves lifetime EOF, independently of PID discovery or reuse.
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="native Linux external-tree qualification")
+def test_linux_retry_retains_specific_custody_reason(native_dev_tree: NativeDevTree) -> None:
+    tree = native_dev_tree
+    stop_native_backend(tree)
+    deadline = time.monotonic() + 5
+    error = tree.pid_file.parent / "backend.cleanup/error"
+    while (not error.exists() or "Linux existing-tree" not in error.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    state = error.parent
+    while time.monotonic() < deadline:
+        with dev_processes.state_directory(state), socket.socket(socket.AF_UNIX) as client:
+            try:
+                client.connect("control.sock")
+            except (ConnectionRefusedError, FileNotFoundError):
+                break
+        # Let the supervisor's idle check run between connection probes.
+        time.sleep(0.5)
+    else:
+        pytest.fail("cleanup supervisor still accepts connections")
+    result = subprocess.run(
+        ["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode != 0
+    assert "Linux existing-tree descendant custody is unproven" in result.stderr
+    assert tree.pid_file.read_text() == str(tree.pids["backend"])
+    assert_shared_workloads_survive(tree)
+
+
+def test_fixture_teardown_handles_missing_socket_and_removed_state(tmp_path: Path) -> None:
+    state = tmp_path / "backend.cleanup"
+    state.mkdir(mode=0o700)
+    (state / "boot").write_text("test-owned")
+    clear_test_owned_lost_cleanup(state)
+    assert not state.exists()
+    clear_test_owned_lost_cleanup(state)

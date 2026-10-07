@@ -509,11 +509,18 @@ and reload the item after moving the checkout or recreating `.venv`, and use
 `docs/development/macos-login-item.md` for verification and raw launchctl
 fallbacks.
 
+## Local web development
+
+The web UI is now split cleanly:
+
+- FastAPI serves the backend API and review media.
+- A SvelteKit frontend lives under `frontend/`.
+
 The frontend dev server now reads the same repo-local `.env` file. The clearest
 local setup is:
 
 - `MEDIAFORCE_WEB_PORT=8777` for the FastAPI app
-- `MEDIAFORCE_FRONTEND_DEV_PORT=4173` for `scripts/mediaforce-dev.sh start`
+- `MEDIAFORCE_FRONTEND_DEV_PORT=4173` for Vite frontend development
 - `MEDIAFORCE_FRONTEND_API_ORIGIN=http://127.0.0.1:8777` so the frontend dev
   server proxies API requests to the backend explicitly
 
@@ -522,14 +529,7 @@ That means the two useful local URLs are:
 - `http://127.0.0.1:4173` while actively editing the frontend in dev mode
 - `http://127.0.0.1:8777` when checking the backend-served built app
 
-## Local web development
-
-The web UI is now split cleanly:
-
-- FastAPI serves the backend API and review media.
-- A SvelteKit frontend lives under `frontend/`.
-
-For local web work, use `scripts/mediaforce-dev.sh` with
+For macOS local web work, use `scripts/mediaforce-dev.sh` with
 `start|stop|restart|status|smoke`. It manages the backend and frontend together,
 uses the repo-local `.env`, writes pid files and logs under
 `~/Library/Application Support/mediaforce/`, starts Vite with `--strictPort`,
@@ -578,6 +578,30 @@ Development stop requires the checkout's prepared Python environment
 custody modules, even when invoked from another directory or unrelated package
 edits cannot import. Native custody failures remain visible rather than falling
 back to bare PID signals.
+
+On Linux, the launcher refuses Start and supplies the foreground commands below,
+including replacements requested through Restart. For an
+existing tree, stop can terminate the identities it captured but cannot prove that
+an existing worker did not fork and exit between discovery passes, leaving an
+unseen grandchild. It therefore reports `Linux existing-tree descendant custody
+is unproven`, retains bookkeeping, and blocks restart even when the captured
+processes exited. Repeating stop cannot establish the missing custody. For Linux
+web development, keep the backend in its foreground terminal instead:
+
+```bash
+uv run mediaforce-web --no-reload
+```
+
+Run `npm --prefix frontend run dev` in a second terminal when editing the UI.
+End those foreground commands from their terminals; do not use development
+stop/restart to claim Linux descendant cleanup. A launcher Stop against the
+foreground backend also leaves unproven cleanup state. Stop preserves that state
+until a verified system restart; retries cannot recover missing custody. Stop All attempts both components and
+reports failure; `stop backend` also attempts the backend independently.
+Start foreground development only after the earlier processes are resolved.
+This limitation does not apply to
+Linux commands launched inside Mediaforce's scoped subprocess supervisor, which
+establishes child custody before launch. Darwin retains its strict fork guard.
 
 Development PID files live in a directory under that state path keyed by the
 physical checkout: `development/<checkout hash>/`. Each checkout manages its
@@ -649,10 +673,9 @@ full backend pytest suite, CLI smoke, frontend type checks, frontend lint,
 frontend unit tests, frontend build, and the managed web route smoke
 (`npm --prefix frontend run smoke:web`).
 
-For frontend development, let `scripts/mediaforce-dev.sh start` run the Svelte
-app. The Vite dev server proxies `/api/*` and `/review-media/*` back to the
-FastAPI backend. For the single-server local UI, build the frontend with
-`npm run build`; FastAPI will then serve the built SPA from `frontend/build/`.
+See [Local web development](#local-web-development) for platform-specific
+backend/frontend startup and [Production-style build](frontend/README.md#production-style-build)
+for the backend-served frontend build.
 
 When packaging Mediaforce with `uv build`, the wheel build now runs
 `npm ci` plus `npm run build` automatically so the packaged app always embeds a

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_dev_process_tree import native_command
+from tests.test_dev_process_tree import clear_test_owned_lost_cleanup, native_command
 from tests.test_dev_service import prepare_dev_service
 
 
@@ -34,7 +34,7 @@ def frontend_tree(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Fr
     checkout_name, interpreter_path, remove_interpreter = request.param
     checkout_parent = tmp_path / checkout_name
     checkout_parent.mkdir()
-    script, _, backend_pid_file, _, env = prepare_dev_service(checkout_parent, "absent", "idle", "owned")
+    script, _, backend_pid_file, _, env = prepare_dev_service(checkout_parent, "absent", "idle", "owned", native_custody=True)
     repo = Path(env["DEV_TEST_REPO"])
     frontend = repo / "frontend"
     vite = frontend / "node_modules/.bin/vite"
@@ -118,6 +118,10 @@ sibling.wait()
             assert select.select([reader], [], [], 5)[0], "fixture process survived teardown"
             assert os.read(reader, 1) == b""
             os.close(reader)
+        cleanup_state = backend_pid_file.parent / "frontend.cleanup"
+        if sys.platform == "linux" and cleanup_state.exists():
+            clear_test_owned_lost_cleanup(cleanup_state)
+        assert not cleanup_state.exists(), "fixture cleanup supervisor survived teardown"
         if root.stdout is not None:
             root.stdout.close()
         assert root.stderr is not None
@@ -145,9 +149,35 @@ def test_frontend_stop_preserves_native_shared_wrapper_and_sibling(frontend_tree
         table.write_text(json.dumps(rows))
     result = subprocess.run(["/bin/bash", str(tree.script), "stop", "frontend"],
                             env=tree.env, capture_output=True, text=True, timeout=20)
-    assert result.returncode == 0, result.stderr
+    if sys.platform == "linux":
+        assert result.returncode != 0
+        assert "Linux existing-tree descendant custody is unproven" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
     assert select.select([tree.owned_lifetime], [], [], 5)[0], "owned worker survived stop"
     assert os.read(tree.owned_lifetime, 1) == b""
     assert not select.select([tree.sibling_lifetime], [], [], .1)[0], "unrelated sibling exited"
     assert tree.wrapper.poll() is None, "shared wrapper became the stop root"
-    assert not tree.pid_file.exists()
+    if sys.platform == "linux":
+        if discovery == "pid_file":
+            assert tree.pid_file.read_text() == str(tree.rows["worker"])
+    else:
+        assert not tree.pid_file.exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="native Linux external-tree qualification")
+def test_linux_stop_all_attempts_backend_after_frontend_uncertainty(frontend_tree: FrontendTree) -> None:
+    tree = frontend_tree
+    tree.pid_file.write_text(str(tree.rows["worker"]))
+    result = subprocess.run(
+        ["/bin/bash", str(tree.script), "stop", "all"], env=tree.env,
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode != 0
+    assert "Linux existing-tree descendant custody is unproven" in result.stderr
+    assert "backend: stopped" in result.stdout
+    assert tree.pid_file.read_text() == str(tree.rows["worker"])
+    assert select.select([tree.owned_lifetime], [], [], 5)[0]
+    assert os.read(tree.owned_lifetime, 1) == b""
+    assert tree.wrapper.poll() is None
+    assert not select.select([tree.sibling_lifetime], [], [], 0.1)[0]
