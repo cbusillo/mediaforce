@@ -35,14 +35,18 @@ def test_termination_repeats_graceful_signals_then_forces_with_sticky_failure(
 
 
 def test_termination_does_not_force_an_empty_but_compromised_tree() -> None:
-    tree = Mock(compromised=True, signal_failure_reason=None)
+    ownership_reason = "test-owned custody failure"
+    tree = Mock(
+        spec=custody._DarwinProcessTree, compromised=True, signal_failure_reason=None,
+        ownership_failure_reason=ownership_reason,
+    )
     tree.signal_all.return_value = True
     tree.live.return_value = False
     with patch.object(custody.time, "monotonic", return_value=0):
         result = custody._terminate_tree(tree, Mock())
 
     assert not result.succeeded
-    assert result.reason == "managed process ownership was compromised"
+    assert result.reason == ownership_reason
     tree.signal_all.assert_called_once_with(signal.SIGTERM)
 
 

@@ -562,12 +562,16 @@ stop_all() {
 	return "${failed}"
 }
 
+foreground_development_hint() {
+	echo "Run uv run mediaforce-web --no-reload in one terminal and npm --prefix frontend run dev in another." >&2
+}
+
 run_for_component() {
 	local action="${1:-status}"
 	local component="${2:-all}"
 	if [[ "${action}" == "start" && "$(uname -s)" == "Linux" ]]; then
 		echo "Linux development launcher cleanup cannot prove descendant custody; Start preserves existing processes." >&2
-		echo "Run uv run mediaforce-web --no-reload in one terminal and npm --prefix frontend run dev in another." >&2
+		foreground_development_hint
 		return 1
 	fi
 	case "${action}:${component}" in
@@ -577,16 +581,14 @@ run_for_component() {
 	stop:all) stop_all ;;
 	stop:backend) stop_backend ;;
 	stop:frontend) stop_frontend ;;
-	restart:all)
-		stop_all || return 1
-		run_for_component start all
-		;;
-	restart:backend)
-		stop_backend || return 1
-		run_for_component start backend
-		;;
-	restart:frontend)
-		stop_frontend && run_for_component start frontend
+	restart:all | restart:backend | restart:frontend)
+		run_for_component stop "${component}" || {
+			if [[ "$(uname -s)" == "Linux" ]]; then
+				foreground_development_hint
+			fi
+			return 1
+		}
+		run_for_component start "${component}"
 		;;
 	status:all)
 		status_backend || true

@@ -513,7 +513,7 @@ The frontend dev server now reads the same repo-local `.env` file. The clearest
 local setup is:
 
 - `MEDIAFORCE_WEB_PORT=8777` for the FastAPI app
-- `MEDIAFORCE_FRONTEND_DEV_PORT=4173` for `scripts/mediaforce-dev.sh start`
+- `MEDIAFORCE_FRONTEND_DEV_PORT=4173` for Vite frontend development
 - `MEDIAFORCE_FRONTEND_API_ORIGIN=http://127.0.0.1:8777` so the frontend dev
   server proxies API requests to the backend explicitly
 
@@ -655,10 +655,8 @@ full backend pytest suite, CLI smoke, frontend type checks, frontend lint,
 frontend unit tests, frontend build, and the managed web route smoke
 (`npm --prefix frontend run smoke:web`).
 
-For frontend development, let `scripts/mediaforce-dev.sh start` run the Svelte
-app. The Vite dev server proxies `/api/*` and `/review-media/*` back to the
-FastAPI backend. For the single-server local UI, build the frontend with
-`npm run build`; FastAPI will then serve the built SPA from `frontend/build/`.
+See [Local web development](#local-web-development) for platform-specific
+backend/frontend startup and the backend-served frontend build.
 
 When packaging Mediaforce with `uv build`, the wheel build now runs
 `npm ci` plus `npm run build` automatically so the packaged app always embeds a

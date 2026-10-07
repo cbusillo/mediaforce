@@ -704,6 +704,9 @@ _LinuxProcessTree.refresh = _late_fork_refresh
     assert rows["child"] > 1
     assert result.returncode != 0, result.stdout
     assert "Linux existing-tree descendant custody is unproven" in result.stderr
+    if action == "restart":
+        assert "uv run mediaforce-web --no-reload" in result.stderr
+        assert "npm --prefix frontend run dev" in result.stderr
     assert "backend: stopped" not in result.stdout
     assert not select.select([tree.worker_lifetime], [], [], .1)[0], "late grandchild unexpectedly exited"
     assert tree.pid_file.read_text() == str(tree.pids["backend"])
