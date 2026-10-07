@@ -509,6 +509,13 @@ and reload the item after moving the checkout or recreating `.venv`, and use
 `docs/development/macos-login-item.md` for verification and raw launchctl
 fallbacks.
 
+## Local web development
+
+The web UI is now split cleanly:
+
+- FastAPI serves the backend API and review media.
+- A SvelteKit frontend lives under `frontend/`.
+
 The frontend dev server now reads the same repo-local `.env` file. The clearest
 local setup is:
 
@@ -521,13 +528,6 @@ That means the two useful local URLs are:
 
 - `http://127.0.0.1:4173` while actively editing the frontend in dev mode
 - `http://127.0.0.1:8777` when checking the backend-served built app
-
-## Local web development
-
-The web UI is now split cleanly:
-
-- FastAPI serves the backend API and review media.
-- A SvelteKit frontend lives under `frontend/`.
 
 For macOS local web work, use `scripts/mediaforce-dev.sh` with
 `start|stop|restart|status|smoke`. It manages the backend and frontend together,
@@ -656,7 +656,8 @@ frontend unit tests, frontend build, and the managed web route smoke
 (`npm --prefix frontend run smoke:web`).
 
 See [Local web development](#local-web-development) for platform-specific
-backend/frontend startup and the backend-served frontend build.
+backend/frontend startup and [Production-style build](frontend/README.md#production-style-build)
+for the backend-served frontend build.
 
 When packaging Mediaforce with `uv build`, the wheel build now runs
 `npm ci` plus `npm run build` automatically so the packaged app always embeds a

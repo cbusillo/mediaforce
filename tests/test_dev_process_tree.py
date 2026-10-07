@@ -173,7 +173,7 @@ def clear_test_owned_lost_cleanup(state: Path) -> None:
                 dev_processes.remove_state(state)
             return
         assert time.monotonic() < deadline, "fixture cleanup supervisor survived teardown"
-        time.sleep(.3)
+        time.sleep(0.5)
 
 
 def native_command(pid: int) -> str:
