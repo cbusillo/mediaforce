@@ -63,6 +63,7 @@ PRIOR_REPAIR_RECONCILE_MTIME_SLACK_SECONDS = 300
 # A finished file below this share of the size its sample predicted waits for the owner instead of being
 # published (owner decision on #633: 70%). Across 516 production encodes, one file fell below it.
 FAR_BELOW_PREDICTION_RATIO = 0.70
+FINAL_SIZE_GOAL_CHECK = "staged file satisfies the approved final size contract"
 FAR_BELOW_PREDICTION_CHECK = "staged file is not far smaller than its sample predicted"
 
 
@@ -317,7 +318,7 @@ def validate_one_item(
         check(
             validation,
             accepted_under_target or final_lower_bound_bytes <= staged_size_bytes <= final_upper_bound_bytes,
-            "staged file satisfies the approved final size contract",
+            FINAL_SIZE_GOAL_CHECK,
         )
 
     size_prediction = staged_size_prediction(_stored_validation(row), staged_size_bytes)

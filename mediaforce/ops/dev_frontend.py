@@ -7,6 +7,8 @@ import re
 import struct
 import sys
 
+NOT_FRONTEND = 3
+
 
 def decode_darwin_arguments(data: bytes) -> list[str]:
     if len(data) < 4:
@@ -119,9 +121,9 @@ def main() -> int:
         if len(sys.argv) != 4 or candidate <= 1:
             raise ValueError("invalid frontend ownership arguments")
         pid = candidate
-        return 0 if matches_frontend(process_arguments(pid), checkout, cwd) else 1
+        return 0 if matches_frontend(process_arguments(pid), checkout, cwd) else NOT_FRONTEND
     except (FileNotFoundError, ProcessLookupError):
-        return 1
+        return NOT_FRONTEND
     except (OSError, RuntimeError, ValueError, IndexError) as exc:
         # Darwin may return EINVAL after exit. Only an independent absence
         # check makes a failed argument read non-ownership; EINVAL alone cannot.
@@ -129,7 +131,7 @@ def main() -> int:
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
-                return 1
+                return NOT_FRONTEND
             except OSError:
                 pass
         target = "" if pid is None else f" for pid {pid}"

@@ -223,7 +223,7 @@ def test_native_reader_exit_between_cwd_and_argument_read(tmp_path: Path) -> Non
     process.stdout.close()
     assert process.stderr is not None
     process.stderr.close()
-    assert result.returncode == 1, result.stderr
+    assert result.returncode == dev_frontend.NOT_FRONTEND, result.stderr
     assert result.stderr == ""
 
 

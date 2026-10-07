@@ -2964,3 +2964,25 @@ describe('sizeHeldRecords', () => {
 		expect(sizeHeldRecords(integrity).map((held) => held.item_id)).toEqual([7]);
 	});
 });
+
+describe('finished-file recovery', () => {
+	it('shows size and settings-history remakes, including their blocked explanation', () => {
+		const integrity = {
+			records: [
+				{
+					item_id: 1,
+					disposition: 'validation_failed',
+					remake: { reason: 'final_size', blocked_reason: 'Approve a fresh sample.' }
+				},
+				{
+					item_id: 2,
+					disposition: 'promotable',
+					remake: { reason: 'settings_history', blocked_reason: '' }
+				},
+				{ item_id: 3, disposition: 'validation_failed' },
+				{ item_id: null, remake: { reason: 'final_size', blocked_reason: '' } }
+			]
+		} as unknown as Parameters<typeof sizeHeldRecords>[0];
+		expect(sizeHeldRecords(integrity).map((file) => file.item_id)).toEqual([1, 2]);
+	});
+});

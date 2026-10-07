@@ -144,7 +144,8 @@ def test_linux_reader_rejects_unterminated_data(monkeypatch: pytest.MonkeyPatch)
         dev_frontend.process_arguments(4242)
 
 
-@pytest.mark.parametrize("error,status", [(PermissionError(), 2), (ValueError(), 2), (ProcessLookupError(), 1)])
+@pytest.mark.parametrize("error,status", [(PermissionError(), 2), (ValueError(), 2),
+                                         (ProcessLookupError(), dev_frontend.NOT_FRONTEND)])
 def test_argument_read_outcome_is_explicit(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], error: Exception, status: int) -> None:
     monkeypatch.setattr(sys, "argv", ["dev_frontend.py", "4242", "/checkout", "/checkout/frontend"])
     monkeypatch.setattr(dev_frontend, "process_arguments", Mock(side_effect=error))
@@ -159,7 +160,7 @@ def test_einval_requires_independent_exit_evidence(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(dev_frontend, "process_arguments", Mock(side_effect=OSError(errno.EINVAL, "native read failed")))
     alive = Mock(side_effect=ProcessLookupError() if exited else None)
     monkeypatch.setattr(dev_frontend.os, "kill", alive)
-    assert dev_frontend.main() == (1 if exited else 2)
+    assert dev_frontend.main() == (dev_frontend.NOT_FRONTEND if exited else 2)
     alive.assert_called_once_with(4242, 0)
     assert ("ownership unknown" in capsys.readouterr().err) == (not exited)
 
@@ -172,3 +173,12 @@ def test_pid_one_is_invalid_without_native_queries(monkeypatch: pytest.MonkeyPat
     assert dev_frontend.main() == 2
     arguments.assert_not_called()
     alive.assert_not_called()
+
+
+@pytest.mark.parametrize("arguments,expected", [([], dev_frontend.NOT_FRONTEND), (["npm", "run", "dev"], 0)])
+def test_reader_reserves_nonownership_exit_status(
+    monkeypatch: pytest.MonkeyPatch, arguments: list[str], expected: int,
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["dev_frontend.py", "4242", "/checkout", "/checkout/frontend"])
+    monkeypatch.setattr(dev_frontend, "process_arguments", Mock(return_value=arguments))
+    assert dev_frontend.main() == expected

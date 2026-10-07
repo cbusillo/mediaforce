@@ -114,7 +114,7 @@ mediaforce_backend_root_pid() {
 }
 
 pid_is_frontend_launcher() {
-	local pid="${1:-}" cwd
+	local pid="${1:-}" cwd status=0
 	cwd="$(lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
 	if [[ -z "${cwd}" ]]; then
 		pid_is_alive "${pid}" || return 1
@@ -125,7 +125,16 @@ pid_is_frontend_launcher() {
 		cd "${ROOT_DIR}"
 		uv run --no-sync --project "${ROOT_DIR}" python "${ROOT_DIR}/mediaforce/ops/dev_frontend.py" \
 			"${pid}" "${ROOT_DIR}" "${cwd}"
-	)
+	) || status=$?
+	# dev_frontend.py reserves 3 for proven non-ownership; Python startup can exit 1.
+	case "${status}" in
+	0) return 0 ;;
+	3) return 1 ;;
+	*)
+		echo "frontend: native argument ownership unknown for pid ${pid}; reader exited ${status}" >&2
+		return 2
+		;;
+	esac
 }
 
 pid_matches_mediaforce_frontend() {
@@ -209,9 +218,27 @@ kill_pid_tree() {
 	local component="${2:-}"
 	(
 		cd "${ROOT_DIR}"
-		uv run --no-sync --project "${ROOT_DIR}" python -m mediaforce.ops.dev_processes \
-			"${root_pid}" "${ROOT_DIR}/scripts/mediaforce-dev.sh" "${component}"
+		uv run --no-sync --project "${ROOT_DIR}" python "${ROOT_DIR}/mediaforce/ops/dev_processes.py" \
+			stop "${root_pid}" "${ROOT_DIR}/scripts/mediaforce-dev.sh" "${component}" "${DEV_STATE_DIR}/${component}.cleanup"
 	)
+}
+
+recover_pending_cleanup() {
+	local component="${1}"
+	[[ -e "${DEV_STATE_DIR}/${component}.cleanup" || -L "${DEV_STATE_DIR}/${component}.cleanup" ]] || return 0
+	(
+		cd "${ROOT_DIR}"
+		uv run --no-sync --project "${ROOT_DIR}" python "${ROOT_DIR}/mediaforce/ops/dev_processes.py" \
+			retry 0 "${ROOT_DIR}/scripts/mediaforce-dev.sh" "${component}" "${DEV_STATE_DIR}/${component}.cleanup"
+	)
+}
+
+require_cleanup_finished() {
+	local component="${1}"
+	if [[ -e "${DEV_STATE_DIR}/${component}.cleanup" || -L "${DEV_STATE_DIR}/${component}.cleanup" ]]; then
+		echo "${component}: cleanup is pending; run ${0##*/} stop ${component} before starting" >&2
+		return 1
+	fi
 }
 
 wait_for_no_managed_listener() {
@@ -376,6 +403,7 @@ reload_arg() {
 start_backend() {
 	load_env
 	mkdir -p "${DEV_STATE_DIR}"
+	require_cleanup_finished backend || return 1
 	stop_backend_launch_agent || return 1
 	local running_pid
 	running_pid="$(backend_running_pid)"
@@ -419,6 +447,7 @@ start_backend() {
 start_frontend() {
 	load_env
 	mkdir -p "${DEV_STATE_DIR}"
+	require_cleanup_finished frontend || return 1
 	local running_pid
 	running_pid="$(frontend_running_pid)" || { frontend_discovery_unknown; return 1; }
 	if [[ -n "${running_pid}" ]]; then
@@ -457,6 +486,7 @@ start_frontend() {
 
 stop_backend() {
 	load_env
+	recover_pending_cleanup backend || return 1
 	stop_backend_launch_agent || return 1
 	local pid managed_roots
 	pid="$(backend_running_pid)"
@@ -485,6 +515,7 @@ stop_backend() {
 
 stop_frontend() {
 	load_env
+	recover_pending_cleanup frontend || return 1
 	local pid managed_roots
 	pid="$(frontend_running_pid)" || { frontend_discovery_unknown; return 1; }
 	if [[ -n "${pid}" ]]; then

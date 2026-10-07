@@ -1774,6 +1774,10 @@ export interface StagedIntegrityRecord {
 	/** Present when the file is held for coming out far smaller than its sample predicted. */
 	size_prediction?: StagedSizePrediction;
 	publish_wait_reason?: string;
+	remake?: {
+		reason: 'size_held' | 'final_size' | 'settings_history';
+		blocked_reason: string;
+	};
 }
 
 export interface StagedSizePrediction {

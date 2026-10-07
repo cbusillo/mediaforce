@@ -1,9 +1,13 @@
+import fcntl
 import json
 import os
 import select
 import signal
+import shutil
+import socket
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,8 +15,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from tests.test_dev_service import prepare_dev_service
+from tests.test_dev_service import fixture_backend, prepare_dev_service
 from mediaforce.core import _process_deadline as custody, process_control
+from mediaforce.ops import dev_processes
 
 
 @dataclass
@@ -25,6 +30,7 @@ class NativeDevTree:
     worker_lifetime: int
     sibling_lifetime: int
     reparented: Path
+    retain_cleanup_marker: bool = False
 
 
 @pytest.fixture
@@ -50,7 +56,8 @@ os.read(int(sys.argv[1]), 1)
     backend = repo / ".venv/bin/mediaforce-web"
     backend.parent.mkdir(parents=True)
     backend.write_text('''
-import json, os, signal, subprocess, sys
+import json, os, select, signal, subprocess, sys
+from pathlib import Path
 ready_r, ready_w = os.pipe()
 child = subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2], sys.argv[4], str(ready_w), sys.argv[5]],
                         pass_fds=(int(sys.argv[2]), int(sys.argv[4]), ready_w))
@@ -59,6 +66,9 @@ assert os.read(ready_r, 1) == b"R"
 os.close(ready_r)
 signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
 print(json.dumps({"backend": os.getpid(), "worker": child.pid}), flush=True)
+while not select.select([int(sys.argv[2])], [], [], .01)[0]:
+    if Path(sys.argv[5]).with_suffix(".exit").exists():
+        os._exit(0)
 os.read(int(sys.argv[2]), 1)
 ''')
     wrapper = tmp_path / "wrapper.py"
@@ -103,6 +113,7 @@ sibling.wait()
     os.close(lifetime_w)
     os.close(worker_w)
     os.close(sibling_w)
+    owned_tree = None
     try:
         assert root.stdout is not None
         assert select.select([root.stdout], [], [], 5)[0], "fixture wrapper failed to become ready"
@@ -112,7 +123,8 @@ sibling.wait()
         ps = Path(env["PATH"]) / "ps"
         ps.write_text("#!" + sys.executable + "\nimport os, sys\nos.execv('/bin/ps', ['ps', *sys.argv[1:]])\n")
         ps.chmod(0o755)
-        yield NativeDevTree(script, pid_file, env, root, rows, worker_r, sibling_r, reparented)
+        owned_tree = NativeDevTree(script, pid_file, env, root, rows, worker_r, sibling_r, reparented)
+        yield owned_tree
     finally:
         # Pipe EOF releases every fixture process, including workers reparented by a failed stop.
         os.close(cleanup_w)
@@ -123,6 +135,18 @@ sibling.wait()
         assert os.read(worker_r, 1) == b""
         assert select.select([sibling_r], [], [], 5)[0], "fixture sibling still alive"
         assert os.read(sibling_r, 1) == b""
+        cleanup_state = pid_file.parent / "backend.cleanup"
+        if owned_tree is not None and owned_tree.retain_cleanup_marker:
+            # Only test-owned artifacts are cleared, after every owned lifetime
+            # pipe has proved EOF and the failed supervisor no longer listens.
+            with dev_processes.state_directory(cleanup_state), socket.socket(socket.AF_UNIX) as client:
+                with pytest.raises(ConnectionRefusedError):
+                    client.connect("control.sock")
+            dev_processes.remove_state(cleanup_state)
+        deadline = time.monotonic() + 5
+        while cleanup_state.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert not cleanup_state.exists(), "fixture cleanup supervisor survived teardown"
         os.close(sibling_r)
         os.close(lifetime_r)
         os.close(worker_r)
@@ -153,6 +177,307 @@ def assert_shared_workloads_survive(tree: NativeDevTree) -> None:
     # finish delivery before checking its unique lifetime pipe and the wrapper.
     assert not select.select([tree.sibling_lifetime], [], [], .1)[0], "foreign sibling exited"
     assert tree.wrapper.poll() is None, "shared wrapper became the kill root"
+
+
+def test_stop_survives_unrelated_real_package_import_failure(native_dev_tree: NativeDevTree) -> None:
+    tree = native_dev_tree
+    package = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce"
+    shutil.copytree(Path(__file__).resolve().parents[1] / "mediaforce", package,
+                    dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+    (package / "encoding/encode_queue.py").write_text("unfinished edit !!!\n")
+    stop_native_backend(tree)
+    assert_shared_workloads_survive(tree)
+
+
+def test_internal_stop_cleans_its_current_root_after_clearing_prior_boot_state(native_dev_tree: NativeDevTree) -> None:
+    tree = native_dev_tree
+    helper = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_processes.py"
+    current_boot = "00000000-0000-0000-0000-000000000002"
+    helper.write_text(helper.read_text().replace(
+        "\ndef main()", f"\ndef boot_id():\n    return {current_boot!r}\n\ndef main()",
+    ))
+    state = tree.pid_file.parent / "backend.cleanup"
+    state.mkdir(mode=0o700)
+    (state / "boot").write_text("00000000-0000-0000-0000-000000000001")
+    result = subprocess.run([
+        sys.executable, str(helper), "stop", str(tree.pids["backend"]), str(tree.script), "backend", str(state),
+    ], env=tree.env, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert select.select([tree.worker_lifetime], [], [], 5)[0], "requested tree survived old-state cleanup"
+    assert os.read(tree.worker_lifetime, 1) == b""
+    assert not state.exists()
+    assert_shared_workloads_survive(tree)
+
+
+def test_concurrent_cleanup_completion_reports_retry_without_reboot_advice(tmp_path: Path) -> None:
+    state = tmp_path / "backend.cleanup"
+    state.mkdir(mode=0o700)
+
+    def completed_elsewhere(_address: str) -> None:
+        state.rmdir()
+        raise FileNotFoundError
+
+    connection = Mock()
+    connection.connect.side_effect = completed_elsewhere
+    context = Mock()
+    context.__enter__ = Mock(return_value=connection)
+    context.__exit__ = Mock(return_value=False)
+    with patch.object(dev_processes.socket, "socket", return_value=context):
+        with pytest.raises(RuntimeError, match="session ended while connecting; retry Stop"):
+            dev_processes.request_stop(state, 4321)
+
+
+def test_failed_capture_cannot_discard_workers_after_the_root_exits(native_dev_tree: NativeDevTree) -> None:
+    tree = native_dev_tree
+    tree.retain_cleanup_marker = True
+    native = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/core/_process_deadline.py"
+    exit_trigger = tree.reparented.with_suffix(".exit")
+    native.write_text(native.read_text() + f'''
+from pathlib import Path
+_original_process_tree = _process_tree
+def _process_tree(*args, **kwargs):
+    tree = _original_process_tree(*args, **kwargs)
+    original_refresh = tree.refresh
+    initial_capture = True
+    def refresh(*args, **kwargs):
+        nonlocal initial_capture
+        if initial_capture:
+            initial_capture = False
+            original_refresh(*args, **kwargs)
+            Path({str(exit_trigger)!r}).touch()
+            deadline = time.monotonic() + 3
+            while not Path({str(tree.reparented)!r}).exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            assert Path({str(tree.reparented)!r}).exists(), "backend did not exit independently"
+            raise RuntimeError("injected capture failure after root exit")
+        return original_refresh(*args, **kwargs)
+    tree.refresh = refresh
+    return tree
+''')
+    tree.pid_file.write_text(str(tree.pids["backend"]))
+    first = subprocess.run(["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
+                           capture_output=True, text=True, timeout=15)
+    assert first.returncode != 0
+    assert "capture failure after root exit" in first.stderr
+    assert tree.reparented.exists()
+    for action in ("stop", "start"):
+        retry = subprocess.run(["/bin/bash", str(tree.script), action, "backend"], env=tree.env,
+                               capture_output=True, text=True, timeout=15)
+        assert retry.returncode != 0, retry.stdout
+        assert tree.pid_file.read_text() == str(tree.pids["backend"])
+        assert not select.select([tree.worker_lifetime], [], [], .1)[0], "worker did not survive failed capture"
+    assert_shared_workloads_survive(tree)
+
+
+@pytest.mark.parametrize("component", ["backend", "frontend"])
+def test_lost_cleanup_supervisor_never_discards_pending_custody(tmp_path: Path, component: str) -> None:
+    script, lock, pid_file, log, env = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    lock_bytes = lock.read_bytes()
+    pid_file = pid_file if component == "backend" else pid_file.with_name("mediaforce-frontend.pid")
+    pid_file.write_text("12345")
+    state = pid_file.parent / f"{component}.cleanup"
+    state.mkdir(mode=0o700)
+    fixture_boot = "00000000-0000-0000-0000-000000000001"
+    (state / "boot").write_text(fixture_boot)
+    helper = Path(env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_processes.py"
+    helper.write_text(helper.read_text().replace(
+        "\ndef main()", f"\ndef boot_id():\n    return {fixture_boot!r}\n\ndef main()",
+    ))
+    for action in ("start", "stop"):
+        result = subprocess.run(["/bin/bash", str(script), action, component], env=env,
+                                capture_output=True, text=True, timeout=15)
+        assert result.returncode != 0, result.stdout
+        assert "cleanup" in result.stderr
+        assert pid_file.read_text() == "12345"
+        assert state.exists()
+    assert lock.read_bytes() == lock_bytes
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert not any(call[0] == "nohup" for call in calls)
+
+
+def test_stop_can_clear_lost_custody_only_after_a_proven_new_boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = tmp_path / "backend.cleanup"
+    state.mkdir(mode=0o700)
+    (state / "boot").write_text("00000000-0000-0000-0000-000000000001")
+    monkeypatch.setattr(dev_processes, "boot_id", lambda: "00000000-0000-0000-0000-000000000002")
+    monkeypatch.setattr(sys, "argv", ["dev_processes.py", "retry", "0", "unused", "backend", str(state)])
+    with patch.object(dev_processes, "DevelopmentProcessTree") as tree:
+        assert dev_processes.main() == 0
+        tree.assert_not_called()
+    assert not state.exists()
+
+
+def test_prior_boot_removal_holds_publication_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = tmp_path / "backend.cleanup"
+    state.mkdir(mode=0o700)
+    old_boot = "00000000-0000-0000-0000-000000000001"
+    current_boot = "00000000-0000-0000-0000-000000000002"
+    (state / "boot").write_text(old_boot)
+
+    def assert_publication_locked() -> None:
+        with open(str(state) + ".lock", "r+") as competing_creator:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(competing_creator, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def locked_boot_read() -> str:
+        assert_publication_locked()
+        return current_boot
+
+    original_remove = dev_processes.remove_state
+
+    def locked_remove(marker: Path) -> None:
+        assert_publication_locked()
+        original_remove(marker)
+
+    monkeypatch.setattr(dev_processes, "remove_state", locked_remove)
+    monkeypatch.setattr(dev_processes, "boot_id", locked_boot_read)
+    dev_processes.clear_previous_boot(state)
+    assert not state.exists()
+    assert dev_processes.publish_state(state)
+    socket_marker = state / "control.sock"
+    socket_marker.touch()
+    dev_processes.clear_previous_boot(state)
+    assert socket_marker.exists(), "another caller removed the new current-boot session"
+
+
+def test_interrupted_disposal_does_not_leave_a_pending_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "backend.cleanup"
+    assert dev_processes.publish_state(state)
+    original_unlink = Path.unlink
+
+    def interrupted_unlink(path: Path, missing_ok: bool = False) -> None:
+        if path.name == "boot":
+            assert not state.exists(), "active marker still visible during disposal"
+            raise KeyboardInterrupt
+        original_unlink.__get__(path, Path)(missing_ok=missing_ok)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(Path, "unlink", interrupted_unlink)
+        with pytest.raises(KeyboardInterrupt):
+            dev_processes.remove_state(state)
+    assert not state.exists()
+    remnants = list(tmp_path.glob(".backend.cleanup-removing-*"))
+    assert len(remnants) == 1
+    assert (remnants[0] / "boot").is_file()
+    assert dev_processes.publish_state(state), "interrupted disposal blocked the next session"
+    dev_processes.remove_state(state)
+    assert not list(tmp_path.glob(".backend.cleanup-removing-*"))
+
+
+def test_invalid_boot_receipt_preserves_pending_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = tmp_path / "backend.cleanup"
+    state.mkdir(mode=0o700)
+    (state / "boot").write_text("truncated boot receipt")
+    monkeypatch.setattr(dev_processes, "boot_id", lambda: "00000000-0000-0000-0000-000000000002")
+    monkeypatch.setattr(sys, "argv", ["dev_processes.py", "retry", "0", "unused", "backend", str(state)])
+    assert dev_processes.main() == 1
+    assert state.exists()
+
+
+def test_interrupted_setup_does_not_publish_an_incomplete_boot_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "backend.cleanup"
+
+    def interrupted_boot_read() -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dev_processes, "boot_id", interrupted_boot_read)
+    with pytest.raises(KeyboardInterrupt):
+        dev_processes.publish_state(state)
+    assert not state.exists()
+    assert not list(tmp_path.glob(".backend.cleanup-*"))
+
+
+@pytest.mark.parametrize("blocked_action,component", [
+    ("start", "backend"), ("restart", "backend"), ("restart", "all"), ("stop", "backend"),
+])
+def test_repeated_stop_retains_captured_worker_custody(
+    native_dev_tree: NativeDevTree, blocked_action: str, component: str, tmp_path: Path,
+) -> None:
+    tree = native_dev_tree
+    native = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/core/_process_deadline.py"
+    failed = tree.pid_file.parent / "injected-failure"
+    repaired = tree.pid_file.parent / "repair"
+    completed = tree.pid_file.parent / "cleanup-proved"
+    poll_failed = tree.pid_file.parent / "idle-poll-failed"
+    native.write_text(native.read_text() + f'''
+from pathlib import Path
+_original_termination = _terminate_tree
+def _terminate_tree(tree, reap):
+    failed = Path({str(failed)!r})
+    if not Path({str(repaired)!r}).exists():
+        tree.signal_all(signal.SIGTERM)
+        time.sleep(.15)
+        failed.touch()
+        raise RuntimeError("injected post-TERM cleanup failure")
+    result = _original_termination(tree, reap)
+    if result.succeeded:
+        Path({str(completed)!r}).touch()
+    return result
+
+_original_process_tree = _process_tree
+def _process_tree(*args, **kwargs):
+    tree = _original_process_tree(*args, **kwargs)
+    original_refresh = tree.refresh
+    def refresh(*args, **kwargs):
+        if Path({str(failed)!r}).exists() and not Path({str(poll_failed)!r}).exists():
+            Path({str(poll_failed)!r}).touch()
+            raise RuntimeError("injected idle custody refresh failure")
+        return original_refresh(*args, **kwargs)
+    tree.refresh = refresh
+    return tree
+''')
+    tree.pid_file.write_text(str(tree.pids["backend"]))
+    first = subprocess.run(["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
+                           capture_output=True, text=True, timeout=15)
+    assert first.returncode != 0
+    assert "injected post-TERM" in first.stderr
+    assert tree.pid_file.read_text() == str(tree.pids["backend"])
+    assert not select.select([tree.worker_lifetime], [], [], .1)[0], "worker did not survive injected failure"
+    assert tree.reparented.exists(), "root did not exit before retry"
+    deadline = time.monotonic() + 3
+    while not poll_failed.exists() and time.monotonic() < deadline:
+        time.sleep(.02)
+    assert poll_failed.exists(), "idle custody fault did not run"
+    assert "idle custody refresh" in (tree.pid_file.parent / "backend.cleanup/error").read_text()
+    # A concurrent Stop for a different root cannot consume this tree's success.
+    different = subprocess.run([
+        sys.executable, str(Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_processes.py"),
+        "stop", str(tree.pids["sibling"]), str(tree.script), "backend", str(tree.pid_file.parent / "backend.cleanup"),
+    ], env=tree.env, capture_output=True, text=True, timeout=10)
+    assert different.returncode != 0
+    assert "another development root" in different.stderr
+    assert_shared_workloads_survive(tree)
+    blocked = subprocess.run(["/bin/bash", str(tree.script), blocked_action, component], env=tree.env,
+                             capture_output=True, text=True, timeout=15)
+    assert blocked.returncode != 0, blocked.stdout
+    assert tree.pid_file.read_text() == str(tree.pids["backend"])
+    assert not select.select([tree.worker_lifetime], [], [], .1)[0]
+    calls = [json.loads(line) for line in Path(tree.env["DEV_TEST_LOG"]).read_text().splitlines()]
+    assert not any(call[0] == "nohup" for call in calls), "new backend launched before cleanup"
+    repaired.touch()
+    if blocked_action == "restart" and component == "backend":
+        table = tmp_path / "listeners.json"
+        table.write_text("[]")
+        tree.env["DEV_TEST_TREE"] = str(table)
+        with fixture_backend(tmp_path, tree.env, shutdown_finished=completed) as (started, descriptors):
+            restarted = subprocess.run(["/bin/bash", str(tree.script), "restart", "backend"], env=tree.env,
+                                       capture_output=True, text=True, timeout=20, pass_fds=descriptors)
+            assert restarted.returncode == 0, restarted.stderr
+            assert select.select([tree.worker_lifetime], [], [], 5)[0], "old worker survived restart"
+            assert os.read(tree.worker_lifetime, 1) == b""
+            assert int(tree.pid_file.read_text()) == json.loads(started.read_text())["pid"]
+        stopped = subprocess.run(["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
+                                 capture_output=True, text=True, timeout=15)
+        assert stopped.returncode == 0, stopped.stderr
+    else:
+        stop_native_backend(tree)
+    assert not tree.pid_file.exists()
+    assert not (tree.pid_file.parent / "backend.cleanup").exists()
+    assert_shared_workloads_survive(tree)
 
 
 @pytest.mark.parametrize("native_dev_tree", [

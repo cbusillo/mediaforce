@@ -1,0 +1,45 @@
+# Make a finished file again
+
+The folder workspace offers **Make again** beside each unpublished file whose
+only failed check is its approved final size, and beside checked files whose
+settings history is missing. It uses the existing per-file
+`POST /api/folders/{prefix}/size-held-decision` action with
+`library_item_id` and `keep: false`.
+
+A final-size failure requires a fresh approved sample and a changed goal under
+the same contract check used for failed-run recovery. Older multi-file runs
+need a changed size goal and compare the missed episode's own duration and target; an unnamed or unreadable
+comparison stays blocked. If an earlier legacy comparison recorded the miss
+under the newly approved goal, verified recovery appends a resolution event
+without erasing the miss. The resolution survives removal of the terminal job
+record; a later return to the old missed goal still stays blocked. Missing settings history requires a current approval
+and a new encode rather than accepting the old output without that history.
+
+The action rechecks eligibility and the queue’s run-level and saved per-file
+size-miss guards before removing the staged output. These checks are read-only;
+verified legacy recoveries are recognized without rewriting their history. An active
+encode or sample run blocks removal, and every remake needs a current approved sample. The original must be accessible, and the staged path must
+not point at it; restore source access before retrying when it is unavailable. It then removes that file's staged copy and partial output,
+returns that library item to planned, and queues only that item at its run's
+scope and mode, including older seasons. Pre-mode manifests retain manual season
+overrides through the existing legacy selection-provenance reader. If its terminal job was cleared,
+the saved run scope supplies the prefix. If the manifest itself is unavailable,
+the existing database run selection preserves that scope and mode when the mode
+was recorded. For a pre-mode run, restore its manifest so selection provenance
+can establish whether the season was manually overridden. If neither
+record can be read, restore the saved run settings from a run backup before
+retrying; the staged copy stays in place. A size failure also needs its run manifest
+for the goal comparison; restore that manifest from a run backup when it is missing. The original and other staged outputs
+stay in place. If queuing fails after removal, the response says so and the item
+remains planned for the supported queue action.
+
+**Keep this file** remains available only for the existing smaller-than-predicted
+hold. It cannot waive a final-size failure, another failed check, or missing
+settings history. The integrity response includes per-file `remake.reason` and
+`remake.blocked_reason` so the UI explains unavailable actions; the action
+rechecks these conditions rather than trusting the displayed response.
+
+Within one integrity-page response, remake checks reuse each run manifest's parsed
+record, including an unreadable result. The next page request reads it again.
+The per-file decision reads the manifest and current guards afresh under its
+write lock; displayed availability is never authorization to remove a copy.

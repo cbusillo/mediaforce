@@ -543,16 +543,45 @@ does not own the backend or its siblings. Listener discovery resolves and
 deduplicates owned roots before stopping their trees. Stop captures the owned subtree's
 native process identities before signalling, so workers remain eligible for
 forced cleanup after their parent exits without targeting a reused PID.
-If identity custody or cleanup cannot be proved, stop reports failure, retains
-PID bookkeeping, and restart does not launch another process. Resolve the
-reported error and retry the same stop command. Development discovery and cleanup
+If cleanup fails after capture, a small development cleanup supervisor keeps
+the native identities alive. Stop reports the error and retains PID bookkeeping;
+Start refuses to launch another process while cleanup is pending. Resolve the
+reported error and retry the same Stop or Restart command: it contacts that
+supervisor before looking for the original root, even after workers reparent.
+The supervisor exits when cleanup is proved or its whole captured tree exits
+with ownership still proven.
+If completed cleanup cannot retire its pending state, the supervisor retains
+that completion proof and retries; Stop remains unsuccessful until retirement
+succeeds. Retirement renames the directory without allocating another one.
+A retained supervisor retires only the marker it opened. If that marker
+disappears or is replaced, it fails and leaves the replacement alone.
+Interrupted disposal and unpublished setup artifacts are retried in bounded
+sweeps under the publication lock. Unknown contents, foreign directories and
+symlinks are preserved. Artifacts from earlier helper versions are not swept.
+Boot receipts are synced before publication, followed by their directory and
+the parent directory. Injected write/sync failures are qualified; physical
+power-loss durability has not been tested. An absent or invalid boot receipt
+never proves that pending custody belongs to a previous boot.
+If startup and its retirement both fail, the surviving marker has no persisted
+proof that custody was never acquired. Stop retains it until a new system boot
+can be verified, even after the original filesystem problem is resolved.
+Temporary errors while checking retained processes keep their native handles
+and save the last error for the next Stop. A concurrent Stop for a different
+root reports a conflict instead of consuming another tree's cleanup result.
+If the supervisor itself is lost, Stop fails visibly rather than reconstructing
+custody from saved PIDs. After the next system restart, Stop can clear its pending
+state using the kernel's boot identity; do not delete that state to bypass cleanup.
+Pending state also stays when [native containment cannot be proved](docs/architecture/module-boundaries.md),
+including incomplete capture or a strict Darwin fork.
+Development discovery and cleanup
 require `uv` and the checkout's prepared Python environment (`uv sync --locked`):
 frontend start always needs them to confirm a launch, and status needs them
 when a PID record or listener exists. If a new launch cannot be confirmed,
 the error names the launched PID and retains its record; restore the reader and
 retry start to confirm and reuse it.
-The helper always loads this checkout's code, even when invoked from another directory. Native
-custody failures remain visible rather than falling back to bare PID signals.
+Stop loads only this checkout's standalone cleanup and native custody modules,
+even when invoked from another directory or unrelated package edits cannot import.
+Native custody failures remain visible rather than falling back to bare PID signals.
 
 Development PID files live in a directory under that state path keyed by the
 physical checkout: `development/<checkout hash>/`. Each checkout manages its
@@ -583,6 +612,9 @@ retains the record. A failed native argument read counts as exit only with indep
 process-absence evidence; macOS EINVAL alone remains unknown. The readers have
 macOS native and controlled Linux procfs coverage; the complete shell workflow's
 Linux/login-item behavior is not qualified by those reader tests.
+Python startup or reader failures also leave ownership unknown; repair the
+reported environment error and retry the same command with `uv sync --locked`
+completed for this checkout. A reader crash does not prove a process is foreign.
 Managed npm starts in `frontend/` so its
 rewritten process title remains attributable. For a legacy frontend launched
 from the repository root, stop targets its owned Vite child; npm exits after

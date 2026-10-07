@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import BinaryIO
 
-from . import _process_deadline
+from . import dev_processes
 
 
 class ProcessCancelledError(RuntimeError):
@@ -47,20 +47,7 @@ class ProcessOutputStalledError(subprocess.TimeoutExpired):
 
 
 def stop_existing_process_tree(pid: int, owns_root: Callable[[], bool]) -> None:
-    if pid <= 1 or pid == os.getpid():
-        raise ValueError("invalid development process root")
-    tree = _process_deadline._process_tree(external_root=True)
-    try:
-        # Pin before reading command ownership; an exit/reuse cannot retarget signals.
-        tree.add_root(pid)
-        if not owns_root():
-            raise RuntimeError("development process ownership changed; preserving it")
-        tree.refresh()
-        result = _process_deadline._terminate_tree(tree, lambda: None)
-        if not result.succeeded:
-            raise RuntimeError(result.reason or "development process cleanup is unproven")
-    finally:
-        tree.close()
+    dev_processes.stop_existing_process_tree(pid, owns_root)
 
 
 _PROCESS_COMMUNICATION_POLL_SECONDS = 0.05
@@ -362,9 +349,11 @@ class ManagedProcessController:
             if previous_guard is None:
                 active_guard = guard
             else:
-                def active_guard() -> None:
+                def combined_guard() -> None:
                     previous_guard()
                     guard()
+
+                active_guard = combined_guard
 
             self._activity_guard = active_guard
         try:
@@ -451,10 +440,10 @@ def _terminate_process(
             os.killpg(process_group_id, 0)
         except ProcessLookupError:
             return False
-        except OSError as exc:
-            if exc.errno == errno.ESRCH:
+        except OSError as probe_error:
+            if probe_error.errno == errno.ESRCH:
                 return False
-            if exc.errno == errno.EPERM:
+            if probe_error.errno == errno.EPERM:
                 return True
             raise
         return True

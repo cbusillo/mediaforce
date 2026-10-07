@@ -64,3 +64,45 @@ class LegacyFinalSizeRecoveryTests(unittest.TestCase):
         self.assertIsNotNone(blocker)
         assert blocker is not None
         self.assertEqual(blocker["code"], "final_size_recovery_contract_unchanged")
+
+    def test_show_run_uses_the_missed_file_duration(self) -> None:
+        job = self._legacy_job()
+        path = Path(str(job["manifest_path"]))
+        path.write_text(json.dumps({"items": [{"duration_seconds": 2700}, {"duration_seconds": 438.058}]}))
+        job["progress"]["failure_analysis"]["manifest_index"] = 1
+        self.assertIsNone(folder_actions._final_size_requeue_contract_blocker(job, self._contract(value_mb=275)))
+        self.assertIsNotNone(folder_actions._final_size_requeue_contract_blocker(job, self._contract(value_mb=300)))
+
+    def test_show_run_without_a_named_file_stays_blocked(self) -> None:
+        job = self._legacy_job()
+        Path(str(job["manifest_path"])).write_text(json.dumps({"items": [
+            {"duration_seconds": 2700}, {"duration_seconds": 438.058}
+        ]}))
+        self.assertIsNotNone(folder_actions._final_size_requeue_contract_blocker(job, self._contract(value_mb=275)))
+
+    def test_show_run_checks_each_missed_file(self) -> None:
+        job = self._legacy_job()
+        Path(str(job["manifest_path"])).write_text(json.dumps({"items": [
+            {"duration_seconds": 2700}, {"duration_seconds": 438.058}
+        ]}))
+        job["progress"]["failure_analysis"]["item_analyses"] = [
+            {"kind": "final_size_target_miss", "manifest_index": 0,
+             "target_size_verification": {"target_size_bytes": 275_000_000}},
+            {"kind": "final_size_target_miss", "manifest_index": 1,
+             "target_size_verification": {"target_size_bytes": 48_673_111}}
+        ]
+        self.assertIsNotNone(folder_actions._final_size_requeue_contract_blocker(job, self._contract(value_mb=275)))
+        self.assertIsNone(folder_actions._final_size_requeue_contract_blocker(job, self._contract(value_mb=220)))
+
+    def test_a_named_size_miss_is_independent_of_another_files_quality_failure(self) -> None:
+        job = self._legacy_job()
+        Path(str(job["manifest_path"])).write_text(json.dumps({"items": [
+            {"duration_seconds": 2700}, {"duration_seconds": 438.058}
+        ]}))
+        job["progress"]["failure_analysis"]["item_analyses"] = [
+            {"kind": "quality_policy_failure", "manifest_index": 0},
+            {"kind": "final_size_target_miss", "manifest_index": 1,
+             "target_size_verification": {"target_size_bytes": 48_673_111}}
+        ]
+        self.assertIsNone(folder_actions._final_size_requeue_contract_blocker(job, self._contract(value_mb=220)))
+        self.assertIsNotNone(folder_actions._final_size_requeue_contract_blocker(job, self._contract(value_mb=300)))

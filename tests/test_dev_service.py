@@ -7,10 +7,11 @@ import select
 import signal
 import subprocess
 import sys
-import threading
+import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from threading import Event, Thread
 
 import pytest
 
@@ -30,7 +31,7 @@ def prepare_dev_service(
     for package in ("mediaforce", "mediaforce/core", "mediaforce/ops"):
         (repo / package).mkdir(exist_ok=True)
         (repo / package / "__init__.py").write_text("")
-    for module in ("mediaforce/core/_process_deadline.py", "mediaforce/core/process_control.py", "mediaforce/ops/dev_processes.py", "mediaforce/ops/dev_frontend.py"):
+    for module in ("mediaforce/core/_process_deadline.py", "mediaforce/core/process_control.py", "mediaforce/core/dev_processes.py", "mediaforce/ops/dev_processes.py", "mediaforce/ops/dev_frontend.py"):
         shutil.copyfile(source / module, repo / module)
     if service == "symlink":
         alias = tmp_path / "checkout alias"
@@ -159,6 +160,9 @@ elif name == "python3":
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 elif name == "uv":
     assert sys.argv[1:4] == ["run", "--no-sync", "--project"]
+    if sys.argv[6].endswith("/dev_frontend.py") and "DEV_TEST_READER_EXIT" in os.environ:
+        print("fixture Python startup failed", file=sys.stderr)
+        sys.exit(int(os.environ["DEV_TEST_READER_EXIT"]))
     if os.environ.get("DEV_TEST_CUSTODY_FAILURE"):
         print("injected custody unavailable; PID bookkeeping retained", file=sys.stderr)
         sys.exit(1)
@@ -393,6 +397,7 @@ class ProcessTree:
     child_finished: Path
     cleanup_writer: int
     lifetime_reader: int
+    reaper: Thread
     worker_pid: int | None = None
     worker_finished: Path | None = None
 
@@ -409,28 +414,46 @@ def assert_tree_stopped(tree: ProcessTree) -> None:
     assert os.read(tree.lifetime_reader, 1) == b""
 
 
-@pytest.fixture
-def process_trees() -> Iterator[list[ProcessTree]]:
+def assert_root_running(tree: ProcessTree) -> None:
+    assert tree.root.stdout is not None
+    assert not select.select([tree.root.stdout], [], [], 0.1)[0], "fixture root exited"
+
+
+def finish_process_tree(tree: ProcessTree) -> None:
+    try:
+        try:
+            os.write(tree.cleanup_writer, b"done" * 2)
+        except BrokenPipeError:
+            pass
+        tree.root.wait(timeout=5)
+        tree.reaper.join(timeout=5)
+        assert not tree.reaper.is_alive(), "fixture reaper still running"
+        assert select.select([tree.lifetime_reader], [], [], 5)[0], "fixture tree still alive"
+        assert os.read(tree.lifetime_reader, 1) == b""
+    finally:
+        os.close(tree.cleanup_writer)
+        os.close(tree.lifetime_reader)
+        if tree.root.stdout is not None:
+            tree.root.stdout.close()
+        if tree.root.stderr is not None:
+            tree.root.stderr.close()
+
+
+@contextmanager
+def owned_process_trees() -> Iterator[list[ProcessTree]]:
     trees: list[ProcessTree] = []
     try:
         yield trees
     finally:
-        for tree in trees:
-            try:
-                try:
-                    os.write(tree.cleanup_writer, b"done" * 2)
-                except BrokenPipeError:
-                    pass
-                tree.root.wait(timeout=5)
-                assert select.select([tree.lifetime_reader], [], [], 5)[0], "fixture tree still alive"
-                assert os.read(tree.lifetime_reader, 1) == b""
-            finally:
-                os.close(tree.cleanup_writer)
-                os.close(tree.lifetime_reader)
-                if tree.root.stdout is not None:
-                    tree.root.stdout.close()
-                if tree.root.stderr is not None:
-                    tree.root.stderr.close()
+        with ExitStack() as cleanup:
+            for tree in reversed(trees):
+                cleanup.callback(finish_process_tree, tree)
+
+
+@pytest.fixture
+def process_trees() -> Iterator[list[ProcessTree]]:
+    with owned_process_trees() as trees:
+        yield trees
 
 
 def start_process_tree(
@@ -485,7 +508,7 @@ ready_reader, ready_writer = os.pipe()
 child = subprocess.Popen(
     [sys.executable, "-c", sys.argv[4], str(cleanup_reader), sys.argv[5], str(ready_writer), sys.argv[6],
      str(lifetime_writer), sys.argv[4]],
-    pass_fds=(cleanup_reader, lifetime_writer, ready_writer),
+    pass_fds=(cleanup_reader, lifetime_writer, ready_writer), stdout=subprocess.DEVNULL,
 )
 os.close(ready_writer)
 assert os.read(ready_reader, 1) == b"r"
@@ -510,14 +533,78 @@ Path(sys.argv[1]).write_text(json.dumps({"child_returncode": result, "root_signa
     os.close(cleanup_reader)
     os.close(lifetime_writer)
     assert root.stdout is not None
-    tree = ProcessTree(root, 0, finished, child_finished, cleanup_writer, lifetime_reader)
+    reaper = Thread(target=root.wait, name=f"{name}-fixture-reaper", daemon=True)
+    tree = ProcessTree(root, 0, finished, child_finished, cleanup_writer, lifetime_reader, reaper)
     trees.append(tree)
+    reaper.start()
     assert select.select([root.stdout], [], [], 5)[0], "fixture root not ready"
     tree.child_pid = int(root.stdout.readline())
     if wrapper:
         tree.worker_pid = int(Path(str(child_finished) + "-worker-pid").read_text())
         tree.worker_finished = Path(str(child_finished) + "-worker-finished")
     return tree
+
+
+def test_fixture_reaps_a_completed_tree_while_the_command_is_still_running(
+    tmp_path: Path, process_trees: list[ProcessTree],
+) -> None:
+    tree = start_process_tree(tmp_path, process_trees, "completed-service")
+    os.write(tree.cleanup_writer, b"done")
+    assert select.select([tree.lifetime_reader], [], [], 5)[0], "fixture descendants did not exit"
+    assert os.read(tree.lifetime_reader, 1) == b""
+    deadline = time.monotonic() + 5
+    while tree.root.returncode is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert tree.root.returncode == 0, "completed fixture root was not reaped during the command"
+
+
+def test_fixture_releases_later_trees_after_a_teardown_observation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trees: list[ProcessTree] = []
+    try:
+        with pytest.raises(RuntimeError, match="injected wait observer failure"):
+            with owned_process_trees() as trees:
+                first = start_process_tree(tmp_path, trees, "first-tree")
+                later = start_process_tree(tmp_path, trees, "later-tree")
+
+                def unavailable_wait(timeout: float | None = None) -> int:
+                    raise RuntimeError(f"injected wait observer failure with timeout {timeout}")
+
+                monkeypatch.setattr(first.root, "wait", unavailable_wait)
+        assert later.root.returncode == 0, "later fixture was not released after the failure"
+        assert not later.reaper.is_alive()
+    finally:
+        for tree in trees:
+            if tree.root.returncode is None:
+                try:
+                    os.write(tree.cleanup_writer, b"done" * 2)
+                except OSError:
+                    pass
+            tree.reaper.join(timeout=5)
+
+
+def test_foreign_root_exit_is_observed_before_reaper_status_publication(
+    tmp_path: Path, process_trees: list[ProcessTree], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tree = start_process_tree(tmp_path, process_trees, "foreign-root")
+    status_received, publish_status = Event(), Event()
+    handle_status = tree.root._handle_exitstatus
+
+    def hold_status(status: int) -> None:
+        status_received.set()
+        assert publish_status.wait(5), "exit status publication was not released"
+        handle_status(status)
+
+    monkeypatch.setattr(tree.root, "_handle_exitstatus", hold_status)
+    try:
+        assert_root_running(tree)
+        os.write(tree.cleanup_writer, b"done" * 2)
+        assert status_received.wait(5), "fixture root did not exit"
+        with pytest.raises(AssertionError, match="fixture root exited"):
+            assert_root_running(tree)
+    finally:
+        publish_status.set()
 
 
 @pytest.mark.parametrize("running", ["pid_file", "lock", "listener"])
@@ -559,7 +646,7 @@ def test_stop_discovers_owned_parent_and_descendants_and_preserves_foreign_tree(
     )
     assert result.returncode == 0, result.stderr
     assert_tree_stopped(owned)
-    assert foreign.root.poll() is None
+    assert_root_running(foreign)
     assert not foreign.finished.exists()
     if frontend is not None:
         assert_tree_stopped(frontend)
@@ -594,7 +681,7 @@ def test_stop_forces_stubborn_owned_tree_to_exit(
     assert result.returncode == 0, result.stderr
     assert_tree_stopped(owned)
     assert not owned.child_finished.exists()
-    assert foreign.root.poll() is None
+    assert_root_running(foreign)
     assert not foreign.finished.exists()
     assert lock.read_bytes() == lock_bytes
     assert not pid_file.exists()
@@ -651,7 +738,7 @@ os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
             assert select.select([owned.lifetime_reader], [], [], 5)[0]
             assert os.read(owned.lifetime_reader, 1) == b""
         else:
-            assert owned.root.poll() is None
+            assert_root_running(owned)
         new_backend = json.loads(started.read_text())
         assert int(pid_file.read_text()) == new_backend["pid"]
         assert new_backend["pid"] != owned.root.pid
@@ -730,7 +817,7 @@ def test_frontend_stop_requires_exact_checkout_and_stops_the_whole_tree(
         assert_tree_stopped(tree)
         assert not pid_file.exists()
     else:
-        assert tree.root.poll() is None
+        assert_root_running(tree)
         assert not tree.finished.exists()
         assert not tree.child_finished.exists()
         assert not select.select([tree.lifetime_reader], [], [], 0)[0]
@@ -765,7 +852,7 @@ def test_frontend_actions_preserve_foreign_trees_and_both_shared_pid_files(
     )
     assert result.returncode == (0 if action == "stop" else 1), result.stderr
     for tree in (frontend, backend):
-        assert tree.root.poll() is None
+        assert_root_running(tree)
         assert not tree.child_finished.exists()
         assert not select.select([tree.lifetime_reader], [], [], 0)[0]
     assert frontend_pid_file.read_text() == str(frontend.root.pid)
@@ -861,12 +948,12 @@ os.read(int(os.environ["DEV_TEST_START_CLEANUP_FD"]), 4)
                 assert new_frontend["args"][new_frontend["args"].index("--port") + 1] == environment["MEDIAFORCE_FRONTEND_DEV_PORT"]
         else:
             assert owned is not None
-            assert owned.root.poll() is None
+            assert_root_running(owned)
             assert not started.exists()
             assert "frontend: running" in result.stdout
             calls = [json.loads(line) for line in log.read_text().splitlines()]
             assert not any(call[0] == "nohup" for call in calls)
-        assert foreign.root.poll() is None
+        assert_root_running(foreign)
         assert not foreign.child_finished.exists()
         assert lock.read_bytes() == lock_bytes
     finally:
@@ -913,7 +1000,7 @@ def test_stop_owned_listener_preserves_foreign_pid_record(
     )
     assert result.returncode == 0, result.stderr
     assert_tree_stopped(owned)
-    assert foreign.root.poll() is None
+    assert_root_running(foreign)
     assert not foreign.child_finished.exists()
     assert pid_file.read_text() == str(foreign.root.pid)
     assert lock.read_bytes() == lock_bytes
@@ -940,7 +1027,7 @@ def test_rewritten_npm_in_repo_root_cannot_claim_a_foreign_prefix(
         env=environment, capture_output=True, text=True, timeout=20,
     )
     assert result.returncode == 0, result.stderr
-    assert tree.root.poll() is None
+    assert_root_running(tree)
     assert not tree.child_finished.exists()
     assert not select.select([tree.lifetime_reader], [], [], 0)[0]
     if running == "pid_file":
@@ -1023,7 +1110,7 @@ def test_frontend_stop_preserves_the_unrelated_launching_parent(
     )
     assert result.returncode == 0, result.stderr
     assert_tree_stopped(owned)
-    assert launcher.root.poll() is None
+    assert_root_running(launcher)
     assert not launcher.child_finished.exists()
     assert not select.select([launcher.lifetime_reader], [], [], 0)[0]
     assert not pid_file.exists()
@@ -1045,7 +1132,7 @@ def fixture_backend(
         "DEV_TEST_SLOW_START": str(slow_start),
     })
     binary = Path(environment["DEV_TEST_REPO"]) / ".venv/bin/mediaforce-web"
-    binary.parent.mkdir(parents=True)
+    binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("#!" + sys.executable + "\n" + '''
 import json
 import os
@@ -1152,7 +1239,7 @@ def test_backend_waits_for_service_unload_and_process_completion(
         assert result.returncode == (0 if succeeds else 1), result.stderr
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         assert sum(call[:2] == ["launchctl", "bootout"] for call in calls) == 1
-        assert foreign.root.poll() is None
+        assert_root_running(foreign)
         assert lock.read_bytes() == lock_bytes
         if succeeds:
             assert service.root.wait(timeout=5) == 0
@@ -1172,7 +1259,7 @@ def test_backend_waits_for_service_unload_and_process_completion(
             assert "backend: running" not in result.stdout
             assert "unloaded launch agent" not in result.stdout
             if shutdown in {"stuck_process", "failed"}:
-                assert service.root.poll() is None
+                assert_root_running(service)
 
 
 @pytest.mark.parametrize("replacement", ["fresh", "already_listening"])
@@ -1208,7 +1295,7 @@ def test_shutdown_timeout_retry_waits_for_old_process_then_clears_only_own_recor
             assert result.returncode == 1
             assert "shutdown did not finish" in result.stderr
             assert "backend: running" not in result.stdout
-            assert service.root.poll() is None
+            assert_root_running(service)
             assert str(service.root.pid) in own_record.read_text().splitlines()
             assert not started.exists()
         os.write(service.cleanup_writer, b"done" * 2)
@@ -1237,11 +1324,11 @@ def test_shutdown_timeout_retry_waits_for_old_process_then_clears_only_own_recor
         else:
             assert "backend: running" in result.stdout
             assert f"pid {ready_backend.root.pid}" in result.stdout
-            assert ready_backend.root.poll() is None
+            assert_root_running(ready_backend)
             assert not started.exists()
         assert not own_record.exists()
         assert foreign_record.read_bytes() == foreign_bytes
-        assert foreign.root.poll() is None
+        assert_root_running(foreign)
         assert lock.read_bytes() == lock_bytes
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         assert sum(call[:2] == ["launchctl", "bootout"] for call in calls) == 1
@@ -1317,7 +1404,7 @@ def test_idle_loaded_login_item_does_not_wait_on_independent_development_backend
         )
         assert result.returncode == 0, result.stderr
         if action == "start":
-            assert dev.root.poll() is None
+            assert_root_running(dev)
             assert "backend: running" in result.stdout
             assert not started.exists()
         else:
@@ -1353,7 +1440,7 @@ def test_lock_worker_reuse_compares_listener_and_lock_process_roots(
     )
     assert result.returncode == 0, result.stderr
     assert f"pid {dev.child_pid}" in result.stdout
-    assert dev.root.poll() is None
+    assert_root_running(dev)
     assert lock.read_bytes() == lock_bytes
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert not any(call[0] == "nohup" for call in calls)
@@ -1390,6 +1477,50 @@ def test_dev_handoff_waits_after_every_exit_status_the_service_manager_accepts(
         assert sum(call[:2] == ["launchctl", "bootout"] for call in calls) == 1
 
 
+@pytest.mark.parametrize("discovery", ["pid_file", "listener"])
+@pytest.mark.parametrize("action,component,reader_exit", [
+    (action, component, "1") for action in ("start", "status", "stop", "restart")
+    for component in ("frontend", "all")
+] + [("stop", "frontend", status) for status in ("2", "127", "137")])
+def test_frontend_reader_failure_preserves_live_tree_and_record(
+    tmp_path: Path, process_trees: list[ProcessTree], discovery: str,
+    action: str, component: str, reader_exit: str,
+) -> None:
+    script, _, backend_pid_file, _, env = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    tree = start_process_tree(tmp_path, process_trees, "frontend")
+    table = tmp_path / "process-table.json"
+    rows = frontend_tree_rows(tree, env["DEV_TEST_REPO"], ["npm run dev"])
+    backend = start_process_tree(tmp_path, process_trees, "backend") if component == "all" else None
+    if backend is not None:
+        rows.append({"pid": backend.root.pid, "parent": 0,
+                     "command": env["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web",
+                     "port": "8777", "finished": str(backend.finished)})
+        backend_pid_file.write_text(str(backend.root.pid))
+    table.write_text(json.dumps(rows))
+    env.update(DEV_TEST_TREE=str(table), DEV_TEST_READER_EXIT=reader_exit)
+    pid_file = backend_pid_file.with_name("mediaforce-frontend.pid")
+    pid_file.write_text(str(tree.child_pid if discovery == "pid_file" else 999999))
+    original = pid_file.read_bytes()
+    result = subprocess.run(["/bin/bash", str(script), action, component], env=env,
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode != 0
+    assert "ownership unknown" in result.stderr
+    assert not any(f"frontend: {outcome}" in result.stdout for outcome in ("running", "started", "stopped"))
+    assert tree.root.poll() is None
+    assert not tree.child_finished.exists()
+    assert pid_file.read_bytes() == original
+    if backend is not None:
+        assert backend.root.poll() is None
+        assert not backend.child_finished.exists()
+    if (action, component, reader_exit) == ("stop", "frontend", "1"):
+        del env["DEV_TEST_READER_EXIT"]
+        recovered = subprocess.run(["/bin/bash", str(script), "stop", "frontend"], env=env,
+                                   capture_output=True, text=True, timeout=20)
+        assert recovered.returncode == 0, recovered.stderr
+        assert_tree_stopped(tree)
+        assert not pid_file.exists()
+
+
 @pytest.mark.parametrize("action", ["start", "status", "stop", "restart"])
 @pytest.mark.parametrize("component", ["frontend", "all"])
 @pytest.mark.parametrize("discovery", ["pid_file", "listener"])
@@ -1417,7 +1548,7 @@ def test_unknown_arguments_preserve_frontend_bookkeeping(
     assert "PID bookkeeping retained" in result.stderr
     assert "frontend: stopped" not in result.stdout
     assert "frontend: started" not in result.stdout
-    assert tree.root.poll() is None
+    assert_root_running(tree)
     assert not tree.child_finished.exists()
     assert pid_file.read_bytes() == original
     assert backend.root.poll() is None
@@ -1447,7 +1578,7 @@ while not Path(sys.argv[1]).exists():
         process.wait(timeout=10)
         trigger.with_suffix(".reaped").touch()
 
-    reaper = threading.Thread(target=reap)
+    reaper = Thread(target=reap)
     reaper.start()
     try:
         result = subprocess.run(["/bin/bash", str(script), action, "frontend"], env=env,
