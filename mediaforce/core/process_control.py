@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import BinaryIO
 
 from . import _process_deadline
+from .dev_processes import stop_existing_process_tree as stop_existing_process_tree
 
 
 class ProcessCancelledError(RuntimeError):
@@ -44,23 +45,6 @@ class ProcessOutputStalledError(subprocess.TimeoutExpired):
 
     def __str__(self) -> str:
         return f"Command '{self.cmd}' printed nothing for {self.timeout} seconds"
-
-
-def stop_existing_process_tree(pid: int, owns_root: Callable[[], bool]) -> None:
-    if pid <= 1 or pid == os.getpid():
-        raise ValueError("invalid development process root")
-    tree = _process_deadline._process_tree(external_root=True)
-    try:
-        # Pin before reading command ownership; an exit/reuse cannot retarget signals.
-        tree.add_root(pid)
-        if not owns_root():
-            raise RuntimeError("development process ownership changed; preserving it")
-        tree.refresh()
-        result = _process_deadline._terminate_tree(tree, lambda: None)
-        if not result.succeeded:
-            raise RuntimeError(result.reason or "development process cleanup is unproven")
-    finally:
-        tree.close()
 
 
 _PROCESS_COMMUNICATION_POLL_SECONDS = 0.05
