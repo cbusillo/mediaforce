@@ -163,3 +163,21 @@ def test_frontend_stop_preserves_native_shared_wrapper_and_sibling(frontend_tree
             assert tree.pid_file.read_text() == str(tree.rows["worker"])
     else:
         assert not tree.pid_file.exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="native Linux external-tree qualification")
+def test_linux_stop_all_attempts_backend_after_frontend_uncertainty(frontend_tree: FrontendTree) -> None:
+    tree = frontend_tree
+    tree.pid_file.write_text(str(tree.rows["worker"]))
+    result = subprocess.run(
+        ["/bin/bash", str(tree.script), "stop", "all"], env=tree.env,
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode != 0
+    assert "Linux existing-tree descendant custody is unproven" in result.stderr
+    assert "backend: stopped" in result.stdout
+    assert tree.pid_file.read_text() == str(tree.rows["worker"])
+    assert select.select([tree.owned_lifetime], [], [], 5)[0]
+    assert os.read(tree.owned_lifetime, 1) == b""
+    assert tree.wrapper.poll() is None
+    assert not select.select([tree.sibling_lifetime], [], [], 0.1)[0]

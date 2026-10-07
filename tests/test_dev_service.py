@@ -1417,3 +1417,19 @@ def test_linux_start_preserves_state_and_supplies_foreground_commands(tmp_path: 
     assert lock.read_bytes() == original_lock
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert not any(call[0] in {"nohup", "launchctl", "uv", "rm"} for call in calls)
+
+
+@pytest.mark.parametrize("component", ["all", "backend", "frontend"])
+def test_linux_restart_without_a_tree_cannot_bypass_start_refusal(tmp_path: Path, component: str) -> None:
+    script, lock, _, log, env = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    env["DEV_TEST_SYSTEM"] = "Linux"
+    original_lock = lock.read_bytes()
+    result = subprocess.run(
+        ["/bin/bash", str(script), "restart", component], env=env, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode != 0
+    assert "custody" in result.stderr
+    assert "uv run mediaforce-web --no-reload" in result.stderr
+    assert lock.read_bytes() == original_lock
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert not any(call[0] == "nohup" for call in calls)

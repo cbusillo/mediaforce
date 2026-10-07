@@ -565,7 +565,7 @@ edits cannot import. Native custody failures remain visible rather than falling
 back to bare PID signals.
 
 On Linux, the launcher refuses Start and supplies the foreground commands below,
-so a new development session cannot enter an unprovable cleanup state. For an
+including replacements requested through Restart. For an
 existing tree, stop can terminate the identities it captured but cannot prove that
 an existing worker did not fork and exit between discovery passes, leaving an
 unseen grandchild. It therefore reports `Linux existing-tree descendant custody
@@ -581,7 +581,9 @@ Run `npm --prefix frontend run dev` in a second terminal when editing the UI.
 End those foreground commands from their terminals; do not use development
 stop/restart to claim Linux descendant cleanup. If an earlier launcher session
 left unproven cleanup state, Stop preserves it until a verified system restart;
-retries cannot recover missing custody. Start foreground development only after
+retries cannot recover missing custody. Stop All attempts both components and
+reports failure; `stop backend` also attempts the backend independently.
+Start foreground development only after
 the earlier processes are resolved. This limitation does not apply to
 Linux commands launched inside Mediaforce's scoped subprocess supervisor, which
 establishes child custody before launch. Darwin retains its strict fork guard.

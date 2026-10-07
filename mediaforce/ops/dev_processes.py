@@ -254,7 +254,7 @@ def main() -> int:
         request_stop(state, pid if action == "stop" else 0)
         return 0
     except (OSError, RuntimeError, ValueError, IndexError) as exc:
-        print(f"development stop: {exc}; PID bookkeeping retained; retry the same stop command", file=sys.stderr)
+        print(f"development stop: {exc}; PID bookkeeping retained; retry does not restore lost custody", file=sys.stderr)
         return 1
 
 

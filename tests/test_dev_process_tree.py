@@ -2,6 +2,7 @@ import fcntl
 import json
 import os
 import select
+import socket
 import signal
 import shutil
 import socket
@@ -723,6 +724,16 @@ def test_linux_retry_retains_specific_custody_reason(native_dev_tree: NativeDevT
     error = tree.pid_file.parent / "backend.cleanup/error"
     while (not error.exists() or "Linux existing-tree" not in error.read_text()) and time.monotonic() < deadline:
         time.sleep(0.01)
+    state = error.parent
+    while time.monotonic() < deadline:
+        with dev_processes.state_directory(state), socket.socket(socket.AF_UNIX) as client:
+            try:
+                client.connect("control.sock")
+            except (ConnectionRefusedError, FileNotFoundError):
+                break
+        time.sleep(0.01)
+    else:
+        pytest.fail("cleanup supervisor still accepts connections")
     result = subprocess.run(
         ["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
         capture_output=True, text=True, timeout=15,
