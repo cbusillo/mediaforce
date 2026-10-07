@@ -731,7 +731,8 @@ def test_linux_retry_retains_specific_custody_reason(native_dev_tree: NativeDevT
                 client.connect("control.sock")
             except (ConnectionRefusedError, FileNotFoundError):
                 break
-        time.sleep(0.01)
+        # Let the supervisor's idle check run between connection probes.
+        time.sleep(0.5)
     else:
         pytest.fail("cleanup supervisor still accepts connections")
     result = subprocess.run(
