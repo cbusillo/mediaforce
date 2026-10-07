@@ -55,7 +55,8 @@ os.read(int(sys.argv[1]), 1)
     backend = repo / ".venv/bin/mediaforce-web"
     backend.parent.mkdir(parents=True)
     backend.write_text('''
-import json, os, signal, subprocess, sys
+import json, os, select, signal, subprocess, sys
+from pathlib import Path
 ready_r, ready_w = os.pipe()
 child = subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2], sys.argv[4], str(ready_w), sys.argv[5]],
                         pass_fds=(int(sys.argv[2]), int(sys.argv[4]), ready_w))
@@ -64,6 +65,9 @@ assert os.read(ready_r, 1) == b"R"
 os.close(ready_r)
 signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
 print(json.dumps({"backend": os.getpid(), "worker": child.pid}), flush=True)
+while not select.select([int(sys.argv[2])], [], [], .01)[0]:
+    if Path(sys.argv[5]).with_suffix(".exit").exists():
+        os._exit(0)
 os.read(int(sys.argv[2]), 1)
 ''')
     wrapper = tmp_path / "wrapper.py"
@@ -184,11 +188,51 @@ def test_stop_survives_unrelated_real_package_import_failure(native_dev_tree: Na
     assert_shared_workloads_survive(tree)
 
 
+def test_internal_stop_cleans_its_current_root_after_clearing_prior_boot_state(native_dev_tree: NativeDevTree) -> None:
+    tree = native_dev_tree
+    helper = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_processes.py"
+    current_boot = "00000000-0000-0000-0000-000000000002"
+    helper.write_text(helper.read_text().replace(
+        "\ndef main()", f"\ndef boot_id():\n    return {current_boot!r}\n\ndef main()",
+    ))
+    state = tree.pid_file.parent / "backend.cleanup"
+    state.mkdir(mode=0o700)
+    (state / "boot").write_text("00000000-0000-0000-0000-000000000001")
+    result = subprocess.run([
+        sys.executable, str(helper), "stop", str(tree.pids["backend"]), str(tree.script), "backend", str(state),
+    ], env=tree.env, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert select.select([tree.worker_lifetime], [], [], 5)[0], "requested tree survived old-state cleanup"
+    assert os.read(tree.worker_lifetime, 1) == b""
+    assert not state.exists()
+    assert_shared_workloads_survive(tree)
+
+
+def test_concurrent_cleanup_completion_reports_retry_without_reboot_advice(tmp_path: Path) -> None:
+    state = tmp_path / "backend.cleanup"
+    state.mkdir(mode=0o700)
+
+    def completed_elsewhere(_address: str) -> None:
+        state.rmdir()
+        raise FileNotFoundError
+
+    connection = Mock()
+    connection.connect.side_effect = completed_elsewhere
+    context = Mock()
+    context.__enter__ = Mock(return_value=connection)
+    context.__exit__ = Mock(return_value=False)
+    with patch.object(dev_processes.socket, "socket", return_value=context):
+        with pytest.raises(RuntimeError, match="session ended while connecting; retry Stop"):
+            dev_processes.request_stop(state, 4321)
+
+
 def test_failed_capture_cannot_discard_workers_after_the_root_exits(native_dev_tree: NativeDevTree) -> None:
     tree = native_dev_tree
     tree.retain_cleanup_marker = True
     native = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/core/_process_deadline.py"
-    native.write_text(native.read_text() + '''
+    exit_trigger = tree.reparented.with_suffix(".exit")
+    native.write_text(native.read_text() + f'''
+from pathlib import Path
 _original_process_tree = _process_tree
 def _process_tree(*args, **kwargs):
     tree = _original_process_tree(*args, **kwargs)
@@ -199,8 +243,11 @@ def _process_tree(*args, **kwargs):
         if initial_capture:
             initial_capture = False
             original_refresh(*args, **kwargs)
-            tree.signal_all(signal.SIGTERM)
-            time.sleep(.15)
+            Path({str(exit_trigger)!r}).touch()
+            deadline = time.monotonic() + 3
+            while not Path({str(tree.reparented)!r}).exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            assert Path({str(tree.reparented)!r}).exists(), "backend did not exit independently"
             raise RuntimeError("injected capture failure after root exit")
         return original_refresh(*args, **kwargs)
     tree.refresh = refresh

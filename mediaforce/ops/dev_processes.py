@@ -177,6 +177,8 @@ def request_stop(state: Path, expected_pid: int) -> None:
                 client.connect("control.sock")
                 break
             except (FileNotFoundError, ConnectionRefusedError):
+                if not state.exists():
+                    raise RuntimeError("cleanup session ended while connecting; retry Stop")
                 if time.monotonic() >= deadline:
                     previous_error = ""
                     if (state / "error").is_file():
@@ -190,6 +192,8 @@ def request_stop(state: Path, expected_pid: int) -> None:
         client.sendall(f"stop {expected_pid}\n".encode("ascii"))
         response = client.recv(2048)
         if response != b"ok":
+            if not state.exists():
+                raise RuntimeError("cleanup session ended before replying; retry Stop")
             raise RuntimeError(response.decode(errors="replace") or "cleanup supervisor disconnected")
     deadline = time.monotonic() + 5
     while state.exists():
@@ -209,6 +213,14 @@ def main() -> int:
         state = Path(state_text).absolute()
         if action == "serve":
             return serve(pid, script, component, state)
+        if state.exists():
+            with state_directory(state):
+                recorded_boot = UUID((state / "boot").read_text())
+                if recorded_boot != UUID(boot_id()):
+                    # Processes and native handles from an earlier boot cannot survive.
+                    remove_state(state)
+                    if action == "retry":
+                        return 0
         if action == "stop":
             if publish_state(state):
                 try:
@@ -222,12 +234,6 @@ def main() -> int:
                     raise
         elif not state.exists():
             return 0
-        with state_directory(state):
-            recorded_boot = UUID((state / "boot").read_text())
-            if recorded_boot != UUID(boot_id()):
-                # Processes and native handles from an earlier boot cannot survive.
-                remove_state(state)
-                return 0
         request_stop(state, pid if action == "stop" else 0)
         return 0
     except (OSError, RuntimeError, ValueError, IndexError) as exc:
