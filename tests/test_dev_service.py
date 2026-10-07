@@ -17,7 +17,7 @@ from mediaforce.ops.login_item import BOOTOUT_ACCEPTED_EXIT_CODES, LOGIN_ITEM_LA
 
 
 def prepare_dev_service(
-    tmp_path: Path, service: str, running: str, process: str,
+    tmp_path: Path, service: str, running: str, process: str, *, native_custody: bool = False,
 ) -> tuple[Path, Path, Path, Path, dict[str, str]]:
     repo = tmp_path / "checkout with spaces"
     scripts = repo / "scripts"
@@ -31,6 +31,11 @@ def prepare_dev_service(
         (repo / package / "__init__.py").write_text("")
     for module in ("mediaforce/core/_process_deadline.py", "mediaforce/core/process_control.py", "mediaforce/core/dev_processes.py", "mediaforce/ops/dev_processes.py", "mediaforce/ops/dev_frontend.py"):
         shutil.copyfile(source / module, repo / module)
+    if not native_custody:
+        # Launcher policy tests model complete finite custody. Native tree tests
+        # opt into the real kernel's uncertainty and prove independent teardown.
+        with (repo / "mediaforce/core/_process_deadline.py").open("a") as output:
+            output.write("\n_LinuxProcessTree.compromised = property(lambda self: False)\n")
     if service == "symlink":
         alias = tmp_path / "checkout alias"
         alias.symlink_to(repo, target_is_directory=True)

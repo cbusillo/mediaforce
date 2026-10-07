@@ -35,7 +35,7 @@ class NativeDevTree:
 
 @pytest.fixture
 def native_dev_tree(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[NativeDevTree]:
-    script, _, pid_file, _, env = prepare_dev_service(tmp_path, "absent", "pid_file", "owned")
+    script, _, pid_file, _, env = prepare_dev_service(tmp_path, "absent", "pid_file", "owned", native_custody=True)
     repo = Path(env["DEV_TEST_REPO"])
     worker = tmp_path / "worker.py"
     worker.write_text('''
@@ -48,6 +48,13 @@ recorded = False
 os.write(int(sys.argv[3]), b"R")
 os.close(int(sys.argv[3]))
 while not select.select([int(sys.argv[1])], [], [], .01)[0]:
+    if not sibling and len(sys.argv) > 4 and Path(sys.argv[4]).with_suffix(".fork").exists():
+        child = os.fork()
+        if child:
+            Path(sys.argv[4]).with_suffix(".late-fork.json").write_text(json.dumps({"worker": os.getpid(), "child": child}))
+            os._exit(0)
+        sibling = True
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     if not sibling and not recorded and len(sys.argv) > 4 and os.getppid() != parent:
         Path(sys.argv[4]).write_text(json.dumps({"before": parent, "after": os.getppid()}))
         recorded = True
@@ -167,7 +174,12 @@ def stop_native_backend(tree: NativeDevTree, *, cwd: Path | None = None) -> None
     tree.pid_file.write_text(str(tree.pids["backend"]))
     result = subprocess.run(["/bin/bash", str(tree.script), "stop", "backend"],
                             cwd=cwd, env=tree.env, capture_output=True, text=True, timeout=15)
-    assert result.returncode == 0, result.stderr
+    if sys.platform == "linux":
+        assert result.returncode != 0
+        assert "Linux existing-tree descendant custody is unproven" in result.stderr
+        assert tree.pid_file.read_text() == str(tree.pids["backend"])
+    else:
+        assert result.returncode == 0, result.stderr
     assert select.select([tree.worker_lifetime], [], [], 5)[0], "owned tree survived"
     assert os.read(tree.worker_lifetime, 1) == b""
 
@@ -513,7 +525,11 @@ if not seen.exists():
 ''')
     result = subprocess.run(["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
                             capture_output=True, text=True, timeout=15)
-    assert result.returncode == 0, result.stderr
+    if sys.platform == "linux":
+        assert result.returncode != 0
+        assert "Linux existing-tree descendant custody is unproven" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
     assert select.select([tree.worker_lifetime], [], [], 5)[0], "owned tree survived"
     assert os.read(tree.worker_lifetime, 1) == b""
     assert_shared_workloads_survive(tree)
@@ -612,3 +628,59 @@ def test_failed_custody_preserves_pid_file_and_prevents_restart(tmp_path: Path, 
     finally:
         child.kill()
         child.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="native Linux external-tree qualification")
+@pytest.mark.parametrize("action", ["stop", "restart"])
+def test_linux_late_fork_reports_unproven_custody_through_launcher(
+        native_dev_tree: NativeDevTree, action: str,
+) -> None:
+    tree = native_dev_tree
+    repo = Path(tree.env["DEV_TEST_REPO"])
+    source = Path(__file__).resolve().parents[1] / "mediaforce"
+    # Use the complete real package, rather than the fixture's empty initializers.
+    shutil.copytree(source, repo / "mediaforce", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    custody_module = repo / "mediaforce/core/_process_deadline.py"
+    trigger = tree.reparented.with_suffix(".fork")
+    record = tree.reparented.with_suffix(".late-fork.json")
+    with custody_module.open("a") as output:
+        output.write(f'''
+# Fixture-only scheduling hook: actual discovery/pinning precedes the fork.
+_native_refresh = _LinuxProcessTree.refresh
+_fork_triggered = False
+def _late_fork_refresh(self, timeout=0.0):
+    global _fork_triggered
+    _native_refresh(self, timeout)
+    if _fork_triggered or {tree.pids["worker"]} not in self._processes:
+        return
+    _fork_triggered = True
+    descriptor = self._processes[{tree.pids["worker"]}].process_descriptor
+    from pathlib import Path
+    Path({str(trigger)!r}).touch()
+    deadline = time.monotonic() + 5
+    while not _pidfd_exited(descriptor) and time.monotonic() < deadline:
+        time.sleep(.001)
+    assert _pidfd_exited(descriptor), "tracked worker did not exit"
+_LinuxProcessTree.refresh = _late_fork_refresh
+''')
+    tree.pid_file.write_text(str(tree.pids["backend"]))
+    lock = Path(tree.env["DEV_TEST_LOCK"])
+    lock_bytes = lock.read_bytes()
+    result = subprocess.run(["/bin/bash", str(tree.script), action, "backend"],
+                            env=tree.env, capture_output=True, text=True, timeout=15)
+    assert record.exists(), result.stderr
+    rows = json.loads(record.read_text())
+    assert rows["worker"] == tree.pids["worker"]
+    assert rows["child"] > 1
+    assert result.returncode != 0, result.stdout
+    assert "Linux existing-tree descendant custody is unproven" in result.stderr
+    assert "backend: stopped" not in result.stdout
+    assert not select.select([tree.worker_lifetime], [], [], .1)[0], "late grandchild unexpectedly exited"
+    assert tree.pid_file.read_text() == str(tree.pids["backend"])
+    assert lock.read_bytes() == lock_bytes
+    calls = [json.loads(line) for line in Path(tree.env["DEV_TEST_LOG"]).read_text().splitlines()]
+    assert not any(call[0] == "nohup" for call in calls), "restart launched a replacement"
+    assert_shared_workloads_survive(tree)
+    # native_dev_tree's finally releases the grandchild via its inherited pipe
+    # and proves lifetime EOF, independently of PID discovery or reuse.

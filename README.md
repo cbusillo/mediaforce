@@ -564,6 +564,24 @@ custody modules, even when invoked from another directory or unrelated package
 edits cannot import. Native custody failures remain visible rather than falling
 back to bare PID signals.
 
+On Linux, stop can terminate the identities it captured but cannot prove that
+an existing worker did not fork and exit between discovery passes, leaving an
+unseen grandchild. It therefore reports `Linux existing-tree descendant custody
+is unproven`, retains bookkeeping, and blocks restart even when the captured
+processes exited. Repeating stop cannot establish the missing custody. For Linux
+web development, keep the backend in its foreground terminal instead:
+
+```bash
+uv run mediaforce-web --host 127.0.0.1 --port 8777 --no-reload
+```
+
+Run `npm --prefix frontend run dev` in a second terminal when editing the UI.
+End those foreground commands from their terminals; do not use development
+stop/restart to claim Linux descendant cleanup. Check and resolve any earlier
+unproven tree before starting a replacement. This limitation does not apply to
+Linux commands launched inside Mediaforce's scoped subprocess supervisor, which
+establishes child custody before launch. Darwin retains its strict fork guard.
+
 Development PID files live in a directory under that state path keyed by the
 physical checkout: `development/<checkout hash>/`. Each checkout manages its
 own records, so a reused PID cannot wedge start or discard another checkout's

@@ -198,7 +198,8 @@ class _LinuxProcessTree:
 
     @property
     def compromised(self) -> bool:
-        return False
+        # An external tree can reparent unseen children outside this helper.
+        return self._external_root
 
     @property
     def requires_immediate_shutdown(self) -> bool:
@@ -996,6 +997,25 @@ def _reap_children(
             target_status = wait_status
 
 
+def _completed_termination_result(
+        tree: _LinuxProcessTree | _DarwinProcessTree,
+        succeeded: bool,
+) -> _TerminationResult:
+    if succeeded and not tree.compromised:
+        return _TerminationResult(True)
+    reason = tree.signal_failure_reason
+    if tree.compromised:
+        reason = reason or (
+            "Linux existing-tree descendant custody is unproven"
+            if isinstance(tree, _LinuxProcessTree)
+            else "managed process ownership was compromised"
+        )
+    return _TerminationResult(
+        False,
+        reason or "managed process termination could not be proven",
+    )
+
+
 def _terminate_tree(
         tree: _LinuxProcessTree | _DarwinProcessTree,
         reap: Callable[[], None],
@@ -1012,15 +1032,7 @@ def _terminate_tree(
             tree.refresh(_TREE_POLL_SECONDS)
             if not tree.live():
                 reap()
-                if succeeded and not tree.compromised:
-                    return _TerminationResult(True)
-                reason = tree.signal_failure_reason
-                if tree.compromised:
-                    reason = reason or "managed process ownership was compromised"
-                return _TerminationResult(
-                    False,
-                    reason or "managed process termination could not be proven",
-                )
+                return _completed_termination_result(tree, succeeded)
             succeeded = tree.signal_all(termination_signal) and succeeded
     reason = "managed process tree remained live after SIGKILL grace"
     if tree.signal_failure_reason:
