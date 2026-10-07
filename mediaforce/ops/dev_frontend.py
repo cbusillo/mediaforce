@@ -132,7 +132,8 @@ def main() -> int:
                 return 1
             except OSError:
                 pass
-        print(f"frontend: native argument ownership unknown: {exc}", file=sys.stderr)
+        target = "" if pid is None else f" for pid {pid}"
+        print(f"frontend: native argument ownership unknown{target}: {exc}", file=sys.stderr)
         return 2
 
 

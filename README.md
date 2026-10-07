@@ -570,11 +570,14 @@ and an interpreter alias removed after startup. Direct Node launches support
 Other Node options are not inferred; use the managed npm path with `NODE_OPTIONS`
 for runtime options. If native arguments or the working directory cannot be read
 for a live candidate, discovery reports ownership unknown and retains processes
-and PID records; start and restart refuse a replacement. Restore the reported
-reader/environment prerequisite and retry. Status reports the uncertainty, including
+and PID records; start and restart refuse a replacement when discovery cannot
+prove a frontend to clean up. Restore the reported reader/environment prerequisite,
+or retry when the process becomes readable or disappears (including after its
+parent reaps an exited child). Status reports the uncertainty, including
 with `all`, rather than calling it stopped or foreign. A proven frontend may still
 be stopped below an unreadable parent: the helper reports that boundary, preserves
 the ancestors and their siblings, and removes its PID record after proven cleanup.
+Restart then launches a replacement normally, leaving the unreadable ancestors alone.
 An unavailable ownership recheck before signalling instead reports unknown and
 retains the record. A failed native argument read counts as exit only with independent
 process-absence evidence; macOS EINVAL alone remains unknown. The readers have

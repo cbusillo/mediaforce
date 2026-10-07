@@ -150,7 +150,7 @@ def test_argument_read_outcome_is_explicit(monkeypatch: pytest.MonkeyPatch, caps
     monkeypatch.setattr(dev_frontend, "process_arguments", Mock(side_effect=error))
     monkeypatch.setattr(dev_frontend.os, "kill", Mock())
     assert dev_frontend.main() == status
-    assert ("ownership unknown" in capsys.readouterr().err) == (status == 2)
+    assert ("ownership unknown for pid 4242" in capsys.readouterr().err) == (status == 2)
 
 
 @pytest.mark.parametrize("exited", [False, True])

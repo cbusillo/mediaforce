@@ -196,7 +196,7 @@ def test_native_unknown_parent_and_custody_recheck(frontend_tree: FrontendTree, 
         assert tree.pid_file.read_text() == str(tree.rows["vite"])
         assert not select.select([tree.owned_lifetime], [], [], .1)[0]
     else:
-        assert "native argument ownership unknown: controlled native argument unavailability" in result.stderr
+        assert f"native argument ownership unknown for pid {target}: controlled native argument unavailability" in result.stderr
         assert "stopping proven subtree" in result.stderr
         assert "frontend: stopped" in result.stdout
         assert select.select([tree.owned_lifetime], [], [], 5)[0]
