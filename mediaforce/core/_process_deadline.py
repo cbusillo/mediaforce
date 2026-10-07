@@ -246,7 +246,7 @@ class _LinuxProcessTree:
         succeeded = True
         identities = sorted(
             self._processes.values(),
-            key=lambda identity: self._depth(identity),
+            key=self._depth,
             reverse=True,
         )
         for identity in identities:
@@ -458,50 +458,46 @@ class _DarwinProcessTree:
             reverse=True,
         )
         for identity in identities:
+            succeeded = self._signal_identity(
+                identity, signal_number, identity_retry_deadline,
+            ) and succeeded
+        return succeeded
+
+    def _signal_identity(
+            self,
+            identity: _DarwinProcessIdentity,
+            signal_number: int,
+            retry_deadline: float,
+    ) -> bool:
+        for _ in range(2):
             token_state = self._refresh_signal_token(
                 identity,
-                retry_deadline=identity_retry_deadline,
+                retry_deadline=retry_deadline,
             )
             if token_state is _DarwinSignalState.EXITED:
                 self._mark_exited(identity)
-                continue
+                return True
             if token_state is _DarwinSignalState.UNSIGNALABLE:
-                succeeded = False
-                continue
+                return False
             result = self._libc.proc_signal_with_audittoken(
                 ctypes.byref(identity.token),
                 signal_number,
             )
-            if result == errno.ESRCH:
-                token_state = self._refresh_signal_token(
-                    identity,
-                    retry_deadline=identity_retry_deadline,
-                )
-                if token_state is _DarwinSignalState.EXITED:
-                    self._mark_exited(identity)
-                    continue
-                if token_state is _DarwinSignalState.UNSIGNALABLE:
-                    succeeded = False
-                    continue
-                result = self._libc.proc_signal_with_audittoken(
-                    ctypes.byref(identity.token),
-                    signal_number,
-                )
-            if result == errno.ESRCH:
-                if self._same_identity_alive(identity):
-                    succeeded = False
-                    self._record_signal_failure(
-                        f"managed process {identity.pid} remained live after audit-token signaling"
-                    )
-                else:
-                    self._mark_exited(identity)
-            elif result != 0:
-                succeeded = False
+            if result == 0:
+                return True
+            if result != errno.ESRCH:
                 self._record_signal_failure(
                     f"cannot signal managed process {identity.pid}: "
                     f"{os.strerror(result)}"
                 )
-        return succeeded
+                return False
+        if self._same_identity_alive(identity):
+            self._record_signal_failure(
+                f"managed process {identity.pid} remained live after audit-token signaling"
+            )
+            return False
+        self._mark_exited(identity)
+        return True
 
     def close(self) -> None:
         self._queue.close()
@@ -1004,40 +1000,28 @@ def _terminate_tree(
         tree: _LinuxProcessTree | _DarwinProcessTree,
         reap: Callable[[], None],
 ) -> _TerminationResult:
-    succeeded = tree.signal_all(signal.SIGTERM)
-    term_deadline = time.monotonic() + _TERM_GRACE_SECONDS
-    while time.monotonic() < term_deadline:
-        reap()
-        tree.refresh(_TREE_POLL_SECONDS)
-        if not tree.live():
+    succeeded = True
+    for termination_signal, grace_seconds in (
+        (signal.SIGTERM, _TERM_GRACE_SECONDS),
+        (signal.SIGKILL, _KILL_GRACE_SECONDS),
+    ):
+        succeeded = tree.signal_all(termination_signal) and succeeded
+        phase_deadline = time.monotonic() + grace_seconds
+        while time.monotonic() < phase_deadline:
             reap()
-            if succeeded and not tree.compromised:
-                return _TerminationResult(True)
-            reason = tree.signal_failure_reason
-            if tree.compromised:
-                reason = reason or "managed process ownership was compromised"
-            return _TerminationResult(
-                False,
-                reason or "managed process termination could not be proven",
-            )
-        succeeded = tree.signal_all(signal.SIGTERM) and succeeded
-    succeeded = tree.signal_all(signal.SIGKILL) and succeeded
-    kill_deadline = time.monotonic() + _KILL_GRACE_SECONDS
-    while time.monotonic() < kill_deadline:
-        reap()
-        tree.refresh(_TREE_POLL_SECONDS)
-        if not tree.live():
-            reap()
-            if succeeded and not tree.compromised:
-                return _TerminationResult(True)
-            reason = tree.signal_failure_reason
-            if tree.compromised:
-                reason = reason or "managed process ownership was compromised"
-            return _TerminationResult(
-                False,
-                reason or "managed process termination could not be proven",
-            )
-        succeeded = tree.signal_all(signal.SIGKILL) and succeeded
+            tree.refresh(_TREE_POLL_SECONDS)
+            if not tree.live():
+                reap()
+                if succeeded and not tree.compromised:
+                    return _TerminationResult(True)
+                reason = tree.signal_failure_reason
+                if tree.compromised:
+                    reason = reason or "managed process ownership was compromised"
+                return _TerminationResult(
+                    False,
+                    reason or "managed process termination could not be proven",
+                )
+            succeeded = tree.signal_all(termination_signal) and succeeded
     reason = "managed process tree remained live after SIGKILL grace"
     if tree.signal_failure_reason:
         reason += f": {tree.signal_failure_reason}"
@@ -1066,6 +1050,7 @@ def _terminate_tree_after_parent_loss(
             if not tree.live():
                 return
         except BaseException:
+            # Parent loss leaves no caller to recover custody; keep trying until empty.
             pass
         time.sleep(_TREE_POLL_SECONDS)
 
@@ -1118,16 +1103,16 @@ def _run(
             "managed process command is empty",
         )
         return 125
-    if deadline_ns >= 0 and time.time_ns() >= deadline_ns:
+    if 0 <= deadline_ns <= time.time_ns():
         _notify(status_descriptor, _STATUS_EXPIRED)
         return 124
 
     termination_signal = 0
 
-    def request_termination(signal_number: int, _frame: object) -> None:
+    def request_termination(requested_signal: int, _frame: object) -> None:
         nonlocal termination_signal
         if termination_signal == 0:
-            termination_signal = signal_number
+            termination_signal = requested_signal
 
     for signal_number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signal_number, request_termination)
@@ -1225,7 +1210,7 @@ def _run(
                 ),
             )
             return 128 + termination_signal
-        if deadline_ns >= 0 and time.time_ns() >= deadline_ns:
+        if 0 <= deadline_ns <= time.time_ns():
             os.close(gate_write_descriptor)
             cleanup_result = _terminate_tree(tree, reap)
             _notify(
@@ -1264,7 +1249,7 @@ def _run(
                     ),
                 )
                 return 128 + termination_signal
-            if deadline_ns >= 0 and time.time_ns() >= deadline_ns:
+            if 0 <= deadline_ns <= time.time_ns():
                 cleanup_result = _terminate_tree(tree, reap)
                 _notify(
                     status_descriptor,
@@ -1311,6 +1296,7 @@ def _run(
                 if not cleanup_result.succeeded:
                     reason = _cleanup_failure_reason(reason, cleanup_result)
             except BaseException:
+                # Preserve the original failure and still report unavailable custody.
                 pass
         _notify(
             status_descriptor,
