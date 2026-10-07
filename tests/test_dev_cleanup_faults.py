@@ -78,6 +78,7 @@ def test_failed_retirement_keeps_completed_native_custody_retryable(finite_custo
     helper = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_processes.py"
     repaired = tree.pid_file.parent / "repair-retirement"
     retry_connected = tree.pid_file.parent / "retirement-retry-connected"
+    retirement_failure = "injected retirement rename failure"
     helper.write_text(helper.read_text().replace("\ndef main()", f'''
 _original_rename = Path.rename
 class _RepairGateSocket(socket.socket):
@@ -89,7 +90,7 @@ class _RepairGateSocket(socket.socket):
 socket.socket = _RepairGateSocket
 def _fault_rename(path, target):
     if path.name == "backend.cleanup" and not Path({str(retry_connected)!r}).exists():
-        raise OSError({errno.ENOSPC}, "injected retirement rename failure")
+        raise OSError({errno.ENOSPC}, {retirement_failure!r})
     return _original_rename(path, target)
 Path.rename = _fault_rename
 
@@ -100,6 +101,7 @@ def main()'''))
     state = tree.pid_file.parent / "backend.cleanup"
     tree.retain_cleanup_marker = state.exists()
     assert first.returncode != 0
+    assert retirement_failure in first.stderr
     assert select.select([tree.worker_lifetime], [], [], 5)[0], "owned worker survived"
     assert os.read(tree.worker_lifetime, 1) == b""
     assert state.exists()
@@ -374,12 +376,13 @@ def test_native_completed_supervisor_cannot_retire_another_session(finite_custod
     helper = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_processes.py"
     repaired = tree.pid_file.parent / "repair-retirement"
     returned = tree.pid_file.parent / "supervisor-returned"
+    retirement_failure = "injected retirement failure"
     helper.write_text(helper.read_text().replace("\ndef main()", f'''
 _original_rename = Path.rename
 _original_serve = serve
 def _fault_rename(path, target):
     if path.name == 'backend.cleanup' and not Path({str(repaired)!r}).exists():
-        raise OSError({errno.ENOSPC}, 'injected retirement failure')
+        raise OSError({errno.ENOSPC}, {retirement_failure!r})
     return _original_rename(path, target)
 Path.rename = _fault_rename
 def serve(*args, **kwargs):
@@ -395,6 +398,7 @@ def main()'''))
     state = tree.pid_file.parent / "backend.cleanup"
     tree.retain_cleanup_marker = state.exists()
     assert first.returncode != 0
+    assert retirement_failure in first.stderr
     assert select.select([tree.worker_lifetime], [], [], 5)[0]
     assert os.read(tree.worker_lifetime, 1) == b""
     assert_shared_workloads_survive(tree)
