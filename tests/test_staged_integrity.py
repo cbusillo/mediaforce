@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
-from mediaforce.core.db_tables import encode_jobs, item_events, library_items, run_manifests, staged_artifacts
+from mediaforce.core.db_tables import calibration_jobs, encode_jobs, item_events, library_items, run_manifests, staged_artifacts
 from mediaforce.library.staged_integrity import (
     MAX_DETAIL_PAGE_SIZE,
     CheckedStagedOutputUnavailable,
@@ -176,6 +176,7 @@ class StagedIntegrityTests(unittest.TestCase):
             self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "2026-09-30T12:00:00+00:00",
             validate_items=lambda *_args: self.fail("making it again must not check the old file"),
             queue_items=lambda prefix, mode, ids: queued.append((prefix, mode, list(ids))) or {"ok": True},
+            current_approval=lambda _prefix: self._new_remake_approval(),
         )
         with open_db(self.config.paths.db_path) as connection:
             artifact = connection.execute(
@@ -522,6 +523,75 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(queued, [("tv/Show", "older_seasons", [item_id])])
         self.assertFalse(stage.exists())
+
+    def test_approved_page_reads_shared_policy_manifest_once(self) -> None:
+        policy = {"video": {"encoder": "libsvtav1", "target_vmaf": 93}}
+        manifest = self._write_policy_manifest("approved-page.json", [policy] * 10,
+            selection={"production_approval_contract": {"schema_version": 1, "policy_hash": "earlier"}})
+        reads: list[Path] = []
+        read_text = Path.read_text
+
+        def read(path: Path, *args: object, **kwargs: object) -> str:
+            reads.append(path)
+            return read_text(path, *args, **kwargs)
+
+        with open_db(self.config.paths.db_path) as connection:
+            records = []
+            for index in range(10):
+                rel_path = f"tv/Show/Season 1/{index}.mkv"
+                item_id = self._insert_item(connection, rel_path, status="validated")
+                self._insert_artifact(connection, item_id, self._write_stage(rel_path, b"ready"), passed=True,
+                                      manifest_path=manifest, item_index=index)
+                records.append({"item_id": item_id})
+            with patch.object(Path, "read_text", read):
+                result = staged_remake_records(connection, records, "tv/Show/Season 1",
+                                              current_approval=lambda _prefix: self.fail("already approved"))
+        self.assertTrue(all("remake" not in record for record in result))
+        self.assertEqual(reads.count(manifest), 1)
+
+    def test_active_sample_preserves_the_finished_file_before_queue_refusal(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(calibration_jobs.insert().values(
+                job_id="new-sample-running", prefix="tv/Show", status="running", lane="test", action="sample",
+                host_json="{}", policy_json="{}", sample_item_json="{}", created_at="now", updated_at="now"))
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no validation"), queue_items=lambda *_args: self.fail("no queue"),
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("sample", result["message"])
+        self.assertTrue(stage.exists())
+
+    def test_held_remake_preserves_the_finished_file_without_current_approval(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            item_id, stage = self._held_file(connection, "No approval.mkv")
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no validation"), queue_items=lambda *_args: self.fail("no queue"),
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("Approve", result["message"])
+        self.assertTrue(stage.exists())
+
+    def test_missing_size_manifest_explains_the_required_recovery_record(self) -> None:
+        item_id, stage, manifest = self._final_size_file()
+        selection = json.loads(manifest.read_text())["selection"]
+        manifest.unlink()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(run_manifests.insert().values(run_id="saved-run", created_at="before",
+                output_path=str(manifest), selection_json=json.dumps(selection), item_count=2))
+            connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
+                manifest_run_id="saved-run"))
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no validation"), queue_items=lambda *_args: self.fail("no queue"),
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("Restore the run manifest", result["message"])
+        self.assertTrue(stage.exists())
 
     def test_missing_run_context_preserves_the_output_until_its_record_is_restored(self) -> None:
         item_id, stage, manifest = self._final_size_file()

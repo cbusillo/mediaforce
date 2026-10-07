@@ -18,14 +18,15 @@ and a new encode rather than accepting the old output without that history.
 The action rechecks eligibility and the queue’s run-level and saved per-file
 size-miss guards before removing the staged output. These checks are read-only;
 verified legacy recoveries are recognized without rewriting their history. An active
-run blocks removal. The original must be accessible, and the staged path must
+encode or sample run blocks removal, and every remake needs a current approved sample. The original must be accessible, and the staged path must
 not point at it; restore source access before retrying when it is unavailable. It then removes that file's staged copy and partial output,
 returns that library item to planned, and queues only that item at its run's
 scope and mode, including older seasons. If its terminal job was cleared,
 the saved run scope supplies the prefix. If the manifest itself is unavailable,
 the existing database run selection preserves that scope and mode. If neither
 record can be read, restore the saved run settings from a run backup before
-retrying; the staged copy stays in place. The original and other staged outputs
+retrying; the staged copy stays in place. A size failure also needs its run manifest
+for the goal comparison; restore that manifest from a run backup when it is missing. The original and other staged outputs
 stay in place. If queuing fails after removal, the response says so and the item
 remains planned for the supported queue action.
 

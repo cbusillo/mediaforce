@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,7 @@ from mediaforce.encoding.encode_queue import load_active_encode_jobs_for_prefix
 from mediaforce.encoding.staging import FINAL_SIZE_GOAL_CHECK, partial_output_path
 from mediaforce.library.media_scopes import path_matches_scope
 from mediaforce.library.staged_integrity import staged_validation_outcome
+from mediaforce.tuning.calibration_jobs import EXECUTION_ACTIVE_JOB_STATUSES, load_latest_job
 from mediaforce.web.runtime.encode_runtime import remove_stale_staging_path
 from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, _staged_policy_states, \
     staged_requeue_size_blocker
@@ -126,6 +127,7 @@ def staged_remake_details(
         prefix: str,
         *,
         current_approval: CurrentApprovalFn,
+        policy_states: Mapping[int, str | None] | None = None,
 ) -> dict[str, Any] | None:
     """Offer recovery only for a size-only failure or missing settings history.
 
@@ -138,19 +140,26 @@ def staged_remake_details(
               if object_dict(check).get("passed") is False]
     held = staged_validation_outcome(row["validation_json"]) == "size_held"
     final_size = validation.get("passed") is False and failed == [FINAL_SIZE_GOAL_CHECK]
-    missing_policy = validation.get("passed") is True and _staged_policy_states(
-        connection, {int(row["library_item_id"])}, accepted_policy_hash="",
+    missing_policy = validation.get("passed") is True and (
+        policy_states if policy_states is not None else _staged_policy_states(
+            connection, {int(row["library_item_id"])}, accepted_policy_hash="",
+        )
     ).get(int(row["library_item_id"])) == "season_policy_provenance_missing"
     if not (held or final_size or missing_policy):
         return None
     run_prefix, _mode, context_available = _run_context(connection, row, prefix)
     blocked_reasons: list[str] = []
-    approval = current_approval(run_prefix) if context_available else None
+    approval = current_approval(run_prefix)
     if not held and not context_available:
         blocked_reasons.append("Restore the saved run settings before making this file again. Nothing was removed.")
-    elif not held:
+    else:
         if approval is None:
             blocked_reasons.append("Approve a fresh sample before making this file again.")
+        elif final_size and not _readable_manifest(row):
+            blocked_reasons.append(
+                "Restore the run manifest from a run backup before making this file again; "
+                "its size comparison cannot be verified. Nothing was removed."
+            )
         elif final_size:
             blocker = _final_size_requeue_contract_blocker({
                 "manifest_path": row["manifest_path"],
@@ -177,6 +186,9 @@ def staged_remake_details(
         blocked_reasons.append(
             "The compressed copy points at the original. Check this file’s paths before making it again."
         )
+    sample = load_latest_job(connection, run_prefix)
+    if sample and sample.get("status") in EXECUTION_ACTIVE_JOB_STATUSES:
+        blocked_reasons.append("Mediaforce is still sampling here. Make this file again once that sample finishes.")
     if load_active_encode_jobs_for_prefix(connection, run_prefix):
         blocked_reasons.append("Mediaforce is still compressing here. Make this file again once that run finishes.")
     return {"reason": "size_held" if held else "final_size" if final_size else "settings_history",
@@ -197,9 +209,19 @@ def staged_remake_records(
         .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
         .where(staged_artifacts.c.library_item_id.in_(ids))
     ).mappings()}
+    policy_states = _staged_policy_states(connection, {
+        item_id for item_id, row in rows.items() if _stored_validation(row).get("passed") is True
+    }, accepted_policy_hash="")
+    approvals: dict[str, dict[str, Any] | None] = {}
+
+    def approval_for_scope(scope: str) -> dict[str, Any] | None:
+        if scope not in approvals:
+            approvals[scope] = current_approval(scope)
+        return approvals[scope]
+
     for record in records:
         recovery = staged_remake_details(connection, rows.get(record.get("item_id")), prefix,
-                                        current_approval=current_approval)
+                                        current_approval=approval_for_scope, policy_states=policy_states)
         if recovery is not None:
             record["remake"] = recovery
     return records
@@ -212,6 +234,13 @@ def _stored_validation(row: Any) -> dict[str, Any]:
         return object_dict(json.loads(str(row["validation_json"] or "{}")))
     except json.JSONDecodeError:
         return {}
+
+
+def _readable_manifest(row: Any) -> bool:
+    try:
+        return bool(object_dict(json.loads(Path(str(row["manifest_path"] or "")).read_text())))
+    except (OSError, json.JSONDecodeError):
+        return False
 
 
 def _run_context(connection: DBClient, row: Any, prefix: str) -> tuple[str, str, bool]:
