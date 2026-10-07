@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_dev_process_tree import native_command
+from tests.test_dev_process_tree import clear_test_owned_lost_cleanup, native_command
 from tests.test_dev_service import prepare_dev_service
 
 
@@ -118,6 +118,10 @@ sibling.wait()
             assert select.select([reader], [], [], 5)[0], "fixture process survived teardown"
             assert os.read(reader, 1) == b""
             os.close(reader)
+        cleanup_state = backend_pid_file.parent / "frontend.cleanup"
+        if sys.platform == "linux" and cleanup_state.exists():
+            clear_test_owned_lost_cleanup(cleanup_state)
+        assert not cleanup_state.exists(), "fixture cleanup supervisor survived teardown"
         if root.stdout is not None:
             root.stdout.close()
         assert root.stderr is not None

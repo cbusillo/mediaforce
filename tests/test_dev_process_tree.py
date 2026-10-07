@@ -143,13 +143,10 @@ sibling.wait()
         assert select.select([sibling_r], [], [], 5)[0], "fixture sibling still alive"
         assert os.read(sibling_r, 1) == b""
         cleanup_state = pid_file.parent / "backend.cleanup"
-        if owned_tree is not None and owned_tree.retain_cleanup_marker:
-            # Only test-owned artifacts are cleared, after every owned lifetime
-            # pipe has proved EOF and the failed supervisor no longer listens.
-            with dev_processes.state_directory(cleanup_state), socket.socket(socket.AF_UNIX) as client:
-                with pytest.raises(ConnectionRefusedError):
-                    client.connect("control.sock")
-            dev_processes.remove_state(cleanup_state)
+        if cleanup_state.exists() and (
+                sys.platform == "linux" or owned_tree is not None and owned_tree.retain_cleanup_marker
+        ):
+            clear_test_owned_lost_cleanup(cleanup_state)
         deadline = time.monotonic() + 5
         while cleanup_state.exists() and time.monotonic() < deadline:
             time.sleep(.02)
@@ -161,6 +158,21 @@ sibling.wait()
             root.stdout.close()
         assert root.stderr is not None
         root.stderr.close()
+
+
+def clear_test_owned_lost_cleanup(state: Path) -> None:
+    # Only fixture state is removed, after all descendant lifetime pipes proved
+    # EOF and the custody supervisor's own socket proves it no longer listens.
+    deadline = time.monotonic() + 5
+    while True:
+        with dev_processes.state_directory(state), socket.socket(socket.AF_UNIX) as client:
+            try:
+                client.connect("control.sock")
+            except ConnectionRefusedError:
+                dev_processes.remove_state(state)
+                return
+        assert time.monotonic() < deadline, "fixture cleanup supervisor survived teardown"
+        time.sleep(.3)
 
 
 def native_command(pid: int) -> str:
@@ -470,6 +482,15 @@ def _process_tree(*args, **kwargs):
     calls = [json.loads(line) for line in Path(tree.env["DEV_TEST_LOG"]).read_text().splitlines()]
     assert not any(call[0] == "nohup" for call in calls), "new backend launched before cleanup"
     repaired.touch()
+    if sys.platform == "linux":
+        stop_native_backend(tree)
+        assert tree.pid_file.read_text() == str(tree.pids["backend"])
+        assert (tree.pid_file.parent / "backend.cleanup").exists()
+        assert not completed.exists(), "external Linux custody was falsely certified"
+        calls = [json.loads(line) for line in Path(tree.env["DEV_TEST_LOG"]).read_text().splitlines()]
+        assert not any(call[0] == "nohup" for call in calls)
+        assert_shared_workloads_survive(tree)
+        return
     if blocked_action == "restart" and component == "backend":
         table = tmp_path / "listeners.json"
         table.write_text("[]")
