@@ -524,6 +524,27 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertEqual(queued, [("tv/Show", "older_seasons", [item_id])])
         self.assertFalse(stage.exists())
 
+    def test_legacy_manual_season_override_is_preserved_without_recorded_queue_mode(self) -> None:
+        item_id, stage, manifest = self._final_size_file()
+        payload = json.loads(manifest.read_text())
+        payload["selection"].pop("queue_mode")
+        payload["selection"]["media_scope"]["prefix"] = "tv/Show/Season 1"
+        payload["items"][1]["selection_provenance"] = {"override_applied": True, "manual_override": True}
+        manifest.write_text(json.dumps(payload))
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == "finished-show").values(
+                prefix="tv/Show/Season 1"))
+        queued = []
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no validation"),
+            queue_items=lambda prefix, mode, ids: queued.append((prefix, mode, list(ids))) or {"ok": True},
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(queued, [("tv/Show/Season 1", "season_override", [item_id])])
+        self.assertFalse(stage.exists())
+
     def test_approved_page_reads_shared_policy_manifest_once(self) -> None:
         policy = {"video": {"encoder": "libsvtav1", "target_vmaf": 93}}
         manifest = self._write_policy_manifest("approved-page.json", [policy] * 10,

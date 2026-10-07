@@ -19,6 +19,7 @@ from mediaforce.library.media_scopes import path_matches_scope
 from mediaforce.library.staged_integrity import staged_validation_outcome
 from mediaforce.tuning.calibration_jobs import EXECUTION_ACTIVE_JOB_STATUSES, load_latest_job
 from mediaforce.web.runtime.encode_runtime import remove_stale_staging_path
+from mediaforce.web.runtime.ambiguous_motion import _legacy_queue_mode
 from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, _staged_policy_states, \
     staged_requeue_size_blocker
 from mediaforce.web.runtime.host_runtime import host_config_for_key
@@ -171,7 +172,8 @@ def staged_remake_details(
             }, approval)
             if blocker:
                 blocked_reasons.append(
-                    "Approve a fresh sample with a changed size or quality goal before making this file again."
+                    "Approve a fresh sample with changed size or quality settings before making this file again. "
+                    "Older runs without approval history need a changed size goal."
                 )
     queue_blocker = staged_requeue_size_blocker(connection, run_prefix, int(row["library_item_id"]), approval)
     if queue_blocker is not None:
@@ -250,6 +252,7 @@ def _run_context(connection: DBClient, row: Any, prefix: str) -> tuple[str, str,
         selection = object_dict(manifest.get("selection"))
         available = True
     except (OSError, json.JSONDecodeError):
+        manifest = {}
         stored = connection.execute(select(run_manifests.c.selection_json).where(
             run_manifests.c.run_id == str(row["manifest_run_id"] or "")
         )).scalar_one_or_none()
@@ -263,7 +266,8 @@ def _run_context(connection: DBClient, row: Any, prefix: str) -> tuple[str, str,
     run_prefix = str(connection.execute(
         select(encode_jobs.c.prefix).where(encode_jobs.c.job_id == str(row["encode_job_id"] or ""))
     ).scalar_one_or_none() or recorded_prefix or prefix)
-    return run_prefix, str(selection.get("queue_mode") or lifecycle_override.get("mode") or MODE_FOLDER), available
+    return run_prefix, str(selection.get("queue_mode") or lifecycle_override.get("mode")
+                           or _legacy_queue_mode(manifest, older_seasons=bool(lifecycle_override))), available
 
 
 def _remove_finished_output(config: MediaforceConfig, row: Any) -> bool:

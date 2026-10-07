@@ -8,7 +8,7 @@ settings history is missing. It uses the existing per-file
 
 A final-size failure requires a fresh approved sample and a changed goal under
 the same contract check used for failed-run recovery. Older multi-file runs
-compare the missed episode's own duration and target; an unnamed or unreadable
+need a changed size goal and compare the missed episode's own duration and target; an unnamed or unreadable
 comparison stays blocked. If an earlier legacy comparison recorded the miss
 under the newly approved goal, verified recovery appends a resolution event
 without erasing the miss. The resolution survives removal of the terminal job
@@ -21,7 +21,8 @@ verified legacy recoveries are recognized without rewriting their history. An ac
 encode or sample run blocks removal, and every remake needs a current approved sample. The original must be accessible, and the staged path must
 not point at it; restore source access before retrying when it is unavailable. It then removes that file's staged copy and partial output,
 returns that library item to planned, and queues only that item at its run's
-scope and mode, including older seasons. If its terminal job was cleared,
+scope and mode, including older seasons. Pre-mode manifests retain manual season
+overrides through the existing legacy selection-provenance reader. If its terminal job was cleared,
 the saved run scope supplies the prefix. If the manifest itself is unavailable,
 the existing database run selection preserves that scope and mode. If neither
 record can be read, restore the saved run settings from a run backup before
