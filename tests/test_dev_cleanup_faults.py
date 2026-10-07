@@ -1,5 +1,6 @@
 import errno
 import os
+from collections.abc import Iterator
 from pathlib import Path
 import select
 import stat
@@ -9,14 +10,21 @@ from unittest.mock import Mock, patch
 import pytest
 
 from mediaforce.ops import dev_processes
-from tests.test_dev_process_tree import NativeDevTree, assert_shared_workloads_survive, native_dev_tree
+from tests.test_dev_process_tree import NativeDevTree, assert_shared_workloads_survive, development_tree
+
+
+@pytest.fixture
+def finite_custody_dev_tree(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[NativeDevTree]:
+    # Retirement faults require modeled complete custody on Linux to reach disposal.
+    # Native identity pins and lifetime-pipe teardown still own the finite processes.
+    yield from development_tree(tmp_path, request, native_custody=False)
 
 
 @pytest.mark.parametrize("resource_error", [errno.ENOSPC, errno.EDQUOT])
 def test_retirement_needs_no_directory_allocation(
-    native_dev_tree: NativeDevTree, resource_error: int,
+    finite_custody_dev_tree: NativeDevTree, resource_error: int,
 ) -> None:
-    tree = native_dev_tree
+    tree = finite_custody_dev_tree
     helper = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_processes.py"
     helper.write_text(helper.read_text().replace("\ndef main()", f'''
 _original_mkdtemp = tempfile.mkdtemp
@@ -32,10 +40,10 @@ def main()'''))
                             capture_output=True, text=True, timeout=15)
     state = tree.pid_file.parent / "backend.cleanup"
     tree.retain_cleanup_marker = state.exists()
+    assert result.returncode == 0, result.stderr
     assert select.select([tree.worker_lifetime], [], [], 5)[0], "owned worker survived"
     assert os.read(tree.worker_lifetime, 1) == b""
     assert_shared_workloads_survive(tree)
-    assert result.returncode == 0, result.stderr
     assert not state.exists()
     assert not tree.pid_file.exists()
 
@@ -65,11 +73,12 @@ def test_partial_receipt_failure_does_not_need_another_directory(
     assert not list(tmp_path.glob(".backend.cleanup-*")), "unpublished partial receipt leaked"
 
 
-def test_failed_retirement_keeps_completed_native_custody_retryable(native_dev_tree: NativeDevTree) -> None:
-    tree = native_dev_tree
+def test_failed_retirement_keeps_completed_native_custody_retryable(finite_custody_dev_tree: NativeDevTree) -> None:
+    tree = finite_custody_dev_tree
     helper = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_processes.py"
     repaired = tree.pid_file.parent / "repair-retirement"
     retry_connected = tree.pid_file.parent / "retirement-retry-connected"
+    retirement_failure = "injected retirement rename failure"
     helper.write_text(helper.read_text().replace("\ndef main()", f'''
 _original_rename = Path.rename
 class _RepairGateSocket(socket.socket):
@@ -81,7 +90,7 @@ class _RepairGateSocket(socket.socket):
 socket.socket = _RepairGateSocket
 def _fault_rename(path, target):
     if path.name == "backend.cleanup" and not Path({str(retry_connected)!r}).exists():
-        raise OSError({errno.ENOSPC}, "injected retirement rename failure")
+        raise OSError({errno.ENOSPC}, {retirement_failure!r})
     return _original_rename(path, target)
 Path.rename = _fault_rename
 
@@ -92,6 +101,7 @@ def main()'''))
     state = tree.pid_file.parent / "backend.cleanup"
     tree.retain_cleanup_marker = state.exists()
     assert first.returncode != 0
+    assert retirement_failure in first.stderr
     assert select.select([tree.worker_lifetime], [], [], 5)[0], "owned worker survived"
     assert os.read(tree.worker_lifetime, 1) == b""
     assert state.exists()
@@ -361,17 +371,18 @@ def test_completed_supervisor_preserves_a_replacement_marker(tmp_path: Path, mon
     tree.close.assert_called_once()
 
 
-def test_native_completed_supervisor_cannot_retire_another_session(native_dev_tree: NativeDevTree) -> None:
-    tree = native_dev_tree
+def test_native_completed_supervisor_cannot_retire_another_session(finite_custody_dev_tree: NativeDevTree) -> None:
+    tree = finite_custody_dev_tree
     helper = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_processes.py"
     repaired = tree.pid_file.parent / "repair-retirement"
     returned = tree.pid_file.parent / "supervisor-returned"
+    retirement_failure = "injected retirement failure"
     helper.write_text(helper.read_text().replace("\ndef main()", f'''
 _original_rename = Path.rename
 _original_serve = serve
 def _fault_rename(path, target):
     if path.name == 'backend.cleanup' and not Path({str(repaired)!r}).exists():
-        raise OSError({errno.ENOSPC}, 'injected retirement failure')
+        raise OSError({errno.ENOSPC}, {retirement_failure!r})
     return _original_rename(path, target)
 Path.rename = _fault_rename
 def serve(*args, **kwargs):
@@ -387,6 +398,7 @@ def main()'''))
     state = tree.pid_file.parent / "backend.cleanup"
     tree.retain_cleanup_marker = state.exists()
     assert first.returncode != 0
+    assert retirement_failure in first.stderr
     assert select.select([tree.worker_lifetime], [], [], 5)[0]
     assert os.read(tree.worker_lifetime, 1) == b""
     assert_shared_workloads_survive(tree)

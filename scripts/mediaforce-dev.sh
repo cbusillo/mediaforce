@@ -601,31 +601,43 @@ smoke_frontend() {
 	echo "frontend: smoke passed ${base_url}"
 }
 
+stop_all() {
+	local failed=0
+	stop_frontend || {
+		[[ "$(uname -s)" == "Linux" ]] || return 1
+		failed=1
+	}
+	stop_backend || failed=1
+	return "${failed}"
+}
+
+foreground_development_hint() {
+	echo "Run uv run mediaforce-web --no-reload in one terminal and npm --prefix frontend run dev in another." >&2
+}
+
 run_for_component() {
 	local action="${1:-status}"
 	local component="${2:-all}"
+	if [[ "${action}" == "start" && "$(uname -s)" == "Linux" ]]; then
+		echo "Linux development launcher cleanup cannot prove descendant custody; Start preserves existing processes." >&2
+		foreground_development_hint
+		return 1
+	fi
 	case "${action}:${component}" in
 	start:all) start_backend && start_frontend ;;
 	start:backend) start_backend ;;
 	start:frontend) start_frontend ;;
-	stop:all)
-		stop_frontend || return 1
-		stop_backend || return 1
-		;;
+	stop:all) stop_all ;;
 	stop:backend) stop_backend ;;
 	stop:frontend) stop_frontend ;;
-	restart:all)
-		stop_frontend || return 1
-		stop_backend || return 1
-		start_backend || return 1
-		start_frontend
-		;;
-	restart:backend)
-		stop_backend || return 1
-		start_backend
-		;;
-	restart:frontend)
-		stop_frontend && start_frontend
+	restart:all | restart:backend | restart:frontend)
+		run_for_component stop "${component}" || {
+			if [[ "$(uname -s)" == "Linux" ]]; then
+				foreground_development_hint
+			fi
+			return 1
+		}
+		run_for_component start "${component}"
 		;;
 	status:all)
 		status_backend || true

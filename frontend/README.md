@@ -14,23 +14,8 @@ and loads review media from `/review-media/*`.
 
 ## Local development
 
-From the project root, start the backend and the Vite dev server together
-(Vite listens on `MEDIAFORCE_FRONTEND_DEV_PORT`, default 4173):
-
-```sh
-scripts/mediaforce-dev.sh start
-```
-
-To run only the backend there and Vite here:
-
-```sh
-../scripts/mediaforce-dev.sh start backend
-npm run dev
-```
-
-The Vite dev server proxies `/api/*` and `/review-media/*` to the FastAPI
-backend on `127.0.0.1:8777` by default; set `MEDIAFORCE_FRONTEND_API_ORIGIN`
-or `MEDIAFORCE_WEB_PORT` in the repo `.env` to change it.
+See [Local web development](../README.md#local-web-development) for the
+platform-specific backend and Vite startup commands and proxy configuration.
 
 ## Checks
 

@@ -1541,11 +1541,13 @@ class ProcessControlTests(TestCase):
         self.assertIn("managed process 12345 is unsignalable", str(result.reason))
 
     def test_terminate_tree_observes_exit_after_a_paused_kill_deadline(self) -> None:
+        ownership_reason = "test-owned custody failure"
         for outcome in ("term_exited", "exited", "signal_failed", "compromised", "survived"):
             with self.subTest(outcome=outcome):
                 tree = Mock(
                     signal_failure_reason="native signal refused" if outcome == "signal_failed" else None,
                     compromised=outcome == "compromised",
+                    ownership_failure_reason=ownership_reason,
                 )
                 tree.signal_all.return_value = outcome != "signal_failed"
                 tree.live.side_effect = [False] if outcome == "term_exited" else [True, outcome == "survived"]
@@ -1568,7 +1570,7 @@ class ProcessControlTests(TestCase):
                 if outcome == "signal_failed":
                     self.assertIn("native signal refused", str(result.reason))
                 elif outcome == "compromised":
-                    self.assertIn("ownership was compromised", str(result.reason))
+                    self.assertEqual(result.reason, ownership_reason)
                 elif outcome == "survived":
                     self.assertIn("remained live", str(result.reason))
 

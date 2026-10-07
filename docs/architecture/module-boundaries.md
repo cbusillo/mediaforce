@@ -62,7 +62,13 @@ after the package consolidation pass. Avoid growing them with new helper logic.
     a controller pause; an empty tree succeeds only with intact ownership and
     successful signaling, without extending the cleanup grace periods
   - Linux uses a scoped child subreaper plus pidfds; procfs disappearance is an
-    exit race only when the pinned pidfd independently proves exit
+    exit race only when the pinned pidfd independently proves exit. Existing-tree
+    development cleanup has no such pre-launch subreaper authority: a tracked
+    worker can fork and exit between procfs passes, leaving an unseen descendant.
+    That external mode retains pinned best-effort teardown but always reports
+    descendant custody as unproven; observed exit is not a full-tree proof.
+    The supported Linux foreground development path is in README's Local web
+    development section
   - macOS uses Darwin unique parent identities plus audit-token signaling; a
     uniquely live process that cannot provide a signal token remains live and
     makes cleanup unprovable rather than being classified as exited. Signal-token
