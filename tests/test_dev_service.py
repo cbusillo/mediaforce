@@ -1560,7 +1560,8 @@ def test_fresh_frontend_reports_unconfirmed_launch_without_uv(tmp_path: Path) ->
         confirmed = subprocess.run(["/bin/bash", str(script), "start", "frontend"], env=env,
                                    capture_output=True, text=True, timeout=20)
         assert confirmed.returncode == 0, confirmed.stderr
-        assert "frontend: running http://" in confirmed.stdout
+        assert "frontend: running " in confirmed.stdout
+        assert f"pid {pid}" in confirmed.stdout
         assert int(pid_file.read_text()) == pid
         restored = subprocess.run(["/bin/bash", str(script), "stop", "frontend"], env=env,
                                   capture_output=True, text=True, timeout=20)
