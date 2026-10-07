@@ -529,7 +529,7 @@ The web UI is now split cleanly:
 - FastAPI serves the backend API and review media.
 - A SvelteKit frontend lives under `frontend/`.
 
-For local web work, use `scripts/mediaforce-dev.sh` with
+For macOS local web work, use `scripts/mediaforce-dev.sh` with
 `start|stop|restart|status|smoke`. It manages the backend and frontend together,
 uses the repo-local `.env`, writes pid files and logs under
 `~/Library/Application Support/mediaforce/`, starts Vite with `--strictPort`,
@@ -564,7 +564,9 @@ custody modules, even when invoked from another directory or unrelated package
 edits cannot import. Native custody failures remain visible rather than falling
 back to bare PID signals.
 
-On Linux, stop can terminate the identities it captured but cannot prove that
+On Linux, the launcher refuses Start and supplies the foreground commands below,
+so a new development session cannot enter an unprovable cleanup state. For an
+existing tree, stop can terminate the identities it captured but cannot prove that
 an existing worker did not fork and exit between discovery passes, leaving an
 unseen grandchild. It therefore reports `Linux existing-tree descendant custody
 is unproven`, retains bookkeeping, and blocks restart even when the captured
@@ -577,8 +579,10 @@ uv run mediaforce-web --host 127.0.0.1 --port 8777 --no-reload
 
 Run `npm --prefix frontend run dev` in a second terminal when editing the UI.
 End those foreground commands from their terminals; do not use development
-stop/restart to claim Linux descendant cleanup. Check and resolve any earlier
-unproven tree before starting a replacement. This limitation does not apply to
+stop/restart to claim Linux descendant cleanup. If an earlier launcher session
+left unproven cleanup state, Stop preserves it until a verified system restart;
+retries cannot recover missing custody. Start foreground development only after
+the earlier processes are resolved. This limitation does not apply to
 Linux commands launched inside Mediaforce's scoped subprocess supervisor, which
 establishes child custody before launch. Darwin retains its strict fork guard.
 

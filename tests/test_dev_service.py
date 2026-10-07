@@ -67,6 +67,8 @@ with Path(os.environ["DEV_TEST_LOG"]).open("a") as output:
 if name == "shasum":
     import hashlib
     print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest() + "  -")
+elif name == "uname":
+    print(os.environ["DEV_TEST_SYSTEM"])
 elif name == "id":
     print(4242)
 elif name == "launchctl" and sys.argv[1] == "print":
@@ -246,13 +248,14 @@ elif name == "rm":
 elif name not in {"launchctl", "ps", "lsof", "sleep"}:
     raise AssertionError(name)
 '''
-    for command in ("shasum", "id", "launchctl", "ps", "lsof", "python3", "uv", "sleep", "dirname", "sed", "awk", "sort", "paste", "tr", "rm", "mkdir", "nohup"):
+    for command in ("uname", "shasum", "id", "launchctl", "ps", "lsof", "python3", "uv", "sleep", "dirname", "sed", "awk", "sort", "paste", "tr", "rm", "mkdir", "nohup"):
         binary = binaries / command
         binary.write_text(stub)
         binary.chmod(0o755)
     environment = {
         "PATH": str(binaries),
         "HOME": str(home),
+        "DEV_TEST_SYSTEM": "Linux" if native_custody and sys.platform == "linux" else "Darwin",
         "DEV_TEST_LOG": str(log),
         "DEV_TEST_LABEL": LOGIN_ITEM_LABEL,
         "DEV_TEST_SERVICE": "matching" if service == "symlink" else service,
@@ -1395,3 +1398,22 @@ def test_unknown_arguments_preserve_frontend_bookkeeping(
     assert tree.root.poll() is None
     assert not tree.child_finished.exists()
     assert pid_file.read_bytes() == original
+
+
+@pytest.mark.parametrize("component", ["all", "backend", "frontend"])
+def test_linux_start_preserves_state_and_supplies_foreground_commands(tmp_path: Path, component: str) -> None:
+    script, lock, pid_file, log, env = prepare_dev_service(tmp_path, "matching", "pid_file", "owned")
+    env["DEV_TEST_SYSTEM"] = "Linux"
+    pid_file.write_text("54321")
+    original_lock = lock.read_bytes()
+    result = subprocess.run(
+        ["/bin/bash", str(script), "start", component], env=env, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode != 0
+    assert "custody" in result.stderr
+    assert "uv run mediaforce-web --no-reload" in result.stderr
+    assert "npm --prefix frontend run dev" in result.stderr
+    assert pid_file.read_text() == "54321"
+    assert lock.read_bytes() == original_lock
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert not any(call[0] in {"nohup", "launchctl", "uv", "rm"} for call in calls)

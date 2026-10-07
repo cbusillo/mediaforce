@@ -202,6 +202,12 @@ class _LinuxProcessTree:
         return self._external_root
 
     @property
+    def ownership_failure_reason(self) -> str | None:
+        if self._external_root:
+            return "Linux existing-tree descendant custody is unproven"
+        return None
+
+    @property
     def requires_immediate_shutdown(self) -> bool:
         return False
 
@@ -401,6 +407,12 @@ class _DarwinProcessTree:
     @property
     def compromised(self) -> bool:
         return self._compromised
+
+    @property
+    def ownership_failure_reason(self) -> str | None:
+        if self._compromised:
+            return "managed process ownership was compromised"
+        return None
 
     @property
     def requires_immediate_shutdown(self) -> bool:
@@ -1005,11 +1017,7 @@ def _completed_termination_result(
         return _TerminationResult(True)
     reason = tree.signal_failure_reason
     if tree.compromised:
-        reason = reason or (
-            "Linux existing-tree descendant custody is unproven"
-            if isinstance(tree, _LinuxProcessTree)
-            else "managed process ownership was compromised"
-        )
+        reason = reason or tree.ownership_failure_reason
     return _TerminationResult(
         False,
         reason or "managed process termination could not be proven",

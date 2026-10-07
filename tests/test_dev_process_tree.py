@@ -165,12 +165,13 @@ def clear_test_owned_lost_cleanup(state: Path) -> None:
     # EOF and the custody supervisor's own socket proves it no longer listens.
     deadline = time.monotonic() + 5
     while True:
-        with dev_processes.state_directory(state), socket.socket(socket.AF_UNIX) as client:
-            try:
+        try:
+            with dev_processes.state_directory(state), socket.socket(socket.AF_UNIX) as client:
                 client.connect("control.sock")
-            except ConnectionRefusedError:
+        except (ConnectionRefusedError, FileNotFoundError):
+            if state.exists():
                 dev_processes.remove_state(state)
-                return
+            return
         assert time.monotonic() < deadline, "fixture cleanup supervisor survived teardown"
         time.sleep(.3)
 
@@ -226,10 +227,15 @@ def test_internal_stop_cleans_its_current_root_after_clearing_prior_boot_state(n
     result = subprocess.run([
         sys.executable, str(helper), "stop", str(tree.pids["backend"]), str(tree.script), "backend", str(state),
     ], env=tree.env, capture_output=True, text=True, timeout=15)
-    assert result.returncode == 0, result.stderr
+    if sys.platform == "linux":
+        assert result.returncode != 0
+        assert "Linux existing-tree descendant custody is unproven" in result.stderr
+        assert state.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert not state.exists()
     assert select.select([tree.worker_lifetime], [], [], 5)[0], "requested tree survived old-state cleanup"
     assert os.read(tree.worker_lifetime, 1) == b""
-    assert not state.exists()
     assert_shared_workloads_survive(tree)
 
 
@@ -271,7 +277,7 @@ def _process_tree(*args, **kwargs):
             Path({str(exit_trigger)!r}).touch()
             deadline = time.monotonic() + 3
             while not Path({str(tree.reparented)!r}).exists() and time.monotonic() < deadline:
-                time.sleep(.01)
+                time.sleep(0.01)
             assert Path({str(tree.reparented)!r}).exists(), "backend did not exit independently"
             raise RuntimeError("injected capture failure after root exit")
         return original_refresh(*args, **kwargs)
@@ -544,8 +550,10 @@ if not seen.exists():
     print({tree.pids['backend']})
     print({tree.pids['worker']})
 ''')
-    result = subprocess.run(["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
-                            capture_output=True, text=True, timeout=15)
+    result = subprocess.run(
+        ["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
+        capture_output=True, text=True, timeout=15,
+    )
     if sys.platform == "linux":
         assert result.returncode != 0
         assert "Linux existing-tree descendant custody is unproven" in result.stderr
@@ -705,3 +713,30 @@ _LinuxProcessTree.refresh = _late_fork_refresh
     assert_shared_workloads_survive(tree)
     # native_dev_tree's finally releases the grandchild via its inherited pipe
     # and proves lifetime EOF, independently of PID discovery or reuse.
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="native Linux external-tree qualification")
+def test_linux_retry_retains_specific_custody_reason(native_dev_tree: NativeDevTree) -> None:
+    tree = native_dev_tree
+    stop_native_backend(tree)
+    deadline = time.monotonic() + 5
+    error = tree.pid_file.parent / "backend.cleanup/error"
+    while (not error.exists() or "Linux existing-tree" not in error.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    result = subprocess.run(
+        ["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode != 0
+    assert "Linux existing-tree descendant custody is unproven" in result.stderr
+    assert tree.pid_file.read_text() == str(tree.pids["backend"])
+    assert_shared_workloads_survive(tree)
+
+
+def test_fixture_teardown_handles_missing_socket_and_removed_state(tmp_path: Path) -> None:
+    state = tmp_path / "backend.cleanup"
+    state.mkdir(mode=0o700)
+    (state / "boot").write_text("test-owned")
+    clear_test_owned_lost_cleanup(state)
+    assert not state.exists()
+    clear_test_owned_lost_cleanup(state)
