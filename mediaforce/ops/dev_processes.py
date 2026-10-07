@@ -77,13 +77,29 @@ def record_error(state: Path, error: Exception) -> bytes:
     return response
 
 
-def publish_state(state: Path) -> bool:
+@contextmanager
+def state_lock(state: Path) -> Iterator[None]:
     state.parent.mkdir(parents=True, exist_ok=True)
-    # Publish a complete boot record in one rename. Serialize creators so an
-    # existing empty/uncertain directory is preserved rather than replaced.
-    lock_descriptor = os.open(str(state) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(lock_descriptor, "r+") as lock:
+    descriptor = os.open(str(state) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "r+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def clear_previous_boot(state: Path) -> None:
+    # Check and remove under the publication lock: a competing creator must
+    # not replace an old receipt between this read and removal.
+    with state_lock(state):
+        if state.exists():
+            with state_directory(state):
+                recorded_boot = UUID((state / "boot").read_text())
+                if recorded_boot != UUID(boot_id()):
+                    remove_state(state)
+
+
+def publish_state(state: Path) -> bool:
+    # Publish a complete boot record in one rename, preserving uncertain state.
+    with state_lock(state):
         if state.exists() or state.is_symlink():
             return False
         candidate = Path(tempfile.mkdtemp(prefix=f".{state.name}-", dir=state.parent))
@@ -213,14 +229,7 @@ def main() -> int:
         state = Path(state_text).absolute()
         if action == "serve":
             return serve(pid, script, component, state)
-        if state.exists():
-            with state_directory(state):
-                recorded_boot = UUID((state / "boot").read_text())
-                if recorded_boot != UUID(boot_id()):
-                    # Processes and native handles from an earlier boot cannot survive.
-                    remove_state(state)
-                    if action == "retry":
-                        return 0
+        clear_previous_boot(state)
         if action == "stop":
             if publish_state(state):
                 try:

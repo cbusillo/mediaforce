@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 import select
@@ -304,6 +305,29 @@ def test_stop_can_clear_lost_custody_only_after_a_proven_new_boot(tmp_path: Path
         assert dev_processes.main() == 0
         tree.assert_not_called()
     assert not state.exists()
+
+
+def test_prior_boot_removal_holds_publication_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = tmp_path / "backend.cleanup"
+    state.mkdir(mode=0o700)
+    old_boot = "00000000-0000-0000-0000-000000000001"
+    current_boot = "00000000-0000-0000-0000-000000000002"
+    (state / "boot").write_text(old_boot)
+
+    def locked_boot_read() -> str:
+        with open(str(state) + ".lock", "r+") as competing_creator:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(competing_creator, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return current_boot
+
+    monkeypatch.setattr(dev_processes, "boot_id", locked_boot_read)
+    dev_processes.clear_previous_boot(state)
+    assert not state.exists()
+    assert dev_processes.publish_state(state)
+    socket_marker = state / "control.sock"
+    socket_marker.touch()
+    dev_processes.clear_previous_boot(state)
+    assert socket_marker.exists(), "another caller removed the new current-boot session"
 
 
 def test_invalid_boot_receipt_preserves_pending_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
