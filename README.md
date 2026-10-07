@@ -553,6 +553,8 @@ with ownership still proven.
 If completed cleanup cannot retire its pending state, the supervisor retains
 that completion proof and retries; Stop remains unsuccessful until retirement
 succeeds. Retirement renames the directory without allocating another one.
+A retained supervisor retires only the marker it opened. If that marker
+disappears or is replaced, it fails and leaves the replacement alone.
 Interrupted disposal and unpublished setup artifacts are retried in bounded
 sweeps under the publication lock. Unknown contents, foreign directories and
 symlinks are preserved. Artifacts from earlier helper versions are not swept.

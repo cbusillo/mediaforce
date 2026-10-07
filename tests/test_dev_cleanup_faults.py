@@ -4,7 +4,7 @@ from pathlib import Path
 import select
 import stat
 import subprocess
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -122,6 +122,9 @@ def test_receipt_and_directory_sync_precede_publication(
             events.append("receipt")
         else:
             assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
+            observed = os.fstat(descriptor)
+            expected = (state.parent if state.exists() else next(tmp_path.glob(".backend.cleanup-candidate-*"))).stat()
+            assert (observed.st_dev, observed.st_ino) == (expected.st_dev, expected.st_ino)
             events.append("published directory" if state.exists() else "candidate directory")
 
     def publish(path: Path, target: Path) -> Path:
@@ -245,14 +248,26 @@ def test_receipt_sync_supports_a_symlinked_state_parent(tmp_path: Path, monkeypa
     alias = tmp_path / "state-alias"
     alias.symlink_to(actual, target_is_directory=True)
     state = alias / "backend.cleanup"
+    synced: list[tuple[int, int]] = []
+    original_sync = os.fsync
+
+    def sync(descriptor: int) -> None:
+        info = os.fstat(descriptor)
+        if stat.S_ISDIR(info.st_mode):
+            synced.append((info.st_dev, info.st_ino))
+        original_sync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", sync)
     monkeypatch.setattr(dev_processes, "boot_id", lambda: "00000000-0000-0000-0000-000000000001")
     assert dev_processes.publish_state(state)
     assert (actual / "backend.cleanup/boot").read_bytes() == (state / "boot").read_bytes()
+    expected = actual.stat()
+    assert synced[-1] == (expected.st_dev, expected.st_ino)
 
 
 @pytest.mark.parametrize("startup_failure", ["parent sync", "spawn"])
 def test_consecutive_startup_and_retirement_failures_preserve_unproven_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, startup_failure: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, startup_failure: str, capsys: pytest.CaptureFixture[str],
 ) -> None:
     state = tmp_path / "backend.cleanup"
     current_boot = "00000000-0000-0000-0000-000000000001"
@@ -278,12 +293,143 @@ def test_consecutive_startup_and_retirement_failures_preserve_unproven_state(
         else:
             spawn.side_effect = OSError(errno.EIO, "injected spawn failure")
         assert dev_processes.main() == 1
+        error = capsys.readouterr().err
+        assert f"injected {startup_failure} failure" in error
+        if startup_failure == "spawn":
+            assert "injected retirement failure" in error
         if startup_failure == "parent sync":
             spawn.assert_not_called()
         else:
             spawn.assert_called_once()
     assert state.is_dir()
     assert (state / "boot").read_text() == current_boot
+    monkeypatch.setattr(dev_processes.sys, "argv", ["dev_processes.py", "retry", "0", "unused", "backend", str(state)])
+    with patch.object(dev_processes, "DevelopmentProcessTree") as tree:
+        assert dev_processes.main() == 1
+        tree.assert_not_called()
+        assert state.exists()
+        monkeypatch.setattr(dev_processes, "boot_id", lambda: "00000000-0000-0000-0000-000000000002")
+        assert dev_processes.main() == 0
+        tree.assert_not_called()
+    assert not state.exists()
+
+
+def test_completed_supervisor_preserves_a_replacement_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = tmp_path / "backend.cleanup"
+    assert dev_processes.publish_state(state)
+    old = tmp_path / "old-completed-session"
+    tree = Mock()
+    connection = Mock()
+    connection.makefile.return_value.__enter__ = Mock(return_value=Mock(readline=Mock(return_value=b"stop 4321\n")))
+    connection.makefile.return_value.__exit__ = Mock(return_value=False)
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=False)
+    server = Mock()
+    server.__enter__ = Mock(return_value=server)
+    server.__exit__ = Mock(return_value=False)
+    accepts = 0
+
+    def accept() -> tuple[Mock, str]:
+        nonlocal accepts
+        accepts += 1
+        if accepts == 1:
+            return connection, "unused"
+        assert accepts == 2, "old supervisor kept retrying a replacement marker"
+        state.rename(old)
+        assert dev_processes.publish_state(state)
+        (state / "new-session").write_text("preserve this current session")
+        raise TimeoutError
+
+    original_rename = Path.rename
+    failed = False
+
+    def refuse_once(path: Path, target: Path) -> Path:
+        nonlocal failed
+        if path == state and not failed:
+            failed = True
+            raise OSError(errno.ENOSPC, "injected retirement failure")
+        return original_rename.__get__(path, Path)(target)
+
+    server.accept.side_effect = accept
+    monkeypatch.setattr(Path, "rename", refuse_once)
+    with (patch.object(dev_processes.socket, "socket", return_value=server),
+          patch.object(dev_processes, "DevelopmentProcessTree", return_value=tree)):
+        result = dev_processes.serve(4321, "unused", "backend", state)
+    assert result == 1
+    assert (state / "new-session").read_text() == "preserve this current session"
+    tree.stop.assert_called_once()
+    tree.close.assert_called_once()
+
+
+def test_native_completed_supervisor_cannot_retire_another_session(native_dev_tree: NativeDevTree) -> None:
+    tree = native_dev_tree
+    helper = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_processes.py"
+    repaired = tree.pid_file.parent / "repair-retirement"
+    returned = tree.pid_file.parent / "supervisor-returned"
+    helper.write_text(helper.read_text().replace("\ndef main()", f'''
+_original_rename = Path.rename
+_original_serve = serve
+def _fault_rename(path, target):
+    if path.name == 'backend.cleanup' and not Path({str(repaired)!r}).exists():
+        raise OSError({errno.ENOSPC}, 'injected retirement failure')
+    return _original_rename(path, target)
+Path.rename = _fault_rename
+def serve(*args, **kwargs):
+    try:
+        return _original_serve(*args, **kwargs)
+    finally:
+        Path({str(returned)!r}).touch()
+
+def main()'''))
+    tree.pid_file.write_text(str(tree.pids["backend"]))
+    first = subprocess.run(["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
+                           capture_output=True, text=True, timeout=15)
+    state = tree.pid_file.parent / "backend.cleanup"
+    tree.retain_cleanup_marker = state.exists()
+    assert first.returncode != 0
+    assert select.select([tree.worker_lifetime], [], [], 5)[0]
+    assert os.read(tree.worker_lifetime, 1) == b""
+    assert_shared_workloads_survive(tree)
+    assert not returned.exists(), "retirement failure released the retained supervisor"
+    old = state.with_name("old-completed-session")
+    state.rename(old)
+    state.mkdir(mode=0o700)
+    (state / "boot").write_bytes((old / "boot").read_bytes())
+    sentinel = state / "unpublished-session"
+    sentinel.write_text("this belongs to the replacement")
+    repaired.touch()
+    deadline = dev_processes.time.monotonic() + 3
+    while not returned.exists() and dev_processes.time.monotonic() < deadline:
+        dev_processes.time.sleep(.02)
+    assert returned.exists(), "old supervisor did not stop after losing its marker identity"
+    assert sentinel.read_text() == "this belongs to the replacement"
+    assert_shared_workloads_survive(tree)
+    # This replacement was test-owned unpublished setup; no native capture ever
+    # used it. The old session already proved worker EOF and returned.
+    sentinel.unlink()
+    dev_processes.remove_state(state)
+    tree.retain_cleanup_marker = False
+    dev_processes.dispose_directory(old)
+
+
+def test_interruption_after_publication_retains_unproven_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = tmp_path / "backend.cleanup"
+    monkeypatch.setattr(dev_processes, "boot_id", lambda: "00000000-0000-0000-0000-000000000001")
+    original_rename = Path.rename
+
+    def interrupted_publication(path: Path, target: Path) -> Path:
+        result = original_rename.__get__(path, Path)(target)
+        if target == state:
+            raise KeyboardInterrupt
+        return result
+
+    monkeypatch.setattr(dev_processes.sys, "argv", ["dev_processes.py", "stop", "4321", "unused", "backend", str(state)])
+    with monkeypatch.context() as fault, patch.object(dev_processes.subprocess, "Popen") as spawn:
+        fault.setattr(Path, "rename", interrupted_publication)
+        with pytest.raises(KeyboardInterrupt):
+            dev_processes.main()
+        spawn.assert_not_called()
+    assert state.exists()
     monkeypatch.setattr(dev_processes.sys, "argv", ["dev_processes.py", "retry", "0", "unused", "backend", str(state)])
     with patch.object(dev_processes, "DevelopmentProcessTree") as tree:
         assert dev_processes.main() == 1

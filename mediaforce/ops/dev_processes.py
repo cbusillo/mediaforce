@@ -74,11 +74,25 @@ def dispose_directory(directory: Path) -> None:
     directory.rmdir()
 
 
-def remove_state(state: Path) -> None:
+class DevelopmentStateChangedError(RuntimeError):
+    pass
+
+
+def remove_state(state: Path, *, expected_identity: tuple[int, int] | None = None) -> None:
     # Completion or previous-boot proof belongs to the caller. Retirement needs
     # no new directory allocation and never removes the receipt while active.
     disposed = state.with_name(f".{state.name}-removing-{uuid4()}")
-    state.rename(disposed)
+    if expected_identity is None:
+        state.rename(disposed)
+    else:
+        with state_lock(state):
+            try:
+                current = state.lstat()
+            except FileNotFoundError as exc:
+                raise DevelopmentStateChangedError("cleanup marker disappeared; state retained; retry Stop") from exc
+            if (current.st_dev, current.st_ino) != expected_identity:
+                raise DevelopmentStateChangedError("cleanup marker changed; replacement state retained; retry Stop")
+            state.rename(disposed)
     try:
         dispose_directory(disposed)
     except (OSError, RuntimeError):
@@ -174,6 +188,8 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
     startup_deadline = time.monotonic() + 5
     try:
         with state_directory(state), socket.socket(socket.AF_UNIX) as server:
+            marker = state.lstat()
+            marker_identity = marker.st_dev, marker.st_ino
             server.bind("control.sock")
             server.listen(4)
             server.settimeout(.25)
@@ -187,8 +203,10 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
                         try:
                             if completed or tree.finished():
                                 completed = True
-                                remove_state(state)
+                                remove_state(state, expected_identity=marker_identity)
                                 return 0 if tree is not None else 1
+                        except DevelopmentStateChangedError:
+                            return 1  # Never record an old session's error in a replacement.
                         except DevelopmentCustodyLostError as exc:
                             record_error(state, exc)
                             return 1
@@ -222,8 +240,14 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
                         if not completed:
                             tree.stop()
                         completed = True
-                        remove_state(state)
+                        remove_state(state, expected_identity=marker_identity)
                         response = b"ok"
+                    except DevelopmentStateChangedError as exc:
+                        try:
+                            connection.sendall(str(exc).encode(errors="replace")[:2048])
+                        except OSError:
+                            pass
+                        return 1
                     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
                         response = record_error(state, exc)
                     try:
@@ -295,8 +319,12 @@ def main() -> int:
                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         start_new_session=True,
                     )
-                except (OSError, RuntimeError):
-                    remove_state(state)
+                except (OSError, RuntimeError) as startup_error:
+                    try:
+                        remove_state(state)
+                    except (OSError, RuntimeError) as retirement_error:
+                        raise RuntimeError(f"{str(startup_error)[:1024]}; cleanup state retirement also failed: "
+                                           f"{str(retirement_error)[:1024]}") from startup_error
                     raise
         elif not state.exists():
             return 0
