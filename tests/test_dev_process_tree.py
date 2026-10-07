@@ -3,6 +3,7 @@ import os
 import select
 import signal
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -28,6 +29,7 @@ class NativeDevTree:
     worker_lifetime: int
     sibling_lifetime: int
     reparented: Path
+    retain_cleanup_marker: bool = False
 
 
 @pytest.fixture
@@ -106,6 +108,7 @@ sibling.wait()
     os.close(lifetime_w)
     os.close(worker_w)
     os.close(sibling_w)
+    owned_tree = None
     try:
         assert root.stdout is not None
         assert select.select([root.stdout], [], [], 5)[0], "fixture wrapper failed to become ready"
@@ -115,7 +118,8 @@ sibling.wait()
         ps = Path(env["PATH"]) / "ps"
         ps.write_text("#!" + sys.executable + "\nimport os, sys\nos.execv('/bin/ps', ['ps', *sys.argv[1:]])\n")
         ps.chmod(0o755)
-        yield NativeDevTree(script, pid_file, env, root, rows, worker_r, sibling_r, reparented)
+        owned_tree = NativeDevTree(script, pid_file, env, root, rows, worker_r, sibling_r, reparented)
+        yield owned_tree
     finally:
         # Pipe EOF releases every fixture process, including workers reparented by a failed stop.
         os.close(cleanup_w)
@@ -127,6 +131,13 @@ sibling.wait()
         assert select.select([sibling_r], [], [], 5)[0], "fixture sibling still alive"
         assert os.read(sibling_r, 1) == b""
         cleanup_state = pid_file.parent / "backend.cleanup"
+        if owned_tree is not None and owned_tree.retain_cleanup_marker:
+            # Only test-owned artifacts are cleared, after every owned lifetime
+            # pipe has proved EOF and the failed supervisor no longer listens.
+            with dev_processes.state_directory(cleanup_state), socket.socket(socket.AF_UNIX) as client:
+                with pytest.raises(ConnectionRefusedError):
+                    client.connect("control.sock")
+            dev_processes.remove_state(cleanup_state)
         deadline = time.monotonic() + 5
         while cleanup_state.exists() and time.monotonic() < deadline:
             time.sleep(.02)
@@ -170,6 +181,43 @@ def test_stop_survives_unrelated_real_package_import_failure(native_dev_tree: Na
                     dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
     (package / "encoding/encode_queue.py").write_text("unfinished edit !!!\n")
     stop_native_backend(tree)
+    assert_shared_workloads_survive(tree)
+
+
+def test_failed_capture_cannot_discard_workers_after_the_root_exits(native_dev_tree: NativeDevTree) -> None:
+    tree = native_dev_tree
+    tree.retain_cleanup_marker = True
+    native = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/core/_process_deadline.py"
+    native.write_text(native.read_text() + '''
+_original_process_tree = _process_tree
+def _process_tree(*args, **kwargs):
+    tree = _original_process_tree(*args, **kwargs)
+    original_refresh = tree.refresh
+    initial_capture = True
+    def refresh(*args, **kwargs):
+        nonlocal initial_capture
+        if initial_capture:
+            initial_capture = False
+            original_refresh(*args, **kwargs)
+            tree.signal_all(signal.SIGTERM)
+            time.sleep(.15)
+            raise RuntimeError("injected capture failure after root exit")
+        return original_refresh(*args, **kwargs)
+    tree.refresh = refresh
+    return tree
+''')
+    tree.pid_file.write_text(str(tree.pids["backend"]))
+    first = subprocess.run(["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
+                           capture_output=True, text=True, timeout=15)
+    assert first.returncode != 0
+    assert "capture failure after root exit" in first.stderr
+    assert tree.reparented.exists()
+    for action in ("stop", "start"):
+        retry = subprocess.run(["/bin/bash", str(tree.script), action, "backend"], env=tree.env,
+                               capture_output=True, text=True, timeout=15)
+        assert retry.returncode != 0, retry.stdout
+        assert tree.pid_file.read_text() == str(tree.pids["backend"])
+        assert not select.select([tree.worker_lifetime], [], [], .1)[0], "worker did not survive failed capture"
     assert_shared_workloads_survive(tree)
 
 
@@ -221,6 +269,21 @@ def test_invalid_boot_receipt_preserves_pending_state(tmp_path: Path, monkeypatc
     assert state.exists()
 
 
+def test_interrupted_setup_does_not_publish_an_incomplete_boot_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "backend.cleanup"
+
+    def interrupted_boot_read() -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dev_processes, "boot_id", interrupted_boot_read)
+    with pytest.raises(KeyboardInterrupt):
+        dev_processes.publish_state(state)
+    assert not state.exists()
+    assert not list(tmp_path.glob(".backend.cleanup-*"))
+
+
 @pytest.mark.parametrize("blocked_action,component", [
     ("start", "backend"), ("restart", "backend"), ("restart", "all"), ("stop", "backend"),
 ])
@@ -232,20 +295,33 @@ def test_repeated_stop_retains_captured_worker_custody(
     failed = tree.pid_file.parent / "injected-failure"
     repaired = tree.pid_file.parent / "repair"
     completed = tree.pid_file.parent / "cleanup-proved"
+    poll_failed = tree.pid_file.parent / "idle-poll-failed"
     native.write_text(native.read_text() + f'''
+from pathlib import Path
 _original_termination = _terminate_tree
 def _terminate_tree(tree, reap):
-    from pathlib import Path
     failed = Path({str(failed)!r})
     if not Path({str(repaired)!r}).exists():
-        failed.touch()
         tree.signal_all(signal.SIGTERM)
         time.sleep(.15)
+        failed.touch()
         raise RuntimeError("injected post-TERM cleanup failure")
     result = _original_termination(tree, reap)
     if result.succeeded:
         Path({str(completed)!r}).touch()
     return result
+
+_original_process_tree = _process_tree
+def _process_tree(*args, **kwargs):
+    tree = _original_process_tree(*args, **kwargs)
+    original_refresh = tree.refresh
+    def refresh(*args, **kwargs):
+        if Path({str(failed)!r}).exists() and not Path({str(poll_failed)!r}).exists():
+            Path({str(poll_failed)!r}).touch()
+            raise RuntimeError("injected idle custody refresh failure")
+        return original_refresh(*args, **kwargs)
+    tree.refresh = refresh
+    return tree
 ''')
     tree.pid_file.write_text(str(tree.pids["backend"]))
     first = subprocess.run(["/bin/bash", str(tree.script), "stop", "backend"], env=tree.env,
@@ -255,6 +331,19 @@ def _terminate_tree(tree, reap):
     assert tree.pid_file.read_text() == str(tree.pids["backend"])
     assert not select.select([tree.worker_lifetime], [], [], .1)[0], "worker did not survive injected failure"
     assert tree.reparented.exists(), "root did not exit before retry"
+    deadline = time.monotonic() + 3
+    while not poll_failed.exists() and time.monotonic() < deadline:
+        time.sleep(.02)
+    assert poll_failed.exists(), "idle custody fault did not run"
+    assert "idle custody refresh" in (tree.pid_file.parent / "backend.cleanup/error").read_text()
+    # A concurrent Stop for a different root cannot consume this tree's success.
+    different = subprocess.run([
+        sys.executable, str(Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_processes.py"),
+        "stop", str(tree.pids["sibling"]), str(tree.script), "backend", str(tree.pid_file.parent / "backend.cleanup"),
+    ], env=tree.env, capture_output=True, text=True, timeout=10)
+    assert different.returncode != 0
+    assert "another development root" in different.stderr
+    assert_shared_workloads_survive(tree)
     blocked = subprocess.run(["/bin/bash", str(tree.script), blocked_action, component], env=tree.env,
                              capture_output=True, text=True, timeout=15)
     assert blocked.returncode != 0, blocked.stdout

@@ -12,8 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import BinaryIO
 
-from . import _process_deadline
-from .dev_processes import stop_existing_process_tree as stop_existing_process_tree
+from . import dev_processes
 
 
 class ProcessCancelledError(RuntimeError):
@@ -45,6 +44,10 @@ class ProcessOutputStalledError(subprocess.TimeoutExpired):
 
     def __str__(self) -> str:
         return f"Command '{self.cmd}' printed nothing for {self.timeout} seconds"
+
+
+def stop_existing_process_tree(pid: int, owns_root: Callable[[], bool]) -> None:
+    dev_processes.stop_existing_process_tree(pid, owns_root)
 
 
 _PROCESS_COMMUNICATION_POLL_SECONDS = 0.05

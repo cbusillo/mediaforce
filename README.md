@@ -550,9 +550,14 @@ reported error and retry the same Stop or Restart command: it contacts that
 supervisor before looking for the original root, even after workers reparent.
 The supervisor exits when cleanup is proved or its whole captured tree exits
 with ownership still proven.
+Temporary errors while checking retained processes keep their native handles
+and save the last error for the next Stop. A concurrent Stop for a different
+root reports a conflict instead of consuming another tree's cleanup result.
 If the supervisor itself is lost, Stop fails visibly rather than reconstructing
 custody from saved PIDs. After the next system restart, Stop can clear its pending
 state using the kernel's boot identity; do not delete that state to bypass cleanup.
+Pending state also stays when [native containment cannot be proved](docs/architecture/module-boundaries.md),
+including incomplete capture or a strict Darwin fork.
 Development stop requires the checkout's prepared Python environment
 (`uv sync --locked`) and loads only that checkout's standalone cleanup and native
 custody modules, even when invoked from another directory or unrelated package

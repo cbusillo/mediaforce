@@ -20,6 +20,10 @@ else:
     spec.loader.exec_module(_process_deadline)
 
 
+class DevelopmentCustodyLostError(RuntimeError):
+    pass
+
+
 class DevelopmentProcessTree:
     def __init__(self, pid: int, owns_root: Callable[[], bool]) -> None:
         if pid <= 1 or pid == os.getpid():
@@ -42,7 +46,7 @@ class DevelopmentProcessTree:
     def finished(self) -> bool:
         self._tree.refresh()
         if self._tree.compromised and not self._tree.live():
-            raise RuntimeError("development process ownership was compromised")
+            raise DevelopmentCustodyLostError("development process ownership was compromised")
         return not self._tree.live() and not self._tree.compromised
 
     def close(self) -> None:

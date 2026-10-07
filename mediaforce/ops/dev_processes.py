@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from collections.abc import Iterator
 import ctypes
+import fcntl
 import importlib.util
 import os
 from pathlib import Path
@@ -10,11 +11,12 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from uuid import UUID
 
 if __package__:
-    from mediaforce.core.dev_processes import DevelopmentProcessTree
+    from mediaforce.core.dev_processes import DevelopmentCustodyLostError, DevelopmentProcessTree
 else:
     spec = importlib.util.spec_from_file_location(
         "_mediaforce_dev_custody", Path(__file__).resolve().parents[1] / "core/dev_processes.py",
@@ -24,6 +26,7 @@ else:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     DevelopmentProcessTree = module.DevelopmentProcessTree
+    DevelopmentCustodyLostError = module.DevelopmentCustodyLostError
 
 
 def boot_id() -> str:
@@ -61,7 +64,36 @@ def state_directory(state: Path) -> Iterator[None]:
 def remove_state(state: Path) -> None:
     (state / "control.sock").unlink(missing_ok=True)
     (state / "boot").unlink(missing_ok=True)
+    (state / "error").unlink(missing_ok=True)
     state.rmdir()
+
+
+def record_error(state: Path, error: Exception) -> bytes:
+    response = str(error).encode(errors="replace")[:2048]
+    try:
+        (state / "error").write_bytes(response)
+    except OSError:
+        pass  # Failure to record an error must not release native handles.
+    return response
+
+
+def publish_state(state: Path) -> bool:
+    state.parent.mkdir(parents=True, exist_ok=True)
+    # Publish a complete boot record in one rename. Serialize creators so an
+    # existing empty/uncertain directory is preserved rather than replaced.
+    lock_descriptor = os.open(str(state) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(lock_descriptor, "r+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if state.exists() or state.is_symlink():
+            return False
+        candidate = Path(tempfile.mkdtemp(prefix=f".{state.name}-", dir=state.parent))
+        try:
+            (candidate / "boot").write_text(boot_id())
+            candidate.rename(state)
+        finally:
+            if candidate.exists():
+                remove_state(candidate)
+    return True
 
 
 def serve(pid: int, script: str, component: str, state: Path) -> int:
@@ -80,17 +112,33 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
                     if tree is None and time.monotonic() >= startup_deadline:
                         completed = True
                         return 1
-                    if tree is not None and tree.finished():
-                        completed = True
-                        return 0
+                    if tree is not None:
+                        try:
+                            if tree.finished():
+                                completed = True
+                                return 0
+                        except DevelopmentCustodyLostError as exc:
+                            record_error(state, exc)
+                            return 1
+                        except (OSError, RuntimeError, ValueError) as exc:
+                            record_error(state, exc)
                     continue
                 with connection:
                     connection.settimeout(10)
                     try:
-                        request = connection.recv(4, socket.MSG_WAITALL)
-                    except OSError:
+                        with connection.makefile("rb") as stream:
+                            request = stream.readline(64)
+                        command, expected = request.decode("ascii").strip().split()
+                        expected_pid = int(expected)
+                    except (OSError, ValueError):
                         continue
-                    if request != b"stop":
+                    if command != "stop":
+                        continue
+                    if expected_pid not in {0, pid}:
+                        try:
+                            connection.sendall(b"another development root has pending cleanup; retry Stop")
+                        except OSError:
+                            pass
                         continue
                     try:
                         if tree is None:
@@ -102,7 +150,7 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
                         completed = True
                         response = b"ok"
                     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-                        response = str(exc).encode(errors="replace")[:2048]
+                        response = record_error(state, exc)
                     try:
                         connection.sendall(response)
                     except OSError:
@@ -121,7 +169,7 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
     return 1
 
 
-def request_stop(state: Path) -> None:
+def request_stop(state: Path, expected_pid: int) -> None:
     deadline = time.monotonic() + 5
     with state_directory(state), socket.socket(socket.AF_UNIX) as client:
         while True:
@@ -130,11 +178,16 @@ def request_stop(state: Path) -> None:
                 break
             except (FileNotFoundError, ConnectionRefusedError):
                 if time.monotonic() >= deadline:
-                    raise RuntimeError("cleanup supervisor unavailable; custody cannot be recovered from a PID; "
+                    previous_error = ""
+                    if (state / "error").is_file():
+                        with (state / "error").open("rb") as error_file:
+                            previous_error = error_file.read(2048).decode(errors="replace")
+                    raise RuntimeError(f"{previous_error}; cleanup supervisor unavailable; "
+                                       "custody cannot be recovered from a PID; "
                                        "pending state can be cleared by Stop after the next system restart")
                 time.sleep(.05)
         client.settimeout(10)
-        client.sendall(b"stop")
+        client.sendall(f"stop {expected_pid}\n".encode("ascii"))
         response = client.recv(2048)
         if response != b"ok":
             raise RuntimeError(response.decode(errors="replace") or "cleanup supervisor disconnected")
@@ -150,17 +203,15 @@ def main() -> int:
         action, pid_text, script, component, state_text = sys.argv[1:]
         if action not in {"stop", "retry", "serve"} or component not in {"backend", "frontend"}:
             raise ValueError("invalid development process stop arguments")
+        pid = int(pid_text)
+        if action != "retry" and (pid <= 1 or pid == os.getpid()):
+            raise ValueError("invalid development process root")
         state = Path(state_text).absolute()
         if action == "serve":
-            return serve(int(pid_text), script, component, state)
+            return serve(pid, script, component, state)
         if action == "stop":
-            try:
-                state.mkdir(mode=0o700, parents=True)
-            except FileExistsError:
-                pass  # Concurrent/repeated stop uses the already pinned tree.
-            else:
+            if publish_state(state):
                 try:
-                    (state / "boot").write_text(boot_id())
                     subprocess.Popen(
                         [sys.executable, str(Path(__file__).resolve()), "serve", pid_text, script, component, str(state)],
                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -177,7 +228,7 @@ def main() -> int:
                 # Processes and native handles from an earlier boot cannot survive.
                 remove_state(state)
                 return 0
-        request_stop(state)
+        request_stop(state, pid if action == "stop" else 0)
         return 0
     except (OSError, RuntimeError, ValueError, IndexError) as exc:
         print(f"development stop: {exc}; PID bookkeeping retained; retry the same stop command", file=sys.stderr)
