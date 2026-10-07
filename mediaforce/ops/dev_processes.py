@@ -232,10 +232,16 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
                         continue
                     try:
                         if tree is None:
-                            tree = DevelopmentProcessTree(pid, lambda: subprocess.run(
-                                ["/bin/bash", script, "check-owner", component, str(pid)],
-                                check=False, stdout=subprocess.DEVNULL, timeout=5,
-                            ).returncode == 0)
+                            def owns_root() -> bool:
+                                result = subprocess.run(
+                                    ["/bin/bash", script, "check-owner", component, str(pid)],
+                                    check=False, stdout=subprocess.DEVNULL, timeout=5,
+                                )
+                                if result.returncode not in {0, 1}:
+                                    raise RuntimeError("development process ownership unknown; preserving it")
+                                return result.returncode == 0
+
+                            tree = DevelopmentProcessTree(pid, owns_root)
                             completed = False
                         if not completed:
                             tree.stop()
