@@ -144,9 +144,19 @@ def test_linux_reader_rejects_unterminated_data(monkeypatch: pytest.MonkeyPatch)
         dev_frontend.process_arguments(4242)
 
 
-@pytest.mark.parametrize("error,status", [(PermissionError(), 2), (ValueError(), 2), (ProcessLookupError(), 1)])
+@pytest.mark.parametrize("error,status", [(PermissionError(), 2), (ValueError(), 2),
+                                         (ProcessLookupError(), dev_frontend.NOT_FRONTEND)])
 def test_argument_read_outcome_is_explicit(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], error: Exception, status: int) -> None:
     monkeypatch.setattr(sys, "argv", ["dev_frontend.py", "4242", "/checkout", "/checkout/frontend"])
     monkeypatch.setattr(dev_frontend, "process_arguments", Mock(side_effect=error))
     assert dev_frontend.main() == status
     assert ("ownership unknown" in capsys.readouterr().err) == (status == 2)
+
+
+@pytest.mark.parametrize("arguments,expected", [([], dev_frontend.NOT_FRONTEND), (["npm", "run", "dev"], 0)])
+def test_reader_reserves_nonownership_exit_status(
+    monkeypatch: pytest.MonkeyPatch, arguments: list[str], expected: int,
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["dev_frontend.py", "4242", "/checkout", "/checkout/frontend"])
+    monkeypatch.setattr(dev_frontend, "process_arguments", Mock(return_value=arguments))
+    assert dev_frontend.main() == expected

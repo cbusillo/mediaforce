@@ -160,6 +160,9 @@ elif name == "python3":
     os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
 elif name == "uv":
     assert sys.argv[1:4] == ["run", "--no-sync", "--project"]
+    if sys.argv[6].endswith("/dev_frontend.py") and "DEV_TEST_READER_EXIT" in os.environ:
+        print("fixture Python startup failed", file=sys.stderr)
+        sys.exit(int(os.environ["DEV_TEST_READER_EXIT"]))
     if os.environ.get("DEV_TEST_CUSTODY_FAILURE"):
         print("injected custody unavailable; PID bookkeeping retained", file=sys.stderr)
         sys.exit(1)
@@ -1454,6 +1457,51 @@ def test_dev_handoff_waits_after_every_exit_status_the_service_manager_accepts(
         assert lock.read_bytes() == lock_bytes
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         assert sum(call[:2] == ["launchctl", "bootout"] for call in calls) == 1
+
+
+@pytest.mark.parametrize("discovery", ["pid_file", "listener"])
+@pytest.mark.parametrize("action,component,reader_exit", [
+    (action, component, "1") for action in ("start", "status", "stop", "restart")
+    for component in ("frontend", "all")
+] + [("stop", "frontend", status) for status in ("2", "127", "137")])
+def test_frontend_reader_failure_preserves_live_tree_and_record(
+    tmp_path: Path, process_trees: list[ProcessTree], discovery: str,
+    action: str, component: str, reader_exit: str,
+) -> None:
+    script, _, backend_pid_file, _, env = prepare_dev_service(tmp_path, "absent", "idle", "owned")
+    tree = start_process_tree(tmp_path, process_trees, "frontend")
+    table = tmp_path / "process-table.json"
+    rows = frontend_tree_rows(tree, env["DEV_TEST_REPO"], ["npm run dev"])
+    backend = start_process_tree(tmp_path, process_trees, "backend") if component == "all" else None
+    if backend is not None:
+        rows.append({"pid": backend.root.pid, "parent": 0,
+                     "command": env["DEV_TEST_REPO"] + "/.venv/bin/mediaforce-web",
+                     "port": "8777", "finished": str(backend.finished)})
+        backend_pid_file.write_text(str(backend.root.pid))
+    table.write_text(json.dumps(rows))
+    env.update(DEV_TEST_TREE=str(table), DEV_TEST_READER_EXIT=reader_exit)
+    pid_file = backend_pid_file.with_name("mediaforce-frontend.pid")
+    pid_file.write_text(str(tree.child_pid if discovery == "pid_file" else 999999))
+    original = pid_file.read_bytes()
+    result = subprocess.run(["/bin/bash", str(script), action, component], env=env,
+                            capture_output=True, text=True, timeout=20)
+    # status:all has its existing aggregate success convention on main.
+    assert result.returncode != 0 or (action, component) == ("status", "all")
+    assert "ownership unknown" in result.stderr
+    assert not any(f"frontend: {outcome}" in result.stdout for outcome in ("running", "started", "stopped"))
+    assert tree.root.poll() is None
+    assert not tree.child_finished.exists()
+    assert pid_file.read_bytes() == original
+    if backend is not None:
+        assert backend.root.poll() is None
+        assert not backend.child_finished.exists()
+    if (action, component, reader_exit) == ("stop", "frontend", "1"):
+        del env["DEV_TEST_READER_EXIT"]
+        recovered = subprocess.run(["/bin/bash", str(script), "stop", "frontend"], env=env,
+                                   capture_output=True, text=True, timeout=20)
+        assert recovered.returncode == 0, recovered.stderr
+        assert_tree_stopped(tree)
+        assert not pid_file.exists()
 
 
 @pytest.mark.parametrize("discovery", ["pid_file", "listener"])

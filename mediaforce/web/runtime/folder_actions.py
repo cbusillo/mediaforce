@@ -42,6 +42,7 @@ from mediaforce.tuning.compression_intent import CompressionEvidenceRef, authori
 from mediaforce.tuning.content_intent_observations import record_visual_content_intent_observation
 from mediaforce.tuning.calibration_jobs import resolve_pending_review_job
 from mediaforce.tuning.size_goals import operator_intent_from_policy
+from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
 from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_queue_partition, \
     cadence_safety_partition, older_season_cadence_payload
 from mediaforce.web.runtime.folder_tuning_advice import review_gate
@@ -174,15 +175,13 @@ def _valid_production_approval_contract(payload: Mapping[str, Any] | None) -> Ac
     return contract
 
 
-def _terminal_production_approval_contract(job: JobPayload) -> ActionPayload | None:
+def _terminal_production_approval_contract(
+        job: JobPayload, *, manifest_reader: ManifestReader = read_manifest,
+) -> ActionPayload | None:
     manifest_value = str(job.get("manifest_path") or "").strip()
     if not manifest_value:
         return None
-    manifest_path = Path(manifest_value)
-    try:
-        manifest = object_dict(json.loads(manifest_path.read_text()))
-    except (OSError, json.JSONDecodeError):
-        return None
+    manifest = object_dict(manifest_reader(Path(manifest_value)))
     selection = object_dict(manifest.get("selection"))
     return _valid_production_approval_contract(selection.get("production_approval_contract"))
 
@@ -190,6 +189,8 @@ def _terminal_production_approval_contract(job: JobPayload) -> ActionPayload | N
 def _legacy_final_size_goal_changed(
         job: JobPayload,
         current_contract: ActionPayload,
+        *,
+        manifest_reader: ManifestReader = read_manifest,
 ) -> bool:
     """Compare a fresh size goal with a pre-contract manifest's measured target."""
     failure_analysis = object_dict(object_dict(job.get("progress")).get("failure_analysis"))
@@ -202,7 +203,7 @@ def _legacy_final_size_goal_changed(
     value_mb = _normalized_number(size_goal.get("value_mb"))
     if value_mb is None:
         return False
-    items = _manifest_items(job)
+    items = _manifest_items(job, manifest_reader=manifest_reader)
     for analysis in size_misses:
         verification = object_dict(analysis.get("target_size_verification"))
         previous_target_bytes = _normalized_number(verification.get("target_size_bytes"))
@@ -235,12 +236,14 @@ def _legacy_final_size_goal_changed(
 def _final_size_requeue_contract_blocker(
         job: JobPayload | None,
         current_contract: ActionPayload | None,
+        *,
+        manifest_reader: ManifestReader = read_manifest,
 ) -> ActionPayload | None:
     job_payload = object_dict(job)
     failure_analysis = object_dict(object_dict(job_payload.get("progress")).get("failure_analysis"))
     if str(failure_analysis.get("kind") or "") != "final_size_target_miss":
         return None
-    previous_contract = _terminal_production_approval_contract(job_payload)
+    previous_contract = _terminal_production_approval_contract(job_payload, manifest_reader=manifest_reader)
     current = _valid_production_approval_contract(current_contract)
     changed_sample = bool(
         previous_contract
@@ -254,7 +257,7 @@ def _final_size_requeue_contract_blocker(
     )
     if changed_sample and changed_intent:
         return None
-    if previous_contract is None and current and _legacy_final_size_goal_changed(job_payload, current):
+    if previous_contract is None and current and _legacy_final_size_goal_changed(job_payload, current, manifest_reader=manifest_reader):
         return None
     return {
         "ok": False,
@@ -265,7 +268,9 @@ def _final_size_requeue_contract_blocker(
     }
 
 
-def _final_size_miss_item_ids_by_index(job: JobPayload | None) -> tuple[dict[int, int], set[int]] | None:
+def _final_size_miss_item_ids_by_index(
+        job: JobPayload | None, *, manifest_reader: ManifestReader = read_manifest,
+) -> tuple[dict[int, int], set[int]] | None:
     """Library items that may have missed final size by manifest index, and the indexes no miss names alone.
 
     A shard that missed as a whole covers each of its files. A miss that names no file covers every
@@ -277,7 +282,7 @@ def _final_size_miss_item_ids_by_index(job: JobPayload | None) -> tuple[dict[int
     analyses = [object_dict(item) for item in object_list(failure_analysis.get("item_analyses"))]
     if not analyses:
         analyses = [failure_analysis]
-    items = _manifest_items(job_payload)
+    items = _manifest_items(job_payload, manifest_reader=manifest_reader)
     run_indexes = [
         index for index in object_list(job_payload.get("manifest_indexes")) if isinstance(index, int)
     ] or list(range(len(items)))
@@ -407,6 +412,7 @@ def _recorded_final_size_miss_left_out(
         current_contract: ActionPayload | None,
         *,
         recovered_legacy_job_ids: Collection[str] = (),
+        manifest_reader: ManifestReader = read_manifest,
 ) -> list[LeftOutFile]:
     """Files whose latest recorded final-size miss was under an approval that has not been replaced.
 
@@ -431,7 +437,7 @@ def _recorded_final_size_miss_left_out(
                 continue
             legacy_job = {"manifest_path": details.get("manifest_path"),
                           "progress": {"failure_analysis": details.get("legacy_failure_analysis")}}
-            if object_dict(details.get("legacy_failure_analysis")) and _final_size_requeue_contract_blocker(legacy_job, current) is None:
+            if object_dict(details.get("legacy_failure_analysis")) and _final_size_requeue_contract_blocker(legacy_job, current, manifest_reader=manifest_reader) is None:
                 continue
         elif (
                 current is not None
@@ -454,6 +460,8 @@ def staged_requeue_size_blocker(
         prefix: str,
         library_item_id: int,
         current_contract: ActionPayload | None,
+        *,
+        manifest_reader: ManifestReader = read_manifest,
 ) -> ActionPayload | None:
     """Preview the queue's run and saved-miss guards before discarding a finished copy."""
     recovered_legacy_job_ids: set[str] = set()
@@ -461,8 +469,8 @@ def staged_requeue_size_blocker(
         analysis = object_dict(object_dict(job.get("progress")).get("failure_analysis"))
         if str(analysis.get("kind") or "") != "final_size_target_miss":
             continue
-        blocker = _final_size_requeue_contract_blocker(job, current_contract)
-        misses = _final_size_miss_item_ids_by_index(job)
+        blocker = _final_size_requeue_contract_blocker(job, current_contract, manifest_reader=manifest_reader)
+        misses = _final_size_miss_item_ids_by_index(job, manifest_reader=manifest_reader)
         if misses is None:
             if index == 0 and blocker is not None:
                 return blocker
@@ -471,11 +479,11 @@ def staged_requeue_size_blocker(
             continue
         if blocker is not None:
             return blocker
-        if _terminal_production_approval_contract(job) is None:
+        if _terminal_production_approval_contract(job, manifest_reader=manifest_reader) is None:
             recovered_legacy_job_ids.add(str(job.get("job_id") or ""))
     left_out = _recorded_final_size_miss_left_out(
         connection, [{"library_item_id": library_item_id}], current_contract,
-        recovered_legacy_job_ids=recovered_legacy_job_ids,
+        recovered_legacy_job_ids=recovered_legacy_job_ids, manifest_reader=manifest_reader,
     )
     if left_out:
         return {"ok": False, "code": left_out[0].code, "message": left_out[0].reason}
@@ -2160,6 +2168,7 @@ def _staged_policy_states(
         library_item_ids: set[int],
         *,
         accepted_policy_hash: str,
+        manifest_reader: ManifestReader = read_manifest,
 ) -> dict[int, str | None]:
     """None when the file was made under an approved policy, otherwise the waiting code.
 
@@ -2185,10 +2194,7 @@ def _staged_policy_states(
             continue
         manifest_path = Path(manifest_value)
         if manifest_path not in manifest_cache:
-            try:
-                manifest_cache[manifest_path] = object_dict(json.loads(manifest_path.read_text()))
-            except (OSError, json.JSONDecodeError):
-                manifest_cache[manifest_path] = None
+            manifest_cache[manifest_path] = manifest_reader(manifest_path)
         manifest = manifest_cache[manifest_path]
         manifest_items = object_list(object_dict(manifest).get("items"))
         if manifest is None or item_index < 0 or item_index >= len(manifest_items):
@@ -2566,14 +2572,11 @@ def _hold_files_that_need_a_fresh_plan(
     return (kept, kept_indexes), left_out
 
 
-def _folder_manifest(job: JobPayload) -> ActionPayload:
+def _folder_manifest(job: JobPayload, *, manifest_reader: ManifestReader = read_manifest) -> ActionPayload:
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
     if not str(manifest_path):
         return {}
-    try:
-        return object_dict(json.loads(manifest_path.read_text()))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    return object_dict(manifest_reader(manifest_path))
 
 
 def _folder_recovery_plan(
@@ -2596,8 +2599,8 @@ def _folder_recovery_plan(
     return recoverable_children, unique_indexes
 
 
-def _manifest_items(job: JobPayload) -> list[ActionPayload]:
-    return [object_dict(item) for item in object_list(_folder_manifest(job).get("items"))]
+def _manifest_items(job: JobPayload, *, manifest_reader: ManifestReader = read_manifest) -> list[ActionPayload]:
+    return [object_dict(item) for item in object_list(_folder_manifest(job, manifest_reader=manifest_reader).get("items"))]
 
 
 def _manifest_library_item_ids(job: JobPayload, manifest_indexes: list[int]) -> list[int]:

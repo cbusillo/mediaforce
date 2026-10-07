@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from collections.abc import Collection
+from typing import Any
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -290,6 +291,7 @@ class StagedIntegrityTests(unittest.TestCase):
 
     def test_final_size_remake_requires_new_sample_and_goal_before_removal(self) -> None:
         item_id, stage, _manifest = self._final_size_file()
+        self._assert_remake_available(item_id)
         for approval in (None, self._new_remake_approval(sample="old-sample"), self._new_remake_approval(value_mb=300)):
             with self.subTest(approval=approval):
                 result = decide_size_held_file(
@@ -451,6 +453,7 @@ class StagedIntegrityTests(unittest.TestCase):
 
     def test_run_level_size_blocker_preserves_the_finished_file_before_queue_refusal(self) -> None:
         item_id, stage, manifest = self._final_size_file()
+        self._assert_remake_available(item_id)
         payload = json.loads(manifest.read_text())
         payload["selection"].pop("production_approval_contract")
         payload["items"][1]["library_item_id"] = item_id
@@ -473,6 +476,7 @@ class StagedIntegrityTests(unittest.TestCase):
 
     def test_saved_size_miss_preserves_a_file_even_when_its_staged_goal_changed(self) -> None:
         item_id, stage, _manifest = self._final_size_file()
+        self._assert_remake_available(item_id)
         current = self._new_remake_approval()
         with open_db(self.config.paths.db_path) as connection:
             connection.execute(item_events.insert().values(
@@ -596,6 +600,7 @@ class StagedIntegrityTests(unittest.TestCase):
 
     def test_active_sample_preserves_the_finished_file_before_queue_refusal(self) -> None:
         item_id, stage, _manifest = self._final_size_file()
+        self._assert_remake_available(item_id)
         with open_db(self.config.paths.db_path) as connection:
             connection.execute(calibration_jobs.insert().values(
                 job_id="new-sample-running", prefix="tv/Show", status="running", lane="test", action="sample",
@@ -623,6 +628,7 @@ class StagedIntegrityTests(unittest.TestCase):
 
     def test_missing_size_manifest_explains_the_required_recovery_record(self) -> None:
         item_id, stage, manifest = self._final_size_file()
+        self._assert_remake_available(item_id)
         selection = json.loads(manifest.read_text())["selection"]
         manifest.unlink()
         with open_db(self.config.paths.db_path) as connection:
@@ -638,6 +644,81 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("Restore the run manifest", result["message"])
         self.assertTrue(stage.exists())
+
+    def _assert_remake_available(self, item_id: int) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            page = staged_remake_records(connection, [{"item_id": item_id}], "tv/Show/Season 1",
+                current_approval=lambda _prefix: self._new_remake_approval())
+        self.assertFalse(page[0]["remake"]["blocked_reason"], page)
+
+    def test_remake_pages_share_reads_and_refresh_on_the_next_request(self) -> None:
+        for kind in ("approved", "settings_history", "final_size", "legacy_size"):
+            with self.subTest(kind=kind):
+                manifest = self.root / "runs" / f"{kind}.json"
+                manifest.parent.mkdir(parents=True, exist_ok=True)
+                selection = {"queue_mode": "older_seasons", "media_scope": {"prefix": "tv/Show"}}
+                if kind in {"approved", "final_size"}:
+                    selection["production_approval_contract"] = self._new_remake_approval(
+                        sample="old-sample", value_mb=300)
+                items = []
+                ids = []
+                with open_db(self.config.paths.db_path) as connection:
+                    for index in range(20):
+                        rel_path = f"tv/Show/Season 1/{kind}-{index}.mkv"
+                        item_id = self._insert_item(connection, rel_path, status="encoded")
+                        ids.append(item_id)
+                        stage = self._write_stage(rel_path, b"finished")
+                        self._insert_artifact(connection, item_id, stage, passed=True,
+                            manifest_path=manifest, item_index=index)
+                        item = {"library_item_id": item_id, "duration_seconds": 2700}
+                        if kind != "settings_history":
+                            item["resolved_policy"] = {"video": {"encoder": "libsvtav1"}}
+                        items.append(item)
+                        if kind in {"final_size", "legacy_size"}:
+                            connection.execute(staged_artifacts.update().where(
+                                staged_artifacts.c.library_item_id == item_id).values(validation_json=json.dumps({
+                                    "passed": False, "checks": [{"passed": False, "message": FINAL_SIZE_GOAL_CHECK}],
+                                    "final_size_goal": {"target_size_bytes": 300_000_000},
+                                })))
+                    if kind in {"final_size", "legacy_size"}:
+                        connection.execute(encode_jobs.insert().values(job_id=f"{kind}-run", prefix="tv/Show",
+                            status="failed", job_kind="folder", host_json="{}", manifest_path=str(manifest),
+                            item_count=len(items), created_at="now", updated_at="now", progress_json=json.dumps({
+                                "failure_analysis": {"kind": "final_size_target_miss", "manifest_index": 0,
+                                    "target_size_verification": {"target_size_bytes": 300_000_000}},
+                            })))
+                manifest.write_text(json.dumps({"selection": selection, "items": items}))
+                reads = []
+                original_read = Path.read_text
+
+                def counted_read(path: Path, *args: object, **kwargs: Any) -> str:
+                    if path == manifest:
+                        reads.append(path)
+                    return original_read(path, *args, **kwargs)
+
+                def page() -> list[dict[str, Any]]:
+                    with open_db(self.config.paths.db_path) as connection:
+                        return staged_remake_records(connection, [{"item_id": item_id} for item_id in ids],
+                            "tv/Show/Season 1", current_approval=lambda _prefix: self._new_remake_approval())
+
+                with patch.object(Path, "read_text", counted_read):
+                    records = page()
+                self.assertEqual(len(reads), 1)
+                if kind == "approved":
+                    self.assertTrue(all("remake" not in record for record in records))
+                else:
+                    self.assertTrue(all(not record["remake"]["blocked_reason"] for record in records), records)
+
+                manifest.write_text("broken json")
+                reads.clear()
+                with patch.object(Path, "read_text", counted_read):
+                    records = page()
+                self.assertEqual(len(reads), 1)
+                self.assertTrue(all("Restore the saved run settings" in record["remake"]["blocked_reason"]
+                                    for record in records), records)
+                manifest.write_text(json.dumps({"selection": selection, "items": items}))
+                records = page()
+                self.assertTrue(all(not record.get("remake", {}).get("blocked_reason") for record in records), records)
 
     def test_missing_run_context_preserves_the_output_until_its_record_is_restored(self) -> None:
         item_id, stage, manifest = self._final_size_file()
