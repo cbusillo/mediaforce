@@ -35,7 +35,15 @@ class NativeDevTree:
 
 @pytest.fixture
 def native_dev_tree(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[NativeDevTree]:
-    script, _, pid_file, _, env = prepare_dev_service(tmp_path, "absent", "pid_file", "owned", native_custody=True)
+    yield from development_tree(tmp_path, request, native_custody=True)
+
+
+def development_tree(
+    tmp_path: Path, request: pytest.FixtureRequest, *, native_custody: bool,
+) -> Iterator[NativeDevTree]:
+    script, _, pid_file, _, env = prepare_dev_service(
+        tmp_path, "absent", "pid_file", "owned", native_custody=native_custody,
+    )
     repo = Path(env["DEV_TEST_REPO"])
     worker = tmp_path / "worker.py"
     worker.write_text('''
