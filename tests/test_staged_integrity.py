@@ -2,6 +2,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -354,10 +355,15 @@ class StagedIntegrityTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"])
         queued: list[int] = []
+
+        def queue(_prefix: str, _mode: str, ids: Collection[int]) -> dict[str, bool]:
+            queued.extend(ids)
+            return {"ok": True}
+
         result = decide_size_held_file(
             self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
             validate_items=lambda *_args: self.fail("no old-file validation"),
-            queue_items=lambda _prefix, _mode, ids: queued.extend(ids) or {"ok": True},
+            queue_items=queue,
             current_approval=lambda _prefix: self._new_remake_approval(),
         )
         self.assertTrue(result["ok"], result)
@@ -545,16 +551,34 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertEqual(queued, [("tv/Show/Season 1", "season_override", [item_id])])
         self.assertFalse(stage.exists())
 
+    def test_missing_legacy_mode_preserves_the_copy_until_its_run_record_is_restored(self) -> None:
+        item_id, stage, manifest = self._final_size_file()
+        selection = json.loads(manifest.read_text())["selection"]
+        selection.pop("queue_mode")
+        manifest.unlink()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(run_manifests.insert().values(run_id="saved-run", created_at="before",
+                output_path=str(manifest), selection_json=json.dumps(selection), item_count=2))
+            connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
+                manifest_run_id="saved-run", validation_json=json.dumps({"passed": True})))
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no validation"), queue_items=lambda *_args: self.fail("no queue"),
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("Restore the saved run settings", result["message"])
+        self.assertTrue(stage.exists())
+
     def test_approved_page_reads_shared_policy_manifest_once(self) -> None:
         policy = {"video": {"encoder": "libsvtav1", "target_vmaf": 93}}
         manifest = self._write_policy_manifest("approved-page.json", [policy] * 10,
             selection={"production_approval_contract": {"schema_version": 1, "policy_hash": "earlier"}})
         reads: list[Path] = []
-        read_text = Path.read_text
-
-        def read(path: Path, *args: object, **kwargs: object) -> str:
+        def read(path: Path) -> str:
             reads.append(path)
-            return read_text(path, *args, **kwargs)
+            with path.open(encoding="utf-8") as stream:
+                return stream.read()
 
         with open_db(self.config.paths.db_path) as connection:
             records = []
@@ -586,8 +610,9 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertTrue(stage.exists())
 
     def test_held_remake_preserves_the_finished_file_without_current_approval(self) -> None:
+        manifest = self._write_policy_manifest("held-approval.json", [], selection={"queue_mode": "folder"})
         with open_db(self.config.paths.db_path) as connection:
-            item_id, stage = self._held_file(connection, "No approval.mkv")
+            item_id, stage = self._held_file(connection, "No approval.mkv", manifest_path=manifest, item_index=0)
         result = decide_size_held_file(
             self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
             validate_items=lambda *_args: self.fail("no validation"), queue_items=lambda *_args: self.fail("no queue"),

@@ -24,7 +24,9 @@ returns that library item to planned, and queues only that item at its run's
 scope and mode, including older seasons. Pre-mode manifests retain manual season
 overrides through the existing legacy selection-provenance reader. If its terminal job was cleared,
 the saved run scope supplies the prefix. If the manifest itself is unavailable,
-the existing database run selection preserves that scope and mode. If neither
+the existing database run selection preserves that scope and mode when the mode
+was recorded. For a pre-mode run, restore its manifest so selection provenance
+can establish whether the season was manually overridden. If neither
 record can be read, restore the saved run settings from a run backup before
 retrying; the staged copy stays in place. A size failure also needs its run manifest
 for the goal comparison; restore that manifest from a run backup when it is missing. The original and other staged outputs

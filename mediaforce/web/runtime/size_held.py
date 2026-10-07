@@ -151,7 +151,7 @@ def staged_remake_details(
     run_prefix, _mode, context_available = _run_context(connection, row, prefix)
     blocked_reasons: list[str] = []
     approval = current_approval(run_prefix)
-    if not held and not context_available:
+    if not context_available:
         blocked_reasons.append("Restore the saved run settings before making this file again. Nothing was removed.")
     else:
         if approval is None:
@@ -258,7 +258,9 @@ def _run_context(connection: DBClient, row: Any, prefix: str) -> tuple[str, str,
         )).scalar_one_or_none()
         try:
             selection = object_dict(json.loads(str(stored))) if stored is not None else {}
-            available = stored is not None and bool(selection)
+            available = stored is not None and bool(
+                selection.get("queue_mode") or object_dict(selection.get("lifecycle_override"))
+            )
         except json.JSONDecodeError:
             selection, available = {}, False
     lifecycle_override = object_dict(selection.get("lifecycle_override"))
