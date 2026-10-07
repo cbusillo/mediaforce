@@ -573,11 +573,15 @@ custody from saved PIDs. After the next system restart, Stop can clear its pendi
 state using the kernel's boot identity; do not delete that state to bypass cleanup.
 Pending state also stays when [native containment cannot be proved](docs/architecture/module-boundaries.md),
 including incomplete capture or a strict Darwin fork.
-Development stop requires the checkout's prepared Python environment
-(`uv sync --locked`) and loads only that checkout's standalone cleanup and native
-custody modules, even when invoked from another directory or unrelated package
-edits cannot import. Native custody failures remain visible rather than falling
-back to bare PID signals.
+Development discovery and cleanup
+require `uv` and the checkout's prepared Python environment (`uv sync --locked`):
+frontend start always needs them to confirm a launch, and status needs them
+when a PID record or listener exists. If a new launch cannot be confirmed,
+the error names the launched PID and retains its record; restore the reader and
+retry start to confirm and reuse it.
+Stop loads only this checkout's standalone cleanup and native custody modules,
+even when invoked from another directory or unrelated package edits cannot import.
+Native custody failures remain visible rather than falling back to bare PID signals.
 
 Development PID files live in a directory under that state path keyed by the
 physical checkout: `development/<checkout hash>/`. Each checkout manages its
@@ -593,8 +597,21 @@ on macOS and Linux keep interpreter and script paths separate, including spaces
 and an interpreter alias removed after startup. Direct Node launches support
 `--inspect`, `--inspect-brk`, and `--max-old-space-size` before the script.
 Other Node options are not inferred; use the managed npm path with `NODE_OPTIONS`
-for runtime options. If native arguments cannot be read, ownership is unknown:
-stop preserves the process and its PID record and reports the error.
+for runtime options. If native arguments or the working directory cannot be read
+for a live candidate, discovery reports ownership unknown and retains processes
+and PID records; start and restart refuse a replacement when discovery cannot
+prove a frontend to clean up. Restore the reported reader/environment prerequisite,
+or retry when the process becomes readable or disappears (including after its
+parent reaps an exited child). Status reports the uncertainty, including
+with `all`, rather than calling it stopped or foreign. A proven frontend may still
+be stopped below an unreadable parent: the helper reports that boundary, preserves
+the ancestors and their siblings, and removes its PID record after proven cleanup.
+Restart then launches a replacement normally, leaving the unreadable ancestors alone.
+An unavailable ownership recheck before signalling instead reports unknown and
+retains the record. A failed native argument read counts as exit only with independent
+process-absence evidence; macOS EINVAL alone remains unknown. The readers have
+macOS native and controlled Linux procfs coverage; the complete shell workflow's
+Linux/login-item behavior is not qualified by those reader tests.
 Python startup or reader failures also leave ownership unknown; repair the
 reported environment error and retry the same command with `uv sync --locked`
 completed for this checkout. A reader crash does not prove a process is foreign.
