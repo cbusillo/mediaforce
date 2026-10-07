@@ -550,6 +550,16 @@ reported error and retry the same Stop or Restart command: it contacts that
 supervisor before looking for the original root, even after workers reparent.
 The supervisor exits when cleanup is proved or its whole captured tree exits
 with ownership still proven.
+If completed cleanup cannot retire its pending state, the supervisor retains
+that completion proof and retries; Stop remains unsuccessful until retirement
+succeeds. Retirement renames the directory without allocating another one.
+Interrupted disposal and unpublished setup artifacts are retried in bounded
+sweeps under the publication lock. Unknown contents, foreign directories and
+symlinks are preserved. Artifacts from earlier helper versions are not swept.
+Boot receipts are synced before publication, followed by their directory and
+the parent directory. Injected write/sync failures are qualified; physical
+power-loss durability has not been tested. An absent or invalid boot receipt
+never proves that pending custody belongs to a previous boot.
 Temporary errors while checking retained processes keep their native handles
 and save the last error for the next Stop. A concurrent Stop for a different
 root reports a conflict instead of consuming another tree's cleanup result.

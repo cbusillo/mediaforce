@@ -7,13 +7,14 @@ import fcntl
 import importlib.util
 import os
 from pathlib import Path
+import re
 import socket
 import stat
 import subprocess
 import sys
 import tempfile
 import time
-from uuid import UUID
+from uuid import UUID, uuid4
 
 if __package__:
     from mediaforce.core.dev_processes import DevelopmentCustodyLostError, DevelopmentProcessTree
@@ -61,19 +62,50 @@ def state_directory(state: Path) -> Iterator[None]:
         os.chdir(previous)
 
 
+def dispose_directory(directory: Path) -> None:
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError("unsafe development disposal directory")
+    entries = list(directory.iterdir())
+    if any(entry.name not in {"control.sock", "boot", "error"} for entry in entries):
+        raise RuntimeError("unexpected development disposal contents")
+    for entry in entries:
+        entry.unlink(missing_ok=True)
+    directory.rmdir()
+
+
 def remove_state(state: Path) -> None:
-    # Remove the active marker in one rename before unlinking its receipt.
-    # Interrupted disposal must not leave a pending directory without a boot ID.
-    disposed = Path(tempfile.mkdtemp(prefix=f".{state.name}-removing-", dir=state.parent))
+    # Completion or previous-boot proof belongs to the caller. Retirement needs
+    # no new directory allocation and never removes the receipt while active.
+    disposed = state.with_name(f".{state.name}-removing-{uuid4()}")
+    state.rename(disposed)
     try:
-        state.rename(disposed)
-    except BaseException:
-        disposed.rmdir()
-        raise
-    (disposed / "control.sock").unlink(missing_ok=True)
-    (disposed / "boot").unlink(missing_ok=True)
-    (disposed / "error").unlink(missing_ok=True)
-    disposed.rmdir()
+        dispose_directory(disposed)
+    except (OSError, RuntimeError):
+        pass  # Already inert; the next locked sweep retries bounded disposal.
+
+
+def sweep_disposal(state: Path) -> None:
+    pattern = re.compile(rf"\.{re.escape(state.name)}-(?:removing-[0-9a-f-]{{36}}|candidate-[a-z0-9_]{{8}})")
+    attempted = 0
+    for artifact in state.parent.iterdir():
+        if not pattern.fullmatch(artifact.name):
+            continue
+        attempted += 1
+        try:
+            dispose_directory(artifact)
+        except (OSError, RuntimeError):
+            pass  # Preserve unfamiliar contents and symlinked/foreign directories.
+        if attempted >= 32:
+            break
+
+
+def sync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def record_error(state: Path, error: Exception) -> bytes:
@@ -98,6 +130,7 @@ def clear_previous_boot(state: Path) -> None:
     # Check and remove under the publication lock: a competing creator must
     # not replace an old receipt between this read and removal.
     with state_lock(state):
+        sweep_disposal(state)
         if state.exists():
             with state_directory(state):
                 recorded_boot = UUID((state / "boot").read_text())
@@ -108,15 +141,30 @@ def clear_previous_boot(state: Path) -> None:
 def publish_state(state: Path) -> bool:
     # Publish a complete boot record in one rename, preserving uncertain state.
     with state_lock(state):
+        sweep_disposal(state)
         if state.exists() or state.is_symlink():
             return False
-        candidate = Path(tempfile.mkdtemp(prefix=f".{state.name}-", dir=state.parent))
+        candidate = Path(tempfile.mkdtemp(prefix=f".{state.name}-candidate-", dir=state.parent))
         try:
-            (candidate / "boot").write_text(boot_id())
+            (candidate / "boot").write_text(str(UUID(boot_id())))
+            with (candidate / "boot").open("rb") as receipt:
+                os.fsync(receipt.fileno())
+            sync_directory(candidate)
             candidate.rename(state)
+            try:
+                sync_directory(state.parent)
+            except BaseException:
+                try:
+                    remove_state(state)  # No supervisor has been launched.
+                except (OSError, RuntimeError):
+                    pass  # Retain the published marker if retirement also fails.
+                raise
         finally:
             if candidate.exists():
-                remove_state(candidate)
+                try:
+                    dispose_directory(candidate)  # Unpublished; no retirement allocation.
+                except (OSError, RuntimeError):
+                    pass  # Preserve the original setup error and retry via the sweep.
     return True
 
 
@@ -135,12 +183,12 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
                 except TimeoutError:
                     if tree is None and time.monotonic() >= startup_deadline:
                         completed = True
-                        return 1
-                    if tree is not None:
+                    if tree is not None or completed:
                         try:
-                            if tree.finished():
+                            if completed or tree.finished():
                                 completed = True
-                                return 0
+                                remove_state(state)
+                                return 0 if tree is not None else 1
                         except DevelopmentCustodyLostError as exc:
                             record_error(state, exc)
                             return 1
@@ -170,8 +218,11 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
                                 ["/bin/bash", script, "check-owner", component, str(pid)],
                                 check=False, stdout=subprocess.DEVNULL, timeout=5,
                             ).returncode == 0)
-                        tree.stop()
+                            completed = False
+                        if not completed:
+                            tree.stop()
                         completed = True
+                        remove_state(state)
                         response = b"ok"
                     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
                         response = record_error(state, exc)
@@ -179,7 +230,7 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
                         connection.sendall(response)
                     except OSError:
                         pass  # A disconnected caller does not release native custody.
-                    if completed:
+                    if response == b"ok":
                         return 0
                     if tree is None:
                         # A failed capture cannot prove what survived a lost root.
@@ -188,8 +239,6 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
     finally:
         if tree is not None:
             tree.close()
-        if completed:
-            remove_state(state)
     return 1
 
 
