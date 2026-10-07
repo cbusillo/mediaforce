@@ -112,16 +112,28 @@ def matches_frontend(arguments: list[str], checkout: str, cwd: str) -> bool:
 
 
 def main() -> int:
+    pid = None
     try:
-        pid = int(sys.argv[1])
+        candidate = int(sys.argv[1])
         checkout, cwd = sys.argv[2:4]
-        if len(sys.argv) != 4 or pid <= 1:
+        if len(sys.argv) != 4 or candidate <= 1:
             raise ValueError("invalid frontend ownership arguments")
+        pid = candidate
         return 0 if matches_frontend(process_arguments(pid), checkout, cwd) else 1
     except (FileNotFoundError, ProcessLookupError):
         return 1
-    except (OSError, RuntimeError, ValueError, IndexError):
-        print("frontend: native argument ownership unknown; preserving process and PID bookkeeping", file=sys.stderr)
+    except (OSError, RuntimeError, ValueError, IndexError) as exc:
+        # Darwin may return EINVAL after exit. Only an independent absence
+        # check makes a failed argument read non-ownership; EINVAL alone cannot.
+        if pid is not None:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return 1
+            except OSError:
+                pass
+        target = "" if pid is None else f" for pid {pid}"
+        print(f"frontend: native argument ownership unknown{target}: {exc}", file=sys.stderr)
         return 2
 
 

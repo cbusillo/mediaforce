@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from mediaforce.ops import dev_frontend
 from tests.test_dev_process_tree import native_command
 from tests.test_dev_service import prepare_dev_service
 
@@ -100,12 +101,21 @@ sibling.wait()
         assert select.select([root.stdout], [], [], 5)[0], "frontend fixture failed to start"
         rows = json.loads(root.stdout.readline())
         assert rows.pop("cwd") == str(frontend)
-        # Command/parent readers and custody use the OS. Cwd is supplied from
-        # the fixture's actual startup report, not an assumed launcher location.
+        # Args, parentage inside the fixture and custody are native. Supply
+        # startup cwd and a controlled foreign controller boundary so unrelated
+        # harness ancestors cannot turn this into an unknown-ownership test.
         ps = Path(env["PATH"]) / "ps"
-        ps.write_text("#!" + sys.executable + "\nimport os, sys\nos.execv('/bin/ps', ['ps', *sys.argv[1:]])\n")
+        ps.write_text("#!" + sys.executable + f'''\nimport os, sys
+if sys.argv[1:] == ['-p', '{os.getpid()}', '-o', 'ppid=']:
+    print(0)
+else:
+    os.execv('/bin/ps', ['ps', *sys.argv[1:]])
+''')
         table = tmp_path / "cwd-table.json"
-        table.write_text(json.dumps([{"pid": pid, "cwd": str(frontend)} for pid in rows.values()]))
+        table.write_text(json.dumps([
+            *({"pid": pid, "cwd": str(frontend)} for pid in rows.values()),
+            {"pid": os.getpid(), "cwd": str(tmp_path)},
+        ]))
         env.update(DEV_TEST_TREE=str(table), COLUMNS="80")
         if remove_interpreter:
             node.unlink()
@@ -146,8 +156,95 @@ def test_frontend_stop_preserves_native_shared_wrapper_and_sibling(frontend_tree
     result = subprocess.run(["/bin/bash", str(tree.script), "stop", "frontend"],
                             env=tree.env, capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
+    assert "parent ownership unknown" not in result.stderr
     assert select.select([tree.owned_lifetime], [], [], 5)[0], "owned worker survived stop"
     assert os.read(tree.owned_lifetime, 1) == b""
     assert not select.select([tree.sibling_lifetime], [], [], .1)[0], "unrelated sibling exited"
     assert tree.wrapper.poll() is None, "shared wrapper became the stop root"
     assert not tree.pid_file.exists()
+
+
+@pytest.mark.parametrize("action", ["stop", "restart"])
+@pytest.mark.parametrize("failure", ["parent", "recheck"])
+def test_native_unknown_parent_and_custody_recheck(frontend_tree: FrontendTree, action: str, failure: str) -> None:
+    tree = frontend_tree
+    tree.pid_file.write_text(str(tree.rows["vite"]))
+    reader = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_frontend.py"
+    counter = reader.with_suffix(".reads")
+    target = tree.rows["wrapper"] if failure == "parent" else tree.rows["vite"]
+    # Qualify controlled argument unavailability with real native identities;
+    # the second Vite read occurs inside the custody recheck after discovery.
+    reader.write_text(reader.read_text().replace(
+        "def process_arguments(pid: int) -> list[str]:",
+        f'''def process_arguments(pid: int) -> list[str]:
+    if pid == {target}:
+        counter = Path({str(counter)!r})
+        count = int(counter.read_text()) + 1 if counter.exists() else 1
+        counter.write_text(str(count))
+        if {failure == "parent"!r} or count >= 2:
+            raise PermissionError("controlled native argument unavailability")''',
+    ))
+    result = subprocess.run(["/bin/bash", str(tree.script), action, "frontend"],
+                            env=tree.env, capture_output=True, text=True, timeout=20)
+    assert "ownership unknown" in result.stderr
+    assert "ownership changed" not in result.stderr
+    assert tree.wrapper.poll() is None
+    assert not select.select([tree.sibling_lifetime], [], [], .1)[0]
+    if failure == "recheck":
+        assert result.returncode != 0
+        assert "PID bookkeeping retained" in result.stderr
+        assert tree.pid_file.read_text() == str(tree.rows["vite"])
+        assert not select.select([tree.owned_lifetime], [], [], .1)[0]
+    else:
+        assert f"native argument ownership unknown for pid {target}: controlled native argument unavailability" in result.stderr
+        assert "stopping proven subtree" in result.stderr
+        assert "frontend: stopped" in result.stdout
+        assert select.select([tree.owned_lifetime], [], [], 5)[0]
+        assert os.read(tree.owned_lifetime, 1) == b""
+        if action == "stop":
+            assert not tree.pid_file.exists()
+        else:
+            assert tree.pid_file.read_text().strip() != str(tree.rows["vite"])
+            assert "frontend: failed to start" in result.stderr
+        # The fixture has no npm launcher; restart gets as far as requesting
+        # that supported replacement, then its intentionally absent stub fails.
+        assert result.returncode == (0 if action == "stop" else 1)
+
+
+def test_native_reader_exit_between_cwd_and_argument_read(tmp_path: Path) -> None:
+    process = subprocess.Popen([sys.executable, "-c", "pass"], cwd=tmp_path,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert process.stdout is not None
+    process.wait(timeout=5)
+    assert process.stdout.read() == b""
+    result = subprocess.run([sys.executable, dev_frontend.__file__, str(process.pid),
+                             str(tmp_path), str(tmp_path / "frontend")],
+                            capture_output=True, text=True, timeout=5)
+    process.stdout.close()
+    assert process.stderr is not None
+    process.stderr.close()
+    assert result.returncode == 1, result.stderr
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("failure", ["cwd", "environment"])
+def test_native_discovery_prerequisite_failure_retains_tree(frontend_tree: FrontendTree, failure: str) -> None:
+    tree = frontend_tree
+    tree.pid_file.write_text(str(tree.rows["vite"]))
+    if failure == "cwd":
+        table = Path(tree.env["DEV_TEST_TREE"])
+        rows = json.loads(table.read_text())
+        for row in rows:
+            row["cwd"] = ""
+        table.write_text(json.dumps(rows))
+    else:
+        (Path(tree.env["PATH"]) / "uv").unlink()
+    result = subprocess.run(["/bin/bash", str(tree.script), "stop", "frontend"],
+                            env=tree.env, capture_output=True, text=True, timeout=20)
+    assert result.returncode != 0
+    assert "ownership unknown" in result.stderr
+    assert "PID bookkeeping retained" in result.stderr
+    assert tree.pid_file.read_text() == str(tree.rows["vite"])
+    assert not select.select([tree.owned_lifetime], [], [], .1)[0]
+    assert not select.select([tree.sibling_lifetime], [], [], .1)[0]
+    assert tree.wrapper.poll() is None

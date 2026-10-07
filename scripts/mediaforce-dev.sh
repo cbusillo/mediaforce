@@ -116,7 +116,11 @@ mediaforce_backend_root_pid() {
 pid_is_frontend_launcher() {
 	local pid="${1:-}" cwd
 	cwd="$(lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
-	[[ -n "${cwd}" ]] || return 1
+	if [[ -z "${cwd}" ]]; then
+		pid_is_alive "${pid}" || return 1
+		echo "frontend: working directory ownership unknown for pid ${pid}" >&2
+		return 2
+	fi
 	(
 		cd "${ROOT_DIR}"
 		uv run --no-sync --project "${ROOT_DIR}" python "${ROOT_DIR}/mediaforce/ops/dev_frontend.py" \
@@ -127,7 +131,7 @@ pid_is_frontend_launcher() {
 pid_matches_mediaforce_frontend() {
 	local pid="${1:-}"
 	local depth=0
-	while [[ -n "${pid}" && "${pid}" != "0" && ${depth} -lt 8 ]]; do
+	while [[ -n "${pid}" && "${pid}" != "0" && "${pid}" != "1" && ${depth} -lt 8 ]]; do
 		local status=0
 		pid_is_frontend_launcher "${pid}" || status=$?
 		[[ ${status} -eq 0 ]] && return 0
@@ -143,8 +147,14 @@ mediaforce_frontend_root_pid() {
 	local parent depth=0
 	while [[ ${depth} -lt 8 ]]; do
 		parent="$(trim "$(pid_parent "${pid}")")"
-		[[ -n "${parent}" && "${parent}" != "0" ]] || break
-		pid_matches_mediaforce_frontend "${parent}" || break
+		[[ -n "${parent}" && "${parent}" != "0" && "${parent}" != "1" ]] || break
+		local status=0
+		pid_matches_mediaforce_frontend "${parent}" || status=$?
+		if [[ ${status} -eq 2 ]]; then
+			echo "frontend: parent ownership unknown; preserving ancestors and stopping proven subtree pid ${pid}" >&2
+			break
+		fi
+		[[ ${status} -eq 0 ]] || break
 		pid="${parent}"
 		depth=$((depth + 1))
 	done
@@ -184,8 +194,12 @@ foreign_listener_pids() {
 	local matcher="${2:-}"
 	local pid
 	for pid in $(port_listener_pids "${port}"); do
-		if ! "${matcher}" "${pid}"; then
+		local status=0
+		"${matcher}" "${pid}" || status=$?
+		if [[ ${status} -eq 1 ]]; then
 			printf '%s\n' "${pid}"
+		elif [[ ${status} -ne 0 ]]; then
+			return 2
 		fi
 	done
 }
@@ -205,12 +219,25 @@ wait_for_no_managed_listener() {
 	local matcher="${2:-}"
 	local attempt=0
 	while [[ ${attempt} -lt 20 ]]; do
-		if [[ -z "$(managed_listener_pids "${port}" "${matcher}")" ]]; then
+		local listeners
+		listeners="$(managed_listener_pids "${port}" "${matcher}")" || return 2
+		if [[ -z "${listeners}" ]]; then
 			return 0
 		fi
 		attempt=$((attempt + 1))
 		sleep 0.25
 	done
+	return 1
+}
+
+confirm_frontend_listener_clearance() {
+	local status=0
+	wait_for_no_managed_listener "${FRONTEND_PORT}" pid_matches_mediaforce_frontend || status=$?
+	case "${status}" in
+	0) return 0 ;;
+	1) echo "frontend: cleanup finished but a managed listener remains on port ${FRONTEND_PORT}; PID bookkeeping retained; retry stop" >&2 ;;
+	*) echo "frontend: cleanup finished but listener ownership unknown; PID bookkeeping retained; resolve the reader error and retry stop" >&2 ;;
+	esac
 	return 1
 }
 
@@ -393,18 +420,18 @@ start_frontend() {
 	load_env
 	mkdir -p "${DEV_STATE_DIR}"
 	local running_pid
-	running_pid="$(frontend_running_pid)" || return 1
+	running_pid="$(frontend_running_pid)" || { frontend_discovery_unknown; return 1; }
 	if [[ -n "${running_pid}" ]]; then
 		echo "frontend: running http://${FRONTEND_HOST}:${FRONTEND_PORT} pid ${running_pid}"
 		return 0
 	fi
 	local managed_pids foreign_pids
-	managed_pids="$(managed_listener_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend)"
+	managed_pids="$(managed_listener_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend)" || { frontend_discovery_unknown; return 1; }
 	if [[ -n "${managed_pids}" ]]; then
 		echo "frontend: running http://${FRONTEND_HOST}:${FRONTEND_PORT} listener $(printf '%s' "${managed_pids}" | paste -sd ',' -)"
 		return 0
 	fi
-	foreign_pids="$(foreign_listener_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend)"
+	foreign_pids="$(foreign_listener_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend)" || { frontend_discovery_unknown; return 1; }
 	if [[ -n "${foreign_pids}" ]]; then
 		echo "frontend: port ${FRONTEND_PORT} is used by a process outside this checkout; refusing to start" >&2
 		return 1
@@ -416,7 +443,11 @@ start_frontend() {
 		echo $! >"${FRONTEND_PID_FILE}"
 	)
 	sleep 1
-	running_pid="$(frontend_running_pid)" || return 1
+	running_pid="$(frontend_running_pid)" || {
+		echo "frontend: launched pid $(pid_from_file "${FRONTEND_PID_FILE}") but could not confirm ownership" >&2
+		frontend_discovery_unknown
+		return 1
+	}
 	if [[ -z "${running_pid}" ]]; then
 		echo "frontend: failed to start; see ${FRONTEND_LOG_FILE}" >&2
 		return 1
@@ -455,22 +486,22 @@ stop_backend() {
 stop_frontend() {
 	load_env
 	local pid managed_roots
-	pid="$(frontend_running_pid)" || return 1
+	pid="$(frontend_running_pid)" || { frontend_discovery_unknown; return 1; }
 	if [[ -n "${pid}" ]]; then
 		pid="$(mediaforce_frontend_root_pid "${pid}")"
 		kill_pid_tree "${pid}" frontend || return 1
-		wait_for_no_managed_listener "${FRONTEND_PORT}" pid_matches_mediaforce_frontend || true
+		confirm_frontend_listener_clearance || return 1
 		rm -f "${FRONTEND_PID_FILE}"
 		echo "frontend: stopped pid ${pid}"
 		return 0
 	fi
-	managed_roots="$(managed_listener_root_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend mediaforce_frontend_root_pid)" || return 1
+	managed_roots="$(managed_listener_root_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend mediaforce_frontend_root_pid)" || { frontend_discovery_unknown; return 1; }
 	if [[ -n "${managed_roots}" ]]; then
 		while IFS= read -r root_pid; do
 			[[ -n "${root_pid}" ]] || continue
 			kill_pid_tree "${root_pid}" frontend || return 1
 		done <<<"${managed_roots}"
-		wait_for_no_managed_listener "${FRONTEND_PORT}" pid_matches_mediaforce_frontend || true
+		confirm_frontend_listener_clearance || return 1
 		rm -f "${FRONTEND_PID_FILE}"
 		echo "frontend: stopped tree $(printf '%s' "${managed_roots}" | paste -sd ',' -)"
 		return 0
@@ -499,18 +530,22 @@ status_backend() {
 status_frontend() {
 	load_env
 	local pid listener_pids
-	pid="$(frontend_running_pid)" || return 1
+	pid="$(frontend_running_pid)" || { frontend_discovery_unknown; return 2; }
 	if [[ -n "${pid}" ]]; then
 		echo "frontend: running http://${FRONTEND_HOST}:${FRONTEND_PORT} pid ${pid}"
 		return 0
 	fi
-	listener_pids="$(managed_listener_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend)" || return 1
+	listener_pids="$(managed_listener_pids "${FRONTEND_PORT}" pid_matches_mediaforce_frontend)" || { frontend_discovery_unknown; return 2; }
 	if [[ -n "${listener_pids}" ]]; then
 		echo "frontend: running http://${FRONTEND_HOST}:${FRONTEND_PORT} listener $(printf '%s' "${listener_pids}" | paste -sd ',' -)"
 		return 0
 	fi
 	echo "frontend: stopped http://${FRONTEND_HOST}:${FRONTEND_PORT}"
 	return 1
+}
+
+frontend_discovery_unknown() {
+	echo "frontend: discovery ownership unknown; processes and PID bookkeeping retained; resolve the reader error, check uv and the checkout's prepared Python environment (uv sync --locked), then retry" >&2
 }
 
 smoke_backend() {
@@ -558,7 +593,9 @@ run_for_component() {
 		;;
 	status:all)
 		status_backend || true
-		status_frontend || true
+		local status=0
+		status_frontend || status=$?
+		[[ ${status} -ne 2 ]]
 		;;
 	status:backend) status_backend ;;
 	status:frontend) status_frontend ;;
