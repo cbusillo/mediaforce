@@ -62,10 +62,18 @@ def state_directory(state: Path) -> Iterator[None]:
 
 
 def remove_state(state: Path) -> None:
-    (state / "control.sock").unlink(missing_ok=True)
-    (state / "boot").unlink(missing_ok=True)
-    (state / "error").unlink(missing_ok=True)
-    state.rmdir()
+    # Remove the active marker in one rename before unlinking its receipt.
+    # Interrupted disposal must not leave a pending directory without a boot ID.
+    disposed = Path(tempfile.mkdtemp(prefix=f".{state.name}-removing-", dir=state.parent))
+    try:
+        state.rename(disposed)
+    except BaseException:
+        disposed.rmdir()
+        raise
+    (disposed / "control.sock").unlink(missing_ok=True)
+    (disposed / "boot").unlink(missing_ok=True)
+    (disposed / "error").unlink(missing_ok=True)
+    disposed.rmdir()
 
 
 def record_error(state: Path, error: Exception) -> bytes:

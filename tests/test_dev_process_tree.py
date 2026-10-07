@@ -314,12 +314,22 @@ def test_prior_boot_removal_holds_publication_lock(tmp_path: Path, monkeypatch: 
     current_boot = "00000000-0000-0000-0000-000000000002"
     (state / "boot").write_text(old_boot)
 
-    def locked_boot_read() -> str:
+    def assert_publication_locked() -> None:
         with open(str(state) + ".lock", "r+") as competing_creator:
             with pytest.raises(BlockingIOError):
                 fcntl.flock(competing_creator, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def locked_boot_read() -> str:
+        assert_publication_locked()
         return current_boot
 
+    original_remove = dev_processes.remove_state
+
+    def locked_remove(marker: Path) -> None:
+        assert_publication_locked()
+        original_remove(marker)
+
+    monkeypatch.setattr(dev_processes, "remove_state", locked_remove)
     monkeypatch.setattr(dev_processes, "boot_id", locked_boot_read)
     dev_processes.clear_previous_boot(state)
     assert not state.exists()
@@ -328,6 +338,31 @@ def test_prior_boot_removal_holds_publication_lock(tmp_path: Path, monkeypatch: 
     socket_marker.touch()
     dev_processes.clear_previous_boot(state)
     assert socket_marker.exists(), "another caller removed the new current-boot session"
+
+
+def test_interrupted_disposal_does_not_leave_a_pending_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "backend.cleanup"
+    assert dev_processes.publish_state(state)
+    original_unlink = Path.unlink
+
+    def interrupted_unlink(path: Path, missing_ok: bool = False) -> None:
+        if path.name == "boot":
+            assert not state.exists(), "active marker still visible during disposal"
+            raise KeyboardInterrupt
+        original_unlink.__get__(path, Path)(missing_ok=missing_ok)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(Path, "unlink", interrupted_unlink)
+        with pytest.raises(KeyboardInterrupt):
+            dev_processes.remove_state(state)
+    assert not state.exists()
+    assert dev_processes.publish_state(state), "interrupted disposal blocked the next session"
+    dev_processes.remove_state(state)
+    remnants = list(tmp_path.glob(".backend.cleanup-removing-*"))
+    assert len(remnants) == 1
+    assert (remnants[0] / "boot").is_file()
 
 
 def test_invalid_boot_receipt_preserves_pending_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
