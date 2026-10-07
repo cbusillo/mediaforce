@@ -58,6 +58,9 @@ after the package consolidation pass. Avoid growing them with new helper logic.
 - `_process_deadline.py`
   - private per-command supervisor that keeps ownership until every observed
     descendant exits
+  - reads native exit evidence at each signal phase's deadline, including after
+    a controller pause; an empty tree succeeds only with intact ownership and
+    successful signaling, without extending the cleanup grace periods
   - Linux uses a scoped child subreaper plus pidfds; procfs disappearance is an
     exit race only when the pinned pidfd independently proves exit
   - macOS uses Darwin unique parent identities plus audit-token signaling; a

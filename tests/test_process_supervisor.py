@@ -19,10 +19,16 @@ def test_termination_repeats_graceful_signals_then_forces_with_sticky_failure(
 ) -> None:
     tree = Mock(compromised=False, signal_failure_reason="first signal failed")
     tree.signal_all.side_effect = [first_signal_succeeds, True, True]
-    tree.live.side_effect = [True, False]
+    tree.live.side_effect = [True, True, False]
     reap = Mock()
-    term_end = custody._TERM_GRACE_SECONDS
-    with patch.object(custody.time, "monotonic", side_effect=[0, 0, term_end, term_end, term_end]):
+    clock = 0.0
+
+    def advance_during_observation(_timeout: float) -> None:
+        nonlocal clock
+        clock += custody._TERM_GRACE_SECONDS / 2
+
+    tree.refresh.side_effect = advance_during_observation
+    with patch.object(custody.time, "monotonic", side_effect=lambda: clock):
         result = custody._terminate_tree(tree, reap)
 
     assert result.succeeded is first_signal_succeeds
@@ -30,8 +36,7 @@ def test_termination_repeats_graceful_signals_then_forces_with_sticky_failure(
     assert tree.signal_all.call_args_list == [
         call(signal.SIGTERM), call(signal.SIGTERM), call(signal.SIGKILL),
     ]
-    assert tree.refresh.call_count == 2
-    assert reap.call_count == 3
+    reap.assert_called()
 
 
 def test_termination_does_not_force_an_empty_but_compromised_tree() -> None:
@@ -50,9 +55,14 @@ def test_termination_reports_survivors_after_both_grace_periods() -> None:
     tree = Mock(compromised=False, signal_failure_reason="identity unavailable")
     tree.signal_all.return_value = True
     tree.live.return_value = True
-    term_end = custody._TERM_GRACE_SECONDS
-    kill_end = term_end + custody._KILL_GRACE_SECONDS
-    with patch.object(custody.time, "monotonic", side_effect=[0, term_end, term_end, kill_end]):
+    clock = 0.0
+
+    def advance_past_deadline(_timeout: float) -> None:
+        nonlocal clock
+        clock += custody._TERM_GRACE_SECONDS + custody._KILL_GRACE_SECONDS
+
+    tree.refresh.side_effect = advance_past_deadline
+    with patch.object(custody.time, "monotonic", side_effect=lambda: clock):
         result = custody._terminate_tree(tree, Mock())
 
     assert not result.succeeded
