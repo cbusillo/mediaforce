@@ -1,4 +1,5 @@
 import builtins
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -47,7 +48,7 @@ while str(worker.pid) not in registry.read_text().splitlines():
 port = int(sys.argv[sys.argv.index('--port')+1])
 with socket.socket() as listener:
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(('127.0.0.1', port)); listener.listen()
+    listener.bind((os.environ.get('TEST_BIND_HOST', '127.0.0.1'), port)); listener.listen()
     while not select.select([fd], [], [], .02)[0]:
         if pathlib.Path(os.environ['TEST_CRASH']).exists():
             os._exit(3)
@@ -67,7 +68,12 @@ worker.wait(timeout=5)
 # processes it launched. No installed ps/npm/launchctl or host process state.
 PS = '''
 import os, pathlib, sys
-if pathlib.Path(os.environ['TEST_INVENTORY_FAILURE']).exists():
+failure = pathlib.Path(os.environ['TEST_INVENTORY_FAILURE'])
+if failure.exists():
+    failure.with_suffix('.observed').touch()
+    if failure.read_text() == 'malformed':
+        print('unexpected inventory row')
+        sys.exit(0)
     sys.exit(1)
 for line in pathlib.Path(os.environ['TEST_REGISTRY']).read_text().splitlines():
     try:
@@ -107,6 +113,16 @@ class DevFixture:
     def status(self, component: str = 'backend') -> dict[str, str | int]:
         result = self.run('status', component)
         return json.loads(result.stdout.split(': ', 1)[1])
+
+    def launch_broker(self) -> subprocess.Popen[bytes]:
+        port = self.env['MEDIAFORCE_WEB_PORT']
+        return subprocess.Popen(
+            [sys.executable, str(self.root / 'mediaforce/ops/dev_processes.py'),
+             'serve', 'backend', '--state-dir', str(self.state), '--cwd', str(self.root),
+             '--host', '127.0.0.1', '--port', port, '--',
+             str(self.root / '.venv/bin/mediaforce-web'), '--port', port],
+            env=self.env, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
 
     def assert_empty(self) -> None:
         wait_until(lambda: self.status()['state'] == 'stopped')
@@ -212,10 +228,11 @@ def test_stop_kills_stubborn_descendants_and_preserves_foreign_server(dev: DevFi
     assert dev_processes.port_open('127.0.0.1', foreign_port)
 
 
-def test_occupied_port_preserves_foreign_listener(dev: DevFixture) -> None:
+@pytest.mark.parametrize('foreign_host', ['127.0.0.1', '0.0.0.0'])
+def test_occupied_port_preserves_foreign_listener(dev: DevFixture, foreign_host: str) -> None:
     port = int(dev.env['MEDIAFORCE_WEB_PORT'])
     foreign = subprocess.Popen([str(dev.root / '.venv/bin/mediaforce-web'), '--port', str(port)],
-                               env=dev.env, start_new_session=True)
+                               env=dict(dev.env, TEST_BIND_HOST=foreign_host), start_new_session=True)
     dev.foreign = foreign
     wait_until(lambda: dev_processes.port_open('127.0.0.1', port))
     assert dev.run('start').returncode != 0
@@ -269,25 +286,33 @@ def test_concurrent_starts_share_one_owner(dev: DevFixture) -> None:
     assert dev.run('stop').returncode == 0
 
 
-def test_observation_failure_retains_owner_until_cleanup_can_finish(dev: DevFixture) -> None:
+@pytest.mark.parametrize('malformed', [False, True])
+def test_observation_failure_retains_owner_until_cleanup_can_finish(dev: DevFixture, malformed: bool) -> None:
     dev.env['TEST_STUBBORN'] = '1'
-    assert dev.run('start').returncode == 0
-    owner = dev.status()
+    broker = dev.launch_broker()
     failure = Path(dev.env['TEST_INVENTORY_FAILURE'])
-    failure.touch()
-    stopping = subprocess.Popen(['bash', str(dev.root / 'scripts/mediaforce-dev.sh'), 'stop', 'backend'],
-                                env=dev.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stopping = None
     try:
-        wait_until(lambda: 'cleanup pending' in (dev.state / 'backend.log').read_text())
+        wait_until(lambda: dev.status()['state'] == 'running')
+        owner = dev.status()
+        failure.write_text('malformed' if malformed else '')
+        stopping = subprocess.Popen(['bash', str(dev.root / 'scripts/mediaforce-dev.sh'), 'stop', 'backend'],
+                                    env=dev.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_until(lambda: failure.with_suffix('.observed').exists())
         status = dev.status()
         assert status['state'] == 'stopping'
         assert status['guardian'] == owner['guardian']
         assert stopping.poll() is None
+        failure.unlink()
+        output, errors = stopping.communicate(timeout=15)
+        assert stopping.returncode == 0, (output, errors)
+        dev.assert_empty()
     finally:
         failure.unlink(missing_ok=True)
-    output, errors = stopping.communicate(timeout=15)
-    assert stopping.returncode == 0, (output, errors)
-    dev.assert_empty()
+        if stopping is not None:
+            stopping.kill(); stopping.wait(timeout=5)
+        broker.kill(); broker.wait(timeout=5)
+
 
 
 def test_symlink_command_from_another_directory_reaches_same_owner(dev: DevFixture, tmp_path: Path) -> None:
@@ -340,6 +365,7 @@ def test_completion_log_failure_never_retries_a_reaped_group(
     cleanup = Mock(return_value=0)
     connection = Mock(spec=socket.socket)
     monkeypatch.setattr(dev_processes, 'enable_subreaper', lambda: None)
+    monkeypatch.setattr(dev_processes, 'port_open', lambda _host, _port: False)
     monkeypatch.setattr(dev_processes.socket, 'socket', MagicMock())
     monkeypatch.setattr(dev_processes.signal, 'signal', Mock())
     monkeypatch.setattr(dev_processes.subprocess, 'Popen', Mock(return_value=child))
@@ -365,7 +391,7 @@ def test_failed_spawn_releases_owner_and_start_can_be_retried(dev: DevFixture) -
     result = dev.run('start')
     assert result.returncode != 0
     assert time.monotonic() - began < 5, 'known failed launch waited for the startup deadline'
-    assert 'launcher exited before startup' in result.stdout
+    assert json.loads(result.stdout.split(': ', 1)[1]).get('error')
     assert dev.status()['state'] == 'stopped'
     assert dev.run('stop').returncode == 0
     executable.write_bytes(original)
@@ -431,14 +457,7 @@ def test_restart_after_server_active_close_reuses_available_port(dev: DevFixture
 def test_silent_control_client_preserves_running_or_failed_owner(
     dev: DevFixture, guardian_failed: bool,
 ) -> None:
-    port = dev.env['MEDIAFORCE_WEB_PORT']
-    broker = subprocess.Popen(
-        [sys.executable, str(dev.root / 'mediaforce/ops/dev_processes.py'),
-         'serve', 'backend', '--state-dir', str(dev.state), '--cwd', str(dev.root),
-         '--host', '127.0.0.1', '--port', port, '--',
-         str(dev.root / '.venv/bin/mediaforce-web'), '--port', port],
-        env=dev.env, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    broker = dev.launch_broker()
     try:
         wait_until(lambda: dev.status()['state'] == 'running')
         owner = dev.status()
@@ -464,3 +483,132 @@ def test_silent_control_client_preserves_running_or_failed_owner(
         except ProcessLookupError:
             pass
         broker.wait(timeout=5)
+
+
+@pytest.mark.parametrize('component,variable', [
+    ('backend', 'MEDIAFORCE_WEB_PORT'), ('frontend', 'MEDIAFORCE_FRONTEND_DEV_PORT'),
+])
+@pytest.mark.parametrize('port', ['-1', '0', '87777'])
+def test_invalid_development_port_is_rejected_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, component: str, variable: str, port: str,
+) -> None:
+    monkeypatch.setenv(variable, port)
+    with pytest.raises(ValueError):
+        dev_processes.component_command(component, tmp_path)
+
+
+def test_broker_waits_for_a_temporary_lock_probe(dev: DevFixture, tmp_path: Path) -> None:
+    observed = tmp_path / 'lock-probe-observed'
+    script = """
+import importlib.util, os, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('fixture_launcher', sys.argv[1])
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+original = module.fcntl.flock
+def flock(fd, operation):
+    try:
+        return original(fd, operation)
+    except BlockingIOError:
+        Path(sys.argv[3]).touch()
+        raise
+module.fcntl.flock = flock
+os.chdir(sys.argv[2])
+raise SystemExit(module.serve('backend', [sys.argv[4], '--port', sys.argv[5]],
+                            Path(sys.argv[6]), '127.0.0.1', int(sys.argv[5])))
+"""
+    broker = None
+    try:
+        with (dev.state / 'backend.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            broker = subprocess.Popen(
+                [sys.executable, '-c', script, str(dev.root / 'mediaforce/ops/dev_processes.py'),
+                 str(dev.state), str(observed), str(dev.root / '.venv/bin/mediaforce-web'),
+                 dev.env['MEDIAFORCE_WEB_PORT'], str(dev.root)], env=dev.env,
+                start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            wait_until(observed.exists)
+        wait_until(lambda: dev.status()['state'] == 'running')
+        assert dev.run('stop').returncode == 0
+    finally:
+        if broker is not None:
+            broker.kill()
+            broker.wait(timeout=5)
+
+
+def test_start_retries_after_observing_a_temporary_lock_probe(dev: DevFixture, tmp_path: Path) -> None:
+    observed = tmp_path / 'start-probe-observed'
+    script = """
+import importlib.util, json, os, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('fixture_launcher', sys.argv[1])
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+original = module.request
+def request(component, action):
+    status = original(component, action)
+    Path(sys.argv[3]).write_text(status['state'])
+    return status
+module.request = request
+os.chdir(sys.argv[2])
+result = module.start('backend', [sys.argv[4], '--port', sys.argv[5]],
+                      Path(sys.argv[6]), '127.0.0.1', int(sys.argv[5]))
+print(json.dumps(result))
+raise SystemExit(result['state'] != 'running')
+"""
+    with (dev.state / 'backend.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        starting = subprocess.Popen(
+            [sys.executable, '-c', script, str(dev.root / 'mediaforce/ops/dev_processes.py'),
+             str(dev.state), str(observed), str(dev.root / '.venv/bin/mediaforce-web'),
+             dev.env['MEDIAFORCE_WEB_PORT'], str(dev.root)], env=dev.env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        wait_until(observed.exists)
+        assert observed.read_text() == 'stopping'
+    output, errors = starting.communicate(timeout=25)
+    assert starting.returncode == 0, (output, errors)
+    assert dev.run('stop').returncode == 0
+
+
+def test_status_queued_behind_a_silent_client_completes(dev: DevFixture, tmp_path: Path) -> None:
+    broker = dev.launch_broker()
+    first = second = None
+    ready = tmp_path / 'first-client'; queued = tmp_path / 'second-client'
+    try:
+        wait_until(lambda: dev.status()['state'] == 'running')
+        os.kill(broker.pid, signal.SIGSTOP)
+        silent = "import socket,time,sys; from pathlib import Path; s=socket.socket(socket.AF_UNIX); s.connect('backend.sock'); Path(sys.argv[1]).touch(); time.sleep(5)"
+        first = subprocess.Popen([sys.executable, '-c', silent, str(ready)], cwd=dev.state)
+        wait_until(ready.exists)
+        script = """
+import importlib.util, json, os, socket, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('fixture_launcher', sys.argv[1])
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+original = socket.socket
+class ObservedSocket(original):
+    def sendall(self, data, *args):
+        result = super().sendall(data, *args)
+        Path(sys.argv[3]).touch()
+        return result
+module.socket.socket = ObservedSocket
+os.chdir(sys.argv[2])
+print(json.dumps(module.request('backend', 'status')))
+"""
+        second = subprocess.Popen(
+            [sys.executable, '-c', script, str(dev.root / 'mediaforce/ops/dev_processes.py'),
+             str(dev.state), str(queued)], env=dev.env, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        wait_until(queued.exists)
+        time.sleep(.25)  # Both requests are queued before the server's client timer starts.
+        os.kill(broker.pid, signal.SIGCONT)
+        output, errors = second.communicate(timeout=5)
+        assert second.returncode == 0, errors
+        assert json.loads(output)['state'] == 'running'
+        assert dev.run('stop').returncode == 0
+    finally:
+        os.kill(broker.pid, signal.SIGCONT)
+        broker.kill(); broker.wait(timeout=5)
+        for client in (first, second):
+            if client is not None:
+                client.kill(); client.wait(timeout=5)

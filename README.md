@@ -574,7 +574,7 @@ untouched and are not authority for signalling or starting a replacement.
 The group contract is specific to these dev commands: backend (including
 reload children) and npm/Vite descendants were checked on both macOS and Linux
 and stayed in their group's session. A component that deliberately detaches
-with `setsid` needs OS service-manager containment instead. Production worker
+with `setsid` or `setpgid` needs OS service-manager containment instead. Production worker
 supervision keeps its separate native identity and containment rules.
 
 The backend also holds a Python-level singleton lock while running, so a second

@@ -19,6 +19,8 @@ POLL_SECONDS = .05
 START_SECONDS = 15.0
 TERM_SECONDS = 3.0
 STOP_SECONDS = 12.0
+LOCK_SECONDS = 1.0
+CLIENT_SECONDS = 2.0
 
 
 class Status(TypedDict, total=False):
@@ -110,6 +112,8 @@ def guard_group(connection: socket.socket, command: list[str], cwd: Path,
 
     signal.signal(signal.SIGTERM, request_shutdown)
     signal.signal(signal.SIGINT, request_shutdown)
+    if port_open(host, port):
+        raise OSError("development port already has a listener")
     with socket.socket() as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind((host, port))
@@ -150,7 +154,7 @@ def guard_group(connection: socket.socket, command: list[str], cwd: Path,
             try:
                 result = stop_group(child)
                 break
-            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            except Exception as exc:
                 log(f"development cleanup pending: {exc}")
                 time.sleep(POLL_SECONDS)
         log(f"group {child.pid} empty; leader reaped with exit {result}")
@@ -163,10 +167,15 @@ def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     socket_name = component + ".sock"
     with open(component + ".lock", "a") as lock, socket.socket(socket.AF_UNIX) as server:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return 0
+        lock_deadline = time.monotonic() + LOCK_SECONDS
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= lock_deadline:
+                    return 0
+                time.sleep(POLL_SECONDS)
         Path(socket_name).unlink(missing_ok=True)
         server.bind(socket_name)
         server.listen()
@@ -178,7 +187,7 @@ def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -
             try:
                 guard_group(child, command, cwd, host, port, socket_name)
                 os._exit(0)
-            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            except Exception as exc:
                 log(f"development launcher failed: {exc}")
                 try:
                     send_status(child, {"state": "failed", "error": str(exc)})
@@ -221,7 +230,7 @@ def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -
                     else:
                         try:
                             with server.accept()[0] as client:
-                                client.settimeout(2)
+                                client.settimeout(CLIENT_SECONDS)
                                 action = client.recv(64).decode()
                                 if action == "stop":
                                     try:
@@ -243,7 +252,7 @@ def serve_failure(server: socket.socket, status: Status) -> NoReturn:
     while True:
         try:
             with server.accept()[0] as client:
-                client.settimeout(2)
+                client.settimeout(CLIENT_SECONDS)
                 client.recv(64)
                 send_status(client, status)
         except OSError:
@@ -252,7 +261,7 @@ def serve_failure(server: socket.socket, status: Status) -> NoReturn:
 
 def request(component: str, action: str) -> Status:
     with socket.socket(socket.AF_UNIX) as client:
-        client.settimeout(2)
+        client.settimeout(CLIENT_SECONDS + 1)
         try:
             client.connect(component + ".sock")
         except (FileNotFoundError, ConnectionRefusedError):
@@ -269,22 +278,22 @@ def request(component: str, action: str) -> Status:
 
 def start(component: str, command: list[str], cwd: Path, host: str, port: int) -> Status:
     launcher: subprocess.Popen[bytes] | None = None
-    previous = request(component, "status")
-    if previous["state"] == "stopped":
-        with open(component + ".log", "ab", buffering=0) as output:
-            launcher = subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()), "serve", component,
-                 "--state-dir", str(Path.cwd()), "--cwd", str(cwd),
-                 "--host", host, "--port", str(port), "--", *command],
-                start_new_session=True, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
-            )
     deadline = time.monotonic() + START_SECONDS + 2
     while time.monotonic() < deadline:
         status = request(component, "status")
         if status["state"] in {"running", "failed"}:
             return status
-        if status["state"] == "stopped" and launcher is not None and launcher.poll() is not None:
-            return {"state": "failed", "error": "launcher exited before startup; see component log"}
+        if status["state"] == "stopped":
+            if launcher is not None and launcher.poll() is not None:
+                return {"state": "failed", "error": "launcher exited before startup; see component log"}
+            if launcher is None:
+                with open(component + ".log", "ab", buffering=0) as output:
+                    launcher = subprocess.Popen(
+                        [sys.executable, str(Path(__file__).resolve()), "serve", component,
+                         "--state-dir", str(Path.cwd()), "--cwd", str(cwd),
+                         "--host", host, "--port", str(port), "--", *command],
+                        start_new_session=True, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                    )
         time.sleep(POLL_SECONDS)
     return {"state": "failed", "error": "server did not start; see component log"}
 
@@ -299,10 +308,17 @@ def stop(component: str) -> Status:
     return {"state": "stopping", "error": "cleanup is still running; retry Stop"}
 
 
+def tcp_port(value: str) -> int:
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise ValueError("development port must be between 1 and 65535")
+    return port
+
+
 def component_command(component: str, root: Path) -> tuple[list[str], Path, str, int]:
     if component == "backend":
         host = os.environ.get("MEDIAFORCE_WEB_HOST", "127.0.0.1")
-        port = int(os.environ.get("MEDIAFORCE_WEB_PORT", "8777"))
+        port = tcp_port(os.environ.get("MEDIAFORCE_WEB_PORT", "8777"))
         reload_enabled = os.environ.get("MEDIAFORCE_WEB_RELOAD", "false").lower() in {"1", "true", "yes", "on"}
         command = [str(root / ".venv/bin/mediaforce-web"), "--host", host, "--port", str(port),
                    "--reload" if reload_enabled else "--no-reload"]
@@ -313,7 +329,7 @@ def component_command(component: str, root: Path) -> tuple[list[str], Path, str,
             command.extend(["--config", str(config_path.resolve())])
         return command, root, host, port
     host = os.environ.get("MEDIAFORCE_FRONTEND_DEV_HOST", "127.0.0.1")
-    port = int(os.environ.get("MEDIAFORCE_FRONTEND_DEV_PORT", "4173"))
+    port = tcp_port(os.environ.get("MEDIAFORCE_FRONTEND_DEV_PORT", "4173"))
     return ["npm", "--prefix", str(root / "frontend"), "run", "dev", "--",
             "--host", host, "--port", str(port), "--strictPort"], root / "frontend", host, port
 
