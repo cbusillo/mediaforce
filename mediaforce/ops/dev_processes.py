@@ -1,345 +1,353 @@
-"""Retain native development process custody across failed stop commands."""
+"""Own development servers from launch until their private process group is empty."""
 
-from contextlib import contextmanager
-from collections.abc import Iterator
+import argparse
 import ctypes
 import fcntl
-import importlib.util
+import hashlib
+import json
 import os
 from pathlib import Path
-import re
+import select
+import signal
 import socket
-import stat
 import subprocess
 import sys
-import tempfile
 import time
-from uuid import UUID, uuid4
+from typing import TypedDict
 
-if __package__:
-    from mediaforce.core.dev_processes import DevelopmentCustodyLostError, DevelopmentProcessTree
-else:
-    spec = importlib.util.spec_from_file_location(
-        "_mediaforce_dev_custody", Path(__file__).resolve().parents[1] / "core/dev_processes.py",
+POLL_SECONDS = .05
+START_SECONDS = 15.0
+TERM_SECONDS = 3.0
+STOP_SECONDS = 12.0
+
+
+class Status(TypedDict, total=False):
+    state: str
+    pid: int
+    launcher: int
+    guardian: int
+    error: str
+
+
+def group_members(pgid: int) -> set[int]:
+    output = subprocess.check_output(
+        ["ps", "-axo", "pid=,pgid="], text=True, timeout=2,
     )
-    if spec is None or spec.loader is None:
-        raise RuntimeError("cannot load development custody gateway")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    DevelopmentProcessTree = module.DevelopmentProcessTree
-    DevelopmentCustodyLostError = module.DevelopmentCustodyLostError
+    return {int(pid) for pid, group in (line.split() for line in output.splitlines())
+            if int(group) == pgid}
 
 
-def boot_id() -> str:
+def leader_exited(pid: int) -> bool:
+    # WNOWAIT keeps the leader's PID reserved even after a crash. Never poll()
+    # or reap it while descendants can still receive a group signal.
+    return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+
+
+def enable_subreaper() -> None:
     if sys.platform == "linux":
-        return str(UUID(Path("/proc/sys/kernel/random/boot_id").read_text().strip()))
-    if sys.platform != "darwin":
-        raise RuntimeError("native development recovery is unavailable")
-    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
-    libc.sysctlbyname.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
-                                 ctypes.c_void_p, ctypes.c_size_t]
-    libc.sysctlbyname.restype = ctypes.c_int
-    size = ctypes.c_size_t()
-    if libc.sysctlbyname(b"kern.bootsessionuuid", None, ctypes.byref(size), None, 0) or not 0 < size.value <= 64:
-        raise OSError("cannot read native boot identity")
-    value = ctypes.create_string_buffer(size.value)
-    if libc.sysctlbyname(b"kern.bootsessionuuid", value, ctypes.byref(size), None, 0):
-        raise OSError("cannot read native boot identity")
-    return str(UUID(value.value.decode("ascii")))
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        libc.prctl.restype = ctypes.c_int
+        if libc.prctl(36, 1, 0, 0, 0):  # PR_SET_CHILD_SUBREAPER
+            raise OSError(ctypes.get_errno(), "cannot adopt orphaned development children")
 
 
-@contextmanager
-def state_directory(state: Path) -> Iterator[None]:
-    info = state.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise RuntimeError("unsafe development cleanup directory")
-    # Relative AF_UNIX paths also work under long checkout/state paths on Darwin.
-    previous = Path.cwd()
-    os.chdir(state)
-    try:
-        yield
-    finally:
-        os.chdir(previous)
-
-
-def dispose_directory(directory: Path) -> None:
-    info = directory.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise RuntimeError("unsafe development disposal directory")
-    entries = list(directory.iterdir())
-    if any(entry.name not in {"control.sock", "boot", "error"} for entry in entries):
-        raise RuntimeError("unexpected development disposal contents")
-    for entry in entries:
-        entry.unlink(missing_ok=True)
-    directory.rmdir()
-
-
-class DevelopmentStateChangedError(RuntimeError):
-    pass
-
-
-def remove_state(state: Path, *, expected_identity: tuple[int, int] | None = None) -> None:
-    # Completion or previous-boot proof belongs to the caller. Retirement needs
-    # no new directory allocation and never removes the receipt while active.
-    disposed = state.with_name(f".{state.name}-removing-{uuid4()}")
-    if expected_identity is None:
-        state.rename(disposed)
-    else:
-        with state_lock(state):
-            try:
-                current = state.lstat()
-            except FileNotFoundError as exc:
-                raise DevelopmentStateChangedError("cleanup marker disappeared; state retained; retry Stop") from exc
-            if (current.st_dev, current.st_ino) != expected_identity:
-                raise DevelopmentStateChangedError("cleanup marker changed; replacement state retained; retry Stop")
-            state.rename(disposed)
-    try:
-        dispose_directory(disposed)
-    except (OSError, RuntimeError):
-        pass  # Already inert; the next locked sweep retries bounded disposal.
-
-
-def sweep_disposal(state: Path) -> None:
-    pattern = re.compile(rf"\.{re.escape(state.name)}-(?:removing-[0-9a-f-]{{36}}|candidate-[a-z0-9_]{{8}})")
-    attempted = 0
-    for artifact in state.parent.iterdir():
-        if not pattern.fullmatch(artifact.name):
-            continue
-        attempted += 1
+def reap_descendants(pgid: int) -> set[int]:
+    members = group_members(pgid) - {pgid}
+    for pid in members:
         try:
-            dispose_directory(artifact)
-        except (OSError, RuntimeError):
-            pass  # Preserve unfamiliar contents and symlinked/foreign directories.
-        if attempted >= 32:
-            break
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass  # On macOS launchd reaps descendants orphaned by the leader.
+    return group_members(pgid) - {pgid}
 
 
-def sync_directory(directory: Path) -> None:
-    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def stop_group(child: subprocess.Popen[bytes]) -> int:
     try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        if reap_descendants(child.pid) or not leader_exited(child.pid):
+            raise
+    deadline = time.monotonic() + TERM_SECONDS
+    while reap_descendants(child.pid) or not leader_exited(child.pid):
+        if time.monotonic() >= deadline:
+            os.killpg(child.pid, signal.SIGKILL)
+            deadline = time.monotonic() + TERM_SECONDS
+        time.sleep(POLL_SECONDS)
+    result = child.wait()
+    if group_members(child.pid):
+        raise RuntimeError("development process group is not empty")
+    return result
 
 
-def record_error(state: Path, error: Exception) -> bytes:
-    response = str(error).encode(errors="replace")[:2048]
+def port_open(host: str, port: int) -> bool:
     try:
-        (state / "error").write_bytes(response)
+        with socket.create_connection((host, port), timeout=.2):
+            return True
     except OSError:
-        pass  # Failure to record an error must not release native handles.
-    return response
+        return False
 
 
-@contextmanager
-def state_lock(state: Path) -> Iterator[None]:
-    state.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(str(state) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(descriptor, "r+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        yield
+def send_status(connection: socket.socket, status: Status) -> None:
+    connection.sendall(json.dumps(status).encode() + b"\n")
 
 
-def clear_previous_boot(state: Path) -> None:
-    # Check and remove under the publication lock: a competing creator must
-    # not replace an old receipt between this read and removal.
-    with state_lock(state):
-        sweep_disposal(state)
-        if state.exists():
-            with state_directory(state):
-                recorded_boot = UUID((state / "boot").read_text())
-                if recorded_boot != UUID(boot_id()):
-                    remove_state(state)
+def guard_group(connection: socket.socket, command: list[str], cwd: Path,
+                host: str, port: int, socket_name: str) -> None:
+    enable_subreaper()
+    stopping = False
 
+    def request_shutdown(_signum: int, _frame: object) -> None:
+        nonlocal stopping
+        stopping = True
 
-def publish_state(state: Path) -> bool:
-    # Publish a complete boot record in one rename, preserving uncertain state.
-    with state_lock(state):
-        sweep_disposal(state)
-        if state.exists() or state.is_symlink():
-            return False
-        candidate = Path(tempfile.mkdtemp(prefix=f".{state.name}-candidate-", dir=state.parent))
-        try:
-            (candidate / "boot").write_text(str(UUID(boot_id())))
-            with (candidate / "boot").open("rb") as receipt:
-                os.fsync(receipt.fileno())
-            sync_directory(candidate)
-            candidate.rename(state)
-            try:
-                sync_directory(state.parent.resolve(strict=True))
-            except BaseException:
-                try:
-                    remove_state(state)  # No supervisor has been launched.
-                except (OSError, RuntimeError):
-                    pass  # Retain the published marker if retirement also fails.
-                raise
-        finally:
-            if candidate.exists():
-                try:
-                    dispose_directory(candidate)  # Unpublished; no retirement allocation.
-                except (OSError, RuntimeError):
-                    pass  # Preserve the original setup error and retry via the sweep.
-    return True
-
-
-def serve(pid: int, script: str, component: str, state: Path) -> int:
-    tree = None
-    completed = False
-    startup_deadline = time.monotonic() + 5
+    signal.signal(signal.SIGTERM, request_shutdown)
+    signal.signal(signal.SIGINT, request_shutdown)
+    with socket.socket() as probe:
+        probe.bind((host, port))
+    child = subprocess.Popen(command, cwd=cwd, start_new_session=True,
+                             stdin=subprocess.DEVNULL)
+    status: Status = {"state": "starting", "pid": child.pid,
+                      "launcher": os.getppid(), "guardian": os.getpid()}
     try:
-        with state_directory(state), socket.socket(socket.AF_UNIX) as server:
-            marker = state.lstat()
-            marker_identity = marker.st_dev, marker.st_ino
-            server.bind("control.sock")
-            server.listen(4)
-            server.settimeout(.25)
-            while True:
-                try:
-                    connection, _ = server.accept()
-                except TimeoutError:
-                    if tree is None and time.monotonic() >= startup_deadline:
-                        completed = True
-                    if tree is not None or completed:
-                        try:
-                            if completed or tree.finished():
-                                completed = True
-                                remove_state(state, expected_identity=marker_identity)
-                                return 0 if tree is not None else 1
-                        except DevelopmentStateChangedError:
-                            return 1  # Never record an old session's error in a replacement.
-                        except DevelopmentCustodyLostError as exc:
-                            record_error(state, exc)
-                            return 1
-                        except (OSError, RuntimeError, ValueError) as exc:
-                            record_error(state, exc)
-                    continue
-                with connection:
-                    connection.settimeout(10)
-                    try:
-                        with connection.makefile("rb") as stream:
-                            request = stream.readline(64)
-                        command, expected = request.decode("ascii").strip().split()
-                        expected_pid = int(expected)
-                    except (OSError, ValueError):
-                        continue
-                    if command != "stop":
-                        continue
-                    if expected_pid not in {0, pid}:
-                        try:
-                            connection.sendall(b"another development root has pending cleanup; retry Stop")
-                        except OSError:
-                            pass
-                        continue
-                    try:
-                        if tree is None:
-                            def owns_root() -> bool:
-                                result = subprocess.run(
-                                    ["/bin/bash", script, "check-owner", component, str(pid)],
-                                    check=False, stdout=subprocess.DEVNULL, timeout=5,
-                                )
-                                if result.returncode not in {0, 1}:
-                                    raise RuntimeError("development process ownership unknown; preserving it")
-                                return result.returncode == 0
-
-                            tree = DevelopmentProcessTree(pid, owns_root)
-                            completed = False
-                        if not completed:
-                            tree.stop()
-                        completed = True
-                        remove_state(state, expected_identity=marker_identity)
-                        response = b"ok"
-                    except DevelopmentStateChangedError as exc:
-                        try:
-                            connection.sendall(str(exc).encode(errors="replace")[:2048])
-                        except OSError:
-                            pass
-                        return 1
-                    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-                        response = record_error(state, exc)
-                    try:
-                        connection.sendall(response)
-                    except OSError:
-                        pass  # A disconnected caller does not release native custody.
-                    if response == b"ok":
-                        return 0
-                    if tree is None:
-                        # A failed capture cannot prove what survived a lost root.
-                        # Keep the marker even though no native handles were acquired.
-                        return 1
+        send_status(connection, status)
+        deadline = time.monotonic() + START_SECONDS
+        while not stopping:
+            if leader_exited(child.pid):
+                status.update(state="stopping", error="development server exited")
+                break
+            if status["state"] == "starting":
+                if port_open(host, port):
+                    status["state"] = "running"
+                    send_status(connection, status)
+                elif time.monotonic() >= deadline:
+                    status.update(state="stopping", error="development server did not start listening")
+                    break
+            if select.select([connection], [], [], POLL_SECONDS)[0]:
+                # Only the launcher owns the other endpoint. EOF includes SIGKILL
+                # of that launcher; server descendants never inherit this fd.
+                connection.recv(64)
+                stopping = True
+    except (BrokenPipeError, ConnectionResetError):
+        pass
     finally:
-        if tree is not None:
-            tree.close()
-    return 1
-
-
-def request_stop(state: Path, expected_pid: int) -> None:
-    deadline = time.monotonic() + 5
-    with state_directory(state), socket.socket(socket.AF_UNIX) as client:
+        status["state"] = "stopping"
+        try:
+            send_status(connection, status)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        # Keep custody and the component lock while a transient observation or
+        # signal error prevents completion. Clients can retry Stop.
         while True:
             try:
-                client.connect("control.sock")
+                result = stop_group(child)
+                print(f"group {child.pid} empty; leader reaped with exit {result}", flush=True)
                 break
-            except (FileNotFoundError, ConnectionRefusedError):
-                if not state.exists():
-                    raise RuntimeError("cleanup session ended while connecting; retry Stop")
-                if time.monotonic() >= deadline:
-                    previous_error = ""
-                    if (state / "error").is_file():
-                        with (state / "error").open("rb") as error_file:
-                            previous_error = error_file.read(2048).decode(errors="replace")
-                    raise RuntimeError(f"{previous_error}; cleanup supervisor unavailable; "
-                                       "custody cannot be recovered from a PID; "
-                                       "pending state can be cleared by Stop after the next system restart")
-                time.sleep(.05)
-        client.settimeout(10)
-        client.sendall(f"stop {expected_pid}\n".encode("ascii"))
-        response = client.recv(2048)
-        if response != b"ok":
-            if not state.exists():
-                raise RuntimeError("cleanup session ended before replying; retry Stop")
-            raise RuntimeError(response.decode(errors="replace") or "cleanup supervisor disconnected")
-    deadline = time.monotonic() + 5
-    while state.exists():
-        if time.monotonic() >= deadline:
-            raise RuntimeError("cleanup completed but supervisor bookkeeping remains")
-        time.sleep(.01)
+            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+                print(f"development cleanup pending: {exc}", flush=True)
+                time.sleep(POLL_SECONDS)
+        Path(socket_name).unlink(missing_ok=True)
+
+
+def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -> int:
+    socket_name = component + ".sock"
+    with open(component + ".lock", "a") as lock, socket.socket(socket.AF_UNIX) as server:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        Path(socket_name).unlink(missing_ok=True)
+        server.bind(socket_name)
+        server.listen()
+        parent, child = socket.socketpair()
+        guardian = os.fork()
+        if guardian == 0:
+            parent.close()
+            server.close()
+            try:
+                guard_group(child, command, cwd, host, port, socket_name)
+                os._exit(0)
+            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+                print(f"development launcher failed: {exc}", flush=True)
+                try:
+                    send_status(child, {"state": "failed", "error": str(exc)})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                os._exit(0)
+        child.close()
+        status: Status = {"state": "starting", "launcher": os.getpid(), "guardian": guardian}
+        shutting_down = False
+
+        def request_shutdown(_signum: int, _frame: object) -> None:
+            nonlocal shutting_down
+            shutting_down = True
+
+        signal.signal(signal.SIGTERM, request_shutdown)
+        signal.signal(signal.SIGINT, request_shutdown)
+        pending = b""
+        try:
+            while True:
+                if shutting_down:
+                    parent.sendall(b"stop")
+                    shutting_down = False
+                for ready in select.select([server, parent], [], [], POLL_SECONDS)[0]:
+                    if ready is parent:
+                        data = parent.recv(4096)
+                        if not data:
+                            _, exit_status = os.waitpid(guardian, 0)
+                            guardian = 0
+                            if exit_status == 0:
+                                return 0
+                            status.update(state="failed", error="group guardian failed; new starts blocked")
+                            # Retain the lock and report failure rather than invent
+                            # ownership from a saved PID after losing the guardian.
+                            parent.close()
+                            return serve_failure(server, status)
+                        pending += data
+                        while b"\n" in pending:
+                            line, pending = pending.split(b"\n", 1)
+                            status = json.loads(line)
+                    else:
+                        with server.accept()[0] as client:
+                            client.settimeout(2)
+                            action = client.recv(64).decode()
+                            if action == "stop":
+                                try:
+                                    parent.sendall(b"stop")
+                                except BrokenPipeError:
+                                    pass
+                                status["state"] = "stopping"
+                            send_status(client, status)
+        finally:
+            parent.close()
+            if guardian:
+                os.waitpid(guardian, 0)
+            Path(socket_name).unlink(missing_ok=True)
+
+
+def serve_failure(server: socket.socket, status: Status) -> int:
+    while True:
+        with server.accept()[0] as client:
+            client.settimeout(2)
+            client.recv(64)
+            send_status(client, status)
+
+
+def request(component: str, action: str) -> Status:
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(2)
+        try:
+            client.connect(component + ".sock")
+        except (FileNotFoundError, ConnectionRefusedError):
+            with open(component + ".lock", "a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return {"state": "stopping"}
+            return {"state": "stopped"}
+        client.sendall(action.encode())
+        with client.makefile("r") as response:
+            return json.loads(response.readline())
+
+
+def start(component: str, command: list[str], cwd: Path, host: str, port: int) -> Status:
+    previous = request(component, "status")
+    if previous["state"] == "stopped":
+        with open(component + ".log", "ab", buffering=0) as log:
+            subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), "serve", component,
+                 "--state-dir", str(Path.cwd()), "--cwd", str(cwd),
+                 "--host", host, "--port", str(port), "--", *command],
+                start_new_session=True, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            )
+    deadline = time.monotonic() + START_SECONDS + 2
+    while time.monotonic() < deadline:
+        status = request(component, "status")
+        if status["state"] in {"running", "failed"}:
+            return status
+        time.sleep(POLL_SECONDS)
+    return {"state": "failed", "error": "server did not start; see component log"}
+
+
+def stop(component: str) -> Status:
+    deadline = time.monotonic() + STOP_SECONDS
+    while time.monotonic() < deadline:
+        status = request(component, "stop")
+        if status["state"] in {"stopped", "failed"}:
+            return status
+        time.sleep(POLL_SECONDS)
+    return {"state": "stopping", "error": "cleanup is still running; retry Stop"}
+
+
+def component_command(component: str, root: Path) -> tuple[list[str], Path, str, int]:
+    if component == "backend":
+        host = os.environ.get("MEDIAFORCE_WEB_HOST", "127.0.0.1")
+        port = int(os.environ.get("MEDIAFORCE_WEB_PORT", "8777"))
+        reload_enabled = os.environ.get("MEDIAFORCE_WEB_RELOAD", "false").lower() in {"1", "true", "yes", "on"}
+        command = [str(root / ".venv/bin/mediaforce-web"), "--host", host, "--port", str(port),
+                   "--reload" if reload_enabled else "--no-reload"]
+        if config := os.environ.get("MEDIAFORCE_CONFIG_PATH"):
+            config_path = Path(config).expanduser()
+            if not config_path.is_absolute():
+                config_path = root / config_path
+            command.extend(["--config", str(config_path.resolve())])
+        return command, root, host, port
+    host = os.environ.get("MEDIAFORCE_FRONTEND_DEV_HOST", "127.0.0.1")
+    port = int(os.environ.get("MEDIAFORCE_FRONTEND_DEV_PORT", "4173"))
+    return ["npm", "--prefix", str(root / "frontend"), "run", "dev", "--",
+            "--host", host, "--port", str(port), "--strictPort"], root / "frontend", host, port
 
 
 def main() -> int:
-    try:
-        action, pid_text, script, component, state_text = sys.argv[1:]
-        if action not in {"stop", "retry", "serve"} or component not in {"backend", "frontend"}:
-            raise ValueError("invalid development process stop arguments")
-        pid = int(pid_text)
-        if action != "retry" and (pid <= 1 or pid == os.getpid()):
-            raise ValueError("invalid development process root")
-        state = Path(state_text).absolute()
-        if action == "serve":
-            return serve(pid, script, component, state)
-        clear_previous_boot(state)
-        if action == "stop":
-            if publish_state(state):
-                try:
-                    subprocess.Popen(
-                        [sys.executable, str(Path(__file__).resolve()), "serve", pid_text, script, component, str(state)],
-                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        start_new_session=True,
-                    )
-                except (OSError, RuntimeError) as startup_error:
-                    try:
-                        remove_state(state)
-                    except (OSError, RuntimeError) as retirement_error:
-                        raise RuntimeError(f"{str(startup_error)[:1024]}; cleanup state retirement also failed: "
-                                           f"{str(retirement_error)[:1024]}") from startup_error
-                    raise
-        elif not state.exists():
-            return 0
-        request_stop(state, pid if action == "stop" else 0)
-        return 0
-    except (OSError, RuntimeError, ValueError, IndexError) as exc:
-        print(f"development stop: {exc}; PID bookkeeping retained; retry Stop if custody is retained; retry cannot restore lost custody", file=sys.stderr)
-        return 1
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=["start", "stop", "restart", "status", "smoke", "serve"])
+    parser.add_argument("component", choices=["all", "backend", "frontend"])
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--state-dir", type=Path)
+    parser.add_argument("--cwd", type=Path)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int)
+    argv = sys.argv[1:]
+    separator = argv.index("--") if "--" in argv else len(argv)
+    args = parser.parse_args(argv[:separator])
+    command = argv[separator + 1:]
+    root = args.root.resolve()
+    state = args.state_dir or Path(os.environ.get("MEDIAFORCE_DEV_STATE_DIR", str(
+        Path.home() / "Library/Application Support/mediaforce/development" /
+        hashlib.sha256(str(root).encode()).hexdigest())))
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chdir(state)
+    if args.action == "serve":
+        return serve(args.component, command, args.cwd, args.host, args.port)
+    failed = False
+    for component in (["frontend", "backend"] if args.component == "all" else [args.component]):
+        if args.action in {"stop", "restart"}:
+            status = stop(component)
+            if status["state"] != "stopped":
+                print(f"{component}: {json.dumps(status)}")
+                failed = True
+                continue
+        if args.action in {"start", "restart"}:
+            status = start(component, *component_command(component, root))
+            failed |= status["state"] != "running"
+        elif args.action == "status":
+            status = request(component, "status")
+            failed |= status["state"] != "running"
+        elif args.action == "smoke":
+            from urllib.request import urlopen
+            _, _, host, port = component_command(component, root)
+            routes = ["/", "/api/dashboard", "/api/settings", "/api/hosts"] if component == "backend" else ["/"]
+            for route in routes:
+                with urlopen(f"http://{host}:{port}{route}", timeout=2) as response:
+                    response.read()
+            status = {"state": "smoke passed"}
+        print(f"{component}: {json.dumps(status)}")
+    return int(failed)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as error:
+        print(f"development command failed: {error}", file=sys.stderr)
+        raise SystemExit(1)
