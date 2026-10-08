@@ -94,6 +94,11 @@ gone or its presence cannot be confirmed, the saved approval remains required.
 If removal succeeds but a later database write fails, `removed_library_item_ids`
 still names the removed file and the response says its recovery was not saved.
 The earlier saved request and original finished-file context remain committed.
+The API marks a saved request’s `remake.copy_state` as `removed` only when removal
+is recorded, `present` when its copy is verifiably still present, and `unknown`
+otherwise. An uncertain copy’s decision row shows saved retry guidance without
+size comparisons or claiming another removal; presence uncertainty does not
+change its saved approval or recovery checks.
 Once the database is healthy, **Make again** retries idempotent removal and
 finishes planning under those settings. **Keep this file** refuses a removed
 copy. When cleanup failed and the smaller-than-predicted copy is still present,

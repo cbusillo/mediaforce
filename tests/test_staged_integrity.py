@@ -763,6 +763,56 @@ class StagedIntegrityTests(unittest.TestCase):
         )
         self.assertTrue(accepted["ok"], accepted)
 
+    def test_saved_held_remake_exposes_presence_after_failed_persistence(self) -> None:
+        prefix = "tv/Show/Season 1"
+        item_id, stage, _manifest = self._final_size_file()
+        original = self.root / "source/tv/Show/Season 1/TooLarge.mkv"
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
+                validation_json=self._held_validation()))
+            connection.exec_driver_sql("""CREATE TRIGGER refuse_planning BEFORE UPDATE OF status ON library_items
+                WHEN NEW.status = 'planned' BEGIN SELECT RAISE(ABORT, 'fixture persistence failure'); END""")
+        approval = self._new_remake_approval()
+        refused = decide_size_held_file(
+            self.config, prefix, item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no validation"),
+            queue_items=lambda *_args: self.fail("not persisted"), current_approval=lambda _prefix: approval,
+        )
+        self.assertEqual(refused["removed_library_item_ids"], [item_id])
+        self.assertFalse(stage.exists())
+        self.assertEqual(original.read_bytes(), b"source")
+        with open_db(self.config.paths.db_path) as connection:
+            def record() -> dict[str, Any]:
+                report = staged_integrity_report(connection, self.config, prefix, discover=False)
+                return staged_remake_records(connection, report.detail_payload(offset=0, limit=10)["records"],
+                                             prefix, current_approval=lambda _prefix: approval)[0]
+
+            missing = record()
+            self.assertEqual(missing["disposition"], "missing")
+            self.assertIsNone(missing.get("size_prediction"))
+            self.assertEqual(missing["remake"]["copy_state"], "unknown")
+            self.assertTrue(missing["remake"]["pending"])
+            self.assertIn("saved settings", missing["detail"])
+            self.assertIn("unconfirmed", missing["detail"])
+            self.assertNotIn("copy removed", missing["detail"])
+            row = connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id)).mappings().one()
+            self.assertEqual(size_held.remake_intent(row)["state"], "requested")
+            stage.write_bytes(b"small")
+            stat = stage.stat()
+            connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
+                staging_size_bytes=stat.st_size, staging_mtime_ns=stat.st_mtime_ns))
+            present = record()
+            self.assertEqual(present["remake"]["copy_state"], "present")
+            self.assertEqual(present["disposition"], "size_held")
+            self.assertEqual(present["size_prediction"]["actual_bytes"], 50)
+            stage.unlink()
+            size_held.save_remake_intent(connection, row, {**size_held.remake_intent(row), "state": "removed"}, now="later")
+            removed = record()
+            self.assertEqual(removed["remake"]["copy_state"], "removed")
+            self.assertEqual(removed["disposition"], "not_started")
+            self.assertIn("Finished copy removed", removed["detail"])
+
     def test_batch_remake_retains_each_saved_scope_and_mode_and_queue_exclusion(self) -> None:
         size_id, _stage, _manifest = self._final_size_file()
         season_manifest = self.root / "runs/season-remake.json"
