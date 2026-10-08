@@ -554,8 +554,13 @@ released group number again, even if completion logging fails. A server crash
 also triggers cleanup of its orphaned workers. If the command-facing launcher
 is killed, a private connection closes and the watchdog performs the same cleanup.
 Start cannot replace a component while its watchdog still holds the lock.
-Temporary cleanup errors retain that owner; retry Stop after resolving the
-reported error. Status distinguishes starting, running, stopping, a failed watchdog and an
+Cleanup errors retain that owner. Even if process inventory is unavailable,
+the watchdog still escalates TERM to KILL for its reserved group; it reports
+each changed cleanup error once instead of repeating it on every retry.
+Missing inventory does not prevent Start. Restore `ps` or resolve the reported
+inventory error so the watchdog can verify completion and release the lock,
+then retry Stop. Until verification succeeds, Status stays stopping even when
+the server and workers have exited. Status distinguishes starting, running, stopping, a failed watchdog and an
 unknown control-channel response. An unknown response cannot authorize a new
 server or prove that cleanup finished. A failed watchdog blocks new starts and reports its failure rather
 than signalling processes discovered from saved PIDs. If the watchdog itself

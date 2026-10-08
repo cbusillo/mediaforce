@@ -322,6 +322,117 @@ def test_observation_failure_retains_owner_until_cleanup_can_finish(dev: DevFixt
         broker.kill(); broker.wait(timeout=5)
 
 
+@pytest.fixture
+def worker_receipt(dev: DevFixture, tmp_path: Path) -> Iterator[int]:
+    receipt = tmp_path / 'worker-lifetime'
+    os.mkfifo(receipt)
+    reader = os.open(receipt, os.O_RDONLY | os.O_NONBLOCK)
+    dev.env['TEST_WORKER_RECEIPT'] = str(receipt)
+    dev.env['TEST_STUBBORN'] = '1'
+    executable = dev.root / '.venv/bin/mediaforce-web'
+    executable.write_text(executable.read_text().replace(
+        "if '--worker' in sys.argv:\n",
+        "if '--worker' in sys.argv:\n    receipt = os.open(os.environ['TEST_WORKER_RECEIPT'], os.O_WRONLY)\n",
+    ))
+    # An absolute pinned reader allows genuine ENOENT without falling through to
+    # an installed host ps. Other launcher tests keep their existing fixture.
+    helper = dev.root / 'mediaforce/ops/dev_processes.py'
+    helper.write_text(helper.read_text().replace('["ps",', f'[{str(dev.root / "bin/ps")!r},'))
+    try:
+        yield reader
+    finally:
+        os.close(reader)
+
+
+def receipt_closed(reader: int) -> bool:
+    try:
+        return os.read(reader, 1) == b''
+    except BlockingIOError:
+        return False
+
+
+@pytest.mark.parametrize('trigger', ['stop', 'crash'])
+@pytest.mark.parametrize('inventory', ['missing', 'failed', 'malformed'])
+def test_persistent_inventory_failure_escalates_without_releasing_custody(
+    dev: DevFixture, worker_receipt: int, trigger: str, inventory: str,
+) -> None:
+    failure = Path(dev.env['TEST_INVENTORY_FAILURE'])
+    reader = dev.root / 'bin/ps'
+    reader_bytes = reader.read_bytes()
+    # Qualify missing inventory before startup as well as failures after Start.
+    if inventory == 'missing':
+        reader.unlink()
+    stopping = None
+    try:
+        assert dev.run('start').returncode == 0
+        owner = dev.status()
+        assert not receipt_closed(worker_receipt)
+        if inventory != 'missing':
+            failure.write_text('malformed' if inventory == 'malformed' else '')
+        if trigger == 'stop':
+            stopping = subprocess.Popen(
+                ['bash', str(dev.root / 'scripts/mediaforce-dev.sh'), 'stop', 'backend'],
+                env=dev.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        else:
+            Path(dev.env['TEST_CRASH']).touch()
+        logfile = dev.state / 'backend.log'
+        wait_until(lambda: 'cleanup pending' in logfile.read_text())
+        # FIFO EOF independently proves the TERM-ignoring worker died, even
+        # though unavailable inventory must keep the leader and lock reserved.
+        wait_until(lambda: receipt_closed(worker_receipt), dev_processes.TERM_SECONDS + 5)
+        status = dev.status()
+        assert status['state'] == 'stopping'
+        assert status['guardian'] == owner['guardian']
+        if stopping is not None:
+            assert stopping.poll() is None
+        assert 'leader reaped' not in logfile.read_text()
+        with (dev.state / 'backend.lock').open('a') as lock:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        failure.unlink(missing_ok=True)
+        if inventory == 'missing':
+            reader.write_bytes(reader_bytes)
+            reader.chmod(0o755)
+        if stopping is not None:
+            output, errors = stopping.communicate(timeout=15)
+            assert stopping.returncode == 0, (output, errors)
+        dev.assert_empty()
+        assert 'empty; leader reaped' in logfile.read_text()
+    finally:
+        failure.unlink(missing_ok=True)
+        if not reader.exists():
+            reader.write_bytes(reader_bytes)
+            reader.chmod(0o755)
+        if stopping is not None and stopping.poll() is None:
+            stopping.kill(); stopping.wait(timeout=5)
+
+
+def test_persistent_inventory_failure_logs_once_until_recovery(
+    dev: DevFixture, worker_receipt: int,
+) -> None:
+    failure = Path(dev.env['TEST_INVENTORY_FAILURE'])
+    try:
+        assert dev.run('start').returncode == 0
+        failure.touch()
+        Path(dev.env['TEST_CRASH']).touch()
+        logfile = dev.state / 'backend.log'
+        wait_until(lambda: 'cleanup pending' in logfile.read_text())
+        initial = logfile.read_bytes()
+        time.sleep(dev_processes.POLL_SECONDS * 12)
+        assert logfile.read_bytes() == initial, 'an unchanged observation failure floods the component log'
+        failure.write_text('malformed')
+        wait_until(lambda: logfile.read_bytes() != initial)
+        changed = logfile.read_bytes()
+        assert changed.count(b'cleanup pending') == 2
+        time.sleep(dev_processes.POLL_SECONDS * 12)
+        assert logfile.read_bytes() == changed, 'the changed error should be reported once too'
+        assert dev.status()['state'] == 'stopping'
+    finally:
+        failure.unlink(missing_ok=True)
+    dev.assert_empty()
+
+
 
 def test_symlink_command_from_another_directory_reaches_same_owner(dev: DevFixture, tmp_path: Path) -> None:
     alias = tmp_path / 'alias'

@@ -70,26 +70,41 @@ def reap_descendants(pgid: int) -> set[int]:
 
 
 def stop_group(child: subprocess.Popen[bytes]) -> int:
-    try:
-        os.killpg(child.pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        # Darwin can reject a signal when only the reserved zombie leader remains.
-        if not leader_exited(child.pid) or reap_descendants(child.pid):
-            raise
     deadline = time.monotonic() + TERM_SECONDS
+    pending_signal: signal.Signals | None = signal.SIGTERM
     empty = False
+    last_error: tuple[type[Exception], str] | None = None
     while True:
-        if leader_exited(child.pid) and not reap_descendants(child.pid):
-            if empty:
-                # No group query or signal is permitted after this reap.
-                return child.wait()
-            empty = True
-        else:
-            empty = False
         if time.monotonic() >= deadline:
-            os.killpg(child.pid, signal.SIGKILL)
-            deadline = time.monotonic() + TERM_SECONDS
+            pending_signal = signal.SIGKILL
+        try:
+            if pending_signal is not None:
+                try:
+                    os.killpg(child.pid, pending_signal)
+                except (ProcessLookupError, PermissionError):
+                    # Darwin can reject a signal to the reserved zombie alone.
+                    if not leader_exited(child.pid) or reap_descendants(child.pid):
+                        raise
+                pending_signal = None
+                deadline = time.monotonic() + TERM_SECONDS
+            if leader_exited(child.pid) and not reap_descendants(child.pid):
+                if empty:
+                    break
+                empty = True
+            else:
+                empty = False
+            last_error = None
+        except Exception as exc:
+            # Failed inventory prevents completion, not escalation of the group
+            # whose number the unreaped leader still reserves.
+            empty = False
+            cleanup_error = (type(exc), str(exc))
+            if cleanup_error != last_error:
+                log(f"development cleanup pending: {exc}")
+                last_error = cleanup_error
         time.sleep(POLL_SECONDS)
+    # No group query or signal is permitted after this reap.
+    return child.wait()
 
 
 def log(message: str) -> None:
@@ -168,15 +183,7 @@ def guard_group(connection: socket.socket, command: list[str], cwd: Path,
                 send_status(connection, status)
             except OSError:
                 pass
-            # Keep custody and the component lock while a transient observation or
-            # signal error prevents completion. Clients can retry Stop.
-            while True:
-                try:
-                    result = stop_group(child)
-                    break
-                except Exception as exc:
-                    log(f"development cleanup pending: {exc}")
-                    time.sleep(POLL_SECONDS)
+            result = stop_group(child)
             log(f"group {child.pid} empty; leader reaped with exit {result}")
             Path(socket_name).unlink(missing_ok=True)
     except BaseException as exc:
