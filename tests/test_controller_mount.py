@@ -6,18 +6,19 @@ import sys
 import tempfile
 import time
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
 from unittest.mock import Mock, patch
 
-from mediaforce.hosts.controller_mount import ControllerMountProbe, _resolve_server_addresses as resolve_server_addresses, \
+from mediaforce.hosts.controller_mount import AccessMode, ControllerMountProbe, \
+    _resolve_server_addresses as resolve_server_addresses, \
     controller_mount_lock, mount_controller_smb_no_ui, probe_controller_mount, probe_controller_volume, same_smb_share
 from mediaforce.hosts.mount_runtime import ControllerSmbMount
 
 
 class ControllerMountTests(unittest.TestCase):
     mount = ControllerSmbMount("//local@NAS.local/media", Path("/Volumes/media"))
-    required_paths: dict[Path, Literal["read", "write"]] = {
+    required_paths: Mapping[str | Path, AccessMode] = {
         Path("/Volumes/media/tv"): "read", Path("/Volumes/media/transcode"): "write",
     }
 
