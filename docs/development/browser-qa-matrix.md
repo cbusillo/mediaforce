@@ -116,6 +116,11 @@ The managed smoke seeds a compact but non-empty workflow dataset:
 - Protected approved state: `/folders/tv/Protected%20Ready/Season%202`, where an
   accepted test is ready but the current/recent season requires the explicit
   lifecycle override dialog before queueing.
+- Saved remakes: the TV workspace banner shows a compact count and a keyboard
+  reachable link to **Needs you**. Blocked and unblocked requests keep their
+  per-file retry guidance beside their decisions, without repeating it in the
+  banner. Check desktop and 390px, including requests beyond the first
+  staged-integrity page and the banner disappearing after the last request clears.
 - Active processing state: `/folders/tv/Encoding%20Show/Season%201`, with a
   running folder processing row.
 - Complete and blocked promotion states:
