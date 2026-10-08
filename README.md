@@ -529,157 +529,68 @@ That means the two useful local URLs are:
 - `http://127.0.0.1:4173` while actively editing the frontend in dev mode
 - `http://127.0.0.1:8777` when checking the backend-served built app
 
-For macOS local web work, use `scripts/mediaforce-dev.sh` with
-`start|stop|restart|status|smoke`. It manages the backend and frontend together,
-uses the repo-local `.env`, writes pid files and logs under
-`~/Library/Application Support/mediaforce/`, starts Vite with `--strictPort`,
-and keeps the command lines aligned with the actual configured ports. Pass
-`backend` or `frontend` as a second argument when you intentionally want only
-one side, for example `scripts/mediaforce-dev.sh restart backend`.
+For local web work on macOS and Linux, prepare this checkout with
+`uv sync --locked` and `npm --prefix frontend ci`. Cleanup also needs `ps`
+(included on macOS; install `procps` on minimal Linux systems). Then use
+`scripts/mediaforce-dev.sh` with `start|stop|restart|status|smoke`. Pass `backend`
+or `frontend` as a second argument to manage one component, for example
+`scripts/mediaforce-dev.sh restart backend`. Commands read the repo-local `.env`
+and Vite uses `--strictPort`. Start reuses an existing owner; use Restart to
+apply changes to its host, port or configuration.
 
-Backend ownership requires this checkout's executable as the command itself
-or as the script launched by Python. A wrapper merely mentioning that path
-does not own the backend or its siblings. Listener discovery resolves and
-deduplicates owned roots before stopping their trees. Stop captures the owned subtree's
-native process identities before signalling, so workers remain eligible for
-forced cleanup after their parent exits without targeting a reused PID.
-If cleanup fails after capture, a small development cleanup supervisor keeps
-the native identities alive. Stop reports the error and retains PID bookkeeping;
-Start refuses to launch another process while cleanup is pending. Resolve the
-reported error and retry the same Stop or Restart command: it contacts that
-supervisor before looking for the original root, even after workers reparent.
-The supervisor exits when cleanup is proved or its whole captured tree exits
-with ownership still proven.
-If completed cleanup cannot retire its pending state, the supervisor retains
-that completion proof and retries; Stop remains unsuccessful until retirement
-succeeds. Retirement renames the directory without allocating another one.
-A retained supervisor retires only the marker it opened. If that marker
-disappears or is replaced, it fails and leaves the replacement alone.
-Interrupted disposal and unpublished setup artifacts are retried in bounded
-sweeps under the publication lock. Unknown contents, foreign directories and
-symlinks are preserved. Artifacts from earlier helper versions are not swept.
-Boot receipts are synced before publication, followed by their directory and
-the parent directory. Injected write/sync failures are qualified; physical
-power-loss durability has not been tested. An absent or invalid boot receipt
-never proves that pending custody belongs to a previous boot.
-If startup and its retirement both fail, the surviving marker has no persisted
-proof that custody was never acquired. Stop retains it until a new system boot
-can be verified, even after the original filesystem problem is resolved.
-Temporary errors while checking retained processes keep their native handles
-and save the last error for the next Stop. A concurrent Stop for a different
-root reports a conflict instead of consuming another tree's cleanup result.
-If the supervisor itself is lost, Stop fails visibly rather than reconstructing
-custody from saved PIDs. After the next system restart, Stop can clear its pending
-state using the kernel's boot identity; do not delete that state to bypass cleanup.
-Pending state also stays when [native containment cannot be proved](docs/architecture/module-boundaries.md),
-including incomplete capture or a strict Darwin fork.
-Development discovery and cleanup
-require `uv` and the checkout's prepared Python environment (`uv sync --locked`):
-frontend start always needs them to confirm a launch, and status needs them
-when a PID record or listener exists. If a new launch cannot be confirmed,
-the error names the launched PID and retains its record; restore the reader and
-retry start to confirm and reuse it.
-Stop loads only this checkout's standalone cleanup and native custody modules,
-even when invoked from another directory or unrelated package edits cannot import.
-Native custody failures remain visible rather than falling back to bare PID signals.
+If Start reaches its listening deadline, it reports failure while the server
+continues starting under the same watchdog. Use Status to check for readiness
+or Stop to cancel startup; a crash still triggers cleanup. Startup work is not
+terminated by the command's deadline. Bind checks use the configured host's
+usable resolved addresses, including IPv6 loopback and wildcard addresses.
 
-On Linux, the launcher refuses Start and supplies the foreground commands below,
-including replacements requested through Restart. For an
-existing tree, stop can terminate the identities it captured but cannot prove that
-an existing worker did not fork and exit between discovery passes, leaving an
-unseen grandchild. It therefore reports `Linux existing-tree descendant custody
-is unproven`, retains bookkeeping, and blocks restart even when the captured
-processes exited. Repeating stop cannot establish the missing custody. For Linux
-web development, keep the backend in its foreground terminal instead:
+Each component has a launcher and a watchdog that owns the server from its
+first instruction, in a private session and process group. Stop asks that owner
+to send TERM to the group, then KILL if necessary. The watchdog keeps the leader
+unreaped until it has exited and consecutive observations find no other group
+member, then reaps
+the leader and releases the component lock. It never queries or signals the
+released group number again, even if completion logging fails. A server crash
+also triggers cleanup of its orphaned workers. If the command-facing launcher
+is killed, a private connection closes and the watchdog performs the same cleanup.
+Start cannot replace a component while its watchdog still holds the lock.
+Cleanup errors retain that owner. Even if process inventory is unavailable,
+the watchdog still escalates TERM to KILL for its reserved group; it reports
+each changed cleanup error once instead of repeating it on every retry.
+Missing inventory does not prevent Start. Restore `ps` or resolve the reported
+inventory error so the watchdog can verify completion and release the lock,
+then retry Stop. Until verification succeeds, Status stays stopping even when
+the server and workers have exited. Status distinguishes starting, running, stopping, a failed watchdog and an
+unknown control-channel response. An unknown response cannot authorize a new
+server or prove that cleanup finished. A failed watchdog blocks new starts and reports its failure rather
+than signalling processes discovered from saved PIDs. If the watchdog itself
+is killed, use the OS process manager to force-quit that component's remaining
+server, workers and launcher before starting it again. Deleting a lock file or
+using old PID records does not recover custody. A failed control connection
+leaves both running and failed owners intact.
 
-```bash
-uv run mediaforce-web --no-reload
-```
+Control sockets, locks and component logs live outside the repository at
+`~/Library/Application Support/mediaforce/development/<checkout hash>/`.
+`MEDIAFORCE_DEV_STATE_DIR` can select another state directory, including isolated
+fixtures. The hash uses the physical checkout path, so invoking the helper
+through a checkout symlink reaches the same owner. Stop uses the prepared
+Python interpreter and this standalone helper; it does not import the app or
+run `uv sync` while cleaning up.
 
-Run `npm --prefix frontend run dev` in a second terminal when editing the UI.
-End those foreground commands from their terminals; do not use development
-stop/restart to claim Linux descendant cleanup. A launcher Stop against the
-foreground backend also leaves unproven cleanup state. Stop preserves that state
-until a verified system restart; retries cannot recover missing custody. Stop All attempts both components and
-reports failure; `stop backend` also attempts the backend independently.
-Start foreground development only after the earlier processes are resolved.
-This limitation does not apply to
-Linux commands launched inside Mediaforce's scoped subprocess supervisor, which
-establishes child custody before launch. Darwin retains its strict fork guard.
+The helper manages only servers it launched. It does not adopt foreground
+servers, inspect another checkout's processes, unload login items, or change
+the shared backend runtime lock. An occupied port refuses startup. To move from
+an older development launch, end it in its original terminal first; if that
+backend belongs to the login item, use the existing `uv run mediaforce service
+stop` command from its service checkout when intentionally switching to dev
+work. Then start the new launcher. Old PID records and cleanup markers remain
+untouched and are not authority for signalling or starting a replacement.
 
-Development PID files live in a directory under that state path keyed by the
-physical checkout: `development/<checkout hash>/`. Each checkout manages its
-own records, so a reused PID cannot wedge start or discard another checkout's
-bookkeeping. Legacy shared PID files are left in place. Different checkouts can
-run frontends on different configured ports; port collisions still refuse start.
-
-Frontend discovery checks the npm/Vite process or its ancestors against the
-exact checkout working directory. The launcher must be the command or the
-script launched by Node or Python; a shared wrapper merely mentioning npm or
-Vite's path is preserved with its unrelated children. Native argument readers
-on macOS and Linux keep interpreter and script paths separate, including spaces
-and an interpreter alias removed after startup. Direct Node launches support
-`--inspect`, `--inspect-brk`, and `--max-old-space-size` before the script.
-Other Node options are not inferred; use the managed npm path with `NODE_OPTIONS`
-for runtime options. If native arguments or the working directory cannot be read
-for a live candidate, discovery reports ownership unknown and retains processes
-and PID records; start and restart refuse a replacement when discovery cannot
-prove a frontend to clean up. Restore the reported reader/environment prerequisite,
-or retry when the process becomes readable or disappears (including after its
-parent reaps an exited child). Status reports the uncertainty, including
-with `all`, rather than calling it stopped or foreign. A proven frontend may still
-be stopped below an unreadable parent: the helper reports that boundary, preserves
-the ancestors and their siblings, and removes its PID record after proven cleanup.
-Restart then launches a replacement normally, leaving the unreadable ancestors alone.
-An unavailable ownership recheck before signalling instead reports unknown and
-retains the record. If native capture does not complete, the cleanup supervisor
-exits without descendant completion proof. The first Stop or Restart reports
-incomplete capture and the next-system-restart requirement immediately.
-Restoring the reader alone
-cannot recover that custody. Subsequent Stop and Restart retain the state.
-On macOS, Start refuses a replacement and shows the saved failure. This is distinct from
-an error after completed capture, whose retained supervisor supports retry,
-and from setup that was proved unpublished before the cleanup supervisor was
-launched.
-A failed native argument read counts as exit only with independent
-process-absence evidence; macOS EINVAL alone remains unknown. The readers have
-macOS native and controlled Linux procfs coverage; the complete shell workflow's
-Linux/login-item behavior is not qualified by those reader tests.
-Python startup or reader failures also leave ownership unknown; repair the
-reported environment error and retry the same command with `uv sync --locked`
-completed for this checkout. A reader crash does not prove a process is foreign.
-Managed npm starts in `frontend/` so its
-rewritten process title remains attributable. For a legacy frontend launched
-from the repository root, stop targets its owned Vite child; npm exits after
-the child ends. Stop and restart preserve another checkout's process tree. Stale records in this checkout's development directory can be
-replaced; the shared backend runtime lock is always preserved.
-
-Backend actions temporarily unload a login item only when its working directory
-and executable both match the physical checkout. Before continuing, the helper
-waits for the item to unload and its backend processes to finish, checking up to
-20 times at quarter-second intervals. The wait tracks the item's reported PID
-and its backend root; a PID file or runtime lock alone does not make an independent
-development backend part of that group. Failed unload or unfinished shutdown stops
-the command with a clear error, without force-killing the service or starting a
-replacement. Pending shutdown PIDs are kept outside the checkout in a record
-keyed by its physical path; retrying keeps waiting instead of reusing a dying
-service. The record is removed only after shutdown completes. A login item
-that uses this binary with a different working directory is preserved and
-reported for correction; regenerate it from the
-intended service checkout with `uv run mediaforce service restart` before
-retrying. Other checkouts' services and backend processes stay running.
-The shared runtime lock is preserved.
-
-Ordinary development backends can still be reused through their PID file,
-runtime lock or listener. Fresh starts and PID-based reuse get the same bounded
-polling interval to start listening. Success requires that process tree to
-listen on the configured port, so retrying a timed-out start cannot report a
-process that is still starting as healthy or spawn another copy. Inspect the
-backend log and retry when it is listening; use `smoke backend` to check HTTP
-readiness.
-An old backend launched through a logical symlink path before physical-path
-matching was introduced may remain unrecognized and is left running. Quit that
-older backend in Activity Monitor before starting a replacement.
+The group contract is specific to these dev commands: backend (including
+reload children) and npm/Vite descendants were checked on both macOS and Linux
+and stayed in their group's session. A component that deliberately detaches
+with `setsid` or `setpgid` needs OS service-manager containment instead. Production worker
+supervision keeps its separate native identity and containment rules.
 
 The backend also holds a Python-level singleton lock while running, so a second
 `mediaforce-web` process exits instead of binding another port and confusing the

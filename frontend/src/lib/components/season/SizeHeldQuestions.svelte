@@ -6,19 +6,19 @@
 		records,
 		busy = false,
 		onDecision,
-		onRemake
+		onRemake,
+		onRefresh
 	}: {
 		records: StagedIntegrityRecord[];
 		busy?: boolean;
 		onDecision: (libraryItemId: number, keep: boolean) => void;
 		onRemake: (libraryItemIds: number[]) => void;
+		onRefresh: () => void;
 	} = $props();
 	let selected = $state<number[]>([]);
 	const selectedIds = $derived(
 		records
-			.filter(
-				(record) => selected.includes(record.item_id as number) && !record.remake?.blocked_reason
-			)
+			.filter((record) => selected.includes(record.item_id as number) && canRemake(record))
 			.map((record) => record.item_id as number)
 	);
 	$effect(() => {
@@ -27,6 +27,10 @@
 
 	function fileName(relPath: string | null): string {
 		return (relPath ?? '').split('/').at(-1) || 'This file';
+	}
+
+	function canRemake(record: StagedIntegrityRecord): boolean {
+		return Boolean(record.remake && !record.remake.blocked_reason);
 	}
 </script>
 
@@ -50,7 +54,7 @@
 							type="checkbox"
 							value={record.item_id}
 							bind:group={selected}
-							disabled={busy || Boolean(record.remake?.blocked_reason)}
+							disabled={busy || !canRemake(record)}
 							aria-label={`Select ${fileName(record.rel_path)} to make again`}
 						/>
 						{fileName(record.rel_path)}
@@ -67,9 +71,14 @@
 								Came out at {formatDecimalFileSize(record.size_prediction?.actual_bytes)}; its
 								sample predicted {formatDecimalFileSize(record.size_prediction?.predicted_bytes)}.
 							{/if}
-							Making it again removes only this compressed copy and queues this file. The original stays.
-							{#if record.remake?.pending}
-								{record.detail}
+							{#if !record.remake}
+								This file’s state changed. Refresh its state before making it again.
+							{:else}
+								Making it again removes only this compressed copy and queues this file. The original
+								stays.
+								{#if record.remake.pending}
+									{record.detail}
+								{/if}
 							{/if}
 						{/if}
 						{#if record.remake?.blocked_reason && !record.remake.pending}
@@ -88,11 +97,16 @@
 						{/if}
 						<button
 							type="button"
-							disabled={busy || Boolean(record.remake?.blocked_reason)}
+							disabled={busy || !canRemake(record)}
 							onclick={() => onDecision(record.item_id as number, false)}
 						>
 							Make again
 						</button>
+						{#if !record.remake}
+							<button type="button" disabled={busy} onclick={() => onRefresh()}>
+								Refresh file state
+							</button>
+						{/if}
 					</span>
 				</li>
 			{/each}
