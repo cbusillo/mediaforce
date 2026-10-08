@@ -88,6 +88,10 @@ after the package consolidation pass. Avoid growing them with new helper logic.
     cannot signal an unrelated group after PGID reuse, and cancellation,
     deadline, or command success cannot replace the primary
     containment-enforcement error
+  - ordinary target-exit waits make one final liveness observation after their
+    deadline, so a controller pause cannot turn an exited target into a cleanup
+    failure or an unnecessary KILL escalation. A surviving target still fails
+    after the existing bounded TERM/KILL phases
   - arbitrary supervisor `SIGKILL` remains a deliberate residual-risk boundary:
     a descendant that already created a new session can outlive the private
     process group because the supervisor's pidfds or Darwin identity tokens die
