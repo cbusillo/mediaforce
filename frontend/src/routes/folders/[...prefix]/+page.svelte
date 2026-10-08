@@ -299,9 +299,14 @@
 	{:else}
 		{#if pendingRemakes.length}
 			<div class="saved-remakes" role="status" aria-label="Saved remakes">
-				{#each pendingRemakes as record (record.item_id)}
-					<p><strong>{record.rel_path?.split('/').at(-1)}:</strong> {record.detail}</p>
-				{/each}
+				<p>
+					<strong
+						>{pendingRemakes.length} saved {pendingRemakes.length === 1
+							? 'remake'
+							: 'remakes'}.</strong
+					>
+					<a href="#season-size-held">Review in Needs you</a>
+				</p>
 			</div>
 		{/if}
 		<SeasonExperience
@@ -333,6 +338,11 @@
 
 	.saved-remakes p {
 		margin: 4px 0;
+	}
+
+	.saved-remakes a {
+		text-decoration: underline;
+		text-underline-offset: 2px;
 	}
 
 	.studio-loading {

@@ -280,6 +280,13 @@ interaction work, add a manual browser review with screenshots under
 `scratch/ui-checks/` and inspect the actual starting viewport, post-interaction
 state, and narrow layout.
 
+For saved-remake banner changes, add a manual TV workspace check with blocked
+and unblocked synthetic requests at desktop and 390px. Verify the compact count,
+keyboard link to **Needs you**, and per-file retry guidance beside each decision
+without repetition in the banner. Include requests beyond the first
+staged-integrity page and the banner disappearing after the last request clears;
+these banner checks are not part of the seeded route smoke.
+
 Review-assistant submissions may run multiple bounded inference steps. The
 browser must remain pending instead of aborting before those backend limits,
 and the pending state must explain that the request can take a few minutes and
