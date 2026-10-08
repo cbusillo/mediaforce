@@ -522,6 +522,7 @@ child = subprocess.Popen(
      str(lifetime_writer), sys.argv[4]],
     pass_fds=(cleanup_reader, lifetime_writer, ready_writer), stdout=subprocess.DEVNULL,
 )
+os.close(lifetime_writer)
 os.close(ready_writer)
 assert os.read(ready_reader, 1) == b"r"
 os.close(ready_reader)
@@ -586,6 +587,18 @@ def test_fixture_reaps_a_completed_tree_while_the_command_is_still_running(
     while tree.root.returncode is None and time.monotonic() < deadline:
         time.sleep(0.01)
     assert tree.root.returncode == 0, "completed fixture root was not reaped during the command"
+
+
+def test_worker_lifetime_ends_while_root_waits_for_cleanup(
+    tmp_path: Path, process_trees: list[ProcessTree],
+) -> None:
+    tree = start_process_tree(tmp_path, process_trees, "held-root", hold_root_after_child=True)
+    os.write(tree.cleanup_writer, b"done")
+    assert select.select([tree.lifetime_reader], [], [], 5)[0], "fixture root masked exited worker"
+    assert os.read(tree.lifetime_reader, 1) == b""
+    assert tree.child_finished.exists()
+    assert_root_running(tree)
+    assert not tree.finished.exists()
 
 
 def test_fixture_releases_later_trees_after_a_teardown_observation_fails(
@@ -1536,11 +1549,11 @@ def test_frontend_reader_failure_preserves_live_tree_and_record(
     assert result.returncode != 0
     assert "ownership unknown" in result.stderr
     assert not any(f"frontend: {outcome}" in result.stdout for outcome in ("running", "started", "stopped"))
-    assert tree.root.poll() is None
+    assert_root_running(tree)
     assert not tree.child_finished.exists()
     assert pid_file.read_bytes() == original
     if backend is not None:
-        assert backend.root.poll() is None
+        assert_root_running(backend)
         assert not backend.child_finished.exists()
     if (action, component, reader_exit) == ("stop", "frontend", "1"):
         del env["DEV_TEST_READER_EXIT"]
@@ -1581,7 +1594,7 @@ def test_unknown_arguments_preserve_frontend_bookkeeping(
     assert_root_running(tree)
     assert not tree.child_finished.exists()
     assert pid_file.read_bytes() == original
-    assert backend.root.poll() is None
+    assert_root_running(backend)
     assert not backend.child_finished.exists()
 
 
@@ -1688,7 +1701,7 @@ def test_foreign_listener_with_init_parent_is_proven_foreign(tmp_path: Path, pro
     assert result.returncode == 1
     assert "outside this checkout" in result.stderr
     assert "ownership unknown" not in result.stderr
-    assert tree.root.poll() is None
+    assert_root_running(tree)
     assert not tree.child_finished.exists()
 
 
@@ -1717,7 +1730,7 @@ def test_listener_unknown_after_cleanup_reports_retained_record(
     assert "frontend: stopped" not in result.stdout
     assert "frontend: started" not in result.stdout
     assert_tree_stopped(owned)
-    assert foreign.root.poll() is None
+    assert_root_running(foreign)
     assert not foreign.child_finished.exists()
     assert pid_file.read_bytes() == original
     del env["DEV_TEST_POST_STOP_UNKNOWN_PID"]
@@ -1725,7 +1738,7 @@ def test_listener_unknown_after_cleanup_reports_retained_record(
                            capture_output=True, text=True, timeout=20)
     assert retry.returncode == 0, retry.stderr
     assert not pid_file.exists()
-    assert foreign.root.poll() is None
+    assert_root_running(foreign)
 
 
 def test_fresh_frontend_reports_unconfirmed_launch_without_uv(tmp_path: Path) -> None:
@@ -1787,7 +1800,7 @@ def test_stop_reports_known_remaining_managed_listener(tmp_path: Path, process_t
     assert f"cleanup finished but a managed listener remains on port {env['MEDIAFORCE_FRONTEND_DEV_PORT']}; PID bookkeeping retained" in result.stderr
     assert "ownership unknown" not in result.stderr
     assert_tree_stopped(first)
-    assert second.root.poll() is None
+    assert_root_running(second)
     assert not second.child_finished.exists()
     assert pid_file.read_bytes() == original
     retry = subprocess.run(["/bin/bash", str(script), "stop", "frontend"], env=env,

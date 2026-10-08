@@ -43,4 +43,5 @@ lifetime separately from worker lifetime. Its root handler writes a SIGTERM
 receipt while the worker may still be running; preservation assertions reject
 that receipt. Shutdown cases that intentionally leave a signalled root alive
 explicitly require it. The final completion record derives its signal evidence
-from the same receipt.
+from the same receipt. The root closes its copy of the descendant lifetime
+writer after launching the child, so a live root cannot mask worker exit.
