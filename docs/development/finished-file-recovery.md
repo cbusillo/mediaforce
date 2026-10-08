@@ -18,8 +18,22 @@ does not hold the database write lock for the whole batch.
 Eligible files sharing their saved scope and mode form one normal folder run,
 with the usual host shards. Different saved scopes or modes form separate runs
 rather than broadening a season override. The response names queued and removed
-item IDs and includes the queue results in `runs`. A later queue refusal explicitly
-reports that the copy was removed and the file remains planned for queue recovery.
+item IDs and includes the queue results in `runs`. Before removal, each file's
+finished-file record saves its remake scope, mode and current approval. A later
+queue refusal retains that request and explicitly reports that the copy was
+removed. Retry **Make again** on the same file or selected IDs after the named
+refusal clears; a fresh request reads the saved settings from the database,
+including after a restart. This is an explicit retry, not an automatic one.
+Once removal is confirmed in the saved request, retries do not repeat cleanup
+on its host; an offline former host does not produce a false removal failure.
+Original access, path protection, active-work and queue-admission checks still run.
+The integrity details keep the request and retry guidance visible. A confirmed
+removed copy counts as work awaiting queueing, including copies made on a remote
+host, and points to Make again instead of missing-output repair.
+Its decision row shows the saved retry guidance instead of a size comparison
+or a promise to remove the copy again. The remake decision and return to planned
+are recorded once, when removal is confirmed; refused retries do not duplicate
+that decision or reset its timestamp.
 An unexpected queue failure is reported for its group; the other groups are still
 attempted. The workspace refreshes removed files even when none were queued,
 and shows partial refusals as an attention notice. Single-file Make again uses
@@ -53,8 +67,37 @@ can establish whether the season was manually overridden. If neither
 record can be read, restore the saved run settings from a run backup before
 retrying; the staged copy stays in place. A size failure also needs its run manifest
 for the goal comparison; restore that manifest from a run backup when it is missing. The original and other staged outputs
-stay in place. If queuing fails after removal, the response says so and the item
-remains planned for the supported queue action.
+stay in place. If queueing fails after removal, the file remains planned, with its
+saved request retained. The ordinary folder queue is not the saved retry: it can
+wait for overlapping work and uses that action's chosen mode and membership.
+The saved retry never broadens a manual season selection; it queues only the
+named IDs and waits if active work might include them. Disjoint queued work can
+continue while the saved retry forms a separate run.
+
+Saved retries require the same approval, checked before removal and again inside queue admission.
+If it changed, nothing is queued: restore the saved sample approval before using
+the saved retry. To intentionally use different approved settings, use the
+normal queue action with the intended scope and mode, after existing overlapping
+work finishes; this is a new production request rather than a saved retry.
+All reserve, review, lifecycle and per-file guards still apply.
+Any accepted queue action clears removed remake records in its transaction,
+including an intentional new request under another approval. Old completion
+history cannot make an interrupted new encode look finished.
+Cadence-only production holds are unchanged.
+
+If cleanup is refused before removal, the newly saved request is cleared while
+the finished copy's history remains. A request left by an interruption can also
+be renewed under the current approval when the copy is verifiably still present;
+the original eligibility and changed-goal checks run again. When the copy is
+gone or its presence cannot be confirmed, the saved approval remains required.
+
+If removal succeeds but a later database write fails, `removed_library_item_ids`
+still names the removed file and the response says its recovery was not saved.
+The earlier saved request and original finished-file context remain committed.
+Once the database is healthy, **Make again** retries idempotent removal and
+finishes planning under those settings. **Keep this file** refuses a removed
+copy. When cleanup failed and the smaller-than-predicted copy is still present,
+Keep cancels the saved request and follows its existing validation contract.
 
 **Keep this file** remains available only for the existing smaller-than-predicted
 hold. It cannot waive a final-size failure, another failed check, or missing

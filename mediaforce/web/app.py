@@ -1873,6 +1873,7 @@ def create_app(
             older_seasons_confirmed: bool = False,
             scope_membership_token: str = "",
             only_library_item_ids: Collection[int] | None = None,
+            expected_approval_contract: ActionPayload | None = None,
     ) -> ActionPayload:
         current_config = load_config(config.paths.config_path)
         return queue_folder_encode_action(
@@ -1884,6 +1885,7 @@ def create_app(
             override_older_seasons=override_older_seasons,
             older_seasons_confirmed=older_seasons_confirmed,
             only_library_item_ids=only_library_item_ids,
+            expected_approval_contract=expected_approval_contract,
             now_iso=_now_iso,
             load_job_state=_load_job_state,
             load_calibration_state=_load_calibration_state,
@@ -2049,7 +2051,7 @@ def create_app(
                 only_library_item_ids=item_ids,
             )
 
-        def queue_items(prefix: str, mode: str, item_ids: Collection[int]) -> ActionPayload:
+        def queue_items(prefix: str, mode: str, item_ids: Collection[int], approval: ActionPayload) -> ActionPayload:
             try:
                 return _queue_encode_action(
                     prefix,
@@ -2059,6 +2061,7 @@ def create_app(
                     override_older_seasons=mode == HOLD_MODE_OLDER_SEASONS,
                     older_seasons_confirmed=mode == HOLD_MODE_OLDER_SEASONS,
                     only_library_item_ids=tuple(item_ids),
+                    expected_approval_contract=approval,
                 )
             except HTTPException as exc:
                 return {"ok": False, "message": str(exc.detail)}

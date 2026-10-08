@@ -22,6 +22,7 @@ from mediaforce.library.media_scopes import (
     scope_rel_path_filter,
 )
 from mediaforce.library.movie_library import movie_promotion_conflicts
+from mediaforce.library.remake_intents import remake_intent
 
 IntegrityDisposition = Literal[
     "promotable",
@@ -370,6 +371,9 @@ def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> Staged
     staging_path = str(row["staging_path"] or "").strip() or None
     if status == "promoted" or row["promoted_at"] is not None:
         return _record("tracked", item_id, rel_path, staging_path, "Already promoted and tracked in the library.")
+    if remake_intent(row).get("state") == "removed":
+        return _record("not_started", item_id, rel_path, staging_path,
+                       "Finished copy removed; saved request not queued yet. Use Make again to retry.")
     if staging_path is None:
         disposition: IntegrityDisposition = (
             "not_started"
