@@ -13,7 +13,7 @@ import socket
 import subprocess
 import sys
 import time
-from typing import TypedDict
+from typing import NoReturn, TypedDict
 
 POLL_SECONDS = .05
 START_SECONDS = 15.0
@@ -31,7 +31,7 @@ class Status(TypedDict, total=False):
 
 def group_members(pgid: int) -> set[int]:
     output = subprocess.check_output(
-        ["ps", "-axo", "pid=,pgid="], text=True, timeout=2,
+        ["ps", "-A", "-o", "pid=,pgid="], text=True, timeout=2,
     )
     return {int(pid) for pid, group in (line.split() for line in output.splitlines())
             if int(group) == pgid}
@@ -111,6 +111,7 @@ def guard_group(connection: socket.socket, command: list[str], cwd: Path,
     signal.signal(signal.SIGTERM, request_shutdown)
     signal.signal(signal.SIGINT, request_shutdown)
     with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind((host, port))
     child = subprocess.Popen(command, cwd=cwd, start_new_session=True,
                              stdin=subprocess.DEVNULL)
@@ -218,16 +219,19 @@ def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -
                             line, pending = pending.split(b"\n", 1)
                             status = json.loads(line)
                     else:
-                        with server.accept()[0] as client:
-                            client.settimeout(2)
-                            action = client.recv(64).decode()
-                            if action == "stop":
-                                try:
-                                    parent.sendall(b"stop")
-                                except BrokenPipeError:
-                                    pass
-                                status["state"] = "stopping"
-                            send_status(client, status)
+                        try:
+                            with server.accept()[0] as client:
+                                client.settimeout(2)
+                                action = client.recv(64).decode()
+                                if action == "stop":
+                                    try:
+                                        parent.sendall(b"stop")
+                                    except BrokenPipeError:
+                                        pass
+                                    status["state"] = "stopping"
+                                send_status(client, status)
+                        except (OSError, UnicodeError):
+                            continue  # A failed client cannot release component custody.
         finally:
             parent.close()
             if guardian:
@@ -235,12 +239,15 @@ def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -
             Path(socket_name).unlink(missing_ok=True)
 
 
-def serve_failure(server: socket.socket, status: Status) -> int:
+def serve_failure(server: socket.socket, status: Status) -> NoReturn:
     while True:
-        with server.accept()[0] as client:
-            client.settimeout(2)
-            client.recv(64)
-            send_status(client, status)
+        try:
+            with server.accept()[0] as client:
+                client.settimeout(2)
+                client.recv(64)
+                send_status(client, status)
+        except OSError:
+            continue
 
 
 def request(component: str, action: str) -> Status:
@@ -261,10 +268,11 @@ def request(component: str, action: str) -> Status:
 
 
 def start(component: str, command: list[str], cwd: Path, host: str, port: int) -> Status:
+    launcher: subprocess.Popen[bytes] | None = None
     previous = request(component, "status")
     if previous["state"] == "stopped":
         with open(component + ".log", "ab", buffering=0) as output:
-            subprocess.Popen(
+            launcher = subprocess.Popen(
                 [sys.executable, str(Path(__file__).resolve()), "serve", component,
                  "--state-dir", str(Path.cwd()), "--cwd", str(cwd),
                  "--host", host, "--port", str(port), "--", *command],
@@ -275,6 +283,8 @@ def start(component: str, command: list[str], cwd: Path, host: str, port: int) -
         status = request(component, "status")
         if status["state"] in {"running", "failed"}:
             return status
+        if status["state"] == "stopped" and launcher is not None and launcher.poll() is not None:
+            return {"state": "failed", "error": "launcher exited before startup; see component log"}
         time.sleep(POLL_SECONDS)
     return {"state": "failed", "error": "server did not start; see component log"}
 

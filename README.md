@@ -548,7 +548,11 @@ Start cannot replace a component while its watchdog still holds the lock.
 Temporary cleanup errors retain that owner; retry Stop after resolving the
 reported error. Status distinguishes starting, running, stopping and a failed
 watchdog. A failed watchdog blocks new starts and reports its failure rather
-than signalling processes discovered from saved PIDs.
+than signalling processes discovered from saved PIDs. If the watchdog itself
+is killed, use the OS process manager to force-quit that component's remaining
+server, workers and launcher before starting it again. Deleting a lock file or
+using old PID records does not recover custody. A failed control connection
+leaves both running and failed owners intact.
 
 Control sockets, locks and component logs live outside the repository at
 `~/Library/Application Support/mediaforce/development/<checkout hash>/`.

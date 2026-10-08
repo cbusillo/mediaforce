@@ -46,12 +46,19 @@ while str(worker.pid) not in registry.read_text().splitlines():
     time.sleep(.01)
 port = int(sys.argv[sys.argv.index('--port')+1])
 with socket.socket() as listener:
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(('127.0.0.1', port)); listener.listen()
     while not select.select([fd], [], [], .02)[0]:
         if pathlib.Path(os.environ['TEST_CRASH']).exists():
             os._exit(3)
         if select.select([listener], [], [], 0)[0]:
             client, _ = listener.accept()
+            if os.environ.get('TEST_ACTIVE_CLOSE') == '1':
+                try:
+                    client.sendall(b'ready')
+                    client.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass  # A readiness probe can close before reading the reply.
             client.close()
 worker.wait(timeout=5)
 '''
@@ -104,6 +111,7 @@ class DevFixture:
     def assert_empty(self) -> None:
         wait_until(lambda: self.status()['state'] == 'stopped')
         with socket.socket() as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(('127.0.0.1', int(self.env['MEDIAFORCE_WEB_PORT'])))
 
 
@@ -194,22 +202,24 @@ def test_stop_kills_stubborn_descendants_and_preserves_foreign_server(dev: DevFi
     dev.env['TEST_STUBBORN'] = '1'
     foreign_env = dict(dev.env, TEST_CRASH=str(dev.root / 'no-crash'))
     foreign_port = free_port()
-    dev.foreign = subprocess.Popen([str(dev.root / '.venv/bin/mediaforce-web'), '--port', str(foreign_port)],
-                                   env=foreign_env, start_new_session=True)
+    foreign = subprocess.Popen([str(dev.root / '.venv/bin/mediaforce-web'), '--port', str(foreign_port)],
+                               env=foreign_env, start_new_session=True)
+    dev.foreign = foreign
     wait_until(lambda: dev_processes.port_open('127.0.0.1', foreign_port))
     assert dev.run('start').returncode == 0
     assert dev.run('stop').returncode == 0
-    assert dev.foreign.poll() is None
+    assert foreign.poll() is None
     assert dev_processes.port_open('127.0.0.1', foreign_port)
 
 
 def test_occupied_port_preserves_foreign_listener(dev: DevFixture) -> None:
     port = int(dev.env['MEDIAFORCE_WEB_PORT'])
-    dev.foreign = subprocess.Popen([str(dev.root / '.venv/bin/mediaforce-web'), '--port', str(port)],
-                                   env=dev.env, start_new_session=True)
+    foreign = subprocess.Popen([str(dev.root / '.venv/bin/mediaforce-web'), '--port', str(port)],
+                               env=dev.env, start_new_session=True)
+    dev.foreign = foreign
     wait_until(lambda: dev_processes.port_open('127.0.0.1', port))
     assert dev.run('start').returncode != 0
-    assert dev.foreign.poll() is None
+    assert foreign.poll() is None
     assert dev.run('stop').returncode == 0
     assert dev_processes.port_open('127.0.0.1', port)
 
@@ -351,8 +361,11 @@ def test_failed_spawn_releases_owner_and_start_can_be_retried(dev: DevFixture) -
     executable = dev.root / '.venv/bin/mediaforce-web'
     original = executable.read_bytes()
     executable.unlink()
+    began = time.monotonic()
     result = dev.run('start')
     assert result.returncode != 0
+    assert time.monotonic() - began < 5, 'known failed launch waited for the startup deadline'
+    assert 'launcher exited before startup' in result.stdout
     assert dev.status()['state'] == 'stopped'
     assert dev.run('stop').returncode == 0
     executable.write_bytes(original)
@@ -362,7 +375,9 @@ def test_failed_spawn_releases_owner_and_start_can_be_retried(dev: DevFixture) -
 
 
 def test_launcher_restores_child_exit_custody_before_fork(tmp_path: Path) -> None:
-    helper = Path(dev_processes.__file__).resolve()
+    module_path = dev_processes.__file__
+    assert module_path is not None
+    helper = Path(module_path).resolve()
     probe = '''
 import importlib.util, json, os, signal, sys
 from pathlib import Path
@@ -397,3 +412,55 @@ os.execv(sys.executable, [sys.executable, sys.argv[1], 'start', 'backend'])
     assert result.returncode == 0, result.stderr
     assert dev.run('stop').returncode == 0
     dev.assert_empty()
+
+
+def test_restart_after_server_active_close_reuses_available_port(dev: DevFixture) -> None:
+    dev.env['TEST_ACTIVE_CLOSE'] = '1'
+    assert dev.run('start').returncode == 0
+    first = dev.status()['pid']
+    with socket.create_connection(('127.0.0.1', int(dev.env['MEDIAFORCE_WEB_PORT']))) as client:
+        assert client.recv(5) == b'ready'
+        assert client.recv(1) == b''  # Server sends FIN before the client closes.
+    assert dev.run('restart').returncode == 0
+    assert dev.status()['pid'] != first
+    assert dev.run('stop').returncode == 0
+    dev.assert_empty()
+
+
+@pytest.mark.parametrize('guardian_failed', [False, True])
+def test_silent_control_client_preserves_running_or_failed_owner(
+    dev: DevFixture, guardian_failed: bool,
+) -> None:
+    port = dev.env['MEDIAFORCE_WEB_PORT']
+    broker = subprocess.Popen(
+        [sys.executable, str(dev.root / 'mediaforce/ops/dev_processes.py'),
+         'serve', 'backend', '--state-dir', str(dev.state), '--cwd', str(dev.root),
+         '--host', '127.0.0.1', '--port', port, '--',
+         str(dev.root / '.venv/bin/mediaforce-web'), '--port', port],
+        env=dev.env, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        wait_until(lambda: dev.status()['state'] == 'running')
+        owner = dev.status()
+        if guardian_failed:
+            os.kill(int(owner['guardian']), signal.SIGKILL)
+            wait_until(lambda: dev.status()['state'] == 'failed')
+        stalled = "import socket,time; s=socket.socket(socket.AF_UNIX); s.connect('backend.sock'); time.sleep(2.5)"
+        subprocess.run([sys.executable, '-c', stalled], cwd=dev.state, check=True, timeout=5)
+        status = dev.status()
+        assert status['state'] == ('failed' if guardian_failed else 'running')
+        assert status['pid'] == owner['pid']
+        assert os.getpgid(int(owner['pid'])) == owner['pid']
+        if guardian_failed:
+            assert dev.run('start').returncode != 0
+            assert dev.status()['state'] == 'failed'
+        else:
+            assert dev.run('stop').returncode == 0
+    finally:
+        # This fixture is the broker's parent and has not reaped it; its PID
+        # remains reserved even when the planted client fault made it exit.
+        try:
+            os.kill(broker.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        broker.wait(timeout=5)
