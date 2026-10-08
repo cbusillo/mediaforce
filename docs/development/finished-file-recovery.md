@@ -6,6 +6,17 @@ settings history is missing. It uses the existing per-file
 `POST /api/folders/{prefix}/size-held-decision` action with
 `library_item_id` and `keep: false`.
 
+Select several files on the show or season page and use **Make selected again**
+to queue them in one action. The same endpoint accepts `library_item_ids: [id, ...]`
+with `keep: false`; bulk Keep is not supported. Each file is rechecked separately.
+A file refused by the remake checks keeps its compressed copy and gets its own
+reason in `left_out`.
+Eligible files sharing their saved scope and mode form one normal folder run,
+with the usual host shards. Different saved scopes or modes form separate runs
+rather than broadening a season override. The response names queued and removed
+item IDs and includes the queue results in `runs`. A later queue refusal explicitly
+reports that the copy was removed and the file remains planned for queue recovery.
+
 A final-size failure requires a fresh approved sample and a changed goal under
 the same contract check used for failed-run recovery. Older multi-file runs
 need a changed size goal and compare the missed episode's own duration and target; an unnamed or unreadable
@@ -18,7 +29,10 @@ and a new encode rather than accepting the old output without that history.
 The action rechecks eligibility and the queue’s run-level and saved per-file
 size-miss guards before removing the staged output. These checks are read-only;
 verified legacy recoveries are recognized without rewriting their history. An active
-encode or sample run blocks removal, and every remake needs a current approved sample. The original must be accessible, and the staged path must
+encode that has started or an active sample run blocks removal. A queued run
+allows another remake request for files outside its membership, creating a
+separate compatible run. Unreadable queued membership or a file already named
+in that run blocks removal. Every remake needs a current approved sample. The original must be accessible, and the staged path must
 not point at it; restore source access before retrying when it is unavailable. It then removes that file's staged copy and partial output,
 returns that library item to planned, and queues only that item at its run's
 scope and mode, including older seasons. Pre-mode manifests retain manual season

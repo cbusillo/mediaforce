@@ -1132,6 +1132,20 @@
 		});
 	}
 
+	async function remakeSelectedFiles(libraryItemIds: number[]) {
+		const fallback = 'We couldn’t queue these files to make again.';
+		await runAction('deciding', fallback, async () => {
+			const response = ensureOk(
+				await postJson<ActionResponse>(endpoint('size-held-decision'), {
+					library_item_ids: libraryItemIds,
+					keep: false
+				}),
+				fallback
+			);
+			actionMessage = response.message || '';
+		});
+	}
+
 	async function decideSize(jobId: string, allow: boolean) {
 		const fallback = 'We couldn’t record that size decision.';
 		await runAction('deciding', fallback, async () => {
@@ -3268,6 +3282,7 @@
 			records={sizeHeldRecords(promotionIntegrity)}
 			busy={actionPhase !== 'idle'}
 			onDecision={decideSizeHeld}
+			onRemake={remakeSelectedFiles}
 		/>
 
 		<!-- Below the season's state and its questions, so "Answer this above" points up the page. -->

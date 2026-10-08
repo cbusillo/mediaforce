@@ -1352,6 +1352,7 @@ def queue_folder_encode_action(
             left_out=left_out,
         ),
         "job": queue_job,
+        "queued_library_item_ids": [int(item["library_item_id"]) for item in manifest["items"]],
         "left_out": left_out_payload(left_out),
         "policy_holds_overridden": bool(
             override_policy_holds

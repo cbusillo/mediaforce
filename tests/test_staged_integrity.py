@@ -326,6 +326,128 @@ class StagedIntegrityTests(unittest.TestCase):
             self.assertIsNotNone(connection.execute(select(staged_artifacts).where(
                 staged_artifacts.c.library_item_id == other_id)).first())
 
+    def test_batch_remake_queues_compatible_files_once_and_preserves_excluded_siblings(self) -> None:
+        size_id, size_stage, manifest = self._final_size_file()
+        with open_db(self.config.paths.db_path) as connection:
+            history_id = self._insert_item(connection, "tv/Show/Season 1/History.mkv", status="validated")
+            history_stage = self._write_stage("tv/Show/Season 1/History.mkv", b"history")
+            self._insert_artifact(connection, history_id, history_stage, passed=True, manifest_path=manifest, item_index=0)
+            blocked_id, blocked_stage = self._held_file(connection, "Unavailable.mkv", manifest_path=manifest)
+            (self.root / "source/tv/Show/Season 1/Unavailable.mkv").unlink()
+            foreign_id = self._insert_item(connection, "tv/Other/Season 1/Other.mkv", status="validated")
+            foreign_stage = self._write_stage("tv/Other/Season 1/Other.mkv", b"other")
+            self._insert_artifact(connection, foreign_id, foreign_stage, passed=True, manifest_path=manifest)
+        queued: list[tuple[str, str, list[int]]] = []
+        result = decide_size_held_file(
+            self.config, "tv/Show", [size_id, history_id, blocked_id, foreign_id, size_id], keep=False,
+            now_iso=lambda: "now", validate_items=lambda *_args: self.fail("no validation"),
+            queue_items=lambda prefix, mode, ids: queued.append((prefix, mode, list(ids))) or {"ok": True},
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(queued, [("tv/Show", "older_seasons", [size_id, history_id])])
+        self.assertEqual(result["queued_library_item_ids"], [size_id, history_id])
+        self.assertEqual({file["library_item_id"] for file in result["left_out"]}, {blocked_id, foreign_id})
+        self.assertIn("Restore access", result["left_out"][0]["reason"])
+        self.assertFalse(size_stage.exists())
+        self.assertFalse(history_stage.exists())
+        self.assertEqual(blocked_stage.read_bytes(), b"small")
+        self.assertEqual(foreign_stage.read_bytes(), b"other")
+        with open_db(self.config.paths.db_path) as connection:
+            statuses = dict(connection.execute(select(library_items.c.id, library_items.c.status)).all())
+            self.assertEqual(statuses[size_id], "planned")
+            self.assertEqual(statuses[history_id], "planned")
+            self.assertEqual(statuses[blocked_id], "encoded")
+            decisions = connection.execute(select(item_events.c.library_item_id).where(
+                item_events.c.event_type == "owner_size_held_decision")).scalars().all()
+            self.assertEqual(decisions, [size_id, history_id])
+        for name in ("TooLarge.mkv", "History.mkv"):
+            self.assertEqual((self.root / "source/tv/Show/Season 1" / name).read_bytes(), b"source")
+
+    def test_queued_followup_remake_is_accepted_but_overlapping_or_unreadable_work_is_preserved(self) -> None:
+        item_id, stage, manifest = self._final_size_file()
+        queued_manifest = self.root / "runs/queued.json"
+        queued_manifest.write_text(json.dumps({"items": [{"library_item_id": item_id + 100}]}))
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_encode_job(connection, job_id="queued-run", prefix="tv/Show", status="queued",
+                                    updated_at="now", manifest_path=queued_manifest)
+        for contents in ({"items": [{"library_item_id": item_id}]}, {}, {"items": [{}]}):
+            queued_manifest.write_text(json.dumps(contents))
+            result = decide_size_held_file(
+                self.config, "tv/Show", [item_id], keep=False, now_iso=lambda: "now",
+                validate_items=lambda *_args: self.fail("no validation"),
+                queue_items=lambda *_args: self.fail("must preserve"),
+                current_approval=lambda _prefix: self._new_remake_approval(),
+            )
+            self.assertFalse(result["ok"])
+            self.assertTrue(stage.exists())
+            self.assertIn("queued run", result["message"])
+        queued_manifest.write_text(json.dumps({"items": [{"library_item_id": item_id + 100}]}))
+        queued = Mock(return_value={"ok": True})
+        result = decide_size_held_file(
+            self.config, "tv/Show", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no validation"), queue_items=queued,
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertTrue(result["ok"], result)
+        queued.assert_called_once_with("tv/Show", "older_seasons", [item_id])
+        self.assertFalse(stage.exists())
+        self.assertTrue(manifest.exists())
+
+    def test_batch_remake_reports_queue_failures_after_removal(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        result = decide_size_held_file(
+            self.config, "tv/Show", [item_id], keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no validation"),
+            queue_items=lambda *_args: {"ok": False, "message": "Storage is unavailable."},
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["removed_library_item_ids"], [item_id])
+        self.assertEqual(result["queued_library_item_ids"], [])
+        self.assertIn("Finished copy removed, but not queued", result["message"])
+        self.assertFalse(stage.exists())
+
+    def test_batch_remake_retains_each_saved_scope_and_mode_and_queue_exclusion(self) -> None:
+        size_id, _stage, _manifest = self._final_size_file()
+        season_manifest = self.root / "runs/season-remake.json"
+        season_manifest.write_text(json.dumps({"selection": {"queue_mode": "season_override",
+            "media_scope": {"prefix": "tv/Show/Season 1"}}, "items": [{}]}))
+        with open_db(self.config.paths.db_path) as connection:
+            season_id, _season_stage = self._held_file(connection, "Season.mkv", manifest_path=season_manifest)
+        calls: list[tuple[str, str, list[int]]] = []
+
+        def queue(prefix: str, mode: str, ids: Collection[int]) -> dict[str, Any]:
+            calls.append((prefix, mode, list(ids)))
+            return {"ok": True, "left_out": [{"library_item_id": season_id, "reason": "Needs a motion check."}]
+                    if mode == "season_override" else []}
+
+        result = decide_size_held_file(
+            self.config, "tv/Show", [size_id, season_id], keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no old-file check"), queue_items=queue,
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertEqual(calls, [("tv/Show", "older_seasons", [size_id]),
+                                 ("tv/Show/Season 1", "season_override", [season_id])])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["queued_library_item_ids"], [size_id])
+        self.assertEqual(result["left_out"][0]["library_item_id"], season_id)
+        self.assertIn("Needs a motion check", result["left_out"][0]["reason"])
+
+    def test_remake_does_not_claim_a_file_the_queue_did_not_accept(self) -> None:
+        item_id, _stage, _manifest = self._final_size_file()
+        result = decide_size_held_file(
+            self.config, "tv/Show", [item_id], keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no old-file check"),
+            queue_items=lambda *_args: {"ok": True, "queued_library_item_ids": [],
+                                       "message": "The selected file is already queued elsewhere."},
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["queued_library_item_ids"], [])
+        self.assertEqual(result["removed_library_item_ids"], [item_id])
+        self.assertIn("already queued elsewhere", result["left_out"][0]["reason"])
+
     def test_other_validation_failures_and_keep_cannot_bypass_the_size_contract(self) -> None:
         item_id, stage, _manifest = self._final_size_file(extra_failure=True)
         for keep in (False, True):

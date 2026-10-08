@@ -5,12 +5,25 @@
 	let {
 		records,
 		busy = false,
-		onDecision
+		onDecision,
+		onRemake
 	}: {
 		records: StagedIntegrityRecord[];
 		busy?: boolean;
 		onDecision: (libraryItemId: number, keep: boolean) => void;
+		onRemake: (libraryItemIds: number[]) => void;
 	} = $props();
+	let selected = $state<number[]>([]);
+	const selectedIds = $derived(
+		records
+			.filter(
+				(record) => selected.includes(record.item_id as number) && !record.remake?.blocked_reason
+			)
+			.map((record) => record.item_id as number)
+	);
+	$effect(() => {
+		if (selected.length !== selectedIds.length) selected = selectedIds;
+	});
 
 	function fileName(relPath: string | null): string {
 		return (relPath ?? '').split('/').at(-1) || 'This file';
@@ -20,10 +33,28 @@
 {#if records.length > 0}
 	<section id="season-size-held" class="size-held" aria-label="Files that need you">
 		<h3>Needs you</h3>
+		<div class="size-held__actions">
+			<button
+				type="button"
+				disabled={busy || selectedIds.length === 0}
+				onclick={() => onRemake(selectedIds)}
+			>
+				Make selected again ({selectedIds.length})
+			</button>
+		</div>
 		<ul>
 			{#each records as record (record.item_id)}
 				<li>
-					<span class="size-held__file">{fileName(record.rel_path)}</span>
+					<label class="size-held__file">
+						<input
+							type="checkbox"
+							value={record.item_id}
+							bind:group={selected}
+							disabled={busy || Boolean(record.remake?.blocked_reason)}
+							aria-label={`Select ${fileName(record.rel_path)} to make again`}
+						/>
+						{fileName(record.rel_path)}
+					</label>
 					<span class="size-held__detail">
 						{#if record.remake?.reason === 'final_size'}
 							Missed its approved size goal.
@@ -110,7 +141,7 @@
 		margin-top: 3px;
 	}
 
-	.size-held__actions button {
+	.size-held button {
 		background: transparent;
 		border: 1px solid var(--mf-line-muted);
 		border-radius: 999px;
