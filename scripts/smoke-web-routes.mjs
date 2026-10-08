@@ -1085,6 +1085,12 @@ async function checkLibraryModeLayout(baseUrl, timeoutMs) {
           state: "visible",
           timeout: timeoutMs,
         });
+        // Details can reorder the register and reset scroll after structure renders.
+        await expect(page.locator(".library-layout .workspace")).toHaveAttribute(
+          "aria-busy",
+          "false",
+          { timeout: timeoutMs },
+        );
         const state = await page.evaluate(() => {
           const heading = document.querySelector(".library-layout > h1");
           const nav = document.querySelector(".library-mode-nav");
