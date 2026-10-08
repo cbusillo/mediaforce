@@ -3302,6 +3302,7 @@
 			busy={actionPhase !== 'idle'}
 			onDecision={decideSizeHeld}
 			onRemake={remakeSelectedFiles}
+			onRefresh={onMutate}
 		/>
 
 		<!-- Below the season's state and its questions, so "Answer this above" points up the page. -->

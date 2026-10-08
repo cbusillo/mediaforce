@@ -50,6 +50,7 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       const requests = [];
       const originalRecords = records;
       let outcome = "refused";
+      let restoredRecord = null;
       let removedMessage = "Finished copies removed, but not queued: the selected computer timed out.";
       const integrity = () => ({
         counts: { validation_failed: records.length },
@@ -88,6 +89,10 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
         }
         const response = await route.fetch();
         if (url.endsWith("/staged-integrity")) {
+          if (restoredRecord) {
+            records = records.map((record) => record.item_id === restoredRecord.item_id ? restoredRecord : record);
+            restoredRecord = null;
+          }
           return route.fulfill({ response, json: { ...await response.json(), ...integrity() } });
         }
         if (url.endsWith("/status")) {
@@ -161,9 +166,61 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       if (JSON.stringify(requests.at(-1)) !== JSON.stringify({ library_item_id: 101, keep: false })) {
         throw new Error(`Wrong single-file remake request: ${JSON.stringify(requests.at(-1))}`);
       }
+      records = originalRecords.slice(0, 3).map((record) => ({
+        ...record, disposition: "size_held",
+        remake: { ...record.remake, reason: "size_held" },
+        size_prediction: { actual_bytes: 50, predicted_bytes: 100, held: true },
+      }));
+      await expect(section.getByRole("checkbox")).toHaveCount(3, { timeout: 15000 });
+      const recoveredRecord = records[0];
+      await first.check();
+      await section.getByRole("checkbox", { name: "Select Episode 2.mkv to make again", exact: true }).check();
+      records = records.map((record, index) => {
+        if (index !== 0) return record;
+        const { remake: _remake, ...stale } = record;
+        return stale;
+      });
+      await expect(first).toBeDisabled({ timeout: 15000 });
+      await expect(first).not.toBeChecked();
+      await expect(section.getByRole("button", { name: "Make selected again (1)", exact: true })).toBeEnabled();
+      const staleRow = section.getByRole("listitem").filter({ hasText: "Episode 1.mkv" });
+      await expect(staleRow.getByRole("button", { name: "Make again", exact: true })).toBeDisabled();
+      await expect(staleRow.getByRole("button", { name: "Keep this file", exact: true })).toBeEnabled();
+      await expect(staleRow).toContainText("Refresh its state before making it again.");
+      await staleRow.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(screenshotDir, `stale-finished-controls-${viewport.width}.png`) });
+      if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) {
+        throw new Error("Stale finished-file recovery overflows the viewport.");
+      }
+      outcome = "success";
+      await section.getByRole("button", { name: "Make selected again (1)", exact: true }).click();
+      if (JSON.stringify(requests.at(-1)) !== JSON.stringify({ library_item_ids: [102], keep: false })) {
+        throw new Error(`Stale selection reached remake: ${JSON.stringify(requests.at(-1))}`);
+      }
+      await expect(section.getByRole("checkbox")).toHaveCount(2);
+      restoredRecord = recoveredRecord;
+      const refresh = staleRow.getByRole("button", { name: "Refresh file state", exact: true });
+      await refresh.focus();
+      await page.keyboard.press("Enter");
+      await expect(staleRow.getByRole("button", { name: "Make again", exact: true })).toBeEnabled();
+      await expect(first).toBeEnabled();
+      await expect(first).not.toBeChecked();
+      await expect(section.getByRole("button", { name: "Make selected again (0)", exact: true })).toBeDisabled();
+      await expect(refresh).toHaveCount(0);
+      await page.screenshot({ path: path.join(screenshotDir, `finished-controls-refreshed-${viewport.width}.png`) });
+      await staleRow.getByRole("button", { name: "Make again", exact: true }).click();
+      if (JSON.stringify(requests.at(-1)) !== JSON.stringify({ library_item_id: 101, keep: false })) {
+        throw new Error("Normal per-file remake changed after refresh.");
+      }
+      await expect(section.getByRole("checkbox")).toHaveCount(1);
+      await section.getByRole("button", { name: "Keep this file", exact: true }).click();
+      if (JSON.stringify(requests.at(-1)) !== JSON.stringify({ library_item_id: 103, keep: true })) {
+        throw new Error("Keep must retain its separate decision contract.");
+      }
+      await expect(section).toHaveCount(0);
       await page.close();
     }
-    console.log("route ok: Multi-file remake selection, retry and refresh at desktop and narrow widths");
+    console.log("route ok: Multi-file remake, stale selection pruning, explicit refresh and Keep at desktop and narrow widths");
   } finally {
     await browser.close();
   }
