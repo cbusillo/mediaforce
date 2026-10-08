@@ -145,6 +145,33 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertEqual(records["tv/Show/Season 1/AlsoBroken.mkv"].disposition, "validation_failed")
         self.assertTrue(integrity_disposition_blocks_promotion("size_held"))
 
+    def test_concurrent_removal_leaves_a_stale_held_report_without_remake_details(self) -> None:
+        prefix = "tv/Show/Season 1"
+        with open_db(self.config.paths.db_path) as connection:
+            item_id, stage = self._held_file(connection, "Changed.mkv")
+        with open_db(self.config.paths.db_path) as reader:
+            report = staged_integrity_report(reader, self.config, prefix, discover=False)
+            with open_db(self.config.paths.db_path) as writer:
+                writer.execute(staged_artifacts.delete().where(staged_artifacts.c.library_item_id == item_id))
+            records = staged_remake_records(
+                reader, report.detail_payload(offset=0, limit=10)["records"], prefix,
+                current_approval=lambda _prefix: self._new_remake_approval(),
+            )
+            refreshed = staged_integrity_report(reader, self.config, prefix, discover=False)
+
+        self.assertEqual(records[0]["disposition"], "size_held")
+        self.assertNotIn("remake", records[0])
+        self.assertFalse(any(record.disposition == "size_held" for record in refreshed.records))
+        result = decide_size_held_file(
+            self.config, prefix, item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("stale rows must not validate"),
+            queue_items=lambda *_args: self.fail("stale rows must not queue"),
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertFalse(result["ok"])
+        self.assertTrue(stage.exists())
+        self.assertTrue((self.root / "source" / prefix / "Changed.mkv").exists())
+
     def test_keeping_a_held_file_records_the_owner_and_checks_only_that_file(self) -> None:
         checked: list[tuple[str, list[int]]] = []
         with open_db(self.config.paths.db_path) as connection:
