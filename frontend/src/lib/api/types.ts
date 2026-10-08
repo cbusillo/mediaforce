@@ -1777,6 +1777,7 @@ export interface StagedIntegrityRecord {
 	remake?: {
 		reason: 'size_held' | 'final_size' | 'settings_history';
 		blocked_reason: string;
+		pending?: boolean;
 	};
 }
 

@@ -14,6 +14,7 @@ from sqlalchemy import delete, or_, select, update
 from mediaforce.core.config import MediaforceConfig, load_config, with_folder_policy_override
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
+from mediaforce.web.runtime.remake_intents import finish_remake_intents
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.core.utils import filesystem_collision_key
@@ -730,6 +731,7 @@ def queue_folder_encode_action(
         validate_scope_action: ValidateScopeActionFn | None = None,
         reserve_preflight: Callable[..., Any] = encode_reserve_preflight,
         only_library_item_ids: Collection[int] | None = None,
+        expected_approval_contract: ActionPayload | None = None,
 ) -> ActionPayload:
     """Queue the folder's eligible files, leaving out each file with a problem and saying why.
 
@@ -793,6 +795,9 @@ def queue_folder_encode_action(
         calibration_payload = object_dict(calibration)
         calibration_policy = object_dict(calibration_payload.get("policy"))
         production_approval_contract = _production_approval_contract(calibration_payload)
+        if expected_approval_contract is not None and production_approval_contract != expected_approval_contract:
+            return {"ok": False, "code": "remake_approval_changed",
+                    "message": "The approved settings changed after this remake was saved. Nothing was queued."}
         hold_mode = queue_mode(
             override_policy_holds=override_policy_holds,
             override_older_seasons=override_older_seasons,
@@ -1330,6 +1335,9 @@ def queue_folder_encode_action(
             "updated_at": created_at,
         }
         save_encode_job(connection, queue_job)
+        if expected_approval_contract is not None:
+            finish_remake_intents(connection, [int(item["library_item_id"]) for item in manifest["items"]],
+                                  prefix=normalized_prefix, mode=hold_mode, approval=expected_approval_contract)
         release_holds(connection, [int(item.get("library_item_id") or 0) for item in manifest["items"]])
         for shard_indexes in _build_manifest_shards(refreshed_config, manifest):
             save_encode_job(

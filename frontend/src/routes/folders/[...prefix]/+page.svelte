@@ -42,6 +42,9 @@
 	let loadError = $state<string | null>(null);
 	let seriesContextError = $state('');
 	let hydrationGeneration = 0;
+	const pendingRemakes = $derived(
+		(status.staged_integrity?.records ?? []).filter((record) => record.remake?.pending)
+	);
 
 	function encodePrefix(prefix: string): string {
 		return prefix
@@ -294,6 +297,13 @@
 			onMutate={refreshStudio}
 		/>
 	{:else}
+		{#if pendingRemakes.length}
+			<div class="saved-remakes" role="status" aria-label="Saved remakes">
+				{#each pendingRemakes as record (record.item_id)}
+					<p><strong>{record.rel_path?.split('/').at(-1)}:</strong> {record.detail}</p>
+				{/each}
+			</div>
+		{/if}
 		<SeasonExperience
 			{folder}
 			{status}
@@ -311,6 +321,20 @@
 {/if}
 
 <style>
+	.saved-remakes {
+		border-left: 2px solid var(--mf-wait-fg);
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-sm);
+		margin: 12px auto;
+		max-width: var(--mf-shell-max);
+		padding: 8px 12px;
+		width: calc(100% - 32px);
+	}
+
+	.saved-remakes p {
+		margin: 4px 0;
+	}
+
 	.studio-loading {
 		align-items: center;
 		display: grid;

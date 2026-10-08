@@ -24909,11 +24909,9 @@ raise SystemExit(0)
         from mediaforce.web.runtime.size_held import decide_size_held_file
 
         queue_config = self._complete_queue_config()
-        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show/Season 1"))
+        calibration = self._accepted_calibration_contract(sample_job_id="remake-sample")
         old_manifest = self._write_manifest("old-remake.json", [])
-        approval = folder_actions_runtime._production_approval_contract(
-            self._accepted_calibration_contract(sample_job_id="remake-sample"),
-        )
+        approval = folder_actions_runtime._production_approval_contract(calibration)
         old_manifest.write_text(json.dumps({"selection": {"queue_mode": "season_override",
             "media_scope": {"prefix": "tv/show/Season 1"}}, "items": [{}]}))
         with open_db(self.config.paths.db_path) as connection:
@@ -24929,11 +24927,13 @@ raise SystemExit(0)
                     validation_json=json.dumps({"passed": True}), validated_at="now", updated_at="now",
                 ))
         jobs: list[dict[str, Any]] = []
+        reserve_allowed = False
 
-        def queue(_prefix: str, _mode: str, item_ids: Collection[int]) -> dict[str, Any]:
+        def queue(_prefix: str, _mode: str, item_ids: Collection[int], saved_approval: dict[str, Any]) -> dict[str, Any]:
             result = self._queue_show_folder(queue_config, jobs, calibration=calibration,
-                                            only_library_item_ids=item_ids,
-                                            reserve_preflight=lambda *_args: ReservePreflight(True, None, {}))
+                                            only_library_item_ids=item_ids, expected_approval_contract=saved_approval,
+                                            reserve_preflight=lambda *_args: ReservePreflight(
+                                                reserve_allowed, "Waiting for fixture space.", {}))
             with open_db(queue_config.paths.db_path) as connection:
                 for job in jobs:
                     save_encode_job(connection, job)
@@ -24946,6 +24946,14 @@ raise SystemExit(0)
                 current_approval=lambda _prefix: approval,
             )
 
+        refused = remake(ids[:2])
+        self.assertFalse(refused["ok"], refused)
+        self.assertEqual(refused["removed_library_item_ids"], ids[:2])
+        self.assertEqual(refused["runs"][0]["code"], "free_space_reserve")
+        self.assertEqual(jobs, [])
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertEqual(set(connection.execute(select(staged_artifacts.c.library_item_id)).scalars()), set(ids))
+        reserve_allowed = True
         first = remake(ids[:2])
         self.assertTrue(first["ok"], first)
         first_jobs = list(jobs)
@@ -24955,12 +24963,35 @@ raise SystemExit(0)
         self.assertEqual({index for job in jobs if job["job_kind"] == "shard"
                           for index in job["manifest_indexes"]}, {0, 1})
         self.assertTrue(stages[2].exists())
+        duplicate = remake(ids[:2])
+        self.assertFalse(duplicate["ok"], duplicate)
+        self.assertEqual(duplicate["queued_library_item_ids"], [])
+        self.assertEqual(len(jobs), len(first_jobs))
         second = remake(ids[2:])
         self.assertTrue(second["ok"], second)
         self.assertEqual(second["queued_library_item_ids"], ids[2:])
         self.assertEqual(self._queued_manifest_item_ids(jobs[len(first_jobs):]), ids[2:])
         self.assertTrue(all(not stage.exists() for stage in stages))
         self.assertEqual(len([job for job in jobs if job["job_kind"] == "folder"]), 2)
+
+    def test_queue_saved_remake_rechecks_approval_inside_admission(self) -> None:
+        queue_config = self._complete_queue_config()
+        calibration = self._accepted_calibration_contract(sample_job_id="saved-sample")
+        approval = folder_actions_runtime._production_approval_contract(calibration)
+        with open_db(self.config.paths.db_path) as connection:
+            ids = list(self._insert_show_episodes(connection, "One.mkv", "Unselected.mkv").values())
+        jobs: list[dict[str, Any]] = []
+        changed = self._accepted_calibration_contract(sample_job_id="changed-sample")
+        refused = self._queue_show_folder(queue_config, jobs, calibration=changed,
+                                         only_library_item_ids=ids[:1], expected_approval_contract=approval)
+        self.assertFalse(refused["ok"], refused)
+        self.assertEqual(refused["code"], "remake_approval_changed")
+        self.assertEqual(jobs, [])
+        accepted = self._queue_show_folder(queue_config, jobs, calibration=calibration,
+                                          only_library_item_ids=ids[:1], expected_approval_contract=approval,
+                                          reserve_preflight=lambda *_args: ReservePreflight(True, None, {}))
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertEqual(self._queued_manifest_item_ids(jobs), ids[:1])
 
     @staticmethod
     def _queued_manifest_item_ids(saved_jobs: list[dict[str, Any]]) -> list[int]:

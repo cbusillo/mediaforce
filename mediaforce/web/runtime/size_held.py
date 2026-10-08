@@ -9,10 +9,10 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import select, update
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, run_manifests, staged_artifacts
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding.encode_queue import load_active_encode_jobs_for_prefix
@@ -26,6 +26,8 @@ from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_b
     staged_requeue_size_blocker
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
+from mediaforce.web.runtime.remake_intents import INTENT_KEY, finish_remake_intents, remake_intent, save_remake_intent
+from mediaforce.web.runtime.remake_intents import stored_validation as _stored_validation
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ NOT_HELD_MESSAGE = "This file is no longer waiting for a decision about its size
 
 ValidateItemsFn = Callable[[str, Collection[int]], dict[str, Any]]
 CurrentApprovalFn = Callable[[str], dict[str, Any] | None]
-QueueItemsFn = Callable[[str, str, Collection[int]], dict[str, Any]]
+QueueItemsFn = Callable[[str, str, Collection[int], dict[str, Any]], dict[str, Any]]
 
 
 def decide_size_held_file(
@@ -74,8 +76,12 @@ def decide_size_held_file(
         held = staged_validation_outcome(row["validation_json"]) == "size_held"
         if not held:
             return {"ok": False, "message": NOT_HELD_MESSAGE}
+        intent = remake_intent(row)
+        if intent and (intent.get("state") != "requested" or not Path(str(row["staging_path"] or "")).is_file()):
+            return {"ok": False, "message": "This file is waiting to be made again. Retry Make again with its saved settings."}
         name = Path(str(row["rel_path"])).name
         now = now_iso()
+        validation.pop(INTENT_KEY, None)
         validation["size_prediction"] = {**size_prediction, "owner_kept_at": now, "held": False}
         connection.execute(
             update(staged_artifacts)
@@ -106,7 +112,7 @@ def remake_staged_files(
         current_approval: CurrentApprovalFn,
 ) -> dict[str, Any]:
     """Recheck requested files independently and queue compatible remakes together."""
-    groups: dict[tuple[str, str], list[int]] = {}
+    groups: dict[tuple[str, str, str], list[int]] = {}
     left_out: list[dict[str, Any]] = []
     removed: list[int] = []
     names: dict[int, str] = {}
@@ -116,46 +122,62 @@ def remake_staged_files(
         try:
             with open_db(config.paths.db_path) as connection:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
-                row = connection.execute(
-                    select(staged_artifacts, library_items.c.rel_path,
-                           library_items.c.source_path.label("original_source_path"))
-                    .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
-                    .where(staged_artifacts.c.library_item_id == item_id)
-                ).mappings().fetchone()
+                row = _load_remake_row(connection, item_id)
                 names[item_id] = Path(str(row["rel_path"])).name if row is not None else "Unavailable file"
                 recovery = None
                 if row is not None and path_matches_scope(str(row["rel_path"] or ""), prefix):
                     recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval,
                                                     manifest_reader=manifest_reader)
                 reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
+                if recovery is None or reason:
+                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
+                    continue
+                intent = remake_intent(row)
+                if not intent:
+                    run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
+                    intent = {"prefix": run_prefix, "mode": mode, "approval": recovery["approval"],
+                              "reason": recovery["reason"], "state": "requested"}
+                    save_remake_intent(connection, row, intent, now=now_iso())
+            # The request commits before unlink; custody and eligibility are rechecked in the removal transaction.
+            with open_db(config.paths.db_path) as connection:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                row = _load_remake_row(connection, item_id)
+                recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval,
+                                                manifest_reader=manifest_reader)
+                reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
+                if not reason and remake_intent(row) != intent:
+                    reason = "This file’s saved request changed. Refresh it before retrying."
                 if not reason and not _remove_finished_output(config, row):
                     reason = "Mediaforce could not remove the finished copy yet. Try again."
                 if reason:
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
                     continue
-                run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
+                removed.append(item_id)
+                run_prefix, mode = str(intent["prefix"]), str(intent["mode"])
                 now = now_iso()
-                connection.execute(delete(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id))
+                save_remake_intent(connection, row, {**intent, "state": "removed"}, now=now)
                 connection.execute(update(library_items).where(library_items.c.id == item_id)
                                    .values(status="planned", updated_at=now))
                 _record_decision(connection, item_id, "remake", {
                     **object_dict(_stored_validation(row).get("size_prediction")),
                     "recovery_reason": recovery["reason"],
                 }, now)
-            removed.append(item_id)
-            groups.setdefault((run_prefix, mode), []).append(item_id)
+            groups.setdefault((run_prefix, mode, json.dumps(intent["approval"], sort_keys=True)), []).append(item_id)
         except Exception:
             logger.exception("Could not finish remake recovery for library item %s", item_id)
             left_out.append({"library_item_id": item_id, "name": names[item_id],
-                             "reason": "Could not finish this file’s recovery. Check it again before retrying."})
+                             "reason": ("Finished copy removed, but recovery was not saved. "
+                                        "Use Make again to retry with its saved settings." if item_id in removed else
+                                        "Could not finish this file’s recovery. Use Make again to retry.")})
     runs: list[dict[str, Any]] = []
     queued_ids: list[int] = []
-    for (run_prefix, mode), item_ids in groups.items():
+    for (run_prefix, mode, saved_approval), item_ids in groups.items():
+        approval = object_dict(json.loads(saved_approval))
         try:
-            result = queue_items(run_prefix, mode, item_ids)
+            result = queue_items(run_prefix, mode, item_ids, approval)
         except Exception:
             logger.exception("Could not queue remade files for %s in %s mode", run_prefix, mode)
-            result = {"ok": False, "message": "Queueing failed. Try the normal queue action again."}
+            result = {"ok": False, "message": "Queueing failed. Use Make again to retry with its saved settings."}
         runs.append(result)
         queue_left_out = object_list(result.get("left_out"))
         excluded_ids = {file.get("library_item_id") for file in queue_left_out}
@@ -170,7 +192,15 @@ def remake_staged_files(
                 reason = next((str(file.get("reason")) for file in queue_left_out
                                if file.get("library_item_id") == item_id), fallback)
                 left_out.append({"library_item_id": item_id, "name": names[item_id],
-                                 "reason": f"Finished copy removed, but not queued: {reason}"})
+                                 "reason": f"Finished copy removed, but not queued: {reason} "
+                                           "Use Make again to retry only this file with its saved settings once this clears."})
+        accepted = [item_id for item_id in item_ids if item_id in queued_ids]
+        if accepted:
+            try:
+                with open_db(config.paths.db_path) as connection:
+                    finish_remake_intents(connection, accepted, prefix=run_prefix, mode=mode, approval=approval)
+            except Exception:
+                logger.exception("Could not clear accepted remake records for %s", run_prefix)
     message = f"Queued {len(queued_ids)} {'file' if len(queued_ids) == 1 else 'files'} to make again."
     if left_out:
         message += " " + " ".join(f"{file['name']}: {file['reason']}" for file in left_out)
@@ -197,6 +227,9 @@ def staged_remake_details(
     """
     if row is None or row["promoted_at"] is not None:
         return None
+    if not path_matches_scope(str(row.get("rel_path") or ""), prefix) and "rel_path" in row:
+        return None
+    intent = remake_intent(row)
     validation = _stored_validation(row)
     failed = [str(object_dict(check).get("message") or "") for check in object_list(validation.get("checks"))
               if object_dict(check).get("passed") is False]
@@ -207,22 +240,24 @@ def staged_remake_details(
             connection, {int(row["library_item_id"])}, accepted_policy_hash="", manifest_reader=manifest_reader,
         )
     ).get(int(row["library_item_id"])) == "season_policy_provenance_missing"
-    if not (held or final_size or missing_policy):
+    if not (held or final_size or missing_policy or intent):
         return None
     run_prefix, _mode, context_available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
     blocked_reasons: list[str] = []
     approval = current_approval(run_prefix)
+    if intent and approval != intent.get("approval"):
+        blocked_reasons.append("The approved settings changed after this remake was saved. Restore that approval before retrying.")
     if not context_available:
         blocked_reasons.append("Restore the saved run settings before making this file again. Nothing was removed.")
     else:
         if approval is None:
             blocked_reasons.append("Approve a fresh sample before making this file again.")
-        elif final_size and not manifest_reader(Path(str(row["manifest_path"] or ""))):
+        elif not intent and final_size and not manifest_reader(Path(str(row["manifest_path"] or ""))):
             blocked_reasons.append(
                 "Restore the run manifest from a run backup before making this file again; "
                 "its size comparison cannot be verified. Nothing was removed."
             )
-        elif final_size:
+        elif not intent and final_size:
             blocker = _final_size_requeue_contract_blocker({
                 "manifest_path": row["manifest_path"],
                 "progress": {"failure_analysis": {
@@ -261,8 +296,8 @@ def staged_remake_details(
         busy_ids = _queued_run_item_ids(active_jobs, manifest_reader=manifest_reader)
         if busy_ids is None or int(row["library_item_id"]) in busy_ids:
             blocked_reasons.append("A queued run may still make this file. Wait for it before making this file again.")
-    return {"reason": "size_held" if held else "final_size" if final_size else "settings_history",
-            "blocked_reason": " ".join(blocked_reasons)}
+    return {"reason": intent.get("reason") or ("size_held" if held else "final_size" if final_size else "settings_history"),
+            "blocked_reason": " ".join(blocked_reasons), "approval": approval}
 
 
 def _queued_run_item_ids(jobs: list[dict[str, Any]], *, manifest_reader: ManifestReader) -> set[int] | None:
@@ -312,23 +347,33 @@ def staged_remake_records(
                                         current_approval=approval_for_scope, policy_states=policy_states,
                                         manifest_reader=manifest_reader)
         if recovery is not None:
-            record["remake"] = recovery
+            record["remake"] = {key: recovery[key] for key in ("reason", "blocked_reason")}
+            intent = remake_intent(rows.get(record.get("item_id")))
+            if intent:
+                record["remake"]["pending"] = True
+                record["detail"] = ("Saved request to make this file again. Use Make again to retry only this file "
+                                    "with its saved settings. " + str(recovery["blocked_reason"]))
+                if intent.get("state") == "removed":
+                    record["detail"] = "Finished copy removed; not queued yet. " + record["detail"]
     return records
 
 
-def _stored_validation(row: Any) -> dict[str, Any]:
-    if row is None:
-        return {}
-    try:
-        return object_dict(json.loads(str(row["validation_json"] or "{}")))
-    except json.JSONDecodeError:
-        return {}
+def _load_remake_row(connection: DBClient, item_id: int) -> DBRow | None:
+    return connection.execute(
+        select(staged_artifacts, library_items.c.rel_path,
+               library_items.c.source_path.label("original_source_path"))
+        .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
+        .where(staged_artifacts.c.library_item_id == item_id)
+    ).mappings().fetchone()
 
 
 def _run_context(
         connection: DBClient, row: Any, prefix: str, *, manifest_reader: ManifestReader = read_manifest,
 ) -> tuple[str, str, bool]:
     """Use the existing saved selection when the manifest or terminal job is no longer available."""
+    intent = remake_intent(row)
+    if intent:
+        return str(intent["prefix"]), str(intent["mode"]), True
     manifest = manifest_reader(Path(str(row["manifest_path"] or "")))
     if manifest is not None:
         selection = object_dict(manifest.get("selection"))
