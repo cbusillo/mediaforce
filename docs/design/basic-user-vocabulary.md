@@ -110,6 +110,7 @@ bytes in Technical details.
 A finished file without current Make again details keeps that action and its
 selection disabled. `Refresh file state` reloads the workspace so the file can
 disappear or regain its current actions; it never restores a pruned selection.
+Keyboard refresh returns focus to the workspace heading.
 `Keep this file` remains governed by the file's separate size decision.
 
 ### Library And Show Pages

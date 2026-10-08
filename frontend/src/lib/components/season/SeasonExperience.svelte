@@ -1153,6 +1153,11 @@
 		await decideSizeHeld(libraryItemIds, false);
 	}
 
+	async function refreshFileState() {
+		await onMutate();
+		await focusCurrentHeading();
+	}
+
 	async function decideSize(jobId: string, allow: boolean) {
 		const fallback = 'We couldn’t record that size decision.';
 		await runAction('deciding', fallback, async () => {
@@ -3302,7 +3307,7 @@
 			busy={actionPhase !== 'idle'}
 			onDecision={decideSizeHeld}
 			onRemake={remakeSelectedFiles}
-			onRefresh={onMutate}
+			onRefresh={refreshFileState}
 		/>
 
 		<!-- Below the season's state and its questions, so "Answer this above" points up the page. -->

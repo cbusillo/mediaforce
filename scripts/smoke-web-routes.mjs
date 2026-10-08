@@ -51,6 +51,9 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       const originalRecords = records;
       let outcome = "refused";
       let restoredRecord = null;
+      let promotionReadiness;
+      let pollingActive = true;
+      let integrityReads = 0;
       let removedMessage = "Finished copies removed, but not queued: the selected computer timed out.";
       const integrity = () => ({
         counts: { validation_failed: records.length },
@@ -60,6 +63,7 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
         database_truncated: false,
         next_offset: null,
         discovery: { scanned: false, truncated: false },
+        promotion_readiness: promotionReadiness,
       });
       await page.route("**/api/folders/**", async (route) => {
         const url = decodeURIComponent(new URL(route.request().url()).pathname);
@@ -89,14 +93,17 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
         }
         const response = await route.fetch();
         if (url.endsWith("/staged-integrity")) {
+          integrityReads++;
+          const payload = await response.json();
+          promotionReadiness ??= payload.promotion_readiness;
           if (restoredRecord) {
             records = records.map((record) => record.item_id === restoredRecord.item_id ? restoredRecord : record);
             restoredRecord = null;
           }
-          return route.fulfill({ response, json: { ...await response.json(), ...integrity() } });
+          return route.fulfill({ response, json: { ...payload, ...integrity() } });
         }
         if (url.endsWith("/status")) {
-          return route.fulfill({ response, json: { ...await response.json(), polling_active: true, staged_integrity: integrity() } });
+          return route.fulfill({ response, json: { ...await response.json(), polling_active: pollingActive, staged_integrity: integrity() } });
         }
         return route.fulfill({ response });
       });
@@ -180,6 +187,7 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
         const { remake: _remake, ...stale } = record;
         return stale;
       });
+      pollingActive = false;
       await expect(first).toBeDisabled({ timeout: 15000 });
       await expect(first).not.toBeChecked();
       await expect(section.getByRole("button", { name: "Make selected again (1)", exact: true })).toBeEnabled();
@@ -201,12 +209,20 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       restoredRecord = recoveredRecord;
       const refresh = staleRow.getByRole("button", { name: "Refresh file state", exact: true });
       await refresh.focus();
+      const readsBeforeRefresh = integrityReads;
+      const refreshRequest = page.waitForRequest((request) =>
+        decodeURIComponent(new URL(request.url()).pathname) === `/api/folders/${prefix}/staged-integrity`);
       await page.keyboard.press("Enter");
+      await refreshRequest;
       await expect(staleRow.getByRole("button", { name: "Make again", exact: true })).toBeEnabled();
       await expect(first).toBeEnabled();
       await expect(first).not.toBeChecked();
       await expect(section.getByRole("button", { name: "Make selected again (0)", exact: true })).toBeDisabled();
       await expect(refresh).toHaveCount(0);
+      if (integrityReads !== readsBeforeRefresh + 1) {
+        throw new Error("Refresh must fetch current file state exactly once without a background poll.");
+      }
+      await expect(page.locator("main h1")).toBeFocused();
       await page.screenshot({ path: path.join(screenshotDir, `finished-controls-refreshed-${viewport.width}.png`) });
       await staleRow.getByRole("button", { name: "Make again", exact: true }).click();
       if (JSON.stringify(requests.at(-1)) !== JSON.stringify({ library_item_id: 101, keep: false })) {
