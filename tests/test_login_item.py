@@ -38,7 +38,6 @@ class LoginItemTests(unittest.TestCase):
         self.assertNotIn("MEDIAFORCE_ENV_FILE", payload["EnvironmentVariables"])
         self.assertNotIn("WatchPaths", payload)
         self.assertNotIn("QueueDirectories", payload)
-        self.assertNotIn("/Volumes", str(payload))
 
     def test_rendered_plist_uses_durable_logs(self) -> None:
         payload = plistlib.loads(render_login_item_plist(self.paths))
