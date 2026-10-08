@@ -2,6 +2,7 @@
 
 import argparse
 import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -123,10 +124,21 @@ def guard_group(connection: socket.socket, command: list[str], cwd: Path,
     signal.signal(signal.SIGINT, request_shutdown)
     if port_open(host, port):
         raise OSError("development port already has a listener")
-    family, kind, protocol, _, address = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)[0]
-    with socket.socket(family, kind, protocol) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        probe.bind(address)
+    available = False
+    bind_error: OSError | None = None
+    for family, kind, protocol, _, address in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+        try:
+            with socket.socket(family, kind, protocol) as probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                probe.bind(address)
+        except OSError as exc:
+            if exc.errno not in {errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT}:
+                raise
+            bind_error = exc
+        else:
+            available = True
+    if not available:
+        raise bind_error or OSError("development host has no usable address")
     status: Status = {"state": "starting", "pid": 0,
                       "launcher": os.getppid(), "guardian": os.getpid()}
     child = subprocess.Popen(command, cwd=cwd, start_new_session=True,
@@ -323,7 +335,7 @@ def start(component: str, command: list[str], cwd: Path, host: str, port: int) -
                         start_new_session=True, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
                     )
         time.sleep(POLL_SECONDS)
-    return {"state": "failed", "error": "startup deadline reached; watchdog remains active; use Status or Stop; see component log"}
+    return {"state": "failed", "error": "startup deadline reached; check Status or use Stop; see component log"}
 
 
 def stop(component: str) -> Status:

@@ -542,7 +542,7 @@ If Start reaches its listening deadline, it reports failure while the server
 continues starting under the same watchdog. Use Status to check for readiness
 or Stop to cancel startup; a crash still triggers cleanup. Startup work is not
 terminated by the command's deadline. Bind checks use the configured host's
-resolved address family, including IPv6 loopback and wildcard addresses.
+usable resolved addresses, including IPv6 loopback and wildcard addresses.
 
 Each component has a launcher and a watchdog that owns the server from its
 first instruction, in a private session and process group. Stop asks that owner

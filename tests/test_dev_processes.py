@@ -955,3 +955,44 @@ def test_ipv6_bind_probe_uses_resolved_address(
     probe.bind.assert_called_once_with(address)
     spawned.assert_called_once()
     cleanup.assert_called_once_with(child)
+
+
+@pytest.mark.parametrize('outcome', ['ipv4_available', 'none_available', 'ipv4_busy'])
+def test_bind_probe_checks_usable_addresses_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    addresses = [
+        (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', ('::1', 1234, 0, 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', ('127.0.0.1', 1234)),
+    ]
+    connection = Mock(spec=socket.socket)
+    def make_socket(family: int, _kind: int, _protocol: int) -> MagicMock:
+        context = MagicMock()
+        def bind(_address: tuple[object, ...]) -> None:
+            if outcome == 'none_available' or (family == socket.AF_INET6 and outcome == 'ipv4_available'):
+                raise OSError(errno.EADDRNOTAVAIL, 'resolved address is unavailable')
+            if family == socket.AF_INET and outcome == 'ipv4_busy':
+                raise OSError(errno.EADDRINUSE, 'listener already bound')
+        context.__enter__.return_value.bind.side_effect = bind
+        return context
+    child = Mock(spec=subprocess.Popen, pid=123)
+    spawned = Mock(return_value=child)
+    monkeypatch.setattr(dev_processes, 'enable_subreaper', lambda: None)
+    monkeypatch.setattr(dev_processes, 'port_open', lambda _host, _port: False)
+    monkeypatch.setattr(dev_processes.socket, 'getaddrinfo', Mock(return_value=addresses))
+    monkeypatch.setattr(dev_processes.socket, 'socket', make_socket)
+    monkeypatch.setattr(dev_processes.signal, 'signal', Mock())
+    monkeypatch.setattr(dev_processes.subprocess, 'Popen', spawned)
+    monkeypatch.setattr(dev_processes, 'leader_exited', lambda _pid: True)
+    monkeypatch.setattr(dev_processes, 'stop_group', Mock(return_value=0))
+    if outcome == 'ipv4_available':
+        dev_processes.guard_group(connection, ['fixture'], tmp_path, 'localhost', 1234,
+                                  str(tmp_path / 'control.sock'))
+        spawned.assert_called_once()
+    else:
+        with pytest.raises(OSError) as raised:
+            dev_processes.guard_group(connection, ['fixture'], tmp_path, 'localhost', 1234,
+                                      str(tmp_path / 'control.sock'))
+        expected = errno.EADDRNOTAVAIL if outcome == 'none_available' else errno.EADDRINUSE
+        assert raised.value.errno == expected
+        spawned.assert_not_called()
