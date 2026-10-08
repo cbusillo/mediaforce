@@ -1335,9 +1335,8 @@ def queue_folder_encode_action(
             "updated_at": created_at,
         }
         save_encode_job(connection, queue_job)
-        if expected_approval_contract is not None:
-            finish_remake_intents(connection, [int(item["library_item_id"]) for item in manifest["items"]],
-                                  prefix=normalized_prefix, mode=hold_mode, approval=expected_approval_contract)
+        finish_remake_intents(connection, [int(item["library_item_id"]) for item in manifest["items"]],
+                              prefix=normalized_prefix, mode=hold_mode, approval=expected_approval_contract)
         release_holds(connection, [int(item.get("library_item_id") or 0) for item in manifest["items"]])
         for shard_indexes in _build_manifest_shards(refreshed_config, manifest):
             save_encode_job(

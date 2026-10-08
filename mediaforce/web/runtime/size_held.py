@@ -27,6 +27,7 @@ from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_b
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
 from mediaforce.web.runtime.remake_intents import INTENT_KEY, finish_remake_intents, remake_intent, save_remake_intent
+from mediaforce.web.runtime.remake_intents import requested_copy_is_present
 from mediaforce.web.runtime.remake_intents import stored_validation as _stored_validation
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ def decide_size_held_file(
         if not held:
             return {"ok": False, "message": NOT_HELD_MESSAGE}
         intent = remake_intent(row)
-        if intent and (intent.get("state") != "requested" or not Path(str(row["staging_path"] or "")).is_file()):
+        if intent and not requested_copy_is_present(row):
             return {"ok": False, "message": "This file is waiting to be made again. Retry Make again with its saved settings."}
         name = Path(str(row["rel_path"])).name
         now = now_iso()
@@ -119,6 +120,7 @@ def remake_staged_files(
     manifest_reader = cache(read_manifest)
     for item_id in dict.fromkeys(library_item_ids):
         names[item_id] = "Unavailable file"
+        request_saved = False
         try:
             with open_db(config.paths.db_path) as connection:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
@@ -133,11 +135,12 @@ def remake_staged_files(
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
                     continue
                 intent = remake_intent(row)
-                if not intent:
+                if not intent or requested_copy_is_present(row):
                     run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
                     intent = {"prefix": run_prefix, "mode": mode, "approval": recovery["approval"],
                               "reason": recovery["reason"], "state": "requested"}
                     save_remake_intent(connection, row, intent, now=now_iso())
+                    request_saved = True
             # The request commits before unlink; custody and eligibility are rechecked in the removal transaction.
             with open_db(config.paths.db_path) as connection:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
@@ -149,7 +152,9 @@ def remake_staged_files(
                     reason = "This file’s saved request changed. Refresh it before retrying."
                 if not reason and not _remove_finished_output(config, row):
                     reason = "Mediaforce could not remove the finished copy yet. Try again."
-                if reason:
+                if recovery is None or reason:
+                    if request_saved and remake_intent(row) == intent:
+                        save_remake_intent(connection, row, {}, now=now_iso())
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
                     continue
                 removed.append(item_id)
@@ -230,6 +235,8 @@ def staged_remake_details(
     if not path_matches_scope(str(row.get("rel_path") or ""), prefix) and "rel_path" in row:
         return None
     intent = remake_intent(row)
+    if requested_copy_is_present(row):
+        intent = {}
     validation = _stored_validation(row)
     failed = [str(object_dict(check).get("message") or "") for check in object_list(validation.get("checks"))
               if object_dict(check).get("passed") is False]
@@ -343,18 +350,23 @@ def staged_remake_records(
         return approvals[scope]
 
     for record in records:
-        recovery = staged_remake_details(connection, rows.get(record.get("item_id")), prefix,
+        record_id = record.get("item_id")
+        row = rows.get(record_id) if isinstance(record_id, int) else None
+        recovery = staged_remake_details(connection, row, prefix,
                                         current_approval=approval_for_scope, policy_states=policy_states,
                                         manifest_reader=manifest_reader)
         if recovery is not None:
             record["remake"] = {key: recovery[key] for key in ("reason", "blocked_reason")}
-            intent = remake_intent(rows.get(record.get("item_id")))
+            intent = remake_intent(row)
             if intent:
                 record["remake"]["pending"] = True
                 record["detail"] = ("Saved request to make this file again. Use Make again to retry only this file "
                                     "with its saved settings. " + str(recovery["blocked_reason"]))
                 if intent.get("state") == "removed":
                     record["detail"] = "Finished copy removed; not queued yet. " + record["detail"]
+                elif requested_copy_is_present(row):
+                    record["detail"] = ("Finished copy remains. Use Make again to retry with the current approved settings. "
+                                        + str(recovery["blocked_reason"]))
     return records
 
 

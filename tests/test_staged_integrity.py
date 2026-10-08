@@ -589,6 +589,27 @@ class StagedIntegrityTests(unittest.TestCase):
             self.assertFalse(size_held.remake_intent(row))
             self.assertFalse(size_held._stored_validation(row)["size_prediction"]["held"])
 
+    def test_failed_cleanup_does_not_pin_a_remaining_copy_to_the_previous_approval(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        with patch.object(size_held, "_remove_finished_output", return_value=False):
+            refused = decide_size_held_file(
+                self.config, "tv/Show", item_id, keep=False, now_iso=lambda: "now",
+                validate_items=lambda *_args: self.fail("no check"), queue_items=lambda *_args: self.fail("not removed"),
+                current_approval=lambda _prefix: self._new_remake_approval(),
+            )
+        self.assertFalse(refused["ok"], refused)
+        self.assertTrue(stage.exists())
+        current = self._new_remake_approval(sample="newer-sample", value_mb=180)
+        queue = Mock(return_value={"ok": True})
+        accepted = decide_size_held_file(
+            self.config, "tv/Show", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no check"), queue_items=queue,
+            current_approval=lambda _prefix: current,
+        )
+        self.assertTrue(accepted["ok"], accepted)
+        queue.assert_called_once_with("tv/Show", "older_seasons", [item_id], current)
+        self.assertFalse(stage.exists())
+
     def test_remake_reports_unlink_when_the_following_database_write_fails_and_can_retry(self) -> None:
         item_id, stage, _manifest = self._final_size_file()
         with open_db(self.config.paths.db_path) as connection:
@@ -604,6 +625,12 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertEqual(refused["removed_library_item_ids"], [item_id])
         self.assertIn("recovery was not saved", refused["message"])
         self.assertEqual((self.root / "source/tv/Show/Season 1/TooLarge.mkv").read_bytes(), b"source")
+        changed = decide_size_held_file(
+            self.config, "tv/Show", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no check"), queue_items=lambda *_args: self.fail("must keep saved approval"),
+            current_approval=lambda _prefix: self._new_remake_approval(sample="newer-sample", value_mb=180),
+        )
+        self.assertFalse(changed["ok"], changed)
         with open_db(self.config.paths.db_path) as connection:
             self.assertEqual(connection.execute(select(library_items.c.status).where(
                 library_items.c.id == item_id)).scalar_one(), "encoded")

@@ -71,8 +71,16 @@ the saved retry. To intentionally use different approved settings, use the
 normal queue action with the intended scope and mode, after existing overlapping
 work finishes; this is a new production request rather than a saved retry.
 All reserve, review, lifecycle and per-file guards still apply.
-Accepted requests clear their old finished-file records in the queue transaction.
+Any accepted queue action clears removed remake records in its transaction,
+including an intentional new request under another approval. Old completion
+history cannot make an interrupted new encode look finished.
 Cadence-only production holds are unchanged.
+
+If cleanup is refused before removal, the newly saved request is cleared while
+the finished copy's history remains. A request left by an interruption can also
+be renewed under the current approval when the copy is verifiably still present;
+the original eligibility and changed-goal checks run again. When the copy is
+gone or its presence cannot be confirmed, the saved approval remains required.
 
 If removal succeeds but a later database write fails, `removed_library_item_ids`
 still names the removed file and the response says its recovery was not saved.
