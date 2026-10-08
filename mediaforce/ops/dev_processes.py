@@ -66,18 +66,25 @@ def stop_group(child: subprocess.Popen[bytes]) -> int:
     try:
         os.killpg(child.pid, signal.SIGTERM)
     except ProcessLookupError:
-        if reap_descendants(child.pid) or not leader_exited(child.pid):
+        if not leader_exited(child.pid) or reap_descendants(child.pid):
             raise
     deadline = time.monotonic() + TERM_SECONDS
-    while reap_descendants(child.pid) or not leader_exited(child.pid):
+    while not leader_exited(child.pid) or reap_descendants(child.pid):
         if time.monotonic() >= deadline:
             os.killpg(child.pid, signal.SIGKILL)
             deadline = time.monotonic() + TERM_SECONDS
         time.sleep(POLL_SECONDS)
-    result = child.wait()
-    if group_members(child.pid):
-        raise RuntimeError("development process group is not empty")
-    return result
+    # The exited, unreaped leader still reserves the PGID while the last
+    # group snapshot is taken. After wait() there are no further PGID queries
+    # or signals: that number can belong to a new process group.
+    return child.wait()
+
+
+def log(message: str) -> None:
+    try:
+        print(message, flush=True)
+    except OSError:
+        pass  # Log I/O cannot interrupt custody or repeat completed cleanup.
 
 
 def port_open(host: str, port: int) -> bool:
@@ -141,15 +148,18 @@ def guard_group(connection: socket.socket, command: list[str], cwd: Path,
         while True:
             try:
                 result = stop_group(child)
-                print(f"group {child.pid} empty; leader reaped with exit {result}", flush=True)
                 break
             except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
-                print(f"development cleanup pending: {exc}", flush=True)
+                log(f"development cleanup pending: {exc}")
                 time.sleep(POLL_SECONDS)
+        log(f"group {child.pid} empty; leader reaped with exit {result}")
         Path(socket_name).unlink(missing_ok=True)
 
 
 def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -> int:
+    # An ignored inherited SIGCHLD would auto-reap the server and release its
+    # PID before group completion. Both launcher and watchdog retain exit status.
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     socket_name = component + ".sock"
     with open(component + ".lock", "a") as lock, socket.socket(socket.AF_UNIX) as server:
         try:
@@ -168,7 +178,7 @@ def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -
                 guard_group(child, command, cwd, host, port, socket_name)
                 os._exit(0)
             except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
-                print(f"development launcher failed: {exc}", flush=True)
+                log(f"development launcher failed: {exc}")
                 try:
                     send_status(child, {"state": "failed", "error": str(exc)})
                 except (BrokenPipeError, ConnectionResetError):
@@ -253,12 +263,12 @@ def request(component: str, action: str) -> Status:
 def start(component: str, command: list[str], cwd: Path, host: str, port: int) -> Status:
     previous = request(component, "status")
     if previous["state"] == "stopped":
-        with open(component + ".log", "ab", buffering=0) as log:
+        with open(component + ".log", "ab", buffering=0) as output:
             subprocess.Popen(
                 [sys.executable, str(Path(__file__).resolve()), "serve", component,
                  "--state-dir", str(Path.cwd()), "--cwd", str(cwd),
                  "--host", host, "--port", str(port), "--", *command],
-                start_new_session=True, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                start_new_session=True, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
             )
     deadline = time.monotonic() + START_SECONDS + 2
     while time.monotonic() < deadline:
@@ -320,6 +330,7 @@ def main() -> int:
     if args.action == "serve":
         return serve(args.component, command, args.cwd, args.host, args.port)
     failed = False
+    status: Status = {"state": "stopped"}
     for component in (["frontend", "backend"] if args.component == "all" else [args.component]):
         if args.action in {"stop", "restart"}:
             status = stop(component)

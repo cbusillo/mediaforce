@@ -539,8 +539,9 @@ and Vite uses `--strictPort`.
 Each component has a launcher and a watchdog that owns the server from its
 first instruction, in a private session and process group. Stop asks that owner
 to send TERM to the group, then KILL if necessary. The watchdog keeps the leader
-unreaped until every other group member has exited, reaps the leader, and checks
-that the group is empty before releasing the component lock. A server crash
+unreaped until it has exited and every other group member is gone, then reaps
+the leader and releases the component lock. It never queries or signals the
+released group number again, even if completion logging fails. A server crash
 also triggers cleanup of its orphaned workers. If the command-facing launcher
 is killed, a private connection closes and the watchdog performs the same cleanup.
 Start cannot replace a component while its watchdog still holds the lock.

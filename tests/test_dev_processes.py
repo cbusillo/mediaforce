@@ -1,14 +1,14 @@
+import builtins
 import json
 import os
 from pathlib import Path
-import select
 import shutil
 import signal
 import socket
 import subprocess
 import sys
 import time
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
@@ -241,7 +241,11 @@ def test_leader_is_reaped_only_after_descendants_exit(monkeypatch: pytest.Monkey
     monkeypatch.setattr(dev_processes.os, 'killpg', lambda *_args: events.append('signal group'))
     monkeypatch.setattr(dev_processes, 'reap_descendants', observe_descendants)
     monkeypatch.setattr(dev_processes, 'leader_exited', lambda _pid: True)
-    monkeypatch.setattr(dev_processes, 'group_members', lambda _pgid: set())
+    def released_group_snapshot(_pgid: int) -> set[int]:
+        if 'reap leader' in events:
+            raise OSError('snapshot failed after the leader was reaped')
+        return set()
+    monkeypatch.setattr(dev_processes, 'group_members', released_group_snapshot)
     assert dev_processes.stop_group(child) == 0
     assert events == ['signal group', 'descendants remain', 'descendants empty', 'reap leader']
 
@@ -317,3 +321,79 @@ def test_worker_fork_during_stop_is_cleaned_with_its_group(dev: DevFixture) -> N
             assert os.getpgid(int(pid)) != group
         except ProcessLookupError:
             pass
+
+
+def test_completion_log_failure_never_retries_a_reaped_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child = Mock(spec=subprocess.Popen, pid=123)
+    cleanup = Mock(return_value=0)
+    connection = Mock(spec=socket.socket)
+    monkeypatch.setattr(dev_processes, 'enable_subreaper', lambda: None)
+    monkeypatch.setattr(dev_processes.socket, 'socket', MagicMock())
+    monkeypatch.setattr(dev_processes.signal, 'signal', Mock())
+    monkeypatch.setattr(dev_processes.subprocess, 'Popen', Mock(return_value=child))
+    monkeypatch.setattr(dev_processes, 'leader_exited', lambda _pid: True)
+    monkeypatch.setattr(dev_processes, 'stop_group', cleanup)
+    printed = False
+    def report(message: str, **_kwargs: object) -> None:
+        nonlocal printed
+        if not printed and message.startswith('group '):
+            printed = True
+            raise OSError('disk full while reporting completion')
+    monkeypatch.setattr(builtins, 'print', report)
+    dev_processes.guard_group(connection, ['fixture'], tmp_path, '127.0.0.1', 1234,
+                              str(tmp_path / 'control.sock'))
+    cleanup.assert_called_once_with(child)
+
+
+def test_failed_spawn_releases_owner_and_start_can_be_retried(dev: DevFixture) -> None:
+    executable = dev.root / '.venv/bin/mediaforce-web'
+    original = executable.read_bytes()
+    executable.unlink()
+    result = dev.run('start')
+    assert result.returncode != 0
+    assert dev.status()['state'] == 'stopped'
+    assert dev.run('stop').returncode == 0
+    executable.write_bytes(original)
+    executable.chmod(0o755)
+    assert dev.run('start').returncode == 0
+    assert dev.run('stop').returncode == 0
+
+
+def test_launcher_restores_child_exit_custody_before_fork(tmp_path: Path) -> None:
+    helper = Path(dev_processes.__file__).resolve()
+    probe = '''
+import importlib.util, json, os, signal, sys
+from pathlib import Path
+signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+spec = importlib.util.spec_from_file_location('dev_custody_probe', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+os.chdir(sys.argv[2])
+def before_fork():
+    print(json.dumps({'retains_child_exit': signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL}))
+    raise OSError('fixture stops before process creation')
+module.os.fork = before_fork
+try:
+    module.serve('backend', ['fixture'], Path.cwd(), '127.0.0.1', 1234)
+except OSError:
+    pass
+'''
+    result = subprocess.run([sys.executable, '-c', probe, str(helper), str(tmp_path)],
+                            text=True, capture_output=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['retains_child_exit']
+
+
+def test_start_with_inherited_ignored_child_signal_still_stops(dev: DevFixture) -> None:
+    entry = '''
+import os, signal, sys
+signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+os.execv(sys.executable, [sys.executable, sys.argv[1], 'start', 'backend'])
+'''
+    result = subprocess.run([sys.executable, '-c', entry, str(dev.root / 'mediaforce/ops/dev_processes.py')],
+                            env=dev.env, text=True, capture_output=True, timeout=25)
+    assert result.returncode == 0, result.stderr
+    assert dev.run('stop').returncode == 0
+    dev.assert_empty()
