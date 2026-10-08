@@ -368,13 +368,18 @@ def staged_remake_records(
             intent = remake_intent(row)
             if intent:
                 record["remake"]["pending"] = True
+                copy_state = ("removed" if intent.get("state") == "removed" else
+                              "present" if requested_copy_is_present(row) else "unknown")
+                record["remake"]["copy_state"] = copy_state
                 record["detail"] = ("Saved request to make this file again. Use Make again to retry only this file "
                                     "with its saved settings. " + str(recovery["blocked_reason"]))
-                if intent.get("state") == "removed":
+                if copy_state == "removed":
                     record["detail"] = "Finished copy removed; not queued yet. " + record["detail"]
-                elif requested_copy_is_present(row):
+                elif copy_state == "present":
                     record["detail"] = ("Finished copy remains. Use Make again to retry with the current approved settings. "
                                         + str(recovery["blocked_reason"]))
+                else:
+                    record["detail"] = "Finished copy presence is unconfirmed. " + record["detail"]
     return records
 
 

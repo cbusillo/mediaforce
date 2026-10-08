@@ -60,8 +60,11 @@
 						{fileName(record.rel_path)}
 					</label>
 					<span class="size-held__detail">
-						{#if record.remake?.pending && record.disposition === 'not_started'}
-							{record.detail || 'This compressed copy is already removed.'}
+						{#if record.remake?.pending && (record.remake.copy_state === 'removed' || record.remake.copy_state === 'unknown' || record.disposition === 'not_started')}
+							{record.detail ||
+								(record.remake.copy_state === 'unknown'
+									? 'Use Make again to retry this file with its saved settings.'
+									: 'This compressed copy is already removed.')}
 						{:else}
 							{#if record.remake?.reason === 'final_size'}
 								Missed its approved size goal.
