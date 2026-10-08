@@ -49,12 +49,6 @@ after the package consolidation pass. Avoid growing them with new helper logic.
 - `process_control.py`
   - managed subprocess cancellation, absolute deadlines, containment status,
     and command helpers
-  - delegates existing development-tree stop to `dev_processes.py`
-- `dev_processes.py`
-  - standalone development custody gateway, loadable without application imports
-  - pins native custody before rechecking command ownership and retains that
-    custody across bounded cleanup attempts; `ops/dev_processes.py` owns the
-    retry connection and pending-state lifecycle
 - `_process_deadline.py`
   - private per-command supervisor that keeps ownership until every observed
     descendant exits
@@ -62,13 +56,7 @@ after the package consolidation pass. Avoid growing them with new helper logic.
     a controller pause; an empty tree succeeds only with intact ownership and
     successful signaling, without extending the cleanup grace periods
   - Linux uses a scoped child subreaper plus pidfds; procfs disappearance is an
-    exit race only when the pinned pidfd independently proves exit. Existing-tree
-    development cleanup has no such pre-launch subreaper authority: a tracked
-    worker can fork and exit between procfs passes, leaving an unseen descendant.
-    That external mode retains pinned best-effort teardown but always reports
-    descendant custody as unproven; observed exit is not a full-tree proof.
-    The supported Linux foreground development path is in README's Local web
-    development section
+    exit race only when the pinned pidfd independently proves exit
   - macOS uses Darwin unique parent identities plus audit-token signaling; a
     uniquely live process that cannot provide a signal token remains live and
     makes cleanup unprovable rather than being classified as exited. Signal-token
@@ -546,3 +534,15 @@ tests/test_tuning_runtime.py tests/test_scanner_runtime.py`
 - `uv run --with ruff ruff check <touched files>`
 - `cd frontend && npm run check` when route payloads or frontend code change
 - real browser verification when visible route behavior changes
+
+### Development server launcher
+
+`mediaforce/ops/dev_processes.py` owns dev-server startup, control sockets,
+component locks and private process-group completion. `scripts/mediaforce-dev.sh`
+loads `.env` and calls it with the checkout's prepared interpreter. A watchdog
+retains the server leader until its group is empty and watches the launcher
+connection for EOF. On Linux it adopts orphaned descendants as a child subreaper;
+on macOS launchd reaps them. Development lifecycle behavior and the migration
+from older foreground/login-item launches are documented in README's Local web
+development section. Production workers continue through `process_control.py`
+and `_process_deadline.py`; they do not use the development launcher.

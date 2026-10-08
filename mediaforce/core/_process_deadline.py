@@ -169,14 +169,13 @@ class _LinuxProcessIdentity:
 
 
 class _LinuxProcessTree:
-    def __init__(self, *, external_root: bool = False) -> None:
+    def __init__(self) -> None:
         pidfd_open = getattr(os, "pidfd_open", None)
         pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
         if pidfd_open is None or pidfd_send_signal is None:
             raise _ContainmentUnavailableError("pidfd signaling is unavailable")
         self._pidfd_open = pidfd_open
         self._pidfd_send_signal = pidfd_send_signal
-        self._external_root = external_root
         libc = ctypes.CDLL(None, use_errno=True)
         prctl = libc.prctl
         prctl.argtypes = [
@@ -187,7 +186,7 @@ class _LinuxProcessTree:
             ctypes.c_ulong,
         ]
         prctl.restype = ctypes.c_int
-        if not external_root and prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        if prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
             error_number = ctypes.get_errno()
             raise _ContainmentUnavailableError(
                 "cannot establish a scoped child subreaper"
@@ -198,13 +197,10 @@ class _LinuxProcessTree:
 
     @property
     def compromised(self) -> bool:
-        # An external tree can reparent unseen children outside this helper.
-        return self._external_root
+        return False
 
     @property
     def ownership_failure_reason(self) -> str | None:
-        if self._external_root:
-            return "Linux existing-tree descendant custody is unproven"
         return None
 
     @property
@@ -216,7 +212,7 @@ class _LinuxProcessTree:
         return self._signal_failure_reason
 
     def add_root(self, pid: int) -> None:
-        parent_pid = _linux_parent_pid(pid) if self._external_root else os.getpid()
+        parent_pid = os.getpid()
         if not self._register(pid, parent_pid):
             raise _ContainmentUnavailableError(
                 "managed command exited before containment was established"
@@ -229,7 +225,7 @@ class _LinuxProcessTree:
         changed = True
         while changed:
             changed = False
-            parent_pids = list(self._processes) if self._external_root else [os.getpid(), *self._processes]
+            parent_pids = [os.getpid(), *self._processes]
             for parent_pid in parent_pids:
                 identity = self._processes.get(parent_pid)
                 if identity is not None and _pidfd_exited(identity.process_descriptor):
@@ -982,11 +978,9 @@ class _DarwinProcessTree:
 
 def _process_tree(
         containment_mode: _ContainmentMode = _ContainmentMode.STRICT,
-        *,
-        external_root: bool = False,
 ) -> _LinuxProcessTree | _DarwinProcessTree:
     if sys.platform.startswith("linux"):
-        return _LinuxProcessTree(external_root=external_root)
+        return _LinuxProcessTree()
     if sys.platform == "darwin":
         return _DarwinProcessTree(containment_mode)
     raise _ContainmentUnavailableError(

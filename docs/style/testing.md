@@ -38,10 +38,10 @@ orchestration, profile byte preservation and dependency-cache invalidation.
 The existing Vitest lane exercises the actual JavaScript module normalization
 and manifest digest, including its CLI, using temporary inputs.
 
-The development lifecycle fixture in `tests/test_dev_service.py` observes root
-lifetime separately from worker lifetime. Its root handler writes a SIGTERM
-receipt while the worker may still be running; preservation assertions reject
-that receipt. Shutdown cases that intentionally leave a signalled root alive
-explicitly require it. The final completion record derives its signal evidence
-from the same receipt. The root closes its copy of the descendant lifetime
-writer after launching the child, so a live root cannot mask worker exit.
+Development launcher behavior tests use temporary checkouts and pipe-owned
+server fixtures. The fixtures expose native PGIDs through a pinned process
+inventory command and close their lifetime pipe for independent teardown.
+They cover reuse, restart, server crash with orphan workers, launcher loss,
+stubborn descendants, foreign listeners and preservation of legacy records.
+Actual backend/reload/npm/Vite process-group qualification remains separate
+from the isolated fixture tests.

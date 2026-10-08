@@ -6,17 +6,21 @@ import sys
 import tempfile
 import time
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from mediaforce.hosts.controller_mount import _resolve_server_addresses as resolve_server_addresses, \
+from mediaforce.hosts.controller_mount import AccessMode, ControllerMountProbe, \
+    _resolve_server_addresses as resolve_server_addresses, \
     controller_mount_lock, mount_controller_smb_no_ui, probe_controller_mount, probe_controller_volume, same_smb_share
 from mediaforce.hosts.mount_runtime import ControllerSmbMount
 
 
 class ControllerMountTests(unittest.TestCase):
     mount = ControllerSmbMount("//local@NAS.local/media", Path("/Volumes/media"))
-    required_paths = {Path("/Volumes/media/tv"): "read", Path("/Volumes/media/transcode"): "write"}
+    required_paths: Mapping[str | Path, AccessMode] = {
+        Path("/Volumes/media/tv"): "read", Path("/Volumes/media/transcode"): "write",
+    }
 
     def setUp(self) -> None:
         # No test may reach the network: names resolve only where a test says so.
@@ -127,7 +131,7 @@ class ControllerMountTests(unittest.TestCase):
         def resolve(server: str) -> frozenset[str]:
             return addresses.get(server, frozenset())
 
-        def probe(source: str):
+        def probe(source: str) -> ControllerMountProbe:
             return probe_controller_mount(
                 mount, self.required_paths,
                 run_subprocess=Mock(return_value=self._probe(source=source)), resolve_server=resolve,
@@ -148,7 +152,9 @@ class ControllerMountTests(unittest.TestCase):
     def test_bonjour_service_name_resolves_through_its_advertised_host(self) -> None:
         lookups: list[str] = []
 
-        def getaddrinfo(host: str, *_args, **_kwargs):
+        def getaddrinfo(
+                host: str, *_args: object, **_kwargs: object,
+        ) -> list[tuple[None, None, None, str, tuple[str, int]]]:
             lookups.append(host)
             if host in {"storage-1.local", "nas.shiny"}:
                 return [(None, None, None, "", ("192.168.1.37", 445))]
