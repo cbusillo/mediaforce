@@ -243,13 +243,19 @@ def test_native_unknown_parent_and_custody_recheck(frontend_tree: FrontendTree, 
             retry = subprocess.run(["/bin/bash", str(tree.script), retry_action, "frontend"],
                                    env=tree.env, capture_output=True, text=True, timeout=20)
             assert retry.returncode != 0, retry.stdout
-            assert retry.stderr.count(dev_processes.CUSTODY_RECOVERY_ADVICE) == 1
-            assert "native capture incomplete" in retry.stderr
+            if retry_action == "start" and sys.platform == "linux":
+                assert "Linux development launcher cleanup cannot prove descendant custody" in retry.stderr
+                assert "uv run mediaforce-web --no-reload" in retry.stderr
+                assert "npm --prefix frontend run dev" in retry.stderr
+            else:
+                assert retry.stderr.count(dev_processes.CUSTODY_RECOVERY_ADVICE) == 1
+                assert "native capture incomplete" in retry.stderr
+                if retry_action == "start":
+                    assert "cleanup is pending" in retry.stderr
             assert tree.pid_file.read_text() == str(tree.rows["vite"])
             assert (state / "boot").read_bytes() == recorded_boot
             assert not select.select([tree.owned_lifetime, tree.sibling_lifetime], [], [], .1)[0]
             assert tree.wrapper.poll() is None
-        assert "cleanup is pending" in retry.stderr
     else:
         assert f"native argument ownership unknown for pid {target}: controlled native argument unavailability" in result.stderr
         assert "stopping proven subtree" in result.stderr

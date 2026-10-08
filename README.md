@@ -637,7 +637,7 @@ exits without descendant completion proof. The first Stop or Restart reports
 incomplete capture and the next-system-restart requirement immediately.
 Restoring the reader alone
 cannot recover that custody. Subsequent Stop and Restart retain the state;
-Start refuses a replacement and shows the saved failure. This is distinct from
+On macOS, Start refuses a replacement and shows the saved failure. This is distinct from
 an error after completed capture, whose retained supervisor supports retry,
 and from setup that was proved unpublished before the cleanup supervisor was
 launched.
