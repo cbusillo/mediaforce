@@ -14,7 +14,6 @@ from sqlalchemy import delete, or_, select, update
 from mediaforce.core.config import MediaforceConfig, load_config, with_folder_policy_override
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
-from mediaforce.library.remake_intents import finish_remake_intents
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.core.utils import filesystem_collision_key
@@ -26,6 +25,7 @@ from mediaforce.execution import HeldFile, PromotionResult
 from mediaforce.library.media_scopes import MediaScope, is_tv_season_prefix, path_matches_scope, resolve_media_scope, \
     scope_descendant_filter, scope_rel_path_filter
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
+from mediaforce.library.remake_intents import finish_remake_intents
 from mediaforce.library.staged_integrity import IntegrityDisposition, StagedIntegrityReport, \
     integrity_disposition_blocks_promotion, \
     staged_integrity_report_for_scope

@@ -555,6 +555,29 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertFalse(request()["ok"])
         self.assertEqual(len(calls), 2)
 
+    def test_confirmed_removed_remote_remake_does_not_repeat_cleanup_before_queueing(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        refused = decide_size_held_file(
+            self.config, "tv/Show", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no check"), queue_items=lambda *_args: {"ok": False},
+            current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertFalse(refused["ok"], refused)
+        self.assertFalse(stage.exists())
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(update(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id)
+                               .values(encode_host_key="fixture-offline", encode_media_access="stream"))
+        queue = Mock(return_value={"ok": True})
+        with patch.object(size_held, "_remove_finished_output", return_value=False) as cleanup:
+            accepted = decide_size_held_file(
+                self.config, "tv/Show", item_id, keep=False, now_iso=lambda: "now",
+                validate_items=lambda *_args: self.fail("no check"), queue_items=queue,
+                current_approval=lambda _prefix: self._new_remake_approval(),
+            )
+        self.assertTrue(accepted["ok"], accepted)
+        cleanup.assert_not_called()
+        queue.assert_called_once_with("tv/Show", "older_seasons", [item_id], self._new_remake_approval())
+
     def test_saved_remake_refuses_changed_approval_and_does_not_keep_a_removed_copy(self) -> None:
         item_id, stage, _manifest = self._final_size_file()
         decide_size_held_file(

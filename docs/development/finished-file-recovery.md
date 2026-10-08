@@ -24,6 +24,9 @@ queue refusal retains that request and explicitly reports that the copy was
 removed. Retry **Make again** on the same file or selected IDs after the named
 refusal clears; a fresh request reads the saved settings from the database,
 including after a restart. This is an explicit retry, not an automatic one.
+Once removal is confirmed in the saved request, retries do not repeat cleanup
+on its host; an offline former host does not produce a false removal failure.
+Original access, path protection, active-work and queue-admission checks still run.
 The integrity details keep the request and retry guidance visible. A confirmed
 removed copy counts as work awaiting queueing, including copies made on a remote
 host, and points to Make again instead of missing-output repair.

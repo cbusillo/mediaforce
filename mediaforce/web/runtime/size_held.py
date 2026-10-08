@@ -18,6 +18,14 @@ from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding.encode_queue import load_active_encode_jobs_for_prefix
 from mediaforce.encoding.staging import FINAL_SIZE_GOAL_CHECK, partial_output_path
 from mediaforce.library.media_scopes import path_matches_scope
+from mediaforce.library.remake_intents import (
+    INTENT_KEY,
+    finish_remake_intents,
+    remake_intent,
+    requested_copy_is_present,
+    save_remake_intent,
+    stored_validation as _stored_validation,
+)
 from mediaforce.library.staged_integrity import staged_validation_outcome
 from mediaforce.tuning.calibration_jobs import EXECUTION_ACTIVE_JOB_STATUSES, load_latest_job
 from mediaforce.web.runtime.encode_runtime import remove_stale_staging_path
@@ -26,9 +34,6 @@ from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_b
     staged_requeue_size_blocker
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
-from mediaforce.library.remake_intents import INTENT_KEY, finish_remake_intents, remake_intent, save_remake_intent
-from mediaforce.library.remake_intents import requested_copy_is_present
-from mediaforce.library.remake_intents import stored_validation as _stored_validation
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +157,7 @@ def remake_staged_files(
                     reason = "This file’s saved request changed. Refresh it before retrying."
                 if not reason and recovery is not None and recovery["approval"] != intent["approval"]:
                     reason = "The approved settings changed before removal. Refresh before retrying. Nothing was removed."
-                if not reason and not _remove_finished_output(config, row):
+                if not reason and intent.get("state") != "removed" and not _remove_finished_output(config, row):
                     reason = "Mediaforce could not remove the finished copy yet. Try again."
                 if recovery is None or reason:
                     if request_saved and remake_intent(row) == intent:
