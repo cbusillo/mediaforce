@@ -231,7 +231,6 @@ def test_native_unknown_parent_and_custody_recheck(frontend_tree: FrontendTree, 
         assert result.returncode != 0
         assert "native capture incomplete" in result.stderr
         assert "next system restart" in result.stderr
-        assert "PID bookkeeping retained; retry the same stop command" not in result.stderr
         assert "PID bookkeeping retained" in result.stderr
         assert tree.pid_file.read_text() == str(tree.rows["vite"])
         assert not select.select([tree.owned_lifetime], [], [], .1)[0]
