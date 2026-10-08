@@ -49,7 +49,7 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       }));
       const requests = [];
       const originalRecords = records;
-      let fail = true;
+      let outcome = "refused";
       const integrity = () => ({
         counts: { validation_failed: records.length },
         blocker_count: records.length,
@@ -65,10 +65,23 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
         if (url.endsWith("/size-held-decision")) {
           const body = route.request().postDataJSON();
           requests.push(body);
-          if (fail) {
+          if (outcome === "refused") {
             return route.fulfill({ status: 409, json: { ok: false, message: "Try again; nothing was queued." } });
           }
           records = records.filter((record) => !body.library_item_ids.includes(record.item_id));
+          if (outcome === "removed") {
+            return route.fulfill({ status: 409, json: {
+              ok: false, removed_library_item_ids: body.library_item_ids,
+              message: "Finished copies removed, but not queued. Try the normal queue action again.",
+            } });
+          }
+          if (outcome === "partial") {
+            return route.fulfill({ json: {
+              ok: true, removed_library_item_ids: body.library_item_ids,
+              queued_library_item_ids: [101], left_out: [{ library_item_id: 102 }],
+              message: "Queued 1 file. Episode 2.mkv: Finished copy removed, but not queued.",
+            } });
+          }
           return route.fulfill({ json: { ok: true, message: "Queued 2 files to make again." } });
         }
         const response = await route.fetch();
@@ -94,7 +107,7 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       await make.click();
       await expect(page.getByText("Try again; nothing was queued.", { exact: true })).toBeVisible();
       await expect(first).toBeChecked();
-      fail = false;
+      outcome = "success";
       await make.click();
       await expect(section.getByRole("checkbox")).toHaveCount(29);
       await expect(section.getByRole("button", { name: "Make selected again (0)", exact: true })).toBeDisabled();
@@ -113,6 +126,29 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       await expect(section.getByRole("checkbox")).toHaveCount(31, { timeout: 15000 });
       await expect(first).not.toBeChecked();
       await expect(section.getByRole("button", { name: "Make selected again (0)", exact: true })).toBeDisabled();
+      outcome = "removed";
+      await first.check();
+      await section.getByRole("checkbox", { name: "Select Episode 2.mkv to make again", exact: true }).check();
+      await make.click();
+      await expect(page.getByRole("alert")).toContainText("Finished copies removed, but not queued.");
+      await expect(section.getByRole("checkbox")).toHaveCount(29, { timeout: 2000 });
+      records = originalRecords;
+      await expect(section.getByRole("checkbox")).toHaveCount(31, { timeout: 15000 });
+      await expect(first).not.toBeChecked();
+      outcome = "partial";
+      await first.check();
+      await section.getByRole("checkbox", { name: "Select Episode 2.mkv to make again", exact: true }).check();
+      await make.click();
+      const notice = page.getByRole("status").filter({ hasText: "Finished copy removed, but not queued." });
+      await expect(notice).toBeVisible();
+      await expect(notice).toContainText("!");
+      await expect(section.getByRole("checkbox")).toHaveCount(29);
+      await notice.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(screenshotDir, `multi-file-remake-warning-${viewport.width}.png`) });
+      if (requests.length !== 4 || requests.some((body) =>
+        JSON.stringify(body) !== JSON.stringify({ library_item_ids: [101, 102], keep: false }))) {
+        throw new Error(`Wrong recovery remake request: ${JSON.stringify(requests)}`);
+      }
       await page.close();
     }
     console.log("route ok: Multi-file remake selection, retry and refresh at desktop and narrow widths");

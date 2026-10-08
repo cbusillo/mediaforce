@@ -10,12 +10,17 @@ Select several files on the show or season page and use **Make selected again**
 to queue them in one action. The same endpoint accepts `library_item_ids: [id, ...]`
 with `keep: false`; bulk Keep is not supported. Each file is rechecked separately.
 A file refused by the remake checks keeps its compressed copy and gets its own
-reason in `left_out`.
+reason in `left_out`. Each completed file is committed before checking the next,
+so an interruption cannot roll back earlier recovery records and a slow host
+does not hold the database write lock for the whole batch.
 Eligible files sharing their saved scope and mode form one normal folder run,
 with the usual host shards. Different saved scopes or modes form separate runs
 rather than broadening a season override. The response names queued and removed
 item IDs and includes the queue results in `runs`. A later queue refusal explicitly
 reports that the copy was removed and the file remains planned for queue recovery.
+An unexpected queue failure is reported for its group; the other groups are still
+attempted. The workspace refreshes removed files even when none were queued,
+and shows partial refusals as an attention notice.
 
 A final-size failure requires a fresh approved sample and a changed goal under
 the same contract check used for failed-run recovery. Older multi-file runs

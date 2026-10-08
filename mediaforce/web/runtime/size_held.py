@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Collection, Mapping
 from functools import cache
 from pathlib import Path
@@ -25,6 +26,8 @@ from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_b
     staged_requeue_size_blocker
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
+
+logger = logging.getLogger(__name__)
 
 NOT_HELD_MESSAGE = "This file is no longer waiting for a decision about its size."
 
@@ -108,9 +111,9 @@ def remake_staged_files(
     removed: list[int] = []
     names: dict[int, str] = {}
     manifest_reader = cache(read_manifest)
-    with open_db(config.paths.db_path) as connection:
-        connection.exec_driver_sql("BEGIN IMMEDIATE")
-        for item_id in dict.fromkeys(library_item_ids):
+    for item_id in dict.fromkeys(library_item_ids):
+        with open_db(config.paths.db_path) as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
             row = connection.execute(
                 select(staged_artifacts, library_items.c.rel_path,
                        library_items.c.source_path.label("original_source_path"))
@@ -142,7 +145,11 @@ def remake_staged_files(
     runs: list[dict[str, Any]] = []
     queued_ids: list[int] = []
     for (run_prefix, mode), item_ids in groups.items():
-        result = queue_items(run_prefix, mode, item_ids)
+        try:
+            result = queue_items(run_prefix, mode, item_ids)
+        except Exception:
+            logger.exception("Could not queue remade files for %s in %s mode", run_prefix, mode)
+            result = {"ok": False, "message": "Queueing failed. Try the normal queue action again."}
         runs.append(result)
         queue_left_out = object_list(result.get("left_out"))
         excluded_ids = {file.get("library_item_id") for file in queue_left_out}

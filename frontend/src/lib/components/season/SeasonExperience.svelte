@@ -115,6 +115,7 @@
 	type ActionResponse = {
 		ok?: boolean;
 		message?: string;
+		left_out?: { library_item_id?: number; reason?: string }[];
 		proposal?: Record<string, unknown> | null;
 		start_encode?: { ok?: boolean; message?: string } | null;
 	};
@@ -178,7 +179,7 @@
 	let actionPhase = $state<ActionPhase>('idle');
 	let actionError = $state('');
 	let actionMessage = $state('');
-	let actionMessageTone = $state<'success' | 'neutral'>('success');
+	let actionMessageTone = $state<'success' | 'neutral' | 'warning'>('success');
 	let actionMessageStateKey = $state('');
 	let blockerAction = $state<{ route: '/ops'; label: string } | null>(null);
 	let actionStartedAt = $state(0);
@@ -1135,14 +1136,26 @@
 	async function remakeSelectedFiles(libraryItemIds: number[]) {
 		const fallback = 'We couldn’t queue these files to make again.';
 		await runAction('deciding', fallback, async () => {
-			const response = ensureOk(
-				await postJson<ActionResponse>(endpoint('size-held-decision'), {
-					library_item_ids: libraryItemIds,
-					keep: false
-				}),
-				fallback
-			);
-			actionMessage = response.message || '';
+			try {
+				const response = ensureOk(
+					await postJson<ActionResponse>(endpoint('size-held-decision'), {
+						library_item_ids: libraryItemIds,
+						keep: false
+					}),
+					fallback
+				);
+				actionMessage = response.message || '';
+				if (response.left_out?.length) actionMessageTone = 'warning';
+			} catch (error) {
+				if (
+					error instanceof ApiError &&
+					Array.isArray(error.payload?.removed_library_item_ids) &&
+					error.payload.removed_library_item_ids.length
+				) {
+					await onMutate();
+				}
+				throw error;
+			}
 		});
 	}
 
@@ -1616,7 +1629,13 @@
 				class:action-notice--neutral={actionMessageTone === 'neutral'}
 				role="status"
 			>
-				<span aria-hidden="true">{actionMessageTone === 'success' ? '✓' : 'i'}</span>
+				<span aria-hidden="true"
+					>{actionMessageTone === 'success'
+						? '✓'
+						: actionMessageTone === 'warning'
+							? '!'
+							: 'i'}</span
+				>
 				<div><strong>{actionMessage}</strong></div>
 			</div>
 		{/if}
