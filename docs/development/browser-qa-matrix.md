@@ -116,11 +116,6 @@ The managed smoke seeds a compact but non-empty workflow dataset:
 - Protected approved state: `/folders/tv/Protected%20Ready/Season%202`, where an
   accepted test is ready but the current/recent season requires the explicit
   lifecycle override dialog before queueing.
-- Saved remakes: the TV workspace banner shows a compact count and a keyboard
-  reachable link to **Needs you**. Blocked and unblocked requests keep their
-  per-file retry guidance beside their decisions, without repeating it in the
-  banner. Check desktop and 390px, including requests beyond the first
-  staged-integrity page and the banner disappearing after the last request clears.
 - Active processing state: `/folders/tv/Encoding%20Show/Season%201`, with a
   running folder processing row.
 - Complete and blocked promotion states:
@@ -284,6 +279,13 @@ Those checks are intentionally short and mechanical. For visual redesign or
 interaction work, add a manual browser review with screenshots under
 `scratch/ui-checks/` and inspect the actual starting viewport, post-interaction
 state, and narrow layout.
+
+For saved-remake banner changes, add a manual TV workspace check with blocked
+and unblocked synthetic requests at desktop and 390px. Verify the compact count,
+keyboard link to **Needs you**, and per-file retry guidance beside each decision
+without repetition in the banner. Include requests beyond the first
+staged-integrity page and the banner disappearing after the last request clears;
+these banner checks are not part of the seeded route smoke.
 
 Review-assistant submissions may run multiple bounded inference steps. The
 browser must remain pending instead of aborting before those backend limits,
