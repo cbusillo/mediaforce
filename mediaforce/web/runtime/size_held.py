@@ -112,36 +112,42 @@ def remake_staged_files(
     names: dict[int, str] = {}
     manifest_reader = cache(read_manifest)
     for item_id in dict.fromkeys(library_item_ids):
-        with open_db(config.paths.db_path) as connection:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
-            row = connection.execute(
-                select(staged_artifacts, library_items.c.rel_path,
-                       library_items.c.source_path.label("original_source_path"))
-                .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
-                .where(staged_artifacts.c.library_item_id == item_id)
-            ).mappings().fetchone()
-            names[item_id] = Path(str(row["rel_path"])).name if row is not None else "Unavailable file"
-            recovery = None
-            if row is not None and path_matches_scope(str(row["rel_path"] or ""), prefix):
-                recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval,
-                                                manifest_reader=manifest_reader)
-            reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
-            if not reason and not _remove_finished_output(config, row):
-                reason = "Mediaforce could not remove the finished copy yet. Try again."
-            if reason:
-                left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
-                continue
-            run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
-            now = now_iso()
-            connection.execute(delete(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id))
-            connection.execute(update(library_items).where(library_items.c.id == item_id)
-                               .values(status="planned", updated_at=now))
-            _record_decision(connection, item_id, "remake", {
-                **object_dict(_stored_validation(row).get("size_prediction")),
-                "recovery_reason": recovery["reason"],
-            }, now)
+        names[item_id] = "Unavailable file"
+        try:
+            with open_db(config.paths.db_path) as connection:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    select(staged_artifacts, library_items.c.rel_path,
+                           library_items.c.source_path.label("original_source_path"))
+                    .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
+                    .where(staged_artifacts.c.library_item_id == item_id)
+                ).mappings().fetchone()
+                names[item_id] = Path(str(row["rel_path"])).name if row is not None else "Unavailable file"
+                recovery = None
+                if row is not None and path_matches_scope(str(row["rel_path"] or ""), prefix):
+                    recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval,
+                                                    manifest_reader=manifest_reader)
+                reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
+                if not reason and not _remove_finished_output(config, row):
+                    reason = "Mediaforce could not remove the finished copy yet. Try again."
+                if reason:
+                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
+                    continue
+                run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
+                now = now_iso()
+                connection.execute(delete(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id))
+                connection.execute(update(library_items).where(library_items.c.id == item_id)
+                                   .values(status="planned", updated_at=now))
+                _record_decision(connection, item_id, "remake", {
+                    **object_dict(_stored_validation(row).get("size_prediction")),
+                    "recovery_reason": recovery["reason"],
+                }, now)
             removed.append(item_id)
             groups.setdefault((run_prefix, mode), []).append(item_id)
+        except Exception:
+            logger.exception("Could not finish remake recovery for library item %s", item_id)
+            left_out.append({"library_item_id": item_id, "name": names[item_id],
+                             "reason": "Could not finish this file’s recovery. Check it again before retrying."})
     runs: list[dict[str, Any]] = []
     queued_ids: list[int] = []
     for (run_prefix, mode), item_ids in groups.items():
@@ -158,8 +164,11 @@ def remake_staged_files(
             if result.get("ok") and item_id in accepted_ids and item_id not in excluded_ids:
                 queued_ids.append(item_id)
             else:
+                fallback = ("This file was not accepted by the queue. Check whether another run includes it, "
+                            "or review its current settings." if result.get("ok")
+                            else str(result.get("message") or "Try queueing again."))
                 reason = next((str(file.get("reason")) for file in queue_left_out
-                               if file.get("library_item_id") == item_id), str(result.get("message") or "Try queueing again."))
+                               if file.get("library_item_id") == item_id), fallback)
                 left_out.append({"library_item_id": item_id, "name": names[item_id],
                                  "reason": f"Finished copy removed, but not queued: {reason}"})
     message = f"Queued {len(queued_ids)} {'file' if len(queued_ids) == 1 else 'files'} to make again."

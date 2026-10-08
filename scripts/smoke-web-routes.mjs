@@ -50,6 +50,7 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       const requests = [];
       const originalRecords = records;
       let outcome = "refused";
+      let removedMessage = "Finished copies removed, but not queued: the selected computer timed out.";
       const integrity = () => ({
         counts: { validation_failed: records.length },
         blocker_count: records.length,
@@ -68,11 +69,12 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
           if (outcome === "refused") {
             return route.fulfill({ status: 409, json: { ok: false, message: "Try again; nothing was queued." } });
           }
-          records = records.filter((record) => !body.library_item_ids.includes(record.item_id));
+          const ids = body.library_item_ids ?? [body.library_item_id];
+          records = records.filter((record) => !ids.includes(record.item_id));
           if (outcome === "removed") {
             return route.fulfill({ status: 409, json: {
-              ok: false, removed_library_item_ids: body.library_item_ids,
-              message: "Finished copies removed, but not queued. Try the normal queue action again.",
+              ok: false, removed_library_item_ids: ids,
+              message: removedMessage,
             } });
           }
           if (outcome === "partial") {
@@ -130,7 +132,7 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       await first.check();
       await section.getByRole("checkbox", { name: "Select Episode 2.mkv to make again", exact: true }).check();
       await make.click();
-      await expect(page.getByRole("alert")).toContainText("Finished copies removed, but not queued.");
+      await expect(page.getByRole("alert")).toContainText(removedMessage);
       await expect(section.getByRole("checkbox")).toHaveCount(29, { timeout: 2000 });
       records = originalRecords;
       await expect(section.getByRole("checkbox")).toHaveCount(31, { timeout: 15000 });
@@ -148,6 +150,16 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       if (requests.length !== 4 || requests.some((body) =>
         JSON.stringify(body) !== JSON.stringify({ library_item_ids: [101, 102], keep: false }))) {
         throw new Error(`Wrong recovery remake request: ${JSON.stringify(requests)}`);
+      }
+      records = originalRecords;
+      await expect(section.getByRole("checkbox")).toHaveCount(31, { timeout: 15000 });
+      outcome = "removed";
+      removedMessage = "Finished copy removed, but not queued: permission denied on the selected computer.";
+      await section.getByRole("button", { name: "Make again", exact: true }).first().click();
+      await expect(page.getByRole("alert")).toContainText(removedMessage);
+      await expect(section.getByRole("checkbox")).toHaveCount(30, { timeout: 2000 });
+      if (JSON.stringify(requests.at(-1)) !== JSON.stringify({ library_item_id: 101, keep: false })) {
+        throw new Error(`Wrong single-file remake request: ${JSON.stringify(requests.at(-1))}`);
       }
       await page.close();
     }

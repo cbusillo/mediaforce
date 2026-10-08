@@ -1119,28 +1119,18 @@
 		return relPath.split('/').at(-1) ?? relPath;
 	}
 
-	async function decideSizeHeld(libraryItemId: number, keep: boolean) {
-		const fallback = 'We couldn’t record that decision about this file.';
-		await runAction('deciding', fallback, async () => {
-			const response = ensureOk(
-				await postJson<ActionResponse>(endpoint('size-held-decision'), {
-					library_item_id: libraryItemId,
-					keep
-				}),
-				fallback
-			);
-			actionMessage = response.message || '';
-		});
-	}
-
-	async function remakeSelectedFiles(libraryItemIds: number[]) {
-		const fallback = 'We couldn’t queue these files to make again.';
+	async function decideSizeHeld(libraryItemId: number | number[], keep: boolean) {
+		const fallback = Array.isArray(libraryItemId)
+			? 'We couldn’t queue these files to make again.'
+			: 'We couldn’t record that decision about this file.';
 		await runAction('deciding', fallback, async () => {
 			try {
 				const response = ensureOk(
 					await postJson<ActionResponse>(endpoint('size-held-decision'), {
-						library_item_ids: libraryItemIds,
-						keep: false
+						...(Array.isArray(libraryItemId)
+							? { library_item_ids: libraryItemId }
+							: { library_item_id: libraryItemId }),
+						keep
 					}),
 					fallback
 				);
@@ -1157,6 +1147,10 @@
 				throw error;
 			}
 		});
+	}
+
+	async function remakeSelectedFiles(libraryItemIds: number[]) {
+		await decideSizeHeld(libraryItemIds, false);
 	}
 
 	async function decideSize(jobId: string, allow: boolean) {
@@ -1302,6 +1296,12 @@
 
 	function humanActionError(error: unknown, fallback: string): string {
 		if (error instanceof ApiError) {
+			if (
+				Array.isArray(error.payload?.removed_library_item_ids) &&
+				error.payload.removed_library_item_ids.length
+			) {
+				return error.message.trim() || fallback;
+			}
 			const route = String(error.payload?.next_route ?? '').trim();
 			const label = String(error.payload?.next_action_label ?? '').trim();
 			if (route === '/ops' && label) blockerAction = { route, label };

@@ -10,7 +10,9 @@ Select several files on the show or season page and use **Make selected again**
 to queue them in one action. The same endpoint accepts `library_item_ids: [id, ...]`
 with `keep: false`; bulk Keep is not supported. Each file is rechecked separately.
 A file refused by the remake checks keeps its compressed copy and gets its own
-reason in `left_out`. Each completed file is committed before checking the next,
+reason in `left_out`. An unexpected error on one file is reported without
+preventing completed recoveries or other eligible files from reaching the queue.
+Each completed file is committed before checking the next,
 so an interruption cannot roll back earlier recovery records and a slow host
 does not hold the database write lock for the whole batch.
 Eligible files sharing their saved scope and mode form one normal folder run,
@@ -20,7 +22,9 @@ item IDs and includes the queue results in `runs`. A later queue refusal explici
 reports that the copy was removed and the file remains planned for queue recovery.
 An unexpected queue failure is reported for its group; the other groups are still
 attempted. The workspace refreshes removed files even when none were queued,
-and shows partial refusals as an attention notice.
+and shows partial refusals as an attention notice. Single-file Make again uses
+the same refresh behavior. Removal/queue facts in the response are preserved
+even when a host refusal mentions a timeout or access failure.
 
 A final-size failure requires a fresh approved sample and a changed goal under
 the same contract check used for failed-run recovery. Older multi-file runs
