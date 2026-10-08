@@ -1164,7 +1164,7 @@ class MovieWorkflowTests(unittest.TestCase):
         prefix = "films/Revised Target"
         rel_path = f"{prefix}/Feature.mkv"
         with open_db(config.paths.db_path) as connection:
-            self._insert_item(
+            item_id = self._insert_item(
                 connection,
                 rel_path,
                 size_bytes=360_000_000,
@@ -1175,12 +1175,15 @@ class MovieWorkflowTests(unittest.TestCase):
         approved_config = with_folder_policy_override(config, prefix, calibration_policy)
         persisted: list[str] = []
         queued: list[dict[str, object]] = []
-        manifest = {"items": [{"rel_path": rel_path}]}
+        manifest = {"items": [{"library_item_id": item_id, "rel_path": rel_path}]}
         manifest_path = self.root / "runs" / "feasible.json"
 
         with patch("mediaforce.web.runtime.folder_actions.load_config", return_value=approved_config), patch(
             "mediaforce.web.runtime.folder_actions.create_folder_manifest",
             return_value=(manifest, manifest_path),
+        ), patch(
+            "mediaforce.web.runtime.folder_actions.cadence_queue_partition",
+            side_effect=_cadence_clears_every_item,
         ):
             result = queue_folder_encode_action(
                 config,
@@ -1200,6 +1203,7 @@ class MovieWorkflowTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
+        self.assertEqual(result["queued_library_item_ids"], [item_id])
         self.assertEqual(persisted, ["persisted"])
         self.assertEqual([job["job_kind"] for job in queued], ["folder", "shard"])
         self.assertTrue(all(job["manifest_path"] == str(manifest_path) for job in queued))

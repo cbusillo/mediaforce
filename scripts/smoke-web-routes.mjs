@@ -27,6 +27,148 @@ const LIBRARY_METRIC_COPY = [
   "Estimated space saved",
 ];
 
+async function checkMultiFileRemake(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  try {
+    for (const viewport of [{ width: 1440, height: 1000 }, NARROW_VIEWPORT]) {
+      const page = await browser.newPage({ viewport });
+      page.setDefaultTimeout(timeoutMs);
+      const prefix = "tv/Approved Show";
+      let records = Array.from({ length: 31 }, (_, index) => ({
+        item_id: index + 101,
+        rel_path: `${prefix}/Season 1/Episode ${index + 1}.mkv`,
+        disposition: "validation_failed",
+        staging_path: null,
+        code: "staged_integrity_validation_failed",
+        detail: "",
+        next_action: "make_again",
+        remake: {
+          reason: index % 2 ? "settings_history" : "final_size",
+          blocked_reason: index === 30 ? "Restore access to the original file." : "",
+        },
+      }));
+      const requests = [];
+      const originalRecords = records;
+      let outcome = "refused";
+      let removedMessage = "Finished copies removed, but not queued: the selected computer timed out.";
+      const integrity = () => ({
+        counts: { validation_failed: records.length },
+        blocker_count: records.length,
+        blockers: [],
+        records,
+        database_truncated: false,
+        next_offset: null,
+        discovery: { scanned: false, truncated: false },
+      });
+      await page.route("**/api/folders/**", async (route) => {
+        const url = decodeURIComponent(new URL(route.request().url()).pathname);
+        if (!url.startsWith(`/api/folders/${prefix}`)) return route.continue();
+        if (url.endsWith("/size-held-decision")) {
+          const body = route.request().postDataJSON();
+          requests.push(body);
+          if (outcome === "refused") {
+            return route.fulfill({ status: 409, json: { ok: false, message: "Try again; nothing was queued." } });
+          }
+          const ids = body.library_item_ids ?? [body.library_item_id];
+          records = records.filter((record) => !ids.includes(record.item_id));
+          if (outcome === "removed") {
+            return route.fulfill({ status: 409, json: {
+              ok: false, removed_library_item_ids: ids,
+              message: removedMessage,
+            } });
+          }
+          if (outcome === "partial") {
+            return route.fulfill({ json: {
+              ok: true, removed_library_item_ids: body.library_item_ids,
+              queued_library_item_ids: [101], left_out: [{ library_item_id: 102 }],
+              message: "Queued 1 file. Episode 2.mkv: Finished copy removed, but not queued.",
+            } });
+          }
+          return route.fulfill({ json: { ok: true, message: "Queued 2 files to make again." } });
+        }
+        const response = await route.fetch();
+        if (url.endsWith("/staged-integrity")) {
+          return route.fulfill({ response, json: { ...await response.json(), ...integrity() } });
+        }
+        if (url.endsWith("/status")) {
+          return route.fulfill({ response, json: { ...await response.json(), polling_active: true, staged_integrity: integrity() } });
+        }
+        return route.fulfill({ response });
+      });
+      await page.goto(new URL("/folders/tv/Approved%20Show", baseUrl).href);
+      const section = page.getByRole("region", { name: "Files that need you" });
+      await expect(section).toBeVisible();
+      await expect(section.getByRole("checkbox")).toHaveCount(31);
+      await expect(section.getByRole("button", { name: "Make selected again (0)", exact: true })).toBeDisabled();
+      await expect(section.getByRole("checkbox", { name: "Select Episode 31.mkv to make again", exact: true })).toBeDisabled();
+      const first = section.getByRole("checkbox", { name: "Select Episode 1.mkv to make again", exact: true });
+      await first.focus();
+      await page.keyboard.press("Space");
+      await section.getByRole("checkbox", { name: "Select Episode 2.mkv to make again", exact: true }).check();
+      const make = section.getByRole("button", { name: "Make selected again (2)", exact: true });
+      await make.click();
+      await expect(page.getByText("Try again; nothing was queued.", { exact: true })).toBeVisible();
+      await expect(first).toBeChecked();
+      outcome = "success";
+      await make.click();
+      await expect(section.getByRole("checkbox")).toHaveCount(29);
+      await expect(section.getByRole("button", { name: "Make selected again (0)", exact: true })).toBeDisabled();
+      if (requests.length !== 2 || requests.some((body) =>
+        JSON.stringify(body) !== JSON.stringify({ library_item_ids: [101, 102], keep: false }))) {
+        throw new Error(`Wrong multi-file remake request: ${JSON.stringify(requests)}`);
+      }
+      await section.getByRole("button", { name: "Make selected again (0)", exact: true }).scrollIntoViewIfNeeded();
+      if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) {
+        throw new Error("Multi-file remake overflows the viewport.");
+      }
+      const screenshotDir = path.join(rootDir, "scratch/ui-checks");
+      await mkdir(screenshotDir, { recursive: true });
+      await page.screenshot({ path: path.join(screenshotDir, `multi-file-remake-${viewport.width}.png`) });
+      records = originalRecords;
+      await expect(section.getByRole("checkbox")).toHaveCount(31, { timeout: 15000 });
+      await expect(first).not.toBeChecked();
+      await expect(section.getByRole("button", { name: "Make selected again (0)", exact: true })).toBeDisabled();
+      outcome = "removed";
+      await first.check();
+      await section.getByRole("checkbox", { name: "Select Episode 2.mkv to make again", exact: true }).check();
+      await make.click();
+      await expect(page.getByRole("alert")).toContainText(removedMessage);
+      await expect(section.getByRole("checkbox")).toHaveCount(29, { timeout: 2000 });
+      records = originalRecords;
+      await expect(section.getByRole("checkbox")).toHaveCount(31, { timeout: 15000 });
+      await expect(first).not.toBeChecked();
+      outcome = "partial";
+      await first.check();
+      await section.getByRole("checkbox", { name: "Select Episode 2.mkv to make again", exact: true }).check();
+      await make.click();
+      const notice = page.getByRole("status").filter({ hasText: "Finished copy removed, but not queued." });
+      await expect(notice).toBeVisible();
+      await expect(notice).toContainText("!");
+      await expect(section.getByRole("checkbox")).toHaveCount(29);
+      await notice.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(screenshotDir, `multi-file-remake-warning-${viewport.width}.png`) });
+      if (requests.length !== 4 || requests.some((body) =>
+        JSON.stringify(body) !== JSON.stringify({ library_item_ids: [101, 102], keep: false }))) {
+        throw new Error(`Wrong recovery remake request: ${JSON.stringify(requests)}`);
+      }
+      records = originalRecords;
+      await expect(section.getByRole("checkbox")).toHaveCount(31, { timeout: 15000 });
+      outcome = "removed";
+      removedMessage = "Finished copy removed, but not queued: permission denied on the selected computer.";
+      await section.getByRole("button", { name: "Make again", exact: true }).first().click();
+      await expect(page.getByRole("alert")).toContainText(removedMessage);
+      await expect(section.getByRole("checkbox")).toHaveCount(30, { timeout: 2000 });
+      if (JSON.stringify(requests.at(-1)) !== JSON.stringify({ library_item_id: 101, keep: false })) {
+        throw new Error(`Wrong single-file remake request: ${JSON.stringify(requests.at(-1))}`);
+      }
+      await page.close();
+    }
+    console.log("route ok: Multi-file remake selection, retry and refresh at desktop and narrow widths");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function launchSmokeBrowser() {
   let browser;
   try {
@@ -3812,6 +3954,7 @@ async function main() {
         );
       }
       await checkMovieTitleReviewRecovery(targetUrl, args.routeTimeoutMs);
+      await checkMultiFileRemake(targetUrl, args.routeTimeoutMs);
     }
     if (args.narrow) {
       await checkNarrowRoutes(

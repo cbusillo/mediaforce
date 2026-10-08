@@ -50,6 +50,36 @@ def _route_endpoint(app: FastAPI, path: str, method: str) -> Any:
 
 
 class WebRouteSecurityTests(unittest.TestCase):
+    def test_remake_route_accepts_a_file_list_but_rejects_bulk_keep_and_invalid_ids(self) -> None:
+        app = FastAPI()
+        calls: list[tuple[str, object, bool]] = []
+        register_folder_routes(
+            app, folder_status_payload=lambda _prefix: {},
+            folder_content_payload=lambda _prefix: ({}, 200),
+            download_review_compare_action=_empty_file_response,
+            folder_ai_tune_action=lambda *_args: {}, folder_ai_tune_preview_action=lambda *_args: {},
+            folder_ai_tune_confirm_action=lambda *_args: {}, clear_folder_tuning_action=lambda *_args: {},
+            save_series_lifecycle_action=lambda *_args: {}, approve_measured_encode_recovery_action=lambda *_args: {},
+            queue_folder_encode_action=lambda *_args: {}, queue_older_seasons_encode_action=lambda *_args: {},
+            validate_folder_outputs_action=lambda *_args: {}, promote_folder_outputs_action=lambda *_args: {},
+            save_profile_action=lambda *_args: {},
+            decide_size_held_action=lambda prefix, ids, keep: calls.append((prefix, ids, keep)) or {"ok": True},
+        )
+        endpoint = _route_endpoint(app, "/api/folders/{prefix:path}/size-held-decision", "POST")
+        response = asyncio.run(endpoint("/tv/Show/", _json_request({"library_item_ids": [7, 8], "keep": False})))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, [("tv/Show", [7, 8], False)])
+        for payload in (
+            {"library_item_ids": [7], "keep": True}, {"library_item_ids": [], "keep": False},
+            {"library_item_ids": [True], "keep": False}, {"library_item_ids": [0], "keep": False},
+            {"library_item_ids": ["7"], "keep": False}, {"library_item_ids": 7, "keep": False},
+            {"library_item_ids": [7], "library_item_id": 8, "keep": False},
+        ):
+            with self.subTest(payload=payload), self.assertRaises(HTTPException) as raised:
+                asyncio.run(endpoint("tv/Show", _json_request(payload)))
+            self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(len(calls), 1)
+
     def test_checked_output_preview_routes_forward_normalized_scope_and_range(self) -> None:
         app = FastAPI()
         captured: list[tuple[str, str | None]] = []
