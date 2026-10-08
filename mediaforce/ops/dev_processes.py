@@ -31,6 +31,10 @@ class Status(TypedDict, total=False):
     error: str
 
 
+class GroupCustodyError(RuntimeError):
+    """A watchdog failed after creating a server; custody may still be live."""
+
+
 def group_members(pgid: int) -> set[int]:
     output = subprocess.check_output(
         ["ps", "-A", "-o", "pid=,pgid="], text=True, timeout=2,
@@ -67,25 +71,30 @@ def reap_descendants(pgid: int) -> set[int]:
 def stop_group(child: subprocess.Popen[bytes]) -> int:
     try:
         os.killpg(child.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
+        # Darwin can reject a signal when only the reserved zombie leader remains.
         if not leader_exited(child.pid) or reap_descendants(child.pid):
             raise
     deadline = time.monotonic() + TERM_SECONDS
-    while not leader_exited(child.pid) or reap_descendants(child.pid):
+    empty = False
+    while True:
+        if leader_exited(child.pid) and not reap_descendants(child.pid):
+            if empty:
+                # No group query or signal is permitted after this reap.
+                return child.wait()
+            empty = True
+        else:
+            empty = False
         if time.monotonic() >= deadline:
             os.killpg(child.pid, signal.SIGKILL)
             deadline = time.monotonic() + TERM_SECONDS
         time.sleep(POLL_SECONDS)
-    # The exited, unreaped leader still reserves the PGID while the last
-    # group snapshot is taken. After wait() there are no further PGID queries
-    # or signals: that number can belong to a new process group.
-    return child.wait()
 
 
 def log(message: str) -> None:
     try:
         print(message, flush=True)
-    except OSError:
+    except (OSError, ValueError):
         pass  # Log I/O cannot interrupt custody or repeat completed cleanup.
 
 
@@ -117,48 +126,53 @@ def guard_group(connection: socket.socket, command: list[str], cwd: Path,
     with socket.socket() as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind((host, port))
+    status: Status = {"state": "starting", "pid": 0,
+                      "launcher": os.getppid(), "guardian": os.getpid()}
     child = subprocess.Popen(command, cwd=cwd, start_new_session=True,
                              stdin=subprocess.DEVNULL)
-    status: Status = {"state": "starting", "pid": child.pid,
-                      "launcher": os.getppid(), "guardian": os.getpid()}
     try:
-        send_status(connection, status)
-        deadline = time.monotonic() + START_SECONDS
-        while not stopping:
-            if leader_exited(child.pid):
-                status.update(state="stopping", error="development server exited")
-                break
-            if status["state"] == "starting":
-                if port_open(host, port):
-                    status["state"] = "running"
-                    send_status(connection, status)
-                elif time.monotonic() >= deadline:
-                    status.update(state="stopping", error="development server did not start listening")
-                    break
-            if select.select([connection], [], [], POLL_SECONDS)[0]:
-                # Only the launcher owns the other endpoint. EOF includes SIGKILL
-                # of that launcher; server descendants never inherit this fd.
-                connection.recv(64)
-                stopping = True
-    except (BrokenPipeError, ConnectionResetError):
-        pass
-    finally:
-        status["state"] = "stopping"
         try:
+            status["pid"] = child.pid
             send_status(connection, status)
-        except (BrokenPipeError, ConnectionResetError):
+            deadline = time.monotonic() + START_SECONDS
+            while not stopping:
+                if leader_exited(child.pid):
+                    status.update(state="stopping", error="development server exited")
+                    break
+                if status["state"] == "starting":
+                    if port_open(host, port):
+                        status["state"] = "running"
+                        send_status(connection, status)
+                    elif time.monotonic() >= deadline:
+                        status.update(state="stopping", error="development server did not start listening")
+                        break
+                if select.select([connection], [], [], POLL_SECONDS)[0]:
+                    # Only the launcher owns the other endpoint. EOF includes SIGKILL
+                    # of that launcher; server descendants never inherit this fd.
+                    connection.recv(64)
+                    stopping = True
+        except OSError:
             pass
-        # Keep custody and the component lock while a transient observation or
-        # signal error prevents completion. Clients can retry Stop.
-        while True:
+        finally:
+            status["state"] = "stopping"
             try:
-                result = stop_group(child)
-                break
-            except Exception as exc:
-                log(f"development cleanup pending: {exc}")
-                time.sleep(POLL_SECONDS)
-        log(f"group {child.pid} empty; leader reaped with exit {result}")
-        Path(socket_name).unlink(missing_ok=True)
+                send_status(connection, status)
+            except OSError:
+                pass
+            # Keep custody and the component lock while a transient observation or
+            # signal error prevents completion. Clients can retry Stop.
+            while True:
+                try:
+                    result = stop_group(child)
+                    break
+                except Exception as exc:
+                    log(f"development cleanup pending: {exc}")
+                    time.sleep(POLL_SECONDS)
+            log(f"group {child.pid} empty; leader reaped with exit {result}")
+            Path(socket_name).unlink(missing_ok=True)
+    except BaseException as exc:
+        # Unknown post-spawn failure must not masquerade as a clean startup exit.
+        raise GroupCustodyError(str(exc)) from exc
 
 
 def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -> int:
@@ -191,16 +205,27 @@ def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -
                 log(f"development launcher failed: {exc}")
                 try:
                     send_status(child, {"state": "failed", "error": str(exc)})
-                except (BrokenPipeError, ConnectionResetError):
+                except OSError:
                     pass
-                os._exit(0)
+                os._exit(1 if isinstance(exc, GroupCustodyError) else 0)
         child.close()
         status: Status = {"state": "starting", "launcher": os.getpid(), "guardian": guardian}
         shutting_down = False
+        stop_requested = False
 
         def request_shutdown(_signum: int, _frame: object) -> None:
             nonlocal shutting_down
             shutting_down = True
+
+        def notify_stop() -> None:
+            nonlocal stop_requested
+            if not stop_requested:
+                try:
+                    parent.sendall(b"stop")
+                except OSError as request_error:
+                    log(f"development stop request pending: {request_error}")
+                else:
+                    stop_requested = True
 
         signal.signal(signal.SIGTERM, request_shutdown)
         signal.signal(signal.SIGINT, request_shutdown)
@@ -208,7 +233,7 @@ def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -
         try:
             while True:
                 if shutting_down:
-                    parent.sendall(b"stop")
+                    notify_stop()
                     shutting_down = False
                 for ready in select.select([server, parent], [], [], POLL_SECONDS)[0]:
                     if ready is parent:
@@ -233,10 +258,7 @@ def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -
                                 client.settimeout(CLIENT_SECONDS)
                                 action = client.recv(64).decode()
                                 if action == "stop":
-                                    try:
-                                        parent.sendall(b"stop")
-                                    except BrokenPipeError:
-                                        pass
+                                    notify_stop()
                                     status["state"] = "stopping"
                                 send_status(client, status)
                         except (OSError, UnicodeError):
@@ -244,7 +266,10 @@ def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -
         finally:
             parent.close()
             if guardian:
-                os.waitpid(guardian, 0)
+                _, exit_status = os.waitpid(guardian, 0)
+                if exit_status != 0:
+                    status.update(state="failed", error="group guardian failed; new starts blocked")
+                    serve_failure(server, status)
             Path(socket_name).unlink(missing_ok=True)
 
 
@@ -260,20 +285,23 @@ def serve_failure(server: socket.socket, status: Status) -> NoReturn:
 
 
 def request(component: str, action: str) -> Status:
-    with socket.socket(socket.AF_UNIX) as client:
-        client.settimeout(CLIENT_SECONDS + 1)
-        try:
-            client.connect(component + ".sock")
-        except (FileNotFoundError, ConnectionRefusedError):
-            with open(component + ".lock", "a") as lock:
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    return {"state": "stopping"}
-            return {"state": "stopped"}
-        client.sendall(action.encode())
-        with client.makefile("r") as response:
-            return json.loads(response.readline())
+    try:
+        with socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(CLIENT_SECONDS + 1)
+            try:
+                client.connect(component + ".sock")
+            except (FileNotFoundError, ConnectionRefusedError):
+                with open(component + ".lock", "a") as lock:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        return {"state": "stopping"}
+                return {"state": "stopped"}
+            client.sendall(action.encode())
+            with client.makefile("r") as response:
+                return json.loads(response.readline())
+    except (OSError, ValueError) as exc:
+        return {"state": "unknown", "error": f"control unavailable: {exc}"}
 
 
 def start(component: str, command: list[str], cwd: Path, host: str, port: int) -> Status:
@@ -300,11 +328,14 @@ def start(component: str, command: list[str], cwd: Path, host: str, port: int) -
 
 def stop(component: str) -> Status:
     deadline = time.monotonic() + STOP_SECONDS
+    status: Status = {"state": "unknown", "error": "no control response"}
     while time.monotonic() < deadline:
         status = request(component, "stop")
         if status["state"] in {"stopped", "failed"}:
             return status
         time.sleep(POLL_SECONDS)
+    if status["state"] == "unknown":
+        return status
     return {"state": "stopping", "error": "cleanup is still running; retry Stop"}
 
 
@@ -357,7 +388,10 @@ def main() -> int:
         return serve(args.component, command, args.cwd, args.host, args.port)
     failed = False
     status: Status = {"state": "stopped"}
-    for component in (["frontend", "backend"] if args.component == "all" else [args.component]):
+    components = ["frontend", "backend"] if args.component == "all" else [args.component]
+    commands = {component: component_command(component, root) for component in components} \
+        if args.action in {"start", "restart"} else {}
+    for component in components:
         if args.action in {"stop", "restart"}:
             status = stop(component)
             if status["state"] != "stopped":
@@ -365,7 +399,7 @@ def main() -> int:
                 failed = True
                 continue
         if args.action in {"start", "restart"}:
-            status = start(component, *component_command(component, root))
+            status = start(component, *commands[component])
             failed |= status["state"] != "running"
         elif args.action == "status":
             status = request(component, "status")

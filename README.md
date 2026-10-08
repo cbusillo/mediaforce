@@ -530,24 +530,28 @@ That means the two useful local URLs are:
 - `http://127.0.0.1:8777` when checking the backend-served built app
 
 For local web work on macOS and Linux, prepare this checkout with
-`uv sync --locked` and `npm --prefix frontend ci`, then use
+`uv sync --locked` and `npm --prefix frontend ci`. Cleanup also needs `ps`
+(included on macOS; install `procps` on minimal Linux systems). Then use
 `scripts/mediaforce-dev.sh` with `start|stop|restart|status|smoke`. Pass `backend`
 or `frontend` as a second argument to manage one component, for example
 `scripts/mediaforce-dev.sh restart backend`. Commands read the repo-local `.env`
-and Vite uses `--strictPort`.
+and Vite uses `--strictPort`. Start reuses an existing owner; use Restart to
+apply changes to its host, port or configuration.
 
 Each component has a launcher and a watchdog that owns the server from its
 first instruction, in a private session and process group. Stop asks that owner
 to send TERM to the group, then KILL if necessary. The watchdog keeps the leader
-unreaped until it has exited and every other group member is gone, then reaps
+unreaped until it has exited and consecutive observations find no other group
+member, then reaps
 the leader and releases the component lock. It never queries or signals the
 released group number again, even if completion logging fails. A server crash
 also triggers cleanup of its orphaned workers. If the command-facing launcher
 is killed, a private connection closes and the watchdog performs the same cleanup.
 Start cannot replace a component while its watchdog still holds the lock.
 Temporary cleanup errors retain that owner; retry Stop after resolving the
-reported error. Status distinguishes starting, running, stopping and a failed
-watchdog. A failed watchdog blocks new starts and reports its failure rather
+reported error. Status distinguishes starting, running, stopping, a failed watchdog and an
+unknown control-channel response. An unknown response cannot authorize a new
+server or prove that cleanup finished. A failed watchdog blocks new starts and reports its failure rather
 than signalling processes discovered from saved PIDs. If the watchdog itself
 is killed, use the OS process manager to force-quit that component's remaining
 server, workers and launcher before starting it again. Deleting a lock file or

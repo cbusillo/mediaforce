@@ -1,5 +1,6 @@
 import builtins
 import fcntl
+import errno
 import json
 import os
 from pathlib import Path
@@ -255,7 +256,7 @@ def test_stale_pid_records_and_runtime_lock_are_not_process_authority(dev: DevFi
 
 def test_leader_is_reaped_only_after_descendants_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
-    remaining = iter([{42}, set()])
+    remaining = iter([{42}, set(), set()])
     def observe_descendants(_pgid: int) -> set[int]:
         result = next(remaining)
         events.append('descendants remain' if result else 'descendants empty')
@@ -274,7 +275,9 @@ def test_leader_is_reaped_only_after_descendants_exit(monkeypatch: pytest.Monkey
         return set()
     monkeypatch.setattr(dev_processes, 'group_members', released_group_snapshot)
     assert dev_processes.stop_group(child) == 0
-    assert events == ['signal group', 'descendants remain', 'descendants empty', 'reap leader']
+    assert events[0] == 'signal group'
+    assert 'descendants remain' in events
+    assert events[-2:] == ['descendants empty', 'reap leader']
 
 
 def test_concurrent_starts_share_one_owner(dev: DevFixture) -> None:
@@ -358,8 +361,9 @@ def test_worker_fork_during_stop_is_cleaned_with_its_group(dev: DevFixture) -> N
             pass
 
 
+@pytest.mark.parametrize('report_error', [OSError('disk full'), ValueError('closed output stream')])
 def test_completion_log_failure_never_retries_a_reaped_group(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, report_error: Exception,
 ) -> None:
     child = Mock(spec=subprocess.Popen, pid=123)
     cleanup = Mock(return_value=0)
@@ -376,7 +380,7 @@ def test_completion_log_failure_never_retries_a_reaped_group(
         nonlocal printed
         if not printed and message.startswith('group '):
             printed = True
-            raise OSError('disk full while reporting completion')
+            raise report_error
     monkeypatch.setattr(builtins, 'print', report)
     dev_processes.guard_group(connection, ['fixture'], tmp_path, '127.0.0.1', 1234,
                               str(tmp_path / 'control.sock'))
@@ -612,3 +616,219 @@ print(json.dumps(module.request('backend', 'status')))
         for client in (first, second):
             if client is not None:
                 client.kill(); client.wait(timeout=5)
+
+
+@pytest.mark.parametrize('error', [OSError(errno.ENOBUFS, 'status buffer unavailable'), OSError(errno.EPROTOTYPE, 'closing socket')])
+def test_status_send_failure_cannot_skip_group_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception,
+) -> None:
+    child = Mock(spec=subprocess.Popen, pid=123)
+    cleanup = Mock(return_value=0)
+    connection = Mock(spec=socket.socket)
+    report = Mock(side_effect=[None, error])
+    monkeypatch.setattr(dev_processes, 'enable_subreaper', lambda: None)
+    monkeypatch.setattr(dev_processes, 'port_open', lambda _host, _port: False)
+    monkeypatch.setattr(dev_processes.socket, 'socket', MagicMock())
+    monkeypatch.setattr(dev_processes.signal, 'signal', Mock())
+    monkeypatch.setattr(dev_processes.subprocess, 'Popen', Mock(return_value=child))
+    monkeypatch.setattr(dev_processes, 'leader_exited', lambda _pid: True)
+    monkeypatch.setattr(dev_processes, 'stop_group', cleanup)
+    monkeypatch.setattr(dev_processes, 'send_status', report)
+    try:
+        dev_processes.guard_group(connection, ['fixture'], tmp_path, '127.0.0.1', 1234,
+                                  str(tmp_path / 'control.sock'))
+    except RuntimeError:
+        pass
+    cleanup.assert_called_once_with(child)
+
+
+def test_unknown_post_spawn_failure_retains_failed_owner(dev: DevFixture) -> None:
+    script = """
+import importlib.util, os, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('fixture_launcher', sys.argv[1])
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+original = module.send_status
+def report(connection, status):
+    if status['state'] == 'stopping':
+        raise RuntimeError('fixture interrupts post-spawn completion')
+    original(connection, status)
+module.send_status = report
+os.chdir(sys.argv[2])
+raise SystemExit(module.serve('backend', [sys.argv[3], '--port', sys.argv[4]],
+                            Path(sys.argv[5]), '127.0.0.1', int(sys.argv[4])))
+"""
+    broker = subprocess.Popen(
+        [sys.executable, '-c', script, str(dev.root / 'mediaforce/ops/dev_processes.py'),
+         str(dev.state), str(dev.root / '.venv/bin/mediaforce-web'),
+         dev.env['MEDIAFORCE_WEB_PORT'], str(dev.root)], env=dev.env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        wait_until(lambda: dev.status()['state'] == 'running')
+        dev.run('stop')
+        assert dev.status()['state'] == 'failed'
+        assert dev.run('start').returncode != 0
+        assert dev.status()['state'] == 'failed'
+    finally:
+        broker.kill(); broker.wait(timeout=5)
+
+
+def test_repeated_stop_keeps_control_responsive_during_pending_cleanup(dev: DevFixture, tmp_path: Path) -> None:
+    script = r"""
+import importlib.util, os, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('fixture_launcher', sys.argv[1])
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+original = module.socket.socketpair
+def pair():
+    parent, child = original()
+    parent.setsockopt(module.socket.SOL_SOCKET, module.socket.SO_SNDBUF, 512)
+    return parent, child
+module.socket.socketpair = pair
+os.chdir(sys.argv[2])
+raise SystemExit(module.serve('backend', [sys.argv[3], '--port', sys.argv[4]],
+                            Path(sys.argv[5]), '127.0.0.1', int(sys.argv[4])))
+"""
+    broker = subprocess.Popen(
+        [sys.executable, '-c', script, str(dev.root / 'mediaforce/ops/dev_processes.py'),
+         str(dev.state), str(dev.root / '.venv/bin/mediaforce-web'),
+         dev.env['MEDIAFORCE_WEB_PORT'], str(dev.root)], env=dev.env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    failure = Path(dev.env['TEST_INVENTORY_FAILURE'])
+    try:
+        wait_until(lambda: dev.status()['state'] == 'running')
+        failure.touch()
+        client = """
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location('fixture_launcher', sys.argv[1])
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+os.chdir(sys.argv[2]); module.STOP_SECONDS = .01
+for _ in range(40):
+    status = module.stop('backend')
+    assert status['state'] == 'stopping', status
+print(json.dumps(module.request('backend', 'status')))
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', client, str(dev.root / 'mediaforce/ops/dev_processes.py'), str(dev.state)],
+            env=dev.env, capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)['state'] == 'stopping'
+        failure.unlink()
+        assert dev.run('stop').returncode == 0
+    finally:
+        failure.unlink(missing_ok=True)
+        broker.kill(); broker.wait(timeout=5)
+
+
+def test_invalid_restart_settings_preserve_both_components(dev: DevFixture) -> None:
+    assert dev.run('start', 'all').returncode == 0
+    backend = dev.status('backend')['pid']; frontend = dev.status('frontend')['pid']
+    dev.env['MEDIAFORCE_FRONTEND_DEV_PORT'] = '87777'
+    assert dev.run('restart', 'all').returncode != 0
+    assert dev.status('backend')['pid'] == backend
+    assert dev.status('frontend')['pid'] == frontend
+    assert dev.run('stop', 'all').returncode == 0
+
+
+def test_one_empty_snapshot_cannot_reap_a_leader_while_a_worker_lives(monkeypatch: pytest.MonkeyPatch) -> None:
+    child = Mock(spec=subprocess.Popen, pid=123)
+    observations = iter([set(), {42}, set(), set()])
+    alive = True
+    calls = 0
+    def descendants(_group: int) -> set[int]:
+        nonlocal alive, calls
+        calls += 1
+        value = next(observations)
+        if calls >= 3:
+            alive = False
+        return value
+    def reap() -> int:
+        assert not alive, 'one missed snapshot released the leader while its worker was alive'
+        return 0
+    child.wait.side_effect = reap
+    monkeypatch.setattr(dev_processes.os, 'killpg', Mock())
+    monkeypatch.setattr(dev_processes, 'leader_exited', lambda _pid: True)
+    monkeypatch.setattr(dev_processes, 'reap_descendants', descendants)
+    assert dev_processes.stop_group(child) == 0
+
+
+def test_unavailable_frontend_control_does_not_skip_backend_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A real unavailable socket response is checked separately; this controls the
+    # command's two-component dispatch without waiting on host processes.
+    monkeypatch.setattr(sys, 'argv', ['fixture', 'stop', 'all', '--state-dir', str(tmp_path)])
+    stopped: list[str] = []
+    def stop(component: str) -> dev_processes.Status:
+        stopped.append(component)
+        if component == 'frontend':
+            return {'state': 'unknown', 'error': 'control unavailable'}
+        return {'state': 'stopped'}
+    monkeypatch.setattr(dev_processes, 'stop', stop)
+    original = Path.cwd()
+    try:
+        assert dev_processes.main() == 1
+    finally:
+        os.chdir(original)
+    assert stopped == ['frontend', 'backend']
+    assert 'backend' in capsys.readouterr().out
+
+
+def test_empty_control_reply_is_unknown_not_stopped(tmp_path: Path) -> None:
+    script = "import socket,sys; from pathlib import Path; s=socket.socket(socket.AF_UNIX); s.bind('backend.sock'); s.listen(); Path(sys.argv[1]).touch(); c,_=s.accept(); c.recv(64); c.close()"
+    ready = tmp_path / 'ready'
+    server = subprocess.Popen([sys.executable, '-c', script, str(ready)], cwd=tmp_path)
+    original = Path.cwd()
+    try:
+        wait_until(ready.exists)
+        os.chdir(tmp_path)
+        status = dev_processes.request('backend', 'status')
+        assert status['state'] == 'unknown'
+        assert status.get('error')
+    finally:
+        os.chdir(original)
+        server.kill(); server.wait(timeout=5)
+
+
+
+def test_failed_stop_notification_can_be_retried(dev: DevFixture) -> None:
+    script = """
+import errno, importlib.util, os, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('fixture_launcher', sys.argv[1])
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+original = module.socket.socketpair
+class FlakyParent:
+    def __init__(self, connection):
+        self.connection = connection
+        self.failed = False
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+    def sendall(self, data):
+        if not self.failed:
+            self.failed = True
+            raise OSError(errno.ENOBUFS, 'fixture rejects the first stop notification')
+        return self.connection.sendall(data)
+def pair():
+    parent, child = original()
+    return FlakyParent(parent), child
+module.socket.socketpair = pair
+os.chdir(sys.argv[2])
+raise SystemExit(module.serve('backend', [sys.argv[3], '--port', sys.argv[4]],
+                            Path(sys.argv[5]), '127.0.0.1', int(sys.argv[4])))
+"""
+    broker = subprocess.Popen(
+        [sys.executable, '-c', script, str(dev.root / 'mediaforce/ops/dev_processes.py'),
+         str(dev.state), str(dev.root / '.venv/bin/mediaforce-web'),
+         dev.env['MEDIAFORCE_WEB_PORT'], str(dev.root)], env=dev.env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        wait_until(lambda: dev.status()['state'] == 'running')
+        assert dev.run('stop').returncode == 0
+        dev.assert_empty()
+    finally:
+        broker.kill(); broker.wait(timeout=5)
