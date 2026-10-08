@@ -16,7 +16,7 @@ import threading
 import time
 import tomllib
 import unittest
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import replace
@@ -24904,6 +24904,63 @@ raise SystemExit(0)
             )
             for name in names
         }
+
+    def test_multi_file_remake_creates_one_parent_with_shards_and_accepts_queued_followup(self) -> None:
+        from mediaforce.web.runtime.size_held import decide_size_held_file
+
+        queue_config = self._complete_queue_config()
+        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show/Season 1"))
+        old_manifest = self._write_manifest("old-remake.json", [])
+        approval = folder_actions_runtime._production_approval_contract(
+            self._accepted_calibration_contract(sample_job_id="remake-sample"),
+        )
+        old_manifest.write_text(json.dumps({"selection": {"queue_mode": "season_override",
+            "media_scope": {"prefix": "tv/show/Season 1"}}, "items": [{}]}))
+        with open_db(self.config.paths.db_path) as connection:
+            ids = list(self._insert_show_episodes(connection, "One.mkv", "Two.mkv", "Three.mkv").values())
+            stages = []
+            for item_id in ids:
+                stage = self.root / f"staged-{item_id}.mkv"
+                stage.write_bytes(b"old compressed copy")
+                stages.append(stage)
+                connection.execute(update(library_items).where(library_items.c.id == item_id).values(status="validated"))
+                connection.execute(staged_artifacts.insert().values(
+                    library_item_id=item_id, staging_path=str(stage), manifest_path=str(old_manifest), item_index=0,
+                    validation_json=json.dumps({"passed": True}), validated_at="now", updated_at="now",
+                ))
+        jobs: list[dict[str, Any]] = []
+
+        def queue(_prefix: str, _mode: str, item_ids: Collection[int]) -> dict[str, Any]:
+            result = self._queue_show_folder(queue_config, jobs, calibration=calibration,
+                                            only_library_item_ids=item_ids,
+                                            reserve_preflight=lambda *_args: ReservePreflight(True, None, {}))
+            with open_db(queue_config.paths.db_path) as connection:
+                for job in jobs:
+                    save_encode_job(connection, job)
+            return result
+
+        def remake(item_ids: list[int]) -> dict[str, Any]:
+            return decide_size_held_file(
+                queue_config, "tv/show", item_ids, keep=False, now_iso=web_app._now_iso,
+                validate_items=lambda *_args: self.fail("no old-file check"), queue_items=queue,
+                current_approval=lambda _prefix: approval,
+            )
+
+        first = remake(ids[:2])
+        self.assertTrue(first["ok"], first)
+        first_jobs = list(jobs)
+        parents = [job for job in jobs if job["job_kind"] == "folder"]
+        self.assertEqual(len(parents), 1)
+        self.assertEqual(self._queued_manifest_item_ids(jobs), sorted(ids[:2]))
+        self.assertEqual({index for job in jobs if job["job_kind"] == "shard"
+                          for index in job["manifest_indexes"]}, {0, 1})
+        self.assertTrue(stages[2].exists())
+        second = remake(ids[2:])
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(second["queued_library_item_ids"], ids[2:])
+        self.assertEqual(self._queued_manifest_item_ids(jobs[len(first_jobs):]), ids[2:])
+        self.assertTrue(all(not stage.exists() for stage in stages))
+        self.assertEqual(len([job for job in jobs if job["job_kind"] == "folder"]), 2)
 
     @staticmethod
     def _queued_manifest_item_ids(saved_jobs: list[dict[str, Any]]) -> list[int]:

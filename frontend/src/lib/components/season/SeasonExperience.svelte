@@ -115,6 +115,7 @@
 	type ActionResponse = {
 		ok?: boolean;
 		message?: string;
+		left_out?: { library_item_id?: number; reason?: string }[];
 		proposal?: Record<string, unknown> | null;
 		start_encode?: { ok?: boolean; message?: string } | null;
 	};
@@ -178,7 +179,7 @@
 	let actionPhase = $state<ActionPhase>('idle');
 	let actionError = $state('');
 	let actionMessage = $state('');
-	let actionMessageTone = $state<'success' | 'neutral'>('success');
+	let actionMessageTone = $state<'success' | 'neutral' | 'warning'>('success');
 	let actionMessageStateKey = $state('');
 	let blockerAction = $state<{ route: '/ops'; label: string } | null>(null);
 	let actionStartedAt = $state(0);
@@ -1118,18 +1119,38 @@
 		return relPath.split('/').at(-1) ?? relPath;
 	}
 
-	async function decideSizeHeld(libraryItemId: number, keep: boolean) {
-		const fallback = 'We couldn’t record that decision about this file.';
+	async function decideSizeHeld(libraryItemId: number | number[], keep: boolean) {
+		const fallback = Array.isArray(libraryItemId)
+			? 'We couldn’t queue these files to make again.'
+			: 'We couldn’t record that decision about this file.';
 		await runAction('deciding', fallback, async () => {
-			const response = ensureOk(
-				await postJson<ActionResponse>(endpoint('size-held-decision'), {
-					library_item_id: libraryItemId,
-					keep
-				}),
-				fallback
-			);
-			actionMessage = response.message || '';
+			try {
+				const response = ensureOk(
+					await postJson<ActionResponse>(endpoint('size-held-decision'), {
+						...(Array.isArray(libraryItemId)
+							? { library_item_ids: libraryItemId }
+							: { library_item_id: libraryItemId }),
+						keep
+					}),
+					fallback
+				);
+				actionMessage = response.message || '';
+				if (response.left_out?.length) actionMessageTone = 'warning';
+			} catch (error) {
+				if (
+					error instanceof ApiError &&
+					Array.isArray(error.payload?.removed_library_item_ids) &&
+					error.payload.removed_library_item_ids.length
+				) {
+					await onMutate();
+				}
+				throw error;
+			}
 		});
+	}
+
+	async function remakeSelectedFiles(libraryItemIds: number[]) {
+		await decideSizeHeld(libraryItemIds, false);
 	}
 
 	async function decideSize(jobId: string, allow: boolean) {
@@ -1275,6 +1296,12 @@
 
 	function humanActionError(error: unknown, fallback: string): string {
 		if (error instanceof ApiError) {
+			if (
+				Array.isArray(error.payload?.removed_library_item_ids) &&
+				error.payload.removed_library_item_ids.length
+			) {
+				return error.message.trim() || fallback;
+			}
 			const route = String(error.payload?.next_route ?? '').trim();
 			const label = String(error.payload?.next_action_label ?? '').trim();
 			if (route === '/ops' && label) blockerAction = { route, label };
@@ -1602,7 +1629,13 @@
 				class:action-notice--neutral={actionMessageTone === 'neutral'}
 				role="status"
 			>
-				<span aria-hidden="true">{actionMessageTone === 'success' ? '✓' : 'i'}</span>
+				<span aria-hidden="true"
+					>{actionMessageTone === 'success'
+						? '✓'
+						: actionMessageTone === 'warning'
+							? '!'
+							: 'i'}</span
+				>
 				<div><strong>{actionMessage}</strong></div>
 			</div>
 		{/if}
@@ -3268,6 +3301,7 @@
 			records={sizeHeldRecords(promotionIntegrity)}
 			busy={actionPhase !== 'idle'}
 			onDecision={decideSizeHeld}
+			onRemake={remakeSelectedFiles}
 		/>
 
 		<!-- Below the season's state and its questions, so "Answer this above" points up the page. -->

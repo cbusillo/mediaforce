@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -45,7 +45,7 @@ def register_folder_routes(
         checked_output_preview_payload: Callable[[str], dict[str, Any]] | None = None,
         checked_output_preview_stream_action: Callable[[str, str | None], Response] | None = None,
         accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
-        decide_size_held_action: Callable[[str, int, bool], dict[str, Any]] | None = None,
+        decide_size_held_action: Callable[[str, int | Collection[int], bool], dict[str, Any]] | None = None,
         folder_episodes_payload: Callable[[str], dict[str, Any]] | None = None,
 ) -> None:
     staged_integrity_payload = folder_staged_integrity_payload or (lambda _prefix, _offset, _limit: {})
@@ -210,7 +210,14 @@ def register_folder_routes(
         async def api_folder_size_held_decision(prefix: str, request: Request) -> JSONResponse:
             body = await _request_body(request)
             item_id = body.get("library_item_id")
+            item_ids = body.get("library_item_ids")
             keep = body.get("keep")
+            if item_ids is not None:
+                if (item_id is not None or keep is not False or not isinstance(item_ids, list) or not item_ids
+                        or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in item_ids)):
+                    raise HTTPException(status_code=400, detail="Name the files to make again with keep: false.")
+                result = await run_in_threadpool(decide_size_held, prefix.strip("/"), item_ids, False)
+                return JSONResponse(result, status_code=200 if result.get("ok") else 409)
             if isinstance(item_id, bool) or not isinstance(item_id, int) or item_id <= 0 or not isinstance(keep, bool):
                 raise HTTPException(status_code=400, detail="Name one file and whether to keep it.")
             result = await run_in_threadpool(decide_size_held, prefix.strip("/"), item_id, keep)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Collection, Mapping
 from functools import cache
 from pathlib import Path
@@ -24,8 +25,9 @@ from mediaforce.web.runtime.ambiguous_motion import _legacy_queue_mode
 from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, _staged_policy_states, \
     staged_requeue_size_blocker
 from mediaforce.web.runtime.host_runtime import host_config_for_key
-from mediaforce.web.runtime.production_holds import MODE_FOLDER
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
+
+logger = logging.getLogger(__name__)
 
 NOT_HELD_MESSAGE = "This file is no longer waiting for a decision about its size."
 
@@ -37,7 +39,7 @@ QueueItemsFn = Callable[[str, str, Collection[int]], dict[str, Any]]
 def decide_size_held_file(
         config: MediaforceConfig,
         prefix: str,
-        library_item_id: int,
+        library_item_id: int | Collection[int],
         *,
         keep: bool,
         now_iso: Callable[[], str],
@@ -45,9 +47,14 @@ def decide_size_held_file(
         queue_items: QueueItemsFn,
         current_approval: CurrentApprovalFn = lambda _prefix: None,
 ) -> dict[str, Any]:
-    """Keep a held file (then check it again) or make it again; only this file is touched."""
-    queue_mode = MODE_FOLDER
-    run_prefix = prefix
+    """Keep one held file or remake the named files, rechecking each before removal."""
+    if not keep:
+        return remake_staged_files(
+            config, prefix, [library_item_id] if isinstance(library_item_id, int) else library_item_id,
+            now_iso=now_iso, queue_items=queue_items, current_approval=current_approval,
+        )
+    if not isinstance(library_item_id, int):
+        return {"ok": False, "message": "Choose one file to keep."}
     with open_db(config.paths.db_path) as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         row = connection.execute(
@@ -64,63 +71,114 @@ def decide_size_held_file(
                 or not path_matches_scope(str(row["rel_path"] or ""), prefix)
         ):
             return {"ok": False, "message": NOT_HELD_MESSAGE}
-        recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval)
         held = staged_validation_outcome(row["validation_json"]) == "size_held"
-        if (keep and not held) or (not keep and recovery is None):
+        if not held:
             return {"ok": False, "message": NOT_HELD_MESSAGE}
-        if not keep and recovery and recovery["blocked_reason"]:
-            return {"ok": False, "message": recovery["blocked_reason"]}
         name = Path(str(row["rel_path"])).name
         now = now_iso()
-        if keep:
-            validation["size_prediction"] = {**size_prediction, "owner_kept_at": now, "held": False}
-            connection.execute(
-                update(staged_artifacts)
-                .where(staged_artifacts.c.library_item_id == int(library_item_id))
-                .values(validation_json=json.dumps(validation, separators=(",", ":")), updated_at=now)
-            )
-            _record_decision(connection, int(library_item_id), "keep", size_prediction, now)
-        else:
-            run_prefix, queue_mode, _context_available = _run_context(connection, row, prefix)
-            if not _remove_finished_output(config, row):
-                return {
-                    "ok": False,
-                    "message": f"Mediaforce could not remove the finished {name} yet. Nothing changed; try again.",
-                }
-            connection.execute(
-                delete(staged_artifacts)
-                .where(staged_artifacts.c.library_item_id == int(library_item_id))
-                .where(staged_artifacts.c.promoted_at.is_(None))
-            )
-            connection.execute(
-                update(library_items)
-                .where(library_items.c.id == int(library_item_id))
-                .values(status="planned", updated_at=now)
-            )
-            _record_decision(connection, int(library_item_id), "remake",
-                             {**size_prediction, "recovery_reason": recovery["reason"]}, now)
-    if keep:
-        checked = validate_items(prefix, [int(library_item_id)])
-        passed = bool(checked.get("ok")) and int(checked.get("validated_count") or 0) > 0
-        return {
-            "ok": True,
-            "action": "size_held_kept",
-            "message": (
-                f"Kept {name}. It passed its check and can be replaced now."
-                if passed
-                else f"Kept {name}. {str(checked.get('message') or 'Check it again before replacing it.')}"
-            ),
-        }
-    queued = queue_items(run_prefix, queue_mode, [int(library_item_id)])
+        validation["size_prediction"] = {**size_prediction, "owner_kept_at": now, "held": False}
+        connection.execute(
+            update(staged_artifacts)
+            .where(staged_artifacts.c.library_item_id == int(library_item_id))
+            .values(validation_json=json.dumps(validation, separators=(",", ":")), updated_at=now)
+        )
+        _record_decision(connection, int(library_item_id), "keep", size_prediction, now)
+    checked = validate_items(prefix, [int(library_item_id)])
+    passed = bool(checked.get("ok")) and int(checked.get("validated_count") or 0) > 0
     return {
-        **queued,
-        "ok": bool(queued.get("ok")),
-        "action": "size_held_remade",
+        "ok": True,
+        "action": "size_held_kept",
         "message": (
-            f"Making {name} again."
-            if queued.get("ok")
-            else f"Removed the finished {name}, but it could not be queued yet: {queued.get('message') or ''}".strip()
+            f"Kept {name}. It passed its check and can be replaced now."
+            if passed
+            else f"Kept {name}. {str(checked.get('message') or 'Check it again before replacing it.')}"
         ),
+    }
+
+
+def remake_staged_files(
+        config: MediaforceConfig,
+        prefix: str,
+        library_item_ids: Collection[int],
+        *,
+        now_iso: Callable[[], str],
+        queue_items: QueueItemsFn,
+        current_approval: CurrentApprovalFn,
+) -> dict[str, Any]:
+    """Recheck requested files independently and queue compatible remakes together."""
+    groups: dict[tuple[str, str], list[int]] = {}
+    left_out: list[dict[str, Any]] = []
+    removed: list[int] = []
+    names: dict[int, str] = {}
+    manifest_reader = cache(read_manifest)
+    for item_id in dict.fromkeys(library_item_ids):
+        names[item_id] = "Unavailable file"
+        try:
+            with open_db(config.paths.db_path) as connection:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    select(staged_artifacts, library_items.c.rel_path,
+                           library_items.c.source_path.label("original_source_path"))
+                    .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
+                    .where(staged_artifacts.c.library_item_id == item_id)
+                ).mappings().fetchone()
+                names[item_id] = Path(str(row["rel_path"])).name if row is not None else "Unavailable file"
+                recovery = None
+                if row is not None and path_matches_scope(str(row["rel_path"] or ""), prefix):
+                    recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval,
+                                                    manifest_reader=manifest_reader)
+                reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
+                if not reason and not _remove_finished_output(config, row):
+                    reason = "Mediaforce could not remove the finished copy yet. Try again."
+                if reason:
+                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
+                    continue
+                run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
+                now = now_iso()
+                connection.execute(delete(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id))
+                connection.execute(update(library_items).where(library_items.c.id == item_id)
+                                   .values(status="planned", updated_at=now))
+                _record_decision(connection, item_id, "remake", {
+                    **object_dict(_stored_validation(row).get("size_prediction")),
+                    "recovery_reason": recovery["reason"],
+                }, now)
+            removed.append(item_id)
+            groups.setdefault((run_prefix, mode), []).append(item_id)
+        except Exception:
+            logger.exception("Could not finish remake recovery for library item %s", item_id)
+            left_out.append({"library_item_id": item_id, "name": names[item_id],
+                             "reason": "Could not finish this file’s recovery. Check it again before retrying."})
+    runs: list[dict[str, Any]] = []
+    queued_ids: list[int] = []
+    for (run_prefix, mode), item_ids in groups.items():
+        try:
+            result = queue_items(run_prefix, mode, item_ids)
+        except Exception:
+            logger.exception("Could not queue remade files for %s in %s mode", run_prefix, mode)
+            result = {"ok": False, "message": "Queueing failed. Try the normal queue action again."}
+        runs.append(result)
+        queue_left_out = object_list(result.get("left_out"))
+        excluded_ids = {file.get("library_item_id") for file in queue_left_out}
+        accepted_ids = set(result.get("queued_library_item_ids", item_ids if result.get("ok") else []))
+        for item_id in item_ids:
+            if result.get("ok") and item_id in accepted_ids and item_id not in excluded_ids:
+                queued_ids.append(item_id)
+            else:
+                fallback = ("This file was not accepted by the queue. Check whether another run includes it, "
+                            "or review its current settings." if result.get("ok")
+                            else str(result.get("message") or "Try queueing again."))
+                reason = next((str(file.get("reason")) for file in queue_left_out
+                               if file.get("library_item_id") == item_id), fallback)
+                left_out.append({"library_item_id": item_id, "name": names[item_id],
+                                 "reason": f"Finished copy removed, but not queued: {reason}"})
+    message = f"Queued {len(queued_ids)} {'file' if len(queued_ids) == 1 else 'files'} to make again."
+    if left_out:
+        message += " " + " ".join(f"{file['name']}: {file['reason']}" for file in left_out)
+    return {
+        "ok": bool(queued_ids), "action": "size_held_remade", "message": message,
+        "queued_library_item_ids": queued_ids, "removed_library_item_ids": removed,
+        "left_out": left_out, "runs": runs,
+        **({"job": runs[0]["job"]} if len(runs) == 1 and runs[0].get("job") else {}),
     }
 
 
@@ -196,10 +254,32 @@ def staged_remake_details(
     sample = load_latest_job(connection, run_prefix)
     if sample and sample.get("status") in EXECUTION_ACTIVE_JOB_STATUSES:
         blocked_reasons.append("Mediaforce is still sampling here. Make this file again once that sample finishes.")
-    if load_active_encode_jobs_for_prefix(connection, run_prefix):
+    active_jobs = load_active_encode_jobs_for_prefix(connection, run_prefix)
+    if any(job.get("status") != "queued" or job.get("started_at") is not None for job in active_jobs):
         blocked_reasons.append("Mediaforce is still compressing here. Make this file again once that run finishes.")
+    elif active_jobs:
+        busy_ids = _queued_run_item_ids(active_jobs, manifest_reader=manifest_reader)
+        if busy_ids is None or int(row["library_item_id"]) in busy_ids:
+            blocked_reasons.append("A queued run may still make this file. Wait for it before making this file again.")
     return {"reason": "size_held" if held else "final_size" if final_size else "settings_history",
             "blocked_reason": " ".join(blocked_reasons)}
+
+
+def _queued_run_item_ids(jobs: list[dict[str, Any]], *, manifest_reader: ManifestReader) -> set[int] | None:
+    """Missing file identities or invalid shard indexes cannot prove a copy is idle."""
+    busy_ids: set[int] = set()
+    for job in jobs:
+        manifest = object_dict(manifest_reader(Path(str(job.get("manifest_path") or ""))))
+        items = [object_dict(item) for item in object_list(manifest.get("items"))]
+        if not items or any(isinstance(item.get("library_item_id"), bool)
+                            or not isinstance(item.get("library_item_id"), int)
+                            or item["library_item_id"] <= 0 for item in items):
+            return None
+        indexes = object_list(job.get("manifest_indexes")) or list(range(len(items)))
+        if any(not isinstance(index, int) or not 0 <= index < len(items) for index in indexes):
+            return None
+        busy_ids.update(items[index]["library_item_id"] for index in indexes)
+    return busy_ids
 
 
 def staged_remake_records(

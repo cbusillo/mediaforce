@@ -2032,7 +2032,9 @@ def create_app(
             return None
         return _production_approval_contract(object_dict(calibration))
 
-    def _decide_size_held_action(normalized_prefix: str, library_item_id: int, keep: bool) -> ActionPayload:
+    def _decide_size_held_action(
+            normalized_prefix: str, library_item_id: int | Collection[int], keep: bool,
+    ) -> ActionPayload:
         blocker = production_action_blocker(config, normalized_prefix)
         if blocker is not None:
             return blocker
