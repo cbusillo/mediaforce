@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
@@ -527,6 +527,18 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertFalse(stage.exists())
         reset_engine_cache()
         with open_db(self.config.paths.db_path) as connection:
+            # Confirmed removal is queued work even when the prior artifact came from a remote host.
+            for remote_host, access in ((None, None), ("fixture-remote", "stream")):
+                connection.execute(update(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id)
+                                   .values(encode_host_key=remote_host, encode_media_access=access))
+                report = staged_integrity_report(connection, self.config, "tv/Show/Season 1", discover=False)
+                pending = next(record for record in report.records if record.item_id == item_id)
+                with self.subTest(remote_host=remote_host):
+                    self.assertEqual(pending.disposition, "not_started")
+                    self.assertEqual(pending.next_action, "queue_encode")
+                    self.assertIn("Make again", pending.detail)
+            connection.execute(update(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id)
+                               .values(encode_host_key=None, encode_media_access=None))
             report = staged_integrity_report(connection, self.config, "tv/Show/Season 1", discover=False)
             records = staged_remake_records(connection, report.detail_payload(offset=0, limit=100)["records"],
                                            "tv/Show/Season 1", current_approval=lambda _prefix: self._new_remake_approval())
@@ -588,6 +600,33 @@ class StagedIntegrityTests(unittest.TestCase):
                 staged_artifacts.c.library_item_id == item_id)).mappings().one()
             self.assertFalse(size_held.remake_intent(row))
             self.assertFalse(size_held._stored_validation(row)["size_prediction"]["held"])
+
+    def test_remake_preserves_the_copy_when_approval_changes_before_removal(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        original = self._new_remake_approval()
+        current = self._new_remake_approval(sample="newer-sample", value_mb=180)
+        queue = Mock(return_value={"ok": True})
+        refused = decide_size_held_file(
+            self.config, "tv/Show", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no check"), queue_items=queue,
+            current_approval=Mock(side_effect=[original, current]),
+        )
+        self.assertFalse(refused["ok"], refused)
+        self.assertTrue(stage.exists())
+        self.assertEqual(refused["removed_library_item_ids"], [])
+        queue.assert_not_called()
+        with open_db(self.config.paths.db_path) as connection:
+            row = connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id)).mappings().one()
+            self.assertFalse(size_held.remake_intent(row))
+        accepted = decide_size_held_file(
+            self.config, "tv/Show", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("no check"), queue_items=queue,
+            current_approval=lambda _prefix: current,
+        )
+        self.assertTrue(accepted["ok"], accepted)
+        queue.assert_called_once_with("tv/Show", "older_seasons", [item_id], current)
+        self.assertFalse(stage.exists())
 
     def test_failed_cleanup_does_not_pin_a_remaining_copy_to_the_previous_approval(self) -> None:
         item_id, stage, _manifest = self._final_size_file()

@@ -26,9 +26,9 @@ from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_b
     staged_requeue_size_blocker
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
-from mediaforce.web.runtime.remake_intents import INTENT_KEY, finish_remake_intents, remake_intent, save_remake_intent
-from mediaforce.web.runtime.remake_intents import requested_copy_is_present
-from mediaforce.web.runtime.remake_intents import stored_validation as _stored_validation
+from mediaforce.library.remake_intents import INTENT_KEY, finish_remake_intents, remake_intent, save_remake_intent
+from mediaforce.library.remake_intents import requested_copy_is_present
+from mediaforce.library.remake_intents import stored_validation as _stored_validation
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +150,8 @@ def remake_staged_files(
                 reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
                 if not reason and remake_intent(row) != intent:
                     reason = "This file’s saved request changed. Refresh it before retrying."
+                if not reason and recovery is not None and recovery["approval"] != intent["approval"]:
+                    reason = "The approved settings changed before removal. Refresh before retrying. Nothing was removed."
                 if not reason and not _remove_finished_output(config, row):
                     reason = "Mediaforce could not remove the finished copy yet. Try again."
                 if recovery is None or reason:

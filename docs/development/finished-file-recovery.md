@@ -24,7 +24,9 @@ queue refusal retains that request and explicitly reports that the copy was
 removed. Retry **Make again** on the same file or selected IDs after the named
 refusal clears; a fresh request reads the saved settings from the database,
 including after a restart. This is an explicit retry, not an automatic one.
-The integrity details keep the request and retry guidance visible.
+The integrity details keep the request and retry guidance visible. A confirmed
+removed copy counts as work awaiting queueing, including copies made on a remote
+host, and points to Make again instead of missing-output repair.
 An unexpected queue failure is reported for its group; the other groups are still
 attempted. The workspace refreshes removed files even when none were queued,
 and shows partial refusals as an attention notice. Single-file Make again uses
@@ -65,7 +67,7 @@ The saved retry never broadens a manual season selection; it queues only the
 named IDs and waits if active work might include them. Disjoint queued work can
 continue while the saved retry forms a separate run.
 
-Saved retries require the same approval, checked again inside queue admission.
+Saved retries require the same approval, checked before removal and again inside queue admission.
 If it changed, nothing is queued: restore the saved sample approval before using
 the saved retry. To intentionally use different approved settings, use the
 normal queue action with the intended scope and mode, after existing overlapping

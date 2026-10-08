@@ -1,4 +1,4 @@
-"""Saved, explicit remake requests retained until their files enter the queue."""
+"""Library-owned, explicit remake requests retained until their files enter the queue."""
 
 import json
 from collections.abc import Collection
