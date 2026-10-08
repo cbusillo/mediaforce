@@ -555,6 +555,35 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertFalse(request()["ok"])
         self.assertEqual(len(calls), 2)
 
+    def test_saved_remake_retries_record_only_one_owner_decision(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        queue = Mock(return_value={"ok": False, "message": "Waiting for free space."})
+        for attempt in range(4):
+            if attempt == 3:
+                queue.return_value = {"ok": True}
+                reset_engine_cache()
+            result = decide_size_held_file(
+                self.config, "tv/Show", item_id, keep=False, now_iso=lambda: f"attempt-{attempt}",
+                validate_items=lambda *_args: self.fail("no check"), queue_items=queue,
+                current_approval=lambda _prefix: self._new_remake_approval(),
+            )
+            self.assertEqual(result["ok"], attempt == 3, result)
+            self.assertEqual(result["queued_library_item_ids"], [item_id] if attempt == 3 else [])
+            self.assertEqual(result["removed_library_item_ids"], [item_id])
+            self.assertFalse(stage.exists())
+            with open_db(self.config.paths.db_path) as connection:
+                decisions = connection.execute(select(item_events.c.details_json, item_events.c.created_at).where(
+                    item_events.c.library_item_id == item_id,
+                    item_events.c.event_type == "owner_size_held_decision")).all()
+                self.assertEqual(len(decisions), 1)
+                self.assertEqual(json.loads(decisions[0].details_json)["answer"], "remake")
+                self.assertEqual(decisions[0].created_at, "attempt-0")
+                item = connection.execute(select(library_items.c.status, library_items.c.updated_at).where(
+                    library_items.c.id == item_id)).one()
+                self.assertEqual(tuple(item), ("planned", "attempt-0"))
+        self.assertEqual(queue.call_count, 4)
+        self.assertEqual((self.root / "source/tv/Show/Season 1/TooLarge.mkv").read_bytes(), b"source")
+
     def test_confirmed_removed_remote_remake_does_not_repeat_cleanup_before_queueing(self) -> None:
         item_id, stage, _manifest = self._final_size_file()
         refused = decide_size_held_file(

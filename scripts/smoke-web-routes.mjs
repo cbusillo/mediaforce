@@ -161,6 +161,38 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       if (JSON.stringify(requests.at(-1)) !== JSON.stringify({ library_item_id: 101, keep: false })) {
         throw new Error(`Wrong single-file remake request: ${JSON.stringify(requests.at(-1))}`);
       }
+      const pendingDetail = "Finished copy removed. Use Make again to retry with its saved settings.";
+      records = [{
+        ...originalRecords[0], disposition: "not_started", detail: pendingDetail,
+        next_action: "queue_encode",
+        remake: { reason: "size_held", blocked_reason: "", pending: true },
+      }];
+      await expect(section.getByRole("checkbox")).toHaveCount(1, { timeout: 15000 });
+      await expect(section).toContainText(pendingDetail);
+      await expect(section).not.toContainText("Came out at");
+      await expect(section).not.toContainText("removes only this compressed copy");
+      await expect(section.getByRole("button", { name: "Keep this file", exact: true })).toHaveCount(0);
+      await section.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(screenshotDir, `saved-remake-${viewport.width}.png`) });
+      records = [{ ...records[0], detail: "" }];
+      await expect(section).toContainText("This compressed copy is already removed.", { timeout: 15000 });
+      outcome = "success";
+      const retry = section.getByRole("button", { name: "Make again", exact: true });
+      await retry.focus();
+      await page.keyboard.press("Enter");
+      await expect(section).toHaveCount(0);
+      if (JSON.stringify(requests.at(-1)) !== JSON.stringify({ library_item_id: 101, keep: false })) {
+        throw new Error(`Wrong saved remake retry request: ${JSON.stringify(requests.at(-1))}`);
+      }
+      records = [{
+        ...originalRecords[0], disposition: "size_held", detail: "",
+        size_prediction: { actual_bytes: 50_000_000, predicted_bytes: 100_000_000 },
+        remake: { reason: "size_held", blocked_reason: "" },
+      }];
+      await expect(section).toBeVisible({ timeout: 15000 });
+      await expect(section).toContainText("Came out at 50 MB; its sample predicted 100 MB.");
+      await expect(section).toContainText("removes only this compressed copy");
+      await expect(section.getByRole("button", { name: "Keep this file", exact: true })).toBeEnabled();
       await page.close();
     }
     console.log("route ok: Multi-file remake selection, retry and refresh at desktop and narrow widths");

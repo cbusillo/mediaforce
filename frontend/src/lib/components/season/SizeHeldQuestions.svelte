@@ -56,15 +56,19 @@
 						{fileName(record.rel_path)}
 					</label>
 					<span class="size-held__detail">
-						{#if record.remake?.reason === 'final_size'}
-							Missed its approved size goal.
-						{:else if record.remake?.reason === 'settings_history'}
-							Its approved settings were not recorded.
+						{#if record.remake?.pending}
+							{record.detail || 'This compressed copy is already removed.'}
 						{:else}
-							Came out at {formatDecimalFileSize(record.size_prediction?.actual_bytes)}; its sample
-							predicted {formatDecimalFileSize(record.size_prediction?.predicted_bytes)}.
+							{#if record.remake?.reason === 'final_size'}
+								Missed its approved size goal.
+							{:else if record.remake?.reason === 'settings_history'}
+								Its approved settings were not recorded.
+							{:else}
+								Came out at {formatDecimalFileSize(record.size_prediction?.actual_bytes)}; its
+								sample predicted {formatDecimalFileSize(record.size_prediction?.predicted_bytes)}.
+							{/if}
+							Making it again removes only this compressed copy and queues this file. The original stays.
 						{/if}
-						Making it again removes only this compressed copy and queues this file. The original stays.
 						{#if record.remake?.blocked_reason}
 							{record.remake.blocked_reason}
 						{/if}

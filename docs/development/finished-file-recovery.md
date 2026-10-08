@@ -30,6 +30,10 @@ Original access, path protection, active-work and queue-admission checks still r
 The integrity details keep the request and retry guidance visible. A confirmed
 removed copy counts as work awaiting queueing, including copies made on a remote
 host, and points to Make again instead of missing-output repair.
+Its decision row shows the saved retry guidance instead of a size comparison
+or a promise to remove the copy again. The remake decision and return to planned
+are recorded once, when removal is confirmed; refused retries do not duplicate
+that decision or reset its timestamp.
 An unexpected queue failure is reported for its group; the other groups are still
 attempted. The workspace refreshes removed files even when none were queued,
 and shows partial refusals as an attention notice. Single-file Make again uses

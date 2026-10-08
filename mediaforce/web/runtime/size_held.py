@@ -166,14 +166,15 @@ def remake_staged_files(
                     continue
                 removed.append(item_id)
                 run_prefix, mode = str(intent["prefix"]), str(intent["mode"])
-                now = now_iso()
-                save_remake_intent(connection, row, {**intent, "state": "removed"}, now=now)
-                connection.execute(update(library_items).where(library_items.c.id == item_id)
-                                   .values(status="planned", updated_at=now))
-                _record_decision(connection, item_id, "remake", {
-                    **object_dict(_stored_validation(row).get("size_prediction")),
-                    "recovery_reason": recovery["reason"],
-                }, now)
+                if intent.get("state") != "removed":
+                    now = now_iso()
+                    save_remake_intent(connection, row, {**intent, "state": "removed"}, now=now)
+                    connection.execute(update(library_items).where(library_items.c.id == item_id)
+                                       .values(status="planned", updated_at=now))
+                    _record_decision(connection, item_id, "remake", {
+                        **object_dict(_stored_validation(row).get("size_prediction")),
+                        "recovery_reason": recovery["reason"],
+                    }, now)
             groups.setdefault((run_prefix, mode, json.dumps(intent["approval"], sort_keys=True)), []).append(item_id)
         except Exception:
             logger.exception("Could not finish remake recovery for library item %s", item_id)
