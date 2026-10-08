@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from mediaforce.ops import dev_frontend
+from mediaforce.ops import dev_frontend, dev_processes
 from tests.test_dev_process_tree import clear_test_owned_lost_cleanup, native_command
 from tests.test_dev_service import prepare_dev_service
 
@@ -205,6 +205,7 @@ def test_native_unknown_parent_and_custody_recheck(frontend_tree: FrontendTree, 
     tree = frontend_tree
     tree.pid_file.write_text(str(tree.rows["vite"]))
     reader = Path(tree.env["DEV_TEST_REPO"]) / "mediaforce/ops/dev_frontend.py"
+    original_reader = reader.read_bytes()
     counter = reader.with_suffix(".reads")
     target = tree.rows["wrapper"] if failure == "parent" else tree.rows["vite"]
     # Qualify controlled argument unavailability with real native identities;
@@ -228,9 +229,32 @@ def test_native_unknown_parent_and_custody_recheck(frontend_tree: FrontendTree, 
     if failure == "recheck":
         tree.retain_cleanup_marker = True
         assert result.returncode != 0
+        assert "native capture incomplete" in result.stderr
+        assert "next system restart" in result.stderr
         assert "PID bookkeeping retained" in result.stderr
         assert tree.pid_file.read_text() == str(tree.rows["vite"])
         assert not select.select([tree.owned_lifetime], [], [], .1)[0]
+        state = tree.pid_file.parent / "frontend.cleanup"
+        recorded_boot = (state / "boot").read_bytes()
+        assert "native capture incomplete" in (state / "error").read_text()
+        reader.write_bytes(original_reader)
+        for retry_action in ("stop", "restart", "start"):
+            retry = subprocess.run(["/bin/bash", str(tree.script), retry_action, "frontend"],
+                                   env=tree.env, capture_output=True, text=True, timeout=20)
+            assert retry.returncode != 0, retry.stdout
+            if retry_action == "start" and sys.platform == "linux":
+                assert "Linux development launcher cleanup cannot prove descendant custody" in retry.stderr
+                assert "uv run mediaforce-web --no-reload" in retry.stderr
+                assert "npm --prefix frontend run dev" in retry.stderr
+            else:
+                assert retry.stderr.count(dev_processes.CUSTODY_RECOVERY_ADVICE) == 1
+                assert "native capture incomplete" in retry.stderr
+                if retry_action == "start":
+                    assert "cleanup is pending" in retry.stderr
+            assert tree.pid_file.read_text() == str(tree.rows["vite"])
+            assert (state / "boot").read_bytes() == recorded_boot
+            assert not select.select([tree.owned_lifetime, tree.sibling_lifetime], [], [], .1)[0]
+            assert tree.wrapper.poll() is None
     else:
         assert f"native argument ownership unknown for pid {target}: controlled native argument unavailability" in result.stderr
         assert "stopping proven subtree" in result.stderr

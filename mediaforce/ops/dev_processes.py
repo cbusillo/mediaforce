@@ -122,6 +122,23 @@ def sync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
+CUSTODY_RECOVERY_ADVICE = ("custody cannot be recovered from a PID; "
+                          "pending state can be cleared by Stop after the next system restart")
+
+
+def unrecoverable_custody(reason: str) -> RuntimeError:
+    original_reason = reason.replace(f"; {CUSTODY_RECOVERY_ADVICE}", "")
+    return RuntimeError(f"{original_reason}; {CUSTODY_RECOVERY_ADVICE}")
+
+
+def read_error(state: Path) -> str:
+    try:
+        with (state / "error").open("rb") as error_file:
+            return error_file.read(2048).decode(errors="replace")
+    except FileNotFoundError:
+        return ""
+
+
 def record_error(state: Path, error: Exception) -> bytes:
     response = str(error).encode(errors="replace")[:2048]
     try:
@@ -255,6 +272,8 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
                             pass
                         return 1
                     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+                        if tree is None:
+                            exc = unrecoverable_custody(f"{exc}; native capture incomplete; cleanup supervisor exiting")
                         response = record_error(state, exc)
                     try:
                         connection.sendall(response)
@@ -263,8 +282,7 @@ def serve(pid: int, script: str, component: str, state: Path) -> int:
                     if response == b"ok":
                         return 0
                     if tree is None:
-                        # A failed capture cannot prove what survived a lost root.
-                        # Keep the marker even though no native handles were acquired.
+                        # Failed capture cannot prove descendant completion.
                         return 1
     finally:
         if tree is not None:
@@ -283,13 +301,7 @@ def request_stop(state: Path, expected_pid: int) -> None:
                 if not state.exists():
                     raise RuntimeError("cleanup session ended while connecting; retry Stop")
                 if time.monotonic() >= deadline:
-                    previous_error = ""
-                    if (state / "error").is_file():
-                        with (state / "error").open("rb") as error_file:
-                            previous_error = error_file.read(2048).decode(errors="replace")
-                    raise RuntimeError(f"{previous_error}; cleanup supervisor unavailable; "
-                                       "custody cannot be recovered from a PID; "
-                                       "pending state can be cleared by Stop after the next system restart")
+                    raise unrecoverable_custody(f"{read_error(state)}; cleanup supervisor unavailable")
                 time.sleep(.05)
         client.settimeout(10)
         client.sendall(f"stop {expected_pid}\n".encode("ascii"))
@@ -308,14 +320,20 @@ def request_stop(state: Path, expected_pid: int) -> None:
 def main() -> int:
     try:
         action, pid_text, script, component, state_text = sys.argv[1:]
-        if action not in {"stop", "retry", "serve"} or component not in {"backend", "frontend"}:
+        if action not in {"stop", "retry", "serve", "diagnose"} or component not in {"backend", "frontend"}:
             raise ValueError("invalid development process stop arguments")
         pid = int(pid_text)
-        if action != "retry" and (pid <= 1 or pid == os.getpid()):
+        if action in {"stop", "serve"} and (pid <= 1 or pid == os.getpid()):
             raise ValueError("invalid development process root")
         state = Path(state_text).absolute()
         if action == "serve":
             return serve(pid, script, component, state)
+        if action == "diagnose":
+            with state_directory(state):
+                error = read_error(state)
+            if error:
+                print(f"development cleanup last failure: {error}", file=sys.stderr)
+            return 1  # Observation never clears pending state or acquires custody.
         clear_previous_boot(state)
         if action == "stop":
             if publish_state(state):
@@ -337,7 +355,7 @@ def main() -> int:
         request_stop(state, pid if action == "stop" else 0)
         return 0
     except (OSError, RuntimeError, ValueError, IndexError) as exc:
-        print(f"development stop: {exc}; PID bookkeeping retained; retry Stop if custody is retained; retry cannot restore lost custody", file=sys.stderr)
+        print(f"development stop: {exc}; PID bookkeeping retained", file=sys.stderr)
         return 1
 
 

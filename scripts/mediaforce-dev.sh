@@ -236,7 +236,12 @@ recover_pending_cleanup() {
 require_cleanup_finished() {
 	local component="${1}"
 	if [[ -e "${DEV_STATE_DIR}/${component}.cleanup" || -L "${DEV_STATE_DIR}/${component}.cleanup" ]]; then
-		echo "${component}: cleanup is pending; run ${0##*/} stop ${component} before starting" >&2
+		echo "${component}: cleanup is pending; run ${0##*/} stop ${component} for recovery details before starting" >&2
+		(
+			cd "${ROOT_DIR}"
+			uv run --no-sync --project "${ROOT_DIR}" python "${ROOT_DIR}/mediaforce/ops/dev_processes.py" \
+				diagnose 0 "${ROOT_DIR}/scripts/mediaforce-dev.sh" "${component}" "${DEV_STATE_DIR}/${component}.cleanup"
+		) || true
 		return 1
 	fi
 }
