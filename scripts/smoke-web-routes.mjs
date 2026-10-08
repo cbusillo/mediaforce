@@ -174,7 +174,13 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       await expect(section.getByRole("button", { name: "Keep this file", exact: true })).toHaveCount(0);
       await section.scrollIntoViewIfNeeded();
       await page.screenshot({ path: path.join(screenshotDir, `saved-remake-${viewport.width}.png`) });
+      const blockedReason = "The approved settings changed after this remake was saved. Restore that approval before retrying.";
+      records = [{ ...records[0], detail: `${pendingDetail} ${blockedReason}`,
+        remake: { ...records[0].remake, blocked_reason: blockedReason } }];
+      await expect(section.getByRole("button", { name: "Make again", exact: true })).toBeDisabled({ timeout: 15000 });
+      expect((await section.innerText()).split(blockedReason).length - 1).toBe(1);
       records = [{ ...records[0], detail: "" }];
+      records[0].remake = { ...records[0].remake, blocked_reason: "" };
       await expect(section).toContainText("This compressed copy is already removed.", { timeout: 15000 });
       outcome = "success";
       const retry = section.getByRole("button", { name: "Make again", exact: true });
@@ -193,6 +199,18 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       await expect(section).toContainText("Came out at 50 MB; its sample predicted 100 MB.");
       await expect(section).toContainText("removes only this compressed copy");
       await expect(section.getByRole("button", { name: "Keep this file", exact: true })).toBeEnabled();
+      records = [{ ...records[0],
+        detail: "Finished copy remains. Use Make again to retry with the current approved settings.",
+        remake: { ...records[0].remake, pending: true } }];
+      await expect(section).toContainText("Finished copy remains.", { timeout: 15000 });
+      await expect(section).toContainText("Came out at 50 MB; its sample predicted 100 MB.");
+      await expect(section).toContainText("removes only this compressed copy");
+      await expect(section.getByRole("button", { name: "Keep this file", exact: true })).toBeEnabled();
+      await section.scrollIntoViewIfNeeded();
+      if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) {
+        throw new Error("Saved remake state overflows the viewport.");
+      }
+      await page.screenshot({ path: path.join(screenshotDir, `saved-remake-present-${viewport.width}.png`) });
       await page.close();
     }
     console.log("route ok: Multi-file remake selection, retry and refresh at desktop and narrow widths");

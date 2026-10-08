@@ -56,7 +56,7 @@
 						{fileName(record.rel_path)}
 					</label>
 					<span class="size-held__detail">
-						{#if record.remake?.pending}
+						{#if record.remake?.pending && record.disposition === 'not_started'}
 							{record.detail || 'This compressed copy is already removed.'}
 						{:else}
 							{#if record.remake?.reason === 'final_size'}
@@ -68,8 +68,11 @@
 								sample predicted {formatDecimalFileSize(record.size_prediction?.predicted_bytes)}.
 							{/if}
 							Making it again removes only this compressed copy and queues this file. The original stays.
+							{#if record.remake?.pending}
+								{record.detail}
+							{/if}
 						{/if}
-						{#if record.remake?.blocked_reason}
+						{#if record.remake?.blocked_reason && !record.remake.pending}
 							{record.remake.blocked_reason}
 						{/if}
 					</span>
