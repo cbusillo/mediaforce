@@ -27,7 +27,6 @@ install a login item, enable releases, take a live backup, or deploy a runtime.
 ```json
 {
   "observed_at": "2026-10-09T20:00:00+00:00",
-  "database_idle": false,
   "counts": {
     "pending_encode": 1,
     "active_encode": 1,
@@ -42,13 +41,15 @@ install a login item, enable releases, take a live backup, or deploy a runtime.
 `encode_queue.pending_work_count`: queued or retrying episodes count even when
 their parent needs attention. `active_encode` includes queued, retrying and
 running jobs, including folder parents and children. Counts overlap; do not sum
-them to display a number of files. Samples/full runs and evidence work also
-keep `database_idle` false. Paused queues still contain work; terminal jobs and
+them to display a number of files. Samples/full runs and evidence work are also
+counted. Paused queues still contain work; terminal jobs and
 samples waiting only for human review do not count as database execution work.
 `unfinished_scan_rows` covers the catalog traversal recorded in `scan_runs`,
 not the entire scan job.
 
-The response deliberately has no overall `idle` or release-ready flag. Two
+The response contains only counts and the observation-start timestamp, read
+within one SQLite transaction. It deliberately has no idle or release-ready
+flag, even when every count is zero. Two
 ordinary kinds of running work are not represented by these counts:
 
 - A scan can be queued before its database row exists, or continue refreshing
@@ -59,6 +60,8 @@ ordinary kinds of running work are not represented by these counts:
   becomes terminal. `publish_checked_files_once` in
   `mediaforce/web/runtime/automatic_publish.py` selects the pending files, and
   publishing and held-file recovery use `mediaforce/encoding/delivery_lock.py`.
+  Unpromoted staged files are a separate database-resident publishing queue;
+  they are not included in these counts.
   The controller must stop new publishing admissions and verify those locks are
   released, rather than treating terminal encode jobs as finished delivery.
 

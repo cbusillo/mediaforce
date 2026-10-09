@@ -24,12 +24,13 @@ class ReleaseWorkCounts(TypedDict):
 
 class ReleaseWorkSnapshot(TypedDict):
     observed_at: str
-    database_idle: bool
     counts: ReleaseWorkCounts
 
 
 def release_work_payload(db_path: Path) -> ReleaseWorkSnapshot:
     with open_readonly_db(db_path) as connection:
+        # SQLite's legacy SELECT behavior needs an explicit read transaction.
+        connection.exec_driver_sql("BEGIN")
         return release_work_snapshot(connection)
 
 
@@ -40,6 +41,7 @@ def release_work_snapshot(connection: DBClient) -> ReleaseWorkSnapshot:
     release. Scan job files, publishing locks and remote custody are separate
     evidence; the controller must quiesce all producers and recheck before stopping.
     """
+    observed_at = datetime.now(timezone.utc).isoformat()
     counts: ReleaseWorkCounts = {
         "pending_encode": count_pending_encode_work(connection),
         "active_encode": int(connection.execute(
@@ -60,7 +62,6 @@ def release_work_snapshot(connection: DBClient) -> ReleaseWorkSnapshot:
         ).scalar_one()),
     }
     return {
-        "observed_at": datetime.now(timezone.utc).isoformat(),
-        "database_idle": not any(counts.values()),
+        "observed_at": observed_at,
         "counts": counts,
     }
