@@ -104,7 +104,7 @@ def remote_script_ending_with_connection(script: str, owned_output: Path) -> str
         f"mediaforce_owned_output={owned}",
         "exec 3<&0",
         # Keep a stable shell around the command, even when its last program execs.
-        f"( {script}; mediaforce_status=$?; exit \"$mediaforce_status\" ) </dev/null &",
+        f"(\n{script}\nmediaforce_status=$?; exit \"$mediaforce_status\"\n) </dev/null &",
         "mediaforce_encode_pid=$!",
         "pid=$mediaforce_encode_pid",
         f"mediaforce_encode_identity=$({REMOTE_PROCESS_IDENTITY_SHELL})",

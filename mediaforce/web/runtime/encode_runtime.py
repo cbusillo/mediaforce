@@ -290,7 +290,9 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
                     path = str(resolve_item_staging_path(
                         config, object_dict(items[index]), host=host, host_media_access_for_host=host_media_access_for_host,
                     ))
-                    if not path or path in active_paths:
+                    item_id = object_dict(items[index]).get("library_item_id")
+                    if (not path or path in active_paths or (
+                            item_id is not None and _active_standalone_cli_encode(connection, int(item_id)))):
                         raise RuntimeError("An active encode owns this file or its output path is unknown.")
                     for target in (Path(path), partial_output_path(Path(path))):
                         connection.commit()
@@ -1290,7 +1292,12 @@ def transition_encode_job_schedule_close(
                 expected_started_at=expected_started_at,
             )
     except BlockingIOError:
-        return False
+        # Release the finished worker without touching files owned by the
+        # cleanup holding the lock. Retry retains its host and must clean first.
+        return _transition_encode_job_schedule_close(
+            connection, config, job, deps, expected_worker_id=expected_worker_id,
+            expected_started_at=expected_started_at, cleanup_deferred=True,
+        )
 
 
 def _transition_encode_job_schedule_close(
@@ -1301,6 +1308,7 @@ def _transition_encode_job_schedule_close(
         *,
         expected_worker_id: str | None = None,
         expected_started_at: str | None = None,
+        cleanup_deferred: bool = False,
 ) -> bool:
     if str(job.get("status") or "") != "running" or bool(job.get("bypass_schedule")):
         return False
@@ -1327,8 +1335,11 @@ def _transition_encode_job_schedule_close(
     completed = _encode_job_outputs_completed(connection, job)
     connection.commit()
     assigned_host = object_dict(job.get("host"))
-    cleanup = _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANED)
-    if not completed:
+    cleanup = _EncodeRetryArtifactCleanupResult(
+        _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED if cleanup_deferred
+        else _EncodeRetryArtifactCleanupOutcome.CLEANED,
+    )
+    if not completed and not cleanup_deferred:
         cleanup = _cleanup_encode_retry_artifacts(
             connection,
             manifest_path=Path(str(job["manifest_path"])),
@@ -4404,7 +4415,8 @@ def _cleanup_encode_retry_artifacts_locked(
         )
         staging_value = stage_row["staging_path"] if artifact_present else manifest_staging_value
         staging_path = Path(str(staging_value)) if str(staging_value or "").strip() else None
-        if library_item_id in active_items or any(
+        cli_active = library_item_id is not None and _active_standalone_cli_encode(connection, int(library_item_id))
+        if cli_active or library_item_id in active_items or any(
                 str(value) in active_paths for value in (staging_value, manifest_staging_value) if value):
             return _EncodeRetryArtifactCleanupResult(
                 _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
@@ -4439,10 +4451,9 @@ def _cleanup_encode_retry_artifacts_locked(
                 if partial_cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_DEFERRED:
                     partial_cleanup_deferred = True
             if partial_cleanup_deferred:
-                cleanup_succeeded_for_all = False
-                deps.logger.warning(
-                    "Preserving partial staged artifact for item %s because cleanup could not reach the target.",
-                    library_item_id,
+                return _EncodeRetryArtifactCleanupResult(
+                    _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
+                    detail="The earlier output could not be checked; retry when its host is reachable.",
                 )
         if library_item_id is None or promoted or complete:
             continue

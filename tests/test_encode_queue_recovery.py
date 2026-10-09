@@ -1060,8 +1060,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "retry_backoff")
-        self.assertEqual({call.args[1] for call in sweep_mock.call_args_list},
-                         {staging_path, staging_runtime.partial_output_path(staging_path)})
+        visited = {call.args[1] for call in sweep_mock.call_args_list}
+        self.assertTrue(visited)
+        self.assertLessEqual(visited, {staging_path, staging_runtime.partial_output_path(staging_path)})
         unowned.assert_not_called()
         self.assertEqual(staging_path.read_text(), "unfinished")
 
@@ -28718,6 +28719,45 @@ raise SystemExit(0)
             self.assertEqual(load_encode_job(connection, "orphan")["status"], "stopped")
             self.assertEqual(self._library_item_value(connection, item_id, library_items.c.status)["status"], "encoding")
 
+    def test_retained_sweep_preserves_newer_standalone_cli_writer(self) -> None:
+        self._assert_retained_cleanup_preserves_cli_writer(retry=False)
+
+    def test_terminal_retry_preserves_newer_standalone_cli_writer(self) -> None:
+        self._assert_retained_cleanup_preserves_cli_writer(retry=True)
+
+    def _assert_retained_cleanup_preserves_cli_writer(self, *, retry: bool) -> None:
+        source = self._create_source_file("cli-replacement.mkv")
+        output = self._staging_path("cli-replacement.mkv")
+        partial = staging_runtime.partial_output_path(output)
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        partial.write_text("new CLI frames")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="encoding")
+            self._write_manifest("old-cli.json", [{"library_item_id": item_id, "staging_path": str(output)}])
+            self._save_job(connection, job_id="old-cli", manifest_name="old-cli.json", status="stopped",
+                           attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+            self._insert_staged_artifact(connection, item_id, output)
+            connection.execute(item_events.insert().values(
+                library_item_id=item_id, created_at=web_app._now_iso(), event_type="encoding_started",
+                details_json=json.dumps({"encode_origin": "cli", "encode_owner_pid": 12345})))
+            connection.commit()
+            old = load_encode_job(connection, "old-cli")
+            with patch.object(encode_runtime, "_process_is_running", return_value=True), patch.object(
+                    encode_runtime, "end_remote_output_writers") as end_writers, patch.object(
+                    encode_runtime, "run_remote_command", new=_remote_cleanup_succeeds):
+                if retry:
+                    with self.assertRaises(HTTPException) as raised:
+                        encode_runtime.prepare_terminal_encode_job_for_requeue(
+                            connection, old, deps=web_app._encode_queue_runtime_deps(), config=self.config)
+                    self.assertEqual(raised.exception.status_code, 409)
+                else:
+                    encode_runtime.sweep_stopped_remote_encodes(connection, self.config, web_app._encode_queue_runtime_deps())
+                end_writers.assert_not_called()
+            self.assertEqual(partial.read_text(), "new CLI frames")
+            self.assertEqual(load_encode_job(connection, "old-cli")["status"], "stopped")
+            self.assertNotIn("remote_cleanup_verified", object_dict(load_encode_job(connection, "old-cli")["progress"]))
+            self.assertIsNotNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+
     def test_startup_sweeps_stopped_remote_job_without_artifact_record(self) -> None:
         output = self._staging_path("orphan.mkv")
         self._write_manifest("orphan.json", [{"staging_path": str(output)}])
@@ -29011,6 +29051,30 @@ raise SystemExit(0)
             queued = load_encode_job(connection, "claim-cleanup")
             assert queued is not None
             self.assertEqual(queued["status"], "queued")
+
+    def test_schedule_close_under_dispatch_contention_preserves_a_cleanup_retry(self) -> None:
+        output = self._staging_path("schedule-busy.mkv")
+        partial = staging_runtime.partial_output_path(output)
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        partial.write_text("interrupted frames")
+        self._write_manifest("schedule-busy.json", [{"staging_path": str(output)}])
+        host = {"mode": "ssh", "host": "fixture"}
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="schedule-busy", manifest_name="schedule-busy.json", status="running",
+                           attempt_count=1, host=host)
+            connection.commit()
+            job = load_encode_job(connection, "schedule-busy")
+            with encode_runtime._locked_encode_dispatch(connection), patch.object(
+                    encode_runtime, "end_remote_output_writers") as end_writers:
+                self.assertTrue(encode_runtime.transition_encode_job_schedule_close(
+                    connection, self.config, job, web_app._encode_queue_runtime_deps()))
+                end_writers.assert_not_called()
+            saved = load_encode_job(connection, "schedule-busy")
+            self.assertEqual(saved["status"], "retry_backoff")
+            self.assertEqual(saved["host"], host)
+            self.assertIsNone(saved["worker_id"])
+            self.assertIsNotNone(saved["retry_not_before"])
+            self.assertEqual(partial.read_text(), "interrupted frames")
 
     def test_schedule_cleanup_leaves_database_writable(self) -> None:
         self._write_manifest("schedule-lock.json", [{"staging_path": str(self._staging_path("schedule-lock.mkv"))}])

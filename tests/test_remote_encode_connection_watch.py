@@ -9,9 +9,11 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from mediaforce.core.schedule_deadline import guard_shell_script_for_schedule_deadline
 from mediaforce.encoding.runner import remote_script_ending_with_connection
 
 
@@ -84,6 +86,22 @@ class RemoteEncodeConnectionWatchTests(unittest.TestCase):
             self.assertEqual(owned.read_text(), "data", "verified queue cleanup owns removal")
             self.assertIsNone(reader.poll(), "the reader is outside the command's process family")
             self.assertFalse(marker.exists())
+
+    def test_scheduled_multiline_command_keeps_its_output_and_exit_status(self) -> None:
+        with TemporaryDirectory() as raw_root:
+            owned = Path(raw_root) / "Scheduled.partial.mkv"
+            for status in (0, 7):
+                with self.subTest(status=status):
+                    command = f"echo scheduled > {shlex.quote(str(owned))}\nexit {status}"
+                    guarded = guard_shell_script_for_schedule_deadline(command, datetime.now(UTC) + timedelta(minutes=1))
+                    process = self._start(guarded, owned)
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        assert stream is not None
+                        self.addCleanup(stream.close)
+                    self.assertEqual(process.wait(timeout=15), status)
+                    self.assertEqual(owned.read_text().strip(), "scheduled")
+                    assert process.stdin is not None
+                    process.stdin.close()
 
     def test_a_finished_encode_keeps_its_output_and_exit_status(self) -> None:
         with TemporaryDirectory() as raw_root:
