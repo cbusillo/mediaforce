@@ -1059,7 +1059,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(job["status"], "retry_backoff")
         sweep_mock.assert_called_once_with(self.config, prefixes=["tv/show"])
 
-    def test_reconcile_encode_jobs_clears_stale_encoding_items_when_idle(self) -> None:
+    def test_startup_recovery_clears_stale_encoding_items_when_idle(self) -> None:
         source_path = self._create_source_file("episode-idle-clear.mkv")
         staging_path = self._staging_path("episode-idle-clear.mkv")
         partial_path = staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
@@ -1071,7 +1071,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             item_id = self._insert_library_item(connection, source_path, status="encoding")
             self._insert_staged_artifact(connection, item_id, staging_path)
 
-            web_app._reconcile_encode_jobs(connection, self.config)
+            web_app._recover_encode_queue(connection, self.config)
 
             item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
             assert item_status_row is not None
@@ -1148,7 +1148,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         assert job is not None
         self.assertIn("complete free-space reserve inputs", str(job["waiting_reason"]))
 
-    def test_reconcile_encode_jobs_preserves_active_standalone_cli_encode(self) -> None:
+    def test_startup_recovery_preserves_active_standalone_cli_encode(self) -> None:
         source_path = self._create_source_file("episode-active-cli.mkv")
         staging_path = self._staging_path("episode-active-cli.mkv")
         partial_path = staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
@@ -1172,7 +1172,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
             )
 
-            web_app._reconcile_encode_jobs(connection, self.config)
+            web_app._recover_encode_queue(connection, self.config)
 
             item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
             assert item_status_row is not None
@@ -1207,7 +1207,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertIsNotNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
         self.assertTrue(staging_path.exists())
 
-    def test_reconcile_encode_jobs_preserves_state_when_stale_cleanup_fails(self) -> None:
+    def test_startup_recovery_preserves_state_when_stale_cleanup_fails(self) -> None:
         first_source = self._create_source_file("episode-stale-first.mkv")
         second_source = self._create_source_file("episode-stale-second.mkv")
         first_staging = self._staging_path("episode-stale-first.mkv")
@@ -1228,7 +1228,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 target_path.unlink(missing_ok=True)
 
             with patch("mediaforce.web.runtime.encode_runtime.safe_unlink", side_effect=_unlink_with_one_failure):
-                web_app._reconcile_encode_jobs(connection, self.config)
+                web_app._recover_encode_queue(connection, self.config)
 
             first_status_row = self._library_item_value(connection, first_id, library_items.c.status)
             second_status_row = self._library_item_value(connection, second_id, library_items.c.status)
@@ -1246,7 +1246,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(first_staging.exists())
         self.assertFalse(second_staging.exists())
 
-    def test_reconcile_encode_jobs_prunes_empty_quality_temp_dirs(self) -> None:
+    def test_startup_recovery_prunes_empty_quality_temp_dirs(self) -> None:
         source_path = self._create_source_file("episode-temp-dir.mkv")
         temp_dir = self.root / "staging" / ".mediaforce-ab-av1-stale"
         staging_path = temp_dir / "episode-temp-dir.mkv"
@@ -1259,7 +1259,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             item_id = self._insert_library_item(connection, source_path, status="encoding")
             self._insert_staged_artifact(connection, item_id, staging_path)
 
-            web_app._reconcile_encode_jobs(connection, self.config)
+            web_app._recover_encode_queue(connection, self.config)
 
             item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
             assert item_status_row is not None
@@ -1270,7 +1270,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertFalse(partial_path.exists())
         self.assertFalse(temp_dir.exists())
 
-    def test_reconcile_encode_jobs_prunes_empty_quality_temp_dirs_when_files_are_already_missing(self) -> None:
+    def test_startup_recovery_prunes_empty_quality_temp_dirs_when_files_are_already_missing(self) -> None:
         source_path = self._create_source_file("episode-temp-dir-missing.mkv")
         temp_dir = self.root / "staging" / ".mediaforce-ab-av1-missing"
         staging_path = temp_dir / "episode-temp-dir-missing.mkv"
@@ -1280,7 +1280,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             item_id = self._insert_library_item(connection, source_path, status="encoding")
             self._insert_staged_artifact(connection, item_id, staging_path)
 
-            web_app._reconcile_encode_jobs(connection, self.config)
+            web_app._recover_encode_queue(connection, self.config)
 
             item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
             assert item_status_row is not None
@@ -1289,7 +1289,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertFalse(temp_dir.exists())
 
-    def test_reconcile_encode_jobs_preserves_untracked_host_staging_output(self) -> None:
+    def test_startup_recovery_preserves_untracked_host_staging_output(self) -> None:
         source_path = self._create_source_file("episode-host-orphan.mkv")
         self.config.raw["remote_hosts"] = [
             {
@@ -1309,7 +1309,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="encoding")
 
-            web_app._reconcile_encode_jobs(connection, self.config)
+            web_app._recover_encode_queue(connection, self.config)
 
             item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
             assert item_status_row is not None
@@ -1318,7 +1318,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertTrue(host_staging_path.exists())
         self.assertTrue(host_partial_path.exists())
 
-    def test_reconcile_encode_jobs_keeps_stream_host_cleanup_local(self) -> None:
+    def test_startup_recovery_keeps_stream_host_cleanup_local(self) -> None:
         source_path = self._create_source_file("episode-stream-host.mkv")
         self.config.raw["remote_hosts"] = [
             {
@@ -1341,7 +1341,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self._insert_staged_artifact(connection, item_id, staging_path)
 
             with patch("mediaforce.web.runtime.encode_runtime.run_remote_command") as run_remote_command_mock:
-                web_app._reconcile_encode_jobs(connection, self.config)
+                web_app._recover_encode_queue(connection, self.config)
 
             item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
             assert item_status_row is not None
@@ -3533,7 +3533,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("to remove an unfinished file it left", str(still_waiting["waiting_reason"]))
         self.assertIsNotNone(still_waiting["retry_not_before"])
         assert still_waiting_item_status is not None
-        self.assertEqual(still_waiting_item_status["status"], "planned")
+        self.assertEqual(still_waiting_item_status["status"], "encoding")
 
         with open_db(self.config.paths.db_path) as connection:
             still_waiting["retry_not_before"] = "2000-01-01T00:00:00+00:00"
@@ -28702,6 +28702,84 @@ raise SystemExit(0)
             assert job is not None
             self.assertTrue(job["progress"]["remote_cleanup_verified"])
             self.assertIn("remote processes have ended", job["error"])
+
+    def test_reconcile_does_not_poll_stopped_remote_host(self) -> None:
+        output = self._staging_path("offline.mkv")
+        self._write_manifest("offline.json", [{"staging_path": str(output)}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="offline", manifest_name="offline.json", status="stopped",
+                           attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+            with patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers",
+                       side_effect=RuntimeError("offline")) as end_writers:
+                deps = web_app._encode_queue_runtime_deps()
+                encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+                encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+            end_writers.assert_not_called()
+
+    def test_stop_sweep_attempts_an_offline_host_once_per_pass(self) -> None:
+        self._write_manifest("offline.json", [{"staging_path": str(self._staging_path("offline.mkv"))}])
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(3):
+                self._save_job(connection, job_id=f"offline-{index}", manifest_name="offline.json", status="stopped",
+                               attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+            with patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers",
+                       side_effect=RuntimeError("offline")) as end_writers:
+                encode_runtime.sweep_stopped_remote_encodes(connection, web_app._encode_queue_runtime_deps())
+            self.assertEqual(end_writers.call_count, 1)
+
+    def test_stop_sweep_keeps_concurrent_requeue(self) -> None:
+        output = self._staging_path("raced.mkv")
+        self._write_manifest("raced.json", [{"staging_path": str(output)}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="raced", manifest_name="raced.json", status="stopped",
+                           attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+            connection.commit()
+            def concurrent_requeue(*_args: Any, **_kwargs: Any) -> None:
+                with open_db(self.config.paths.db_path) as other:
+                    job = load_encode_job(other, "raced")
+                    assert job is not None
+                    job.update({"status": "queued", "attempt_count": 2})
+                    save_encode_job(other, job)
+            with patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers",
+                       side_effect=concurrent_requeue):
+                encode_runtime.sweep_stopped_remote_encodes(connection, web_app._encode_queue_runtime_deps())
+            job = load_encode_job(connection, "raced")
+            assert job is not None
+            self.assertEqual(job["status"], "queued")
+            self.assertEqual(job["attempt_count"], 2)
+
+    def test_stop_sweep_skips_stream_hosts(self) -> None:
+        output = self._staging_path("stream.mkv")
+        self._write_manifest("stream.json", [{"staging_path": str(output)}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="stream", manifest_name="stream.json", status="stopped",
+                           attempt_count=1, host={"mode": "ssh", "host": "fixture", "media_access": "stream"})
+            with patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers") as end_writers:
+                encode_runtime.sweep_stopped_remote_encodes(connection, web_app._encode_queue_runtime_deps())
+            end_writers.assert_not_called()
+            job = load_encode_job(connection, "stream")
+            assert job is not None
+            self.assertNotIn("remote_cleanup_verified", object_dict(job["progress"]))
+
+    def test_schedule_cleanup_precedes_host_shutdown(self) -> None:
+        self._write_manifest("schedule.json", [{"staging_path": str(self._staging_path("schedule.mkv"))}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="schedule", manifest_name="schedule.json", status="running",
+                           attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+        events: list[str] = []
+        def interrupted(*_args: Any, **_kwargs: Any) -> None:
+            raise ScheduleWindowClosedError()
+        def cleanup(*_args: Any, **_kwargs: Any) -> encode_runtime._EncodeRetryArtifactCleanupResult:
+            events.append("cleanup")
+            return encode_runtime._EncodeRetryArtifactCleanupResult(encode_runtime._EncodeRetryArtifactCleanupOutcome.CLEANED)
+        deps = replace(web_app._encode_queue_runtime_deps(), load_config=lambda _path: self.config,
+                       ensure_encode_host_ready=lambda *_args: True, encode_manifest_items=interrupted,
+                       stop_encode_host_if_configured=lambda *_args: events.append("stop"))
+        with patch("mediaforce.web.runtime.encode_runtime.encode_job_heartbeat_loop"), patch(
+                "mediaforce.web.runtime.encode_runtime._cleanup_encode_retry_artifacts", side_effect=cleanup):
+            encode_runtime.run_encode_job(config_path=self.config.paths.config_path, job_id="schedule",
+                                         process_controller=ManagedProcessController(), deps=deps)
+        self.assertEqual(events, ["cleanup", "stop"])
 
     def test_stopped_remote_receipt_does_not_cover_a_later_attempt(self) -> None:
         output = self._staging_path("repeat.mkv")

@@ -200,7 +200,8 @@ from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_acti
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
 from mediaforce.web.runtime.episode_progress import folder_episodes_payload
-from mediaforce.web.runtime.encode_runtime import release_host_cooldowns, sync_encode_job_parent
+from mediaforce.web.runtime.encode_runtime import release_host_cooldowns, sync_encode_job_parent, \
+    sweep_stopped_remote_encodes
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle, run_supervised_worker_loop
@@ -4464,7 +4465,9 @@ def _reconcile_encode_jobs(
 
 def _clear_stale_encoding_items_when_idle(config: MediaforceConfig) -> int:
     with open_db(config.paths.db_path) as connection:
-        return runtime_clear_stale_encoding_items_when_idle(connection, config, _encode_queue_runtime_deps())
+        deps = _encode_queue_runtime_deps()
+        sweep_stopped_remote_encodes(connection, deps)
+        return runtime_clear_stale_encoding_items_when_idle(connection, config, deps)
 
 
 def _encode_job_manifest_totals(job: dict[str, Any]) -> dict[str, Any]:

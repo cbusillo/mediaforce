@@ -20,7 +20,7 @@ class _RemoteProcess:
 
 
 def _inventory(host: dict[str, Any], run_command: Callable[..., subprocess.CompletedProcess[str]]) -> dict[int, _RemoteProcess]:
-    result = run_command(host, ["ps", "-ww", "-axo", "pid=,ppid=,stat=,lstart=,args="], timeout=10)
+    result = run_command(host, ["ps", "-ww", "-axo", "pid=,ppid=,stat=,lstart=,args="], timeout=10, wake_before_connect=False)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "Remote process inventory failed.")
     if not result.stdout.strip():
@@ -80,7 +80,7 @@ def _signal(host: dict[str, Any], processes: dict[int, _RemoteProcess], signal: 
         '[ "$observed" != "$expected" ] || kill -"$signal" "$pid" 2>/dev/null || true; done'
     )
     arguments = [value for process in processes.values() for value in (str(process.pid), process.identity)]
-    result = run_command(host, ["sh", "-c", script, "mediaforce-end-encode", signal, *arguments], timeout=10)
+    result = run_command(host, ["sh", "-c", script, "mediaforce-end-encode", signal, *arguments], timeout=10, wake_before_connect=False)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "Remote encoder could not be ended.")
 
@@ -101,7 +101,7 @@ def end_remote_output_writers(
     for process in owned.values():
         if Path(process.command.split()[0]).name != "ffmpeg":
             continue
-        opened = run_command(host, ["lsof", "-a", "-p", str(process.pid), "-Ffan"], timeout=10)
+        opened = run_command(host, ["lsof", "-a", "-p", str(process.pid), "-Ffan"], timeout=10, wake_before_connect=False)
         writable = False
         owns_output = False
         for field in opened.stdout.splitlines():

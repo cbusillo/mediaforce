@@ -169,7 +169,12 @@ before deleting the partial file. Process birth time and command are checked
 before signals; unrelated encodes and readers of that file are preserved.
 
 The check runs even when the file is visible through the controller's mounted
-share. A failed host connection, incomplete inventory, or surviving writer
+share. Recovery connects without waking sleeping computers. The retained-job
+sweep runs at startup and on Stop, rather than on each queue poll, and attempts
+an unavailable host only once per sweep. Automatic retry cleanup retains its
+existing backoff. A schedule-close transition completes cleanup before the
+computer's configured shutdown command. A late sweep result cannot overwrite
+a job that was requeued or changed while SSH was running. A failed host connection, incomplete inventory, or surviving writer
 keeps the unfinished file and delays automatic retry. Making a terminal file
 again reports HTTP 409 with a wait message until cleanup succeeds. Retry through
 the same supported action once the host is reachable; no manual file deletion

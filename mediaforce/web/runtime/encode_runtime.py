@@ -196,6 +196,8 @@ def recover_encode_queue(
     connection.commit()
     reconcile_encode_jobs(connection, config, deps, restart_recovery=True)
     sweep_stopped_remote_encodes(connection, deps)
+    clear_stale_encoding_items_when_idle(connection, config, deps)
+    connection.commit()
 
 
 def sweep_stopped_remote_encodes(connection: DBClient, deps: EncodeQueueRuntimeDeps) -> None:
@@ -225,13 +227,16 @@ def sweep_stopped_remote_encodes(connection: DBClient, deps: EncodeQueueRuntimeD
         except (OSError, ValueError, TypeError, IndexError):
             # Unknown active ownership cannot safely be swept by output path.
             return
+    failed_hosts: dict[str, str] = {}
     for row in rows:
         job = load_encode_job(connection, str(row["job_id"]))
         if job is None:
             continue
+        snapshot = stable_json_hash(job)
         host = object_dict(job.get("host"))
+        host_key = str(host.get("host") or host.get("key") or stable_json_hash(host))
         progress = object_dict(job.get("progress"))
-        if execution_mode_for_host(host) != "ssh":
+        if execution_mode_for_host(host) != "ssh" or host_media_access_for_host(host) == "stream":
             continue
         try:
             items = object_list(json.loads(Path(job["manifest_path"]).read_text()).get("items"))
@@ -243,19 +248,48 @@ def sweep_stopped_remote_encodes(connection: DBClient, deps: EncodeQueueRuntimeD
             })
             if progress.get("remote_cleanup_verified") == receipt:
                 continue
+            changed_during_cleanup = False
             for index in indexes:
                 path = str(object_dict(items[index]).get("staging_path") or "")
                 if not path or path in active_paths:
                     raise RuntimeError("An active encode owns this file or its output path is unknown.")
                 for target in (Path(path), partial_output_path(Path(path))):
-                    end_remote_output_writers(host, target, run_command=run_remote_command)
+                    connection.commit()
+                    current = load_encode_job(connection, str(job["job_id"]))
+                    if current is None or stable_json_hash(current) != snapshot:
+                        changed_during_cleanup = True
+                        break
+                    if host_key in failed_hosts:
+                        raise RuntimeError(failed_hosts[host_key])
+                    try:
+                        end_remote_output_writers(host, target, run_command=run_remote_command)
+                    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                        failed_hosts[host_key] = str(exc)
+                        raise
+                if changed_during_cleanup:
+                    break
+            if changed_during_cleanup:
+                connection.rollback()
+                continue
         except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError, subprocess.SubprocessError) as exc:
-            job["error"] = f"Stopped; waiting to end its earlier remote encode before making this file again. {exc}"
+            message = f"Waiting to end its earlier remote encode before making this file again. {exc}"
+            if job["status"] == "stopped":
+                job["error"] = f"Stopped; {message}"
+            else:
+                job["waiting_reason"] = message
         else:
             progress["remote_cleanup_verified"] = receipt
             job["progress"] = progress
             if job["status"] == "stopped":
                 job["error"] = "Encode queue job was stopped; its remote processes have ended."
+            else:
+                job["waiting_reason"] = None
+        connection.commit()
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        current = load_encode_job(connection, str(job["job_id"]))
+        if current is None or stable_json_hash(current) != snapshot:
+            connection.rollback()
+            continue
         job["updated_at"] = deps.now_iso()
         save_encode_job(connection, job)
         sync_encode_job_parent(connection, job, deps)
@@ -410,8 +444,6 @@ def reconcile_encode_jobs(
         state.update({"active_job_id": None, "stop_requested": False, "updated_at": deps.now_iso()})
         save_queue_state(connection, state)
     connection.commit()
-    clear_stale_encoding_items_when_idle(connection, config, deps)
-    connection.commit()
 
 
 LIVE_WORKER_PROGRESS_GRACE = timedelta(minutes=10)
@@ -499,7 +531,6 @@ def clear_stale_encoding_items_when_idle(
 ) -> int:
     if running_encode_job_count(connection) > 0:
         return 0
-    sweep_stopped_remote_encodes(connection, deps)
     stale_rows = connection.execute(
         select(
             library_items.c.id,
@@ -705,7 +736,7 @@ def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> _Stag
         )
     try:
         end_remote_output_writers(host, path, run_command=run_remote_command)
-        result = run_remote_command(host, ["sh", "-lc", script], timeout=10)
+        result = run_remote_command(host, ["sh", "-lc", script], timeout=10, wake_before_connect=False)
     except Exception as exc:
         return _StagingPathCleanupResult(
             _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
@@ -3680,7 +3711,8 @@ def run_encode_job(
         if bool(job.get("bypass_schedule"))
         else str(job.get("schedule_close_deadline_at") or "").strip() or None
     )
-    encode_host = object_dict(job.get("host"))
+    original_host = object_dict(job.get("host"))
+    encode_host = dict(original_host)
     if schedule_close_deadline_at is not None:
         encode_host[SCHEDULE_CLOSE_DEADLINE_KEY] = schedule_close_deadline_at
 
@@ -3796,11 +3828,6 @@ def run_encode_job(
         schedule_deadline_stop.set()
         if schedule_deadline_thread is not None:
             schedule_deadline_thread.join()
-        if started_host_for_job and not _host_has_other_running_jobs(config, job_id, job.get("host")):
-            try:
-                deps.stop_encode_host_if_configured(config, job.get("host"))
-            except Exception as exc:
-                deps.logger.warning("Encode host stop command failed for %s: %s", job_id, exc)
         heartbeat_stop.set()
         heartbeat_thread.join()
         with open_db(config.paths.db_path) as connection:
@@ -3876,6 +3903,12 @@ def run_encode_job(
                 save_queue_state(connection, state)
         if not process_controller.cleanup_unproven:
             process_controller.reset()
+
+        if started_host_for_job and not _host_has_other_running_jobs(config, job_id, original_host):
+            try:
+                deps.stop_encode_host_if_configured(config, original_host)
+            except Exception as exc:
+                deps.logger.warning("Encode host stop command failed for %s: %s", job_id, exc)
 
 
 def _encode_job_worker_id() -> str:

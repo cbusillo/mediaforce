@@ -109,3 +109,4 @@ def test_output_removal_follows_verified_process_exit() -> None:
         result = encode_runtime._remove_stale_staging_path(output, host={"mode": "ssh", "host": "fixture"})
     assert result.outcome == encode_runtime._StagingPathCleanupOutcome.CLEANED
     assert runner.call_args_list[-1].args[1][2] == f"rm -f {output}"
+    assert all(call.kwargs["wake_before_connect"] is False for call in runner.call_args_list)
