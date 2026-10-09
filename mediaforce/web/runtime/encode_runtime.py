@@ -672,6 +672,9 @@ def _candidate_stale_staging_targets(
         return []
     host_key = str(row.get("encode_host_key") or row.get("encode_host_label") or "").strip()
     host_config = host_config_for_key(config, host_key) if host_key else {}
+    if str(row.get("encode_host_mode") or "") == "ssh" and execution_mode_for_host(host_config) != "ssh":
+        # A removed or repurposed computer is not proof its old remote writer ended.
+        host_config = {"mode": "ssh", "key": host_key}
     return [(Path(staging_value), host_config or None)]
 
 

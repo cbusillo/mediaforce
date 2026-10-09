@@ -235,3 +235,7 @@ transition. A requeue returns its existing wait response while that cleanup runs
 and dispatch leaves the queued job for a later pass. Process exit releases the
 lock automatically, so a controller crash does not leave a durable claim to
 manually clear. SQLite remains available while SSH is in flight.
+
+A stale artifact recorded as remote stays remote when its computer configuration
+is removed or repurposed. Cleanup waits for a matching reachable computer instead
+of treating the mounted file as locally owned.

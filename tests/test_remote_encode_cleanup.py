@@ -152,3 +152,16 @@ def test_unlinked_escaped_writer_does_not_verify_reuse() -> None:
     runner = Mock(side_effect=[_result(_row(11, 1, 'ffmpeg /staging/PokM-CM-)mon.partial.mkv')), _result('')])
     with pytest.raises(RuntimeError, match='obscures'):
         end_remote_output_writers({'host': 'fixture'}, output, run_command=runner)
+
+
+@pytest.mark.parametrize('current_host', [{}, {'mode': 'local'}])
+def test_remote_artifact_does_not_become_local_when_host_configuration_changes(tmp_path: Path, current_host: dict) -> None:
+    output = tmp_path / 'unfinished.partial.mkv'
+    output.write_text('still owned remotely')
+    row = {'staging_path': str(output), 'encode_host_key': 'former-remote', 'encode_host_mode': 'ssh'}
+    with patch.object(encode_runtime, 'host_config_for_key', return_value=current_host), patch.object(
+            encode_runtime, 'run_remote_command', return_value=_result(status=255)):
+        targets = encode_runtime._candidate_stale_staging_targets(Mock(), row)
+        result = encode_runtime._remove_stale_staging_path(targets[0][0], host=targets[0][1])
+    assert result.outcome == encode_runtime._StagingPathCleanupOutcome.CLEANUP_DEFERRED
+    assert output.read_text() == 'still owned remotely'
