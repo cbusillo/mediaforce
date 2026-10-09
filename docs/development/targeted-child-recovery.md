@@ -160,14 +160,28 @@ managed controller. SSH commands keep draining until the remote command exits,
 then report the error, because stopping the SSH client alone does not prove the
 remote encoder stopped.
 
-A queued encode on a mounted SSH host runs inside a connection watcher. The
-controller holds the connection's input open; when the controller stops the
-job, restarts, or loses the link, the watcher on the host ends the processes
-writing that job's partial output and removes the partial file. Before this, a
-stopped encode kept running on the host, competed with the host's next job and
-could leave a complete but unrecorded output (observed on 2026-09-19 and
-2026-09-20). A plain command-line encode is not watched. This can leave an output requiring user review;
-existing output and failure checks still apply.
+A queued encode on a mounted SSH host runs inside a connection watcher, but
+losing the controller does not prove that watcher fired. Startup recovery and
+retry cleanup therefore inspect the remote host before removing an interrupted
+output. They identify ffmpeg's own output and confirm its writable file through
+`lsof`, end that encoder and its Mediaforce connection wrapper, and check again
+before deleting the partial file. Process birth time and command are checked
+before signals; unrelated encodes and readers of that file are preserved.
+
+The check runs even when the file is visible through the controller's mounted
+share. A failed host connection, incomplete inventory, or surviving writer
+keeps the unfinished file and delays automatic retry. Making a terminal file
+again reports HTTP 409 with a wait message until cleanup succeeds. Retry through
+the same supported action once the host is reachable; no manual file deletion
+is needed. Startup and Stop also inspect retained stopped-job manifests when
+an earlier cleanup already removed the staging record. They preserve output
+paths currently owned by a running job. Finished and promoted outputs retain
+their existing protection.
+
+This recovery is for mounted remote outputs. Scratch-host lifetime protection
+remains described in [staged encode hosts](../architecture/staged-encode-hosts.md).
+A forced restart during a real approved encode is a separate runtime
+qualification; source fixtures alone do not prove it on the configured Macs.
 
 When a running job's lease has expired, the controller ends its worker only
 after 10 minutes with no sign of life: no progress write, no heartbeat, and no

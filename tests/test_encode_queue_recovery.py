@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import socket
 import sqlite3
 import subprocess
@@ -104,6 +105,14 @@ from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
 def _quality_toolchain_not_probed(**_kwargs: object) -> dict[str, object]:
     return encoding_quality._unavailable_toolchain("not_probed_in_tests")
+
+
+def _remote_cleanup_succeeds(_host: dict[str, Any], command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+    if command[0] == "ps":
+        return subprocess.CompletedProcess(command, 0, "1 0 S Fri Oct 9 14:00:00 2026 sshd\n", "")
+    if command[:2] == ["sh", "-lc"] and command[2].startswith("rm -f "):
+        Path(shlex.split(command[2])[2]).unlink(missing_ok=True)
+    return subprocess.CompletedProcess(command, 0, "", "")
 
 
 def _remote_host_unreachable(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -321,6 +330,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             deps=web_app._encode_queue_runtime_deps(),
         )
 
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_cleanup_succeeds)
     def test_restart_recovery_preserves_completed_output_and_cleans_transients(self) -> None:
         source_path = self._create_source_file("episode-a.mkv")
         staging_path = self._staging_path("episode-a.mkv")
@@ -843,7 +853,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         with open_db(self.config.paths.db_path) as connection, patch(
                 "mediaforce.web.runtime.encode_runtime.run_remote_command",
-                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
+                side_effect=_remote_cleanup_succeeds,
         ), patch(
             "mediaforce.web.runtime.encode_runtime.clear_stale_encoding_items_when_idle",
             return_value=0,
@@ -987,7 +997,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             with patch(
                 "mediaforce.web.runtime.encode_runtime.run_remote_command",
-                return_value=subprocess.CompletedProcess(["ssh"], 1, stdout="", stderr="permission denied"),
+                side_effect=lambda host, command, **kwargs: (
+                    _remote_cleanup_succeeds(host, command, **kwargs) if command[0] == "ps"
+                    else subprocess.CompletedProcess(["ssh"], 1, stdout="", stderr="permission denied")
+                ),
             ):
                 web_app._reconcile_encode_jobs(connection, self.config)
 
@@ -1345,13 +1358,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ordinary_path = Path("/srv/media/transcode/top-level-file.mkv")
         temp_path = Path("/srv/media/transcode/.mediaforce-ab-av1-stale/clip.mkv")
 
-        with patch("mediaforce.web.runtime.encode_runtime.run_remote_command") as run_remote_command_mock:
+        with patch("mediaforce.web.runtime.encode_runtime.run_remote_command",
+                   side_effect=_remote_cleanup_succeeds) as run_remote_command_mock:
             encode_runtime._remove_remote_stale_staging_path(ordinary_path, host)
             encode_runtime._remove_remote_stale_staging_path(temp_path, host)
 
-        self.assertEqual(run_remote_command_mock.call_count, 2)
-        ordinary_script = str(run_remote_command_mock.call_args_list[0].args[1][2])
-        temp_script = str(run_remote_command_mock.call_args_list[1].args[1][2])
+        self.assertEqual(run_remote_command_mock.call_count, 4)
+        ordinary_script = str(run_remote_command_mock.call_args_list[1].args[1][2])
+        temp_script = str(run_remote_command_mock.call_args_list[3].args[1][2])
         self.assertIn("rm -f /srv/media/transcode/top-level-file.mkv", ordinary_script)
         self.assertNotIn("rmdir", ordinary_script)
         self.assertIn("rm -f /srv/media/transcode/.mediaforce-ab-av1-stale/clip.mkv", temp_script)
@@ -3501,7 +3515,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("SSH transport failure", str(updated["waiting_reason"]))
         self.assertIsNotNone(updated["retry_not_before"])
         self.assertIsNotNone(updated["host_cooldown_until"])
-        self.assertFalse(partial_path.exists())
+        self.assertTrue(partial_path.exists())
         assert item_status_row is not None
         self.assertEqual(item_status_row["status"], "encoding")
 
@@ -3525,7 +3539,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             still_waiting["retry_not_before"] = "2000-01-01T00:00:00+00:00"
             save_encode_job(connection, still_waiting)
 
-        cleanup_result = subprocess.CompletedProcess(["ssh", "remote-a"], 0, "", "")
+        cleanup_result = subprocess.CompletedProcess(["ssh", "remote-a"], 0, "1 0 S Fri Oct 9 14:00:00 2026 sshd\n", "")
         with open_db(self.config.paths.db_path) as connection, patch(
             "mediaforce.web.runtime.encode_runtime.run_remote_command",
             return_value=cleanup_result,
@@ -27123,6 +27137,7 @@ raise SystemExit(0)
             ["final_size_recovery_contract_unchanged", "settings_changed_since_queued"],
         )
 
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_cleanup_succeeds)
     def test_queue_folder_encode_recovers_failed_files_into_active_parent(self) -> None:
         source_a = self._create_source_file("recover-active-a.mkv")
         source_b = self._create_source_file("recover-active-b.mkv")
@@ -27789,7 +27804,7 @@ raise SystemExit(0)
         # Queued and running parts are never removed; the re-queue refuses while they exist instead.
         self.assertEqual(remaining_job_ids, {"completed-shard", "queued-stale-shard", "running-stale-shard"})
 
-    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_cleanup_succeeds)
     def test_queue_folder_encode_retry_resets_stale_encoding_items_before_manifest(self) -> None:
         source_a = self._create_source_file("retry-a.mkv")
         source_b = self._create_source_file("retry-b.mkv")
@@ -28652,6 +28667,90 @@ raise SystemExit(0)
         self.assertFalse(partial_b.exists())
         self.assertEqual(item_a_row["status"], "encoded")
         self.assertEqual(item_b_row["status"], "planned")
+
+    def test_terminal_requeue_waits_for_unreachable_remote_writer(self) -> None:
+        source = self._create_source_file("orphan.mkv")
+        output = self._staging_path("orphan.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="encoding")
+            self._write_manifest("orphan.json", [{"library_item_id": item_id, "staging_path": str(output)}])
+            self._save_job(connection, job_id="orphan", manifest_name="orphan.json", status="stopped", attempt_count=1,
+                           host={"mode": "ssh", "host": "fixture"})
+            job = load_encode_job(connection, "orphan")
+            assert job is not None
+            with patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable):
+                with self.assertRaises(HTTPException) as raised:
+                    encode_runtime.prepare_terminal_encode_job_for_requeue(
+                        connection, job, deps=web_app._encode_queue_runtime_deps(),
+                    )
+            self.assertEqual(raised.exception.status_code, 409)
+            self.assertIn("Waiting to end", raised.exception.detail)
+            self.assertEqual(load_encode_job(connection, "orphan")["status"], "stopped")
+            self.assertEqual(self._library_item_value(connection, item_id, library_items.c.status)["status"], "encoding")
+
+    def test_startup_sweeps_stopped_remote_job_without_artifact_record(self) -> None:
+        output = self._staging_path("orphan.mkv")
+        self._write_manifest("orphan.json", [{"staging_path": str(output)}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="orphan", manifest_name="orphan.json", status="stopped", attempt_count=1,
+                           host={"mode": "ssh", "host": "fixture"})
+            with patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers") as end_writers:
+                encode_runtime.recover_encode_queue(connection, self.config, web_app._encode_queue_runtime_deps())
+            self.assertEqual({call.args[1] for call in end_writers.call_args_list},
+                             {output, staging_runtime.partial_output_path(output)})
+            job = load_encode_job(connection, "orphan")
+            assert job is not None
+            self.assertTrue(job["progress"]["remote_cleanup_verified"])
+            self.assertIn("remote processes have ended", job["error"])
+
+    def test_stopped_remote_receipt_does_not_cover_a_later_attempt(self) -> None:
+        output = self._staging_path("repeat.mkv")
+        self._write_manifest("repeat.json", [{"staging_path": str(output)}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="repeat", manifest_name="repeat.json", status="stopped",
+                           attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+            with patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers") as end_writers:
+                deps = web_app._encode_queue_runtime_deps()
+                encode_runtime.sweep_stopped_remote_encodes(connection, deps)
+                encode_runtime.sweep_stopped_remote_encodes(connection, deps)
+                self.assertEqual(end_writers.call_count, 2)
+                job = load_encode_job(connection, "repeat")
+                assert job is not None
+                job["attempt_count"] = 2
+                save_encode_job(connection, job)
+                encode_runtime.sweep_stopped_remote_encodes(connection, deps)
+                self.assertEqual(end_writers.call_count, 4)
+
+    def test_startup_ends_remote_writer_when_restart_exhausts_attempts(self) -> None:
+        output = self._staging_path("exhausted.mkv")
+        self._write_manifest("exhausted.json", [{"staging_path": str(output)}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="exhausted", manifest_name="exhausted.json", status="running",
+                           attempt_count=web_app.ENCODE_JOB_MAX_ATTEMPTS,
+                           host={"mode": "ssh", "host": "fixture"})
+            with patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers") as end_writers:
+                encode_runtime.recover_encode_queue(connection, self.config, web_app._encode_queue_runtime_deps())
+            self.assertEqual({call.args[1] for call in end_writers.call_args_list},
+                             {output, staging_runtime.partial_output_path(output)})
+            job = load_encode_job(connection, "exhausted")
+            assert job is not None
+            self.assertEqual(job["status"], "needs_attention")
+            self.assertTrue(job["progress"]["remote_cleanup_verified"])
+
+    def test_stop_sweep_does_not_end_output_owned_by_a_running_job(self) -> None:
+        output = self._staging_path("shared.mkv")
+        self._write_manifest("shared.json", [{"staging_path": str(output)}])
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, status in (("old", "stopped"), ("current", "running")):
+                self._save_job(connection, job_id=job_id, manifest_name="shared.json", status=status, attempt_count=1,
+                               host={"mode": "ssh", "host": "fixture"})
+            with patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers") as end_writers:
+                encode_runtime.sweep_stopped_remote_encodes(connection, web_app._encode_queue_runtime_deps())
+            end_writers.assert_not_called()
+            job = load_encode_job(connection, "old")
+            assert job is not None
+            self.assertNotIn("remote_cleanup_verified", object_dict(job["progress"]))
+            self.assertIn("active encode owns", job["error"])
 
     def test_cleanup_encode_retry_artifacts_only_removes_selected_indexes(self) -> None:
         source_a = self._create_source_file("cleanup-a.mkv")
