@@ -28761,6 +28761,83 @@ raise SystemExit(0)
             assert job is not None
             self.assertNotIn("remote_cleanup_verified", object_dict(job["progress"]))
 
+    def test_schedule_cleanup_defers_concurrent_terminal_requeue(self) -> None:
+        manifest = self._write_manifest("schedule-race.json", [{"staging_path": str(self._staging_path("schedule-race.mkv"))}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="schedule-race", manifest_name=manifest.name, status="running",
+                           attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+            connection.commit()
+            attempted = False
+            blocked = False
+            def try_requeue(*_args: Any, **_kwargs: Any) -> None:
+                nonlocal attempted, blocked
+                if attempted:
+                    return
+                attempted = True
+                with open_db(self.config.paths.db_path) as other:
+                    stopped = load_encode_job(other, "schedule-race")
+                    assert stopped is not None
+                    stopped["status"] = "stopped"
+                    save_encode_job(other, stopped)
+                    other.commit()
+                    with patch("mediaforce.web.runtime.encode_runtime._remove_stale_staging_path", return_value=
+                               encode_runtime._StagingPathCleanupResult(encode_runtime._StagingPathCleanupOutcome.CLEANED)):
+                        try:
+                            encode_runtime.prepare_terminal_encode_job_for_requeue(
+                                other, stopped, deps=web_app._encode_queue_runtime_deps())
+                        except HTTPException as exc:
+                            blocked = exc.status_code == 409
+            job = load_encode_job(connection, "schedule-race")
+            assert job is not None
+            with patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers", side_effect=try_requeue), patch(
+                    "mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_cleanup_succeeds):
+                self.assertFalse(encode_runtime.transition_encode_job_schedule_close(
+                    connection, self.config, job, web_app._encode_queue_runtime_deps()))
+                stopped = load_encode_job(connection, "schedule-race")
+                assert stopped is not None
+                encode_runtime.prepare_terminal_encode_job_for_requeue(
+                    connection, stopped, deps=web_app._encode_queue_runtime_deps())
+            self.assertTrue(attempted)
+            self.assertTrue(blocked)
+
+    def test_terminal_requeue_rechecks_the_attempt_before_removal(self) -> None:
+        output = self._staging_path("new-attempt.mkv")
+        partial = staging_runtime.partial_output_path(output)
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        partial.write_text("new attempt")
+        self._write_manifest("new-attempt.json", [{"staging_path": str(output)}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="new-attempt", manifest_name="new-attempt.json", status="stopped",
+                           attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+            old = load_encode_job(connection, "new-attempt")
+            assert old is not None
+            current = {**old, "status": "running", "attempt_count": 2, "worker_id": "new-worker"}
+            save_encode_job(connection, current)
+            connection.commit()
+            with patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers") as end_writers, patch(
+                    "mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_cleanup_succeeds):
+                with self.assertRaises(HTTPException) as caught:
+                    encode_runtime.prepare_terminal_encode_job_for_requeue(
+                        connection, old, deps=web_app._encode_queue_runtime_deps())
+            self.assertEqual(caught.exception.status_code, 409)
+            end_writers.assert_not_called()
+            self.assertEqual(partial.read_text(), "new attempt")
+
+    def test_dispatch_waits_for_manifest_cleanup(self) -> None:
+        manifest = self._write_manifest("claim-cleanup.json", [{"staging_path": str(self._staging_path("claim-cleanup.mkv"))}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="claim-cleanup", manifest_name=manifest.name, status="queued", attempt_count=0, host={})
+            connection.commit()
+            job = load_encode_job(connection, "claim-cleanup")
+            assert job is not None
+            with encode_runtime._locked_manifest_cleanup(manifest), patch(
+                    "mediaforce.web.runtime.encode_runtime.load_next_runnable_encode_job", return_value=job):
+                self.assertIsNone(encode_runtime.claim_next_runnable_encode_job(
+                    connection, self.config, web_app._encode_queue_runtime_deps()))
+            queued = load_encode_job(connection, "claim-cleanup")
+            assert queued is not None
+            self.assertEqual(queued["status"], "queued")
+
     def test_schedule_cleanup_leaves_database_writable(self) -> None:
         self._write_manifest("schedule-lock.json", [{"staging_path": str(self._staging_path("schedule-lock.mkv"))}])
         with open_db(self.config.paths.db_path) as connection:

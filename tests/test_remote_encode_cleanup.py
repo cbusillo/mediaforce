@@ -145,3 +145,10 @@ def test_escaped_watcher_without_a_writer_keeps_reuse_deferred() -> None:
     ])
     with pytest.raises(RuntimeError, match='obscures'):
         end_remote_output_writers({'host': 'fixture'}, output, run_command=runner)
+
+
+def test_unlinked_escaped_writer_does_not_verify_reuse() -> None:
+    output = Path('/staging/Pokémon.partial.mkv')
+    runner = Mock(side_effect=[_result(_row(11, 1, 'ffmpeg /staging/PokM-CM-)mon.partial.mkv')), _result('')])
+    with pytest.raises(RuntimeError, match='obscures'):
+        end_remote_output_writers({'host': 'fixture'}, output, run_command=runner)

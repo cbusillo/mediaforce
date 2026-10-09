@@ -89,8 +89,8 @@ def _signal(host: dict[str, Any], processes: dict[int, _RemoteProcess], signal: 
 def _output_writers(host: dict[str, Any], path: Path,
                     run_command: Callable[..., subprocess.CompletedProcess[str]]) -> set[int]:
     # Query by the file itself; ps can escape non-ASCII argv in an SSH locale.
-    result = run_command(host, ["sh", "-c", 'if [ -e "$1" ]; then lsof -Fpa -- "$1"; fi',
-                                "mediaforce-output-writers", str(path)], timeout=10, wake_before_connect=False)
+    input_text = "set -- " + shlex.quote(str(path)) + '\nif [ -e "$1" ]; then lsof -Fpa -- "$1"; fi'
+    result = run_command(host, ["sh", "-s"], input_text=input_text, timeout=10, wake_before_connect=False)
     if result.returncode not in {0, 1} or result.stderr.strip():
         raise RuntimeError(result.stderr.strip() or "Remote output ownership could not be checked.")
     writers: set[int] = set()
@@ -118,7 +118,8 @@ def end_remote_output_writers(
         raise RuntimeError("An unrecognised writer has this output open; wait before retrying.")
     if not owned:
         if any(not character.isascii() or ord(character) < 32 for character in str(path)) and any(
-                "mediaforce_connection_watch=" in process.command for process in inventory.values()):
+                "mediaforce_connection_watch=" in process.command or Path(process.command.split()[0]).name == "ffmpeg"
+                for process in inventory.values()):
             raise RuntimeError("The process inventory obscures this output path; wait for its earlier connection watcher to end.")
         return
     for process in owned.values():

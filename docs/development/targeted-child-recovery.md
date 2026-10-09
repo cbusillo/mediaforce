@@ -225,4 +225,13 @@ the saved attempt before changing queue state. Folder retries with held-back fil
 keep each selected child's host identity.
 If an escaped path leaves a connection watcher unidentified even after its writer
 exits, reuse waits for that watcher to end. This can conservatively defer a
-non-ASCII output while another connection watcher remains on the same host.
+non-ASCII output while another encoder or connection watcher remains on the same host,
+including when the old file has been unlinked.
+
+Cleanup and dispatch coordinate through a non-blocking lock beside the runtime
+manifest, separate from the manifest's short policy-edit lock. Cleanup holds it
+through its last remote operation; schedule closure holds it through its queue
+transition. A requeue returns its existing wait response while that cleanup runs,
+and dispatch leaves the queued job for a later pass. Process exit releases the
+lock automatically, so a controller crash does not leave a durable claim to
+manually clear. SQLite remains available while SSH is in flight.
