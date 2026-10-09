@@ -18,13 +18,13 @@ class ReleaseWorkCounts(TypedDict):
     pending_encode: int
     active_encode: int
     active_calibration: int
-    active_scan: int
+    unfinished_scan_rows: int
     active_evidence: int
 
 
 class ReleaseWorkSnapshot(TypedDict):
     observed_at: str
-    idle: bool
+    database_idle: bool
     counts: ReleaseWorkCounts
 
 
@@ -34,10 +34,11 @@ def release_work_payload(db_path: Path) -> ReleaseWorkSnapshot:
 
 
 def release_work_snapshot(connection: DBClient) -> ReleaseWorkSnapshot:
-    """Observe work, including children hidden by a folder's attention state.
+    """Observe database work, including children hidden by a folder's attention state.
 
     This is evidence only. It neither reserves an idle window nor authorizes a
-    release; the controller must quiesce admissions and recheck before stopping.
+    release. Scan job files, publishing locks and remote custody are separate
+    evidence; the controller must quiesce all producers and recheck before stopping.
     """
     counts: ReleaseWorkCounts = {
         "pending_encode": count_pending_encode_work(connection),
@@ -49,7 +50,7 @@ def release_work_snapshot(connection: DBClient) -> ReleaseWorkSnapshot:
             select(func.count()).select_from(calibration_jobs)
             .where(calibration_jobs.c.status.in_(tuple(EXECUTION_ACTIVE_JOB_STATUSES)))
         ).scalar_one()),
-        "active_scan": int(connection.execute(
+        "unfinished_scan_rows": int(connection.execute(
             select(func.count()).select_from(scan_runs)
             .where(~scan_runs.c.status.in_(tuple(TERMINAL_SCAN_JOB_STATUSES)))
         ).scalar_one()),
@@ -60,6 +61,6 @@ def release_work_snapshot(connection: DBClient) -> ReleaseWorkSnapshot:
     }
     return {
         "observed_at": datetime.now(timezone.utc).isoformat(),
-        "idle": not any(counts.values()),
+        "database_idle": not any(counts.values()),
         "counts": counts,
     }
