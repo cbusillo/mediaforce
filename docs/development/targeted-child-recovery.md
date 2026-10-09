@@ -239,3 +239,5 @@ manually clear. SQLite remains available while SSH is in flight.
 A stale artifact recorded as remote stays remote when its computer configuration
 is removed or repurposed. Cleanup waits for a matching reachable computer instead
 of treating the mounted file as locally owned.
+
+Cleanup also excludes new dispatch through a nonblocking lock beside the controller database. This covers jobs in different manifests that reuse the same output; database writes remain available during remote checks. Dispatch retries on its next queue pass. The lock releases when its owning process exits. Retained recovery and retry cleanup resolve outputs with the encoder's host-aware staging resolver, including host-specific staging roots. Artifact-only cleanup retains the recorded execution mode and storage access mode. If the earlier mounted remote host configuration is gone or has become local, cleanup preserves the file and record until the configuration is restored; it does not guess a remote endpoint from the old display key.

@@ -59,6 +59,7 @@ from mediaforce.encoding.free_space import ReserveInputError
 from mediaforce.encoding.staging import StagedOutputHeldForReviewError, UnreadableEncodeOutputError, partial_output_path, \
     safe_unlink
 from mediaforce.encoding.remote_cleanup import end_remote_output_writers
+from mediaforce.encoding.helpers import resolve_item_staging_path
 from mediaforce.encoding.streams import StreamPlanIdentityError
 from mediaforce.tuning.av1_cold_start import AV1ColdStartContractError
 from mediaforce.tuning.content_intent_observations import ContentIntentObservationConflictError
@@ -195,12 +196,21 @@ def recover_encode_queue(
 ) -> None:
     connection.commit()
     reconcile_encode_jobs(connection, config, deps, restart_recovery=True)
-    sweep_stopped_remote_encodes(connection, deps)
+    sweep_stopped_remote_encodes(connection, config, deps)
     clear_stale_encoding_items_when_idle(connection, config, deps)
     connection.commit()
 
 
-def sweep_stopped_remote_encodes(connection: DBClient, deps: EncodeQueueRuntimeDeps) -> None:
+def sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps) -> None:
+    connection.commit()
+    try:
+        with _locked_encode_dispatch(connection):
+            _sweep_stopped_remote_encodes(connection, config, deps)
+    except BlockingIOError:
+        return
+
+
+def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps) -> None:
     """Retained stopped jobs still identify outputs even after their artifact row is gone."""
     rows = connection.execute(
         select(encode_jobs.c.job_id)
@@ -213,7 +223,7 @@ def sweep_stopped_remote_encodes(connection: DBClient, deps: EncodeQueueRuntimeD
     ).mappings().all()
     active_paths: set[str] = set()
     active_rows = connection.execute(
-        select(encode_jobs.c.manifest_path, encode_jobs.c.manifest_indexes_json)
+        select(encode_jobs.c.manifest_path, encode_jobs.c.manifest_indexes_json, encode_jobs.c.host_json)
         .where(encode_jobs.c.status == "running")
         .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
     ).mappings().all()
@@ -223,8 +233,11 @@ def sweep_stopped_remote_encodes(connection: DBClient, deps: EncodeQueueRuntimeD
             indexes = json.loads(row["manifest_indexes_json"] or "null")
             items = object_list(manifest.get("items"))
             selected = indexes if isinstance(indexes, list) else range(len(items))
-            active_paths.update(str(object_dict(items[index]).get("staging_path") or "") for index in selected)
-        except (OSError, ValueError, TypeError, IndexError):
+            active_host = object_dict(json.loads(row["host_json"] or "{}"))
+            active_paths.update(str(resolve_item_staging_path(
+                config, object_dict(items[index]), host=active_host, host_media_access_for_host=host_media_access_for_host,
+            )) for index in selected)
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
             # Unknown active ownership cannot safely be swept by output path.
             return
     failed_hosts: dict[str, str] = {}
@@ -244,7 +257,9 @@ def sweep_stopped_remote_encodes(connection: DBClient, deps: EncodeQueueRuntimeD
             receipt = stable_json_hash({
                 "job_id": job["job_id"], "started_at": job.get("started_at"),
                 "attempt_count": job.get("attempt_count"), "host": host,
-                "outputs": [object_dict(items[index]).get("staging_path") for index in indexes],
+                "outputs": [str(resolve_item_staging_path(
+                    config, object_dict(items[index]), host=host, host_media_access_for_host=host_media_access_for_host,
+                )) for index in indexes],
             })
             if progress.get("remote_cleanup_verified") == receipt:
                 continue
@@ -252,7 +267,9 @@ def sweep_stopped_remote_encodes(connection: DBClient, deps: EncodeQueueRuntimeD
             with _locked_manifest_cleanup(Path(job["manifest_path"])):
                 changed_during_cleanup = False
                 for index in indexes:
-                    path = str(object_dict(items[index]).get("staging_path") or "")
+                    path = str(resolve_item_staging_path(
+                        config, object_dict(items[index]), host=host, host_media_access_for_host=host_media_access_for_host,
+                    ))
                     if not path or path in active_paths:
                         raise RuntimeError("An active encode owns this file or its output path is unknown.")
                     for target in (Path(path), partial_output_path(Path(path))):
@@ -372,6 +389,7 @@ def reconcile_encode_jobs(
                 host=object_dict(payload.get("host")),
                 expected_job=payload,
                 deps=deps,
+            config=config,
             )
         else:
             cleanup_outcome = _EncodeRetryArtifactCleanupResult(
@@ -534,6 +552,17 @@ def clear_stale_encoding_items_when_idle(
         config: MediaforceConfig,
         deps: EncodeQueueRuntimeDeps,
 ) -> int:
+    connection.commit()
+    try:
+        with _locked_encode_dispatch(connection):
+            return _clear_stale_encoding_items_when_idle(connection, config, deps)
+    except BlockingIOError:
+        return 0
+
+
+def _clear_stale_encoding_items_when_idle(
+        connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps,
+) -> int:
     if running_encode_job_count(connection) > 0:
         return 0
     stale_rows = connection.execute(
@@ -548,6 +577,8 @@ def clear_stale_encoding_items_when_idle(
             staged_artifacts.c.encode_job_id,
             staged_artifacts.c.encode_host_key,
             staged_artifacts.c.encode_host_label,
+            staged_artifacts.c.encode_host_mode,
+            staged_artifacts.c.encode_media_access,
         )
         .select_from(
             library_items.outerjoin(
@@ -674,7 +705,9 @@ def _candidate_stale_staging_targets(
     host_config = host_config_for_key(config, host_key) if host_key else {}
     if str(row.get("encode_host_mode") or "") == "ssh" and execution_mode_for_host(host_config) != "ssh":
         # A removed or repurposed computer is not proof its old remote writer ended.
-        host_config = {"mode": "ssh", "key": host_key}
+        host_config = {"mode": "ssh", "remote_cleanup_unavailable": True}
+    if str(row.get("encode_host_mode") or "") == "ssh":
+        host_config = {**host_config, "media_access": str(row.get("encode_media_access") or "mounted")}
     return [(Path(staging_value), host_config or None)]
 
 
@@ -690,6 +723,11 @@ def _remove_stale_staging_path(
         and execution_mode_for_host(host_payload) == "ssh"
         and host_media_access_for_host(host_payload) != "stream"
     )
+    if remote_mounted_host and host_payload.get("remote_cleanup_unavailable"):
+        return _StagingPathCleanupResult(
+            _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
+            detail="The earlier remote host configuration is unavailable; restore it before retrying cleanup.",
+        )
     if remote_mounted_host:
         return _remove_remote_stale_staging_path(path, host_payload)
     try:
@@ -1226,7 +1264,7 @@ def transition_encode_job_schedule_close(
 ) -> bool:
     connection.commit()
     try:
-        with _locked_manifest_cleanup(Path(str(job["manifest_path"]))):
+        with _locked_encode_dispatch(connection), _locked_manifest_cleanup(Path(str(job["manifest_path"]))):
             return _transition_encode_job_schedule_close(
                 connection, config, job, deps, expected_worker_id=expected_worker_id,
                 expected_started_at=expected_started_at,
@@ -1280,6 +1318,7 @@ def _transition_encode_job_schedule_close(
             cleanup_lock_held=True,
             expected_job=job,
             deps=deps,
+            config=config,
         )
     connection.commit()
     connection.exec_driver_sql("BEGIN IMMEDIATE")
@@ -1528,6 +1567,7 @@ def transition_encode_job_failure(
             host=assigned_host,
             expected_job=job,
             deps=deps,
+            config=config,
         )
         connection.commit()
         return
@@ -2161,6 +2201,17 @@ def _locked_manifest_file(manifest_path: Path, *, blocking: bool = True, suffix:
             yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _locked_encode_dispatch(connection: DBClient) -> Iterator[None]:
+    # Outputs can be shared across manifests. Keep dispatch out while their ownership
+    # is checked and cleaned, without holding SQLite's write lock across SSH calls.
+    database = next((row[2] for row in connection.exec_driver_sql("PRAGMA database_list").all() if row[1] == "main"), None)
+    if not database or database == ":memory:":
+        raise RuntimeError("Encode cleanup needs a persistent controller database.")
+    with _locked_manifest_file(Path(database), blocking=False, suffix=".encode-dispatch.lock"):
+        yield
 
 
 @contextmanager
@@ -3297,7 +3348,7 @@ def claim_next_runnable_encode_job(
         claim = claim.where(~new_calibrations.exists())
     connection.commit()
     try:
-        with _locked_manifest_cleanup(Path(str(next_job["manifest_path"]))):
+        with _locked_encode_dispatch(connection), _locked_manifest_cleanup(Path(str(next_job["manifest_path"]))):
             update_result = connection.execute(
                 claim
                 .where(encode_jobs.c.job_id == next_job["job_id"])
@@ -3863,7 +3914,7 @@ def run_encode_job(
             with open_db(config.paths.db_path) as connection:
                 cleanup = _cleanup_encode_retry_artifacts(
                     connection, manifest_path=manifest_path, indexes=indexes,
-                    host=object_dict(job.get("host")), expected_job=load_encode_job(connection, job_id) or job, deps=deps,
+                    host=object_dict(job.get("host")), expected_job=load_encode_job(connection, job_id) or job, deps=deps, config=config,
                 )
             error = (
                 "Encode queue job was stopped and cleaned up."
@@ -4209,6 +4260,7 @@ def prepare_terminal_encode_job_for_requeue(
         job: dict[str, Any],
         *,
         deps: EncodeQueueRuntimeDeps,
+        config: MediaforceConfig | None = None,
 ) -> None:
     if str(job.get("status") or "") not in {"needs_attention", "failed", "stopped"}:
         return
@@ -4220,7 +4272,7 @@ def prepare_terminal_encode_job_for_requeue(
         children = list_child_encode_jobs(connection, str(job.get("job_id") or ""))
         if children:
             for child in children:
-                prepare_terminal_encode_job_for_requeue(connection, child, deps=deps)
+                prepare_terminal_encode_job_for_requeue(connection, child, deps=deps, config=config)
             return
 
     # Legacy and malformed folder jobs may have no child rows or no non-completed child
@@ -4233,6 +4285,7 @@ def prepare_terminal_encode_job_for_requeue(
         host=object_dict(job.get("host")),
         expected_job=job,
         deps=deps,
+        config=config,
     )
     if cleanup.outcome is not _EncodeRetryArtifactCleanupOutcome.CLEANED:
         raise HTTPException(
@@ -4246,18 +4299,19 @@ def _cleanup_encode_retry_artifacts(
         connection: DBClient, *, manifest_path: Path, indexes: list[int] | None = None,
         host: dict[str, Any] | None = None, commit_between_items: bool = True,
         cleanup_lock_held: bool = False, expected_job: dict[str, Any] | None = None, deps: EncodeQueueRuntimeDeps,
+        config: MediaforceConfig | None = None,
 ) -> _EncodeRetryArtifactCleanupResult:
     connection.commit()
     try:
         if cleanup_lock_held:
             return _cleanup_encode_retry_artifacts_locked(
                 connection, manifest_path=manifest_path, indexes=indexes, host=host,
-                commit_between_items=commit_between_items, expected_job=expected_job, deps=deps,
+                commit_between_items=commit_between_items, expected_job=expected_job, deps=deps, config=config,
             )
-        with _locked_manifest_cleanup(manifest_path):
+        with _locked_encode_dispatch(connection), _locked_manifest_cleanup(manifest_path):
             return _cleanup_encode_retry_artifacts_locked(
                 connection, manifest_path=manifest_path, indexes=indexes, host=host,
-                commit_between_items=commit_between_items, expected_job=expected_job, deps=deps,
+                commit_between_items=commit_between_items, expected_job=expected_job, deps=deps, config=config,
             )
     except BlockingIOError:
         return _EncodeRetryArtifactCleanupResult(
@@ -4275,6 +4329,7 @@ def _cleanup_encode_retry_artifacts_locked(
         commit_between_items: bool = True,
         expected_job: dict[str, Any] | None,
         deps: EncodeQueueRuntimeDeps,
+        config: MediaforceConfig | None,
 ) -> _EncodeRetryArtifactCleanupResult:
     if expected_job is not None:
         current = load_encode_job(connection, str(expected_job.get("job_id") or ""))
@@ -4315,7 +4370,10 @@ def _cleanup_encode_retry_artifacts_locked(
         library_status = str(stage_row["library_status"] if stage_row is not None else "").strip()
         artifact_present = stage_row is not None and stage_row["staging_path"] is not None
         promoted = artifact_present and stage_row["promoted_at"] is not None
-        manifest_staging_value = item.get("staging_path")
+        manifest_staging_value = (
+            str(resolve_item_staging_path(config, item, host=host, host_media_access_for_host=host_media_access_for_host))
+            if config is not None and (item.get("rel_path") or item.get("staging_path")) else item.get("staging_path")
+        )
         staging_value = stage_row["staging_path"] if artifact_present else manifest_staging_value
         staging_path = Path(str(staging_value)) if str(staging_value or "").strip() else None
         complete = (

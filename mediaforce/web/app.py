@@ -1898,6 +1898,7 @@ def create_app(
                 connection,
                 job,
                 deps=_encode_queue_runtime_deps(),
+                config=current_config,
             ),
             save_encode_job=save_encode_job,
             load_advice_state=_load_advice_state_for_queue,
@@ -4466,7 +4467,7 @@ def _reconcile_encode_jobs(
 def _clear_stale_encoding_items_when_idle(config: MediaforceConfig) -> int:
     with open_db(config.paths.db_path) as connection:
         deps = _encode_queue_runtime_deps()
-        sweep_stopped_remote_encodes(connection, deps)
+        sweep_stopped_remote_encodes(connection, config, deps)
         return runtime_clear_stale_encoding_items_when_idle(connection, config, deps)
 
 
