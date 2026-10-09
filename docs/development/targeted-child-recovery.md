@@ -215,3 +215,14 @@ parent detachment. Ordinary in-place writes and WAL checkpoints remain valid.
 The retained custody borrow and descriptor-relative identity checks continue
 through the SQLite connection lifetime and fail closed if the database or its
 parent identity changes.
+
+Remote cleanup also checks writable handles by the file itself: process-list text
+that escapes a non-ASCII path cannot silently authorize deletion. An unrecognised
+writer leaves cleanup deferred. Signal identities travel through stdin so the old
+connection watcher cannot match the cleanup command's arguments. Schedule-close
+cleanup performs remote I/O before taking the database write lock, then rechecks
+the saved attempt before changing queue state. Folder retries with held-back files
+keep each selected child's host identity.
+If an escaped path leaves a connection watcher unidentified even after its writer
+exits, reuse waits for that watcher to end. This can conservatively defer a
+non-ASCII output while another connection watcher remains on the same host.

@@ -998,7 +998,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             with patch(
                 "mediaforce.web.runtime.encode_runtime.run_remote_command",
                 side_effect=lambda host, command, **kwargs: (
-                    _remote_cleanup_succeeds(host, command, **kwargs) if command[0] == "ps"
+                    _remote_cleanup_succeeds(host, command, **kwargs) if not (command[:2] == ["sh", "-lc"] and command[2].startswith("rm -f "))
                     else subprocess.CompletedProcess(["ssh"], 1, stdout="", stderr="permission denied")
                 ),
             ):
@@ -1363,9 +1363,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             encode_runtime._remove_remote_stale_staging_path(ordinary_path, host)
             encode_runtime._remove_remote_stale_staging_path(temp_path, host)
 
-        self.assertEqual(run_remote_command_mock.call_count, 4)
-        ordinary_script = str(run_remote_command_mock.call_args_list[1].args[1][2])
-        temp_script = str(run_remote_command_mock.call_args_list[3].args[1][2])
+        scripts = [str(call.args[1][2]) for call in run_remote_command_mock.call_args_list
+                   if call.args[1][:2] == ["sh", "-lc"] and call.args[1][2].startswith("rm -f ")]
+        ordinary_script, temp_script = scripts
         self.assertIn("rm -f /srv/media/transcode/top-level-file.mkv", ordinary_script)
         self.assertNotIn("rmdir", ordinary_script)
         self.assertIn("rm -f /srv/media/transcode/.mediaforce-ab-av1-stale/clip.mkv", temp_script)
@@ -28760,6 +28760,23 @@ raise SystemExit(0)
             job = load_encode_job(connection, "stream")
             assert job is not None
             self.assertNotIn("remote_cleanup_verified", object_dict(job["progress"]))
+
+    def test_schedule_cleanup_leaves_database_writable(self) -> None:
+        self._write_manifest("schedule-lock.json", [{"staging_path": str(self._staging_path("schedule-lock.mkv"))}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="schedule-lock", manifest_name="schedule-lock.json", status="running",
+                           attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+            connection.commit()
+            def cleanup(*_args: Any, **_kwargs: Any) -> encode_runtime._EncodeRetryArtifactCleanupResult:
+                with open_db(self.config.paths.db_path) as other:
+                    other.exec_driver_sql("PRAGMA busy_timeout=50")
+                    other.exec_driver_sql("UPDATE encode_jobs SET updated_at=updated_at WHERE job_id='schedule-lock'")
+                return encode_runtime._EncodeRetryArtifactCleanupResult(encode_runtime._EncodeRetryArtifactCleanupOutcome.CLEANED)
+            job = load_encode_job(connection, "schedule-lock")
+            assert job is not None
+            with patch("mediaforce.web.runtime.encode_runtime._cleanup_encode_retry_artifacts", side_effect=cleanup):
+                self.assertTrue(encode_runtime.transition_encode_job_schedule_close(
+                    connection, self.config, job, web_app._encode_queue_runtime_deps()))
 
     def test_schedule_cleanup_precedes_host_shutdown(self) -> None:
         self._write_manifest("schedule.json", [{"staging_path": str(self._staging_path("schedule.mkv"))}])

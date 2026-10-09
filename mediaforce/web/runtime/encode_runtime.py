@@ -435,6 +435,8 @@ def reconcile_encode_jobs(
                 "updated_at": deps.now_iso(),
             }
         )
+        if progress.get("progress_state") == "schedule_waiting":
+            payload.update({"host": {}, "waiting_reason": SCHEDULE_CLOSE_WAITING_REASON})
         save_encode_job(connection, payload)
         sync_encode_job_parent(connection, payload, deps)
 
@@ -1227,7 +1229,6 @@ def transition_encode_job_schedule_close(
         return False
 
     connection.commit()
-    connection.exec_driver_sql("BEGIN IMMEDIATE")
     current_job = load_encode_job(connection, str(job["job_id"]))
     if current_job is None or str(current_job.get("status") or "") != "running":
         connection.rollback()
@@ -1240,6 +1241,27 @@ def transition_encode_job_schedule_close(
         return False
     # A queue thread reuses its worker id, so the claim's start time shows whether this is still its attempt.
     if expected_started_at is not None and str(current_job.get("started_at") or "") != expected_started_at:
+        connection.rollback()
+        return False
+    snapshot = stable_json_hash(current_job)
+    job = current_job
+    completed = _encode_job_outputs_completed(connection, job)
+    connection.commit()
+    assigned_host = object_dict(job.get("host"))
+    cleanup = _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANED)
+    if not completed:
+        cleanup = _cleanup_encode_retry_artifacts(
+            connection,
+            manifest_path=Path(str(job["manifest_path"])),
+            indexes=job.get("manifest_indexes"),
+            host=assigned_host,
+            commit_between_items=True,
+            deps=deps,
+        )
+    connection.commit()
+    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    current_job = load_encode_job(connection, str(job["job_id"]))
+    if current_job is None or stable_json_hash(current_job) != snapshot:
         connection.rollback()
         return False
     job = current_job
@@ -1269,15 +1291,6 @@ def transition_encode_job_schedule_close(
         sync_encode_job_parent(connection, job, deps)
         connection.commit()
         return True
-    assigned_host = object_dict(job.get("host"))
-    cleanup = _cleanup_encode_retry_artifacts(
-        connection,
-        manifest_path=Path(str(job["manifest_path"])),
-        indexes=job.get("manifest_indexes"),
-        host=assigned_host,
-        commit_between_items=False,
-        deps=deps,
-    )
     progress = _initial_encode_job_progress(job, deps)
     progress["progress_state"] = "schedule_waiting"
     job.update(

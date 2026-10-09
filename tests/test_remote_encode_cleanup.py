@@ -31,48 +31,49 @@ def test_restart_ends_writer_and_connection_watch_but_preserves_other_encode() -
         + _row(21, 1, f"ffmpeg -i {output} /staging/review.mkv")
     )
     remaining = _row(12, 1, "cat") + _row(20, 1, f"ffmpeg -i /source/other.mkv {output}.other")
-    runner = Mock(side_effect=[_result(inventory), _result(f"f4\naw\nn{output}\n"), _result(), _result(remaining), _result(), _result()])
+    runner = Mock(side_effect=[_result(inventory), _result(""), _result(f"f4\naw\nn{output}\n"), _result(), _result(remaining), _result(), _result(), _result("")])
     with patch("mediaforce.encoding.remote_cleanup.time.sleep"):
         end_remote_output_writers({"host": "fixture"}, output, run_command=runner)
-    term = runner.call_args_list[2].args[1]
-    kill = runner.call_args_list[4].args[1]
-    assert set(term[5::2]) == {"10", "11", "12"}
-    assert kill[4:] == ["KILL", "12", "Fri Oct 9 14:00:00 2026 cat"]
+    term = shlex.split(runner.call_args_list[3].kwargs["input_text"].splitlines()[0])[2:]
+    kill = shlex.split(runner.call_args_list[5].kwargs["input_text"].splitlines()[0])[2:]
+    assert set(term[1::2]) == {"10", "11", "12"}
+    assert kill == ["KILL", "12", "Fri Oct 9 14:00:00 2026 cat"]
+    assert runner.call_args_list[3].args[1] == ["sh", "-s"]
 
 
 def test_reused_pid_is_not_killed() -> None:
     output = Path("/staging/episode.partial.mkv")
     runner = Mock(side_effect=[
-        _result(_row(11, 1, f"ffmpeg {output}")), _result(f"f4\naw\nn{output}\n"), _result(),
-        _result(_row(11, 1, "ffmpeg /other.mkv", birth="14:01:00")),
+        _result(_row(11, 1, f"ffmpeg {output}")), _result(""), _result(f"f4\naw\nn{output}\n"), _result(),
+        _result(_row(11, 1, "ffmpeg /other.mkv", birth="14:01:00")), _result(""),
     ])
     with patch("mediaforce.encoding.remote_cleanup.time.sleep"):
         end_remote_output_writers({"host": "fixture"}, output, run_command=runner)
-    assert runner.call_count == 4
+    assert runner.call_count == 6
 
 
 def test_output_named_as_an_input_does_not_authorize_a_signal() -> None:
     output = Path("/staging/episode.partial.mkv")
     runner = Mock(side_effect=[
-        _result(_row(11, 1, f"ffmpeg -i {output} /another {output}")),
+        _result(_row(11, 1, f"ffmpeg -i {output} /another {output}")), _result(""),
         _result(f"f4\nar\nn{output}\nf5\naw\nn/another {output}\n"),
     ])
     with pytest.raises(RuntimeError, match="Could not verify"):
         end_remote_output_writers({"host": "fixture"}, output, run_command=runner)
-    assert runner.call_count == 2
+    assert runner.call_count == 3
 
 
 def test_unreaped_zombie_is_no_longer_a_writer() -> None:
     output = Path("/staging/episode.partial.mkv")
     runner = Mock(return_value=_result(_row(11, 1, f"ffmpeg {output}", state="Z")))
     end_remote_output_writers({"host": "fixture"}, output, run_command=runner)
-    assert runner.call_count == 1
+    assert runner.call_count == 2
 
 
 def test_stubborn_remote_writer_keeps_cleanup_unproven() -> None:
     output = Path("/staging/episode.partial.mkv")
     inventory = _result(_row(11, 1, f"ffmpeg {output}"))
-    runner = Mock(side_effect=[inventory, _result(f"f4\naw\nn{output}\n"), _result(), inventory, _result(), inventory])
+    runner = Mock(side_effect=[inventory, _result(""), _result(f"f4\naw\nn{output}\n"), _result(), inventory, _result(), inventory])
     with patch("mediaforce.encoding.remote_cleanup.time.sleep"), pytest.raises(RuntimeError, match="still ending"):
         end_remote_output_writers({"host": "fixture"}, output, run_command=runner)
 
@@ -102,7 +103,7 @@ def test_mounted_controller_file_is_kept_until_remote_writer_is_gone(tmp_path: P
 
 def test_output_removal_follows_verified_process_exit() -> None:
     output = Path("/staging/episode.partial.mkv")
-    runner = Mock(side_effect=[_result(_row(11, 1, f"ffmpeg {output}")), _result(f"f4\naw\nn{output}\n"), _result(), _result(), _result()])
+    runner = Mock(side_effect=[_result(_row(11, 1, f"ffmpeg {output}")), _result(""), _result(f"f4\naw\nn{output}\n"), _result(), _result(), _result(""), _result()])
     with patch("mediaforce.web.runtime.encode_runtime.run_remote_command", runner), patch(
         "mediaforce.encoding.remote_cleanup.time.sleep",
     ):
@@ -110,3 +111,37 @@ def test_output_removal_follows_verified_process_exit() -> None:
     assert result.outcome == encode_runtime._StagingPathCleanupOutcome.CLEANED
     assert runner.call_args_list[-1].args[1][2] == f"rm -f {output}"
     assert all(call.kwargs["wake_before_connect"] is False for call in runner.call_args_list)
+
+
+def test_unrecognised_writer_defers_cleanup() -> None:
+    output = Path('/staging/Pokémon.partial.mkv')
+    runner = Mock(side_effect=[
+        _result(_row(11, 1, r'ffmpeg /staging/Pok\M-C\M-)mon.partial.mkv')),
+        _result('p11\nf4\naw\n'),
+    ])
+    with pytest.raises(RuntimeError, match='unrecognised writer'):
+        end_remote_output_writers({'host': 'fixture'}, output, run_command=runner)
+
+
+def test_excluded_folder_retry_uses_the_child_host() -> None:
+    from mediaforce.web.runtime import folder_actions
+    parent = {'job_id': 'folder', 'job_kind': 'folder', 'host': {}, 'manifest_indexes': [0, 1]}
+    children = [
+        {'job_id': 'kept', 'job_kind': 'single', 'status': 'stopped', 'host': {'host': 'fixture'}, 'manifest_indexes': [0]},
+        {'job_id': 'excluded', 'job_kind': 'single', 'status': 'stopped', 'host': {'host': 'other'}, 'manifest_indexes': [1]},
+    ]
+    prepare = Mock()
+    with patch.object(folder_actions, 'list_child_encode_jobs', return_value=children):
+        folder_actions._prepare_terminal_job_except(Mock(), parent, {1}, prepare)
+    assert prepare.call_count == 1
+    assert prepare.call_args.args[1]['host'] == {'host': 'fixture'}
+
+
+def test_escaped_watcher_without_a_writer_keeps_reuse_deferred() -> None:
+    output = Path('/staging/Pokémon.partial.mkv')
+    runner = Mock(side_effect=[
+        _result(_row(10, 1, 'sh -c mediaforce_connection_watch=11; pkill -TERM -f -- /staging/PokM-CM-)mon.partial.mkv 2>/dev/null')),
+        _result(''),
+    ])
+    with pytest.raises(RuntimeError, match='obscures'):
+        end_remote_output_writers({'host': 'fixture'}, output, run_command=runner)

@@ -79,10 +79,28 @@ def _signal(host: dict[str, Any], processes: dict[int, _RemoteProcess], signal: 
         'observed=$(ps -ww -p "$pid" -o lstart=,args= | awk \'{$1=$1;print}\'); '
         '[ "$observed" != "$expected" ] || kill -"$signal" "$pid" 2>/dev/null || true; done'
     )
-    arguments = [value for process in processes.values() for value in (str(process.pid), process.identity)]
-    result = run_command(host, ["sh", "-c", script, "mediaforce-end-encode", signal, *arguments], timeout=10, wake_before_connect=False)
+    arguments = [signal, *[value for process in processes.values() for value in (str(process.pid), process.identity)]]
+    input_text = "set -- " + " ".join(shlex.quote(value) for value in arguments) + "\n" + script
+    result = run_command(host, ["sh", "-s"], input_text=input_text, timeout=10, wake_before_connect=False)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "Remote encoder could not be ended.")
+
+
+def _output_writers(host: dict[str, Any], path: Path,
+                    run_command: Callable[..., subprocess.CompletedProcess[str]]) -> set[int]:
+    # Query by the file itself; ps can escape non-ASCII argv in an SSH locale.
+    result = run_command(host, ["sh", "-c", 'if [ -e "$1" ]; then lsof -Fpa -- "$1"; fi',
+                                "mediaforce-output-writers", str(path)], timeout=10, wake_before_connect=False)
+    if result.returncode not in {0, 1} or result.stderr.strip():
+        raise RuntimeError(result.stderr.strip() or "Remote output ownership could not be checked.")
+    writers: set[int] = set()
+    pid = None
+    for field in result.stdout.splitlines():
+        if field.startswith("p"):
+            pid = int(field[1:])
+        elif field in {"aw", "au"} and pid is not None:
+            writers.add(pid)
+    return writers
 
 
 def end_remote_output_writers(
@@ -96,7 +114,12 @@ def end_remote_output_writers(
     """
     inventory = _inventory(host, run_command)
     owned = _owned_processes(inventory, path)
+    if _output_writers(host, path, run_command) - owned.keys():
+        raise RuntimeError("An unrecognised writer has this output open; wait before retrying.")
     if not owned:
+        if any(not character.isascii() or ord(character) < 32 for character in str(path)) and any(
+                "mediaforce_connection_watch=" in process.command for process in inventory.values()):
+            raise RuntimeError("The process inventory obscures this output path; wait for its earlier connection watcher to end.")
         return
     for process in owned.values():
         if Path(process.command.split()[0]).name != "ffmpeg":
@@ -124,5 +147,5 @@ def end_remote_output_writers(
         _signal(host, remaining, "KILL", run_command)
         time.sleep(0.2)
         current = _inventory(host, run_command)
-    if any(pid in current and current[pid].identity == process.identity for pid, process in owned.items()) or _owned_processes(current, path):
+    if any(pid in current and current[pid].identity == process.identity for pid, process in owned.items()) or _owned_processes(current, path) or _output_writers(host, path, run_command):
         raise RuntimeError("The remote encode is still ending; wait before making this file again.")
