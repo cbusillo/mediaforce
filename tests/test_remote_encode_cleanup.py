@@ -31,12 +31,14 @@ def test_restart_ends_writer_and_connection_watch_but_preserves_other_encode() -
         + _row(21, 1, f"ffmpeg -i {output} /staging/review.mkv")
     )
     remaining = _row(12, 1, "cat") + _row(20, 1, f"ffmpeg -i /source/other.mkv {output}.other")
-    runner = Mock(side_effect=[_result(inventory), _result(""), _result(f"f4\naw\nn{output}\n"), _result(), _result(remaining), _result(), _result(), _result("")])
+    runner = Mock(side_effect=[_result(inventory), _result(""), _result(f"f4\naw\nn{output}\n"), _result(), _result(remaining), _result(), _result(remaining), _result(), _result(), _result("")])
     with patch("mediaforce.encoding.remote_cleanup.time.sleep"):
         end_remote_output_writers({"host": "fixture"}, output, run_command=runner)
-    term = shlex.split(runner.call_args_list[3].kwargs["input_text"].splitlines()[0])[2:]
-    kill = shlex.split(runner.call_args_list[5].kwargs["input_text"].splitlines()[0])[2:]
-    assert set(term[1::2]) == {"10", "11", "12"}
+    wrapper_kill = shlex.split(runner.call_args_list[3].kwargs["input_text"].splitlines()[0])[2:]
+    assert wrapper_kill == ["KILL", "10", _row(10, 1, wrapper).split(maxsplit=3)[3].strip()]
+    term = shlex.split(runner.call_args_list[5].kwargs["input_text"].splitlines()[0])[2:]
+    kill = shlex.split(runner.call_args_list[7].kwargs["input_text"].splitlines()[0])[2:]
+    assert set(term[1::2]) == {"11", "12"}
     assert kill == ["KILL", "12", "Fri Oct 9 14:00:00 2026 cat"]
     assert runner.call_args_list[3].args[1] == ["sh", "-s"]
 
@@ -152,3 +154,33 @@ def test_unlinked_escaped_writer_does_not_verify_reuse() -> None:
     runner = Mock(side_effect=[_result(_row(11, 1, 'ffmpeg /staging/PokM-CM-)mon.partial.mkv')), _result('')])
     with pytest.raises(RuntimeError, match='obscures'):
         end_remote_output_writers({'host': 'fixture'}, output, run_command=runner)
+
+
+def test_watcher_is_gone_before_its_waiting_child_is_signalled() -> None:
+    output = Path("/staging/watcher.partial.mkv")
+    wrapper = f"sh -lc mediaforce_connection_watch=$!; pkill -TERM -f -- {shlex.quote(str(output))} 2>/dev/null"
+    processes = {10: (1, wrapper), 11: (10, f"ffmpeg {output}"), 12: (10, "cat"),
+                 20: (1, f"ffprobe -i {output}")}
+    unsafe_wakeup = []
+    def runner(_host: dict, command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[0] == "ps":
+            return _result("".join(_row(pid, parent, text) for pid, (parent, text) in processes.items()))
+        if command[0] == "lsof":
+            return _result(f"f4\naw\nn{output}\n")
+        text = str(kwargs.get("input_text", ""))
+        if "signal=$1" not in text:
+            return _result("")
+        args = shlex.split(text.splitlines()[0])[2:]
+        signal = args[0]
+        for pid_text in args[1::2]:
+            pid = int(pid_text)
+            if pid == 12 and 10 in processes:
+                unsafe_wakeup.append(signal)
+                processes.pop(20, None)
+            if pid != 10 or signal == "KILL":
+                processes.pop(pid, None)
+        return _result()
+    with patch("mediaforce.encoding.remote_cleanup.time.sleep"):
+        end_remote_output_writers({"host": "fixture"}, output, run_command=runner)
+    assert not unsafe_wakeup
+    assert 20 in processes

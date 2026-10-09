@@ -137,6 +137,16 @@ def end_remote_output_writers(
                 owns_output = True
         if opened.returncode or not owns_output:
             raise RuntimeError("Could not verify which file the earlier remote encode is writing; wait before retrying.")
+    # The watcher ignores TERM and runs broad legacy pkill commands when its cat
+    # exits. End and verify every owned shell before releasing any waiting child.
+    wrappers = {pid: process for pid, process in owned.items()
+                if Path(process.command.split()[0]).name in {"sh", "bash", "dash", "zsh"}}
+    if wrappers:
+        _signal(host, wrappers, "KILL", run_command)
+        current = _inventory(host, run_command)
+        if any(pid in current and current[pid].identity == process.identity for pid, process in wrappers.items()):
+            raise RuntimeError("The earlier connection watcher is still ending; wait before retrying.")
+        owned = {pid: process for pid, process in owned.items() if pid not in wrappers}
     _signal(host, owned, "TERM", run_command)
     time.sleep(0.2)
     current = _inventory(host, run_command)

@@ -201,6 +201,40 @@ def recover_encode_queue(
     connection.commit()
 
 
+def _active_encode_outputs(
+        connection: DBClient, config: MediaforceConfig | None, *, exclude_job_id: str | None = None,
+) -> tuple[set[int], set[str]] | None:
+    query = select(encode_jobs.c.job_id, encode_jobs.c.manifest_path,
+                   encode_jobs.c.manifest_indexes_json, encode_jobs.c.host_json).where(
+        encode_jobs.c.status == "running", encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+    if exclude_job_id:
+        query = query.where(encode_jobs.c.job_id != exclude_job_id)
+    active_items: set[int] = set()
+    active_paths: set[str] = set()
+    for row in connection.execute(query).mappings().all():
+        try:
+            manifest = json.loads(Path(row["manifest_path"]).read_text())
+            indexes = json.loads(row["manifest_indexes_json"] or "null")
+            items = object_list(manifest.get("items"))
+            selected = indexes if isinstance(indexes, list) else range(len(items))
+            active_host = object_dict(json.loads(row["host_json"] or "{}"))
+            for index in selected:
+                item = object_dict(items[index])
+                if item.get("library_item_id") is not None:
+                    active_items.add(int(item["library_item_id"]))
+                path = (
+                    str(resolve_item_staging_path(config, item, host=active_host,
+                                                  host_media_access_for_host=host_media_access_for_host))
+                    if config is not None else str(item.get("staging_path") or "")
+                )
+                if not path:
+                    return None
+                active_paths.update((path, str(partial_output_path(Path(path)))))
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
+            return None
+    return active_items, active_paths
+
+
 def sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps) -> None:
     connection.commit()
     try:
@@ -221,25 +255,11 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
         ))
         .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
     ).mappings().all()
-    active_paths: set[str] = set()
-    active_rows = connection.execute(
-        select(encode_jobs.c.manifest_path, encode_jobs.c.manifest_indexes_json, encode_jobs.c.host_json)
-        .where(encode_jobs.c.status == "running")
-        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
-    ).mappings().all()
-    for row in active_rows:
-        try:
-            manifest = json.loads(Path(row["manifest_path"]).read_text())
-            indexes = json.loads(row["manifest_indexes_json"] or "null")
-            items = object_list(manifest.get("items"))
-            selected = indexes if isinstance(indexes, list) else range(len(items))
-            active_host = object_dict(json.loads(row["host_json"] or "{}"))
-            active_paths.update(str(resolve_item_staging_path(
-                config, object_dict(items[index]), host=active_host, host_media_access_for_host=host_media_access_for_host,
-            )) for index in selected)
-        except (OSError, ValueError, KeyError, TypeError, IndexError):
-            # Unknown active ownership cannot safely be swept by output path.
-            return
+    active = _active_encode_outputs(connection, config)
+    if active is None:
+        # Unknown active ownership cannot safely be swept by output path.
+        return
+    _, active_paths = active
     failed_hosts: dict[str, str] = {}
     for row in rows:
         job = load_encode_job(connection, str(row["job_id"]))
@@ -4343,6 +4363,14 @@ def _cleanup_encode_retry_artifacts_locked(
         manifest = json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError):
         return _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE)
+    active = _active_encode_outputs(connection, config, exclude_job_id=(
+        str(expected_job.get("job_id") or "") if expected_job is not None else None))
+    if active is None:
+        return _EncodeRetryArtifactCleanupResult(
+            _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
+            detail="An active encode's output ownership could not be checked; retry when it ends.",
+        )
+    active_items, active_paths = active
     now_iso = deps.now_iso()
     cleanup_succeeded_for_all = True
     manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
@@ -4376,6 +4404,12 @@ def _cleanup_encode_retry_artifacts_locked(
         )
         staging_value = stage_row["staging_path"] if artifact_present else manifest_staging_value
         staging_path = Path(str(staging_value)) if str(staging_value or "").strip() else None
+        if library_item_id in active_items or any(
+                str(value) in active_paths for value in (staging_value, manifest_staging_value) if value):
+            return _EncodeRetryArtifactCleanupResult(
+                _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
+                detail="An active encode owns this file or its output; retry when it ends.",
+            )
         complete = (
             promoted
             or library_status in {"encoded", "validated"}

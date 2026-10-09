@@ -164,7 +164,7 @@ A queued encode on a mounted SSH host runs inside a connection watcher, but
 losing the controller does not prove that watcher fired. Startup recovery and
 retry cleanup therefore inspect the remote host before removing an interrupted
 output. They identify ffmpeg's own output and confirm its writable file through
-`lsof`, end that encoder and its Mediaforce connection wrapper, and check again
+`lsof`, end and verify its Mediaforce connection wrapper before signalling the encoder or waiting children, and check again
 before deleting the partial file. Process birth time and command are checked
 before signals; unrelated encodes and readers of that file are preserved.
 
@@ -241,3 +241,5 @@ is removed or repurposed. Cleanup waits for a matching reachable computer instea
 of treating the mounted file as locally owned.
 
 Cleanup also excludes new dispatch through a nonblocking lock beside the controller database. This covers jobs in different manifests that reuse the same output; database writes remain available during remote checks. Dispatch retries on its next queue pass. The lock releases when its owning process exits. Retained recovery and retry cleanup resolve outputs with the encoder's host-aware staging resolver, including host-specific staging roots. Artifact-only cleanup retains the recorded execution mode and storage access mode. If the earlier mounted remote host configuration is gone or has become local, cleanup preserves the file and record until the configuration is restored; it does not guess a remote endpoint from the old display key.
+
+Retry cleanup rechecks other running jobs' selected items and resolved outputs under the same dispatch lock before signalling or deleting. A newer active attempt preserves its output and staged record, and the older retry remains deferred. Legacy connection watchers ignore TERM and can run broad path matching when their waiting child exits; cleanup ends and verifies the watcher shells first so ending their children cannot release that command.

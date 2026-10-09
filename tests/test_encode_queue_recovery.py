@@ -28787,6 +28787,33 @@ raise SystemExit(0)
             self.assertNotIn("remote_cleanup_verified", object_dict(job["progress"]))
             self.assertIn("active encode owns", job["error"])
 
+    def test_terminal_cleanup_preserves_an_already_running_replacement(self) -> None:
+        source = self._create_source_file("inflight-replacement.mkv")
+        output = self._staging_path("inflight-replacement.mkv")
+        partial = staging_runtime.partial_output_path(output)
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        partial.write_text("replacement frames")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="encoding")
+            for name, status in (("old-cleanup", "stopped"), ("new-cleanup", "running")):
+                self._write_manifest(f"{name}.json", [{"library_item_id": item_id, "staging_path": str(output)}])
+                self._save_job(connection, job_id=name, manifest_name=f"{name}.json", status=status,
+                               attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+            self._insert_staged_artifact(connection, item_id, output)
+            connection.execute(update(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id).values(
+                encode_job_id="new-cleanup"))
+            old = load_encode_job(connection, "old-cleanup")
+            with patch.object(encode_runtime, "end_remote_output_writers") as end_writers, patch.object(
+                    encode_runtime, "run_remote_command", new=_remote_cleanup_succeeds):
+                with self.assertRaises(HTTPException) as raised:
+                    encode_runtime.prepare_terminal_encode_job_for_requeue(
+                        connection, old, deps=web_app._encode_queue_runtime_deps(), config=self.config)
+            self.assertEqual(raised.exception.status_code, 409)
+            end_writers.assert_not_called()
+            self.assertEqual(partial.read_text(), "replacement frames")
+            self.assertEqual(load_encode_job(connection, "new-cleanup")["status"], "running")
+            self.assertIsNotNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+
     def test_terminal_requeue_resolves_missing_artifact_on_the_saved_host(self) -> None:
         source = self._create_source_file("host-retry.mkv")
         controller_output = self._staging_path("host-retry.mkv")
