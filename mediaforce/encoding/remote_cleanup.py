@@ -10,6 +10,12 @@ from typing import Any
 
 from mediaforce.remote import run_remote_command
 
+REMOTE_PROCESS_IDENTITY_SHELL = 'ps -ww -p "$pid" -o lstart=,args= | awk \'{$1=$1;print}\''
+REMOTE_PROCESS_SIGNAL_SHELL = (
+    f'observed=$({REMOTE_PROCESS_IDENTITY_SHELL}); '
+    '[ "$observed" != "$expected" ] || kill -"$signal" "$pid" 2>/dev/null || true'
+)
+
 
 @dataclass(frozen=True)
 class _RemoteProcess:
@@ -17,6 +23,7 @@ class _RemoteProcess:
     parent_pid: int
     identity: str
     command: str
+    state: str
 
 
 def _inventory(host: dict[str, Any], run_command: Callable[..., subprocess.CompletedProcess[str]]) -> dict[int, _RemoteProcess]:
@@ -35,7 +42,7 @@ def _inventory(host: dict[str, Any], run_command: Callable[..., subprocess.Compl
             continue
         command = fields[8]
         identity = " ".join(" ".join(fields[3:]).split())
-        processes[pid] = _RemoteProcess(pid, parent_pid, identity, command)
+        processes[pid] = _RemoteProcess(pid, parent_pid, identity, command, fields[2])
     return processes
 
 
@@ -45,12 +52,13 @@ def _owned_processes(processes: dict[int, _RemoteProcess], path: Path) -> dict[i
         if Path(process.command.split()[0]).name == "ffmpeg"
         and process.command.endswith(f" {path}")
     }
-    watch_marker = f"pkill -TERM -f -- {shlex.quote(str(path))} 2>/dev/null"
+    watch_markers = (f"pkill -TERM -f -- {shlex.quote(str(path))} 2>/dev/null",
+                     f"mediaforce_owned_output={shlex.quote(str(path))}")
     owned = writers | {
         pid for pid, process in processes.items()
         if Path(process.command.split()[0]).name in {"sh", "bash", "dash", "zsh"}
         and "mediaforce_connection_watch=" in process.command
-        and watch_marker in process.command
+        and any(marker in process.command for marker in watch_markers)
     }
     for pid in writers:
         parent_pid = processes[pid].parent_pid
@@ -76,8 +84,7 @@ def _signal(host: dict[str, Any], processes: dict[int, _RemoteProcess], signal: 
             run_command: Callable[..., subprocess.CompletedProcess[str]]) -> None:
     script = (
         'signal=$1; shift; while [ "$#" -gt 0 ]; do pid=$1; expected=$2; shift 2; '
-        'observed=$(ps -ww -p "$pid" -o lstart=,args= | awk \'{$1=$1;print}\'); '
-        '[ "$observed" != "$expected" ] || kill -"$signal" "$pid" 2>/dev/null || true; done'
+        + REMOTE_PROCESS_SIGNAL_SHELL + '; done'
     )
     arguments = [signal, *[value for process in processes.values() for value in (str(process.pid), process.identity)]]
     input_text = "set -- " + " ".join(shlex.quote(value) for value in arguments) + "\n" + script
@@ -142,6 +149,11 @@ def end_remote_output_writers(
     wrappers = {pid: process for pid, process in owned.items()
                 if Path(process.command.split()[0]).name in {"sh", "bash", "dash", "zsh"}}
     if wrappers:
+        _signal(host, wrappers, "STOP", run_command)
+        current = _inventory(host, run_command)
+        if any(pid in current and current[pid].identity == process.identity and "T" not in current[pid].state
+               for pid, process in wrappers.items()):
+            raise RuntimeError("Could not pause the earlier connection watcher; wait before retrying.")
         _signal(host, wrappers, "KILL", run_command)
         current = _inventory(host, run_command)
         if any(pid in current and current[pid].identity == process.identity for pid, process in wrappers.items()):

@@ -161,7 +161,7 @@ then report the error, because stopping the SSH client alone does not prove the
 remote encoder stopped.
 
 A queued encode on a mounted SSH host runs inside a connection watcher, but
-losing the controller does not prove that watcher fired. Startup recovery and
+losing the controller does not prove that watcher finished. Startup recovery and
 retry cleanup therefore inspect the remote host before removing an interrupted
 output. They identify ffmpeg's own output and confirm its writable file through
 `lsof`, end and verify its Mediaforce connection wrapper before signalling the encoder or waiting children, and check again
@@ -243,3 +243,5 @@ of treating the mounted file as locally owned.
 Cleanup also excludes new dispatch through a nonblocking lock beside the controller database. This covers jobs in different manifests that reuse the same output; database writes remain available during remote checks. Dispatch retries on its next queue pass. The lock releases when its owning process exits. Retained recovery and retry cleanup resolve outputs with the encoder's host-aware staging resolver, including host-specific staging roots. Artifact-only cleanup retains the recorded execution mode and storage access mode. If the earlier mounted remote host configuration is gone or has become local, cleanup preserves the file and record until the configuration is restored; it does not guess a remote endpoint from the old display key.
 
 Retry cleanup rechecks other running jobs' selected items and resolved outputs under the same dispatch lock before signalling or deleting. A newer active attempt preserves its output and staged record, and the older retry remains deferred. Legacy connection watchers ignore TERM and can run broad path matching when their waiting child exits; cleanup ends and verifies the watcher shells first so ending their children cannot release that command.
+
+New connection watchers retain the command shell's PID and birth/command identity. On connection loss they snapshot only that command's descendants and recheck each identity before signalling. They never select other processes by output-path text or remove files. Normal command exit retains its status; closing the connection afterward leaves the finished result alone. Startup and Stop use retained queue ownership instead of the former host-wide marker/group sweep, preserving separate command-line encodes and readers. Mounted-host exception handling keeps unfinished paths for verified cleanup. Stop confirms the queue stopped without claiming every file has been cleaned. Legacy watcher recovery first pauses and verifies all owned shells before ending them, preventing an outer shell's exit from releasing a still-running watcher.

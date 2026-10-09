@@ -28,7 +28,7 @@ class RemoteEncodeConnectionWatchTests(unittest.TestCase):
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
 
-    def test_losing_the_connection_ends_the_encoder_and_removes_its_partial(self) -> None:
+    def test_losing_the_connection_ends_its_encoder_and_preserves_output_for_verified_cleanup(self) -> None:
         with TemporaryDirectory() as raw_root:
             owned = Path(raw_root) / "Episode 01.partial.mkv"
             marker = Path(raw_root) / "finished"
@@ -38,16 +38,17 @@ class RemoteEncodeConnectionWatchTests(unittest.TestCase):
             self.assertTrue(_wait_until(owned.exists))
             assert process.stdin is not None
 
+            import sys
+            reader = subprocess.Popen([sys.executable, "-c", "import sys,time; f=open(sys.argv[1]); time.sleep(60)", str(owned)])
+            self.addCleanup(reader.wait)
+            self.addCleanup(lambda: reader.poll() is None and reader.kill())
             process.stdin.close()  # the controller stopped, restarted, or the link dropped
 
-            self.assertTrue(_wait_until(lambda: not owned.exists()), "the partial output must be removed")
+            self.assertTrue(owned.exists(), "verified queue cleanup owns unfinished output removal")
             process.wait(timeout=15)
 
-            def survivors() -> list[str]:
-                return subprocess.run(["pgrep", "-f", str(owned)], capture_output=True, text=True).stdout.split()
-
-            # The signal is sent before the wrapper exits; a loaded machine can take a moment to end the encoder.
-            self.assertTrue(_wait_until(lambda: not survivors()), f"encoder processes survived: {survivors()}")
+            time.sleep(0.5)
+            self.assertIsNone(reader.poll(), "the reader is outside the command's process family")
             self.assertFalse(marker.exists())
 
     def test_a_finished_encode_keeps_its_output_and_exit_status(self) -> None:

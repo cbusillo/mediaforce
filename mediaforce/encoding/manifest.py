@@ -9,6 +9,7 @@ from sqlalchemy import update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
@@ -1102,7 +1103,10 @@ def encode_one_item(
             exc,
             record_event,
         )
-        _cleanup_paths_without_masking(exc, temp_output, staging_path)
+        if execution_mode_for_host(host) == "ssh" and host_media_access_for_host(host) != "stream":
+            exc.add_note("Interrupted mounted output is preserved until remote ownership cleanup succeeds.")
+        else:
+            _cleanup_paths_without_masking(exc, temp_output, staging_path)
         raise
 
     staged_stat = staging_path.stat()

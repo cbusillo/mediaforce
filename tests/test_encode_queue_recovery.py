@@ -1020,10 +1020,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(staged_row["staging_path"], str(staging_path))
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
-    def test_recover_encode_queue_sweeps_processes_for_interrupted_prefixes(self) -> None:
+    def test_startup_cleanup_is_scoped_and_keeps_the_database_writable(self) -> None:
         source_path = self._create_source_file("episode-restart-sweep.mkv")
         staging_path = self._staging_path("episode-restart-sweep.mkv")
 
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("unfinished")
+        self.config.raw["remote_hosts"] = [{"host": "separate-cli-host", "mode": "ssh", "capabilities": ["encode_queue"]}]
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="encoding")
             self._write_manifest(
@@ -1047,9 +1050,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     writer.exec_driver_sql("ROLLBACK")
 
             with patch(
-                "mediaforce.web.app._sweep_orphaned_encode_processes",
+                "mediaforce.web.runtime.encode_runtime.end_remote_output_writers",
                 side_effect=sweep_with_concurrent_writer,
-            ) as sweep_mock:
+            ) as sweep_mock, patch.object(web_app, "run_remote_command") as unowned:
                 web_app._recover_encode_queue(connection, self.config)
 
             job = load_encode_job(connection, "job-restart-sweep")
@@ -1057,7 +1060,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "retry_backoff")
-        sweep_mock.assert_called_once_with(self.config, prefixes=["tv/show"])
+        self.assertEqual({call.args[1] for call in sweep_mock.call_args_list},
+                         {staging_path, staging_runtime.partial_output_path(staging_path)})
+        unowned.assert_not_called()
+        self.assertEqual(staging_path.read_text(), "unfinished")
 
     def test_startup_recovery_clears_stale_encoding_items_when_idle(self) -> None:
         source_path = self._create_source_file("episode-idle-clear.mkv")
@@ -15498,6 +15504,65 @@ raise SystemExit(0)
             self.assertEqual(failed_details["encode_host_key"], "remote-b")
             self.assertIn("bad stdout", failed_details["error"])
 
+    def test_encode_one_item_preserves_mounted_partial_until_remote_cleanup(self) -> None:
+        source_path = self._create_source_file("episode-encode-fail.mkv")
+        staging_path = self._staging_path("episode-encode-fail.mkv")
+        quality_result = QualitySearchResult(crf=28.0, metric="XPSNR", target=41.0, score=41.5, stdout="ok")
+        manifest = {"run_id": "run-encode-fail", "items": []}
+
+        def run_encode_side_effect(*, temp_output: Path, **_: object) -> subprocess.CompletedProcess[str]:
+            temp_output.parent.mkdir(parents=True, exist_ok=True)
+            temp_output.write_text("partial")
+            return subprocess.CompletedProcess(args=["ffmpeg"], returncode=1, stdout="bad stdout", stderr="bad stderr")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            item = {
+                "library_item_id": item_id,
+                "resolved_policy": {
+                    "video": {"preset": 4, "encoder": "libsvtav1"},
+                    "audio": {},
+                    "subtitle": {},
+                },
+                "rel_path": "tv/show/episode-encode-fail.mkv",
+                "duration_seconds": 1200.0,
+                "video_codec": "h264",
+                "width": 1920,
+                "height": 1080,
+                "source_path": str(source_path),
+                "source_fingerprint": "source-fingerprint",
+                "source_size_bytes": 1024,
+            }
+            with patch("mediaforce.execution.resolve_item_source_path", return_value=source_path), patch(
+                    "mediaforce.execution.resolve_item_staging_path", return_value=staging_path
+            ), patch("mediaforce.execution._search_quality", return_value=quality_result), patch(
+                "mediaforce.execution._select_streams", return_value={"audio_tracks": [], "subtitle_tracks": []}
+            ), patch("mediaforce.execution._build_ffmpeg_command",
+                     return_value=["ffmpeg", "-i", str(source_path), str(staging_path)]), patch(
+                "mediaforce.execution._run_encode_command", side_effect=run_encode_side_effect
+            ):
+                with self.assertRaisesRegex(RuntimeError, "bad stdout"):
+                    execution.encode_one_item(
+                        connection,
+                        self.config,
+                        self.root / "runs" / "manifest-encode-fail.json",
+                        manifest,
+                        0,
+                        item,
+                        overwrite=False,
+                        host={"key": "remote-b", "label": "Remote B", "mode": "ssh", "media_access": "mounted"},
+                        encode_context={"origin": "queue", "encode_job_id": "job-fail", "encode_worker_id": "worker-2"},
+                    )
+
+            self.assertFalse(staging_path.exists())
+            self.assertTrue(staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}").exists())
+            event_rows = self._item_event_rows(connection, item_id)
+            self.assertEqual([row["event_type"] for row in event_rows[-2:]], ["encoding_started", "encoding_failed"])
+            failed_details = json.loads(cast(str, event_rows[-1]["details_json"]))
+            self.assertEqual(failed_details["encode_job_id"], "job-fail")
+            self.assertEqual(failed_details["encode_host_key"], "remote-b")
+            self.assertIn("bad stdout", failed_details["error"])
+
     def test_encode_one_item_records_operator_cancellation_as_stopped(self) -> None:
         source_path = self._create_source_file("episode-encode-stopped.mkv")
         staging_path = self._staging_path("episode-encode-stopped.mkv")
@@ -19079,65 +19144,30 @@ raise SystemExit(0)
         self.assertTrue(state["is_paused"])
         self.assertTrue(state["stop_requested"])
 
-    def test_sweep_orphaned_encode_processes_only_targets_ssh_encode_hosts(self) -> None:
+    def test_orphan_sweep_does_not_signal_configured_hosts_without_queue_ownership(self) -> None:
         self.config.raw["remote_hosts"] = [
-            {"host": "encode-a", "label": "Encode A", "mode": "ssh", "capabilities": ["encode_queue"]},
-            {"host": "encode-b", "label": "Encode B", "capabilities": ["encode_queue"]},
-            {"host": "encode-c", "label": "Encode C", "mode": "   ", "capabilities": ["encode_queue"]},
-            {"host": "sample-only", "label": "Sample Only", "mode": "ssh", "capabilities": ["sample_calibration"]},
-            {"host": "local-ish", "label": "Local-ish", "mode": "local", "capabilities": ["encode_queue"]},
+            {"host": "encode-a", "mode": "ssh", "capabilities": ["encode_queue"]},
+            {"host": "encode-b", "mode": "ssh", "capabilities": ["encode_queue"]},
         ]
-
-        with patch("mediaforce.web.app.run_remote_command") as run_remote_command_mock:
+        with patch.object(web_app, "run_remote_command") as remote, patch.object(
+                encode_runtime, "run_remote_command") as scoped_remote:
             web_app._sweep_orphaned_encode_processes(self.config)
+        remote.assert_not_called()
+        scoped_remote.assert_not_called()
 
-        self.assertEqual(run_remote_command_mock.call_count, 3)
-        self.assertEqual(
-            [call.args[0]["host"] for call in run_remote_command_mock.call_args_list],
-            ["encode-a", "encode-b", "encode-c"],
-        )
-        command_payload = run_remote_command_mock.call_args.args[1]
-        self.assertEqual(command_payload[:2], ["sh", "-lc"])
-        self.assertIn("self_pgid=$(ps -o pgid= -p \"$self_pid\"", command_payload[2])
-        self.assertIn("kill_tree() ( signal=$1; target=$2;", command_payload[2])
-        self.assertIn("mediaforce_encoded_by=mediaforce", command_payload[2])
-        self.assertIn("ab-av1 .*--temp-dir .*\\.mediaforce-ab-av1-", command_payload[2])
-        self.assertIn("$0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/", command_payload[2])
-        self.assertIn("[ \"$pgid\" != \"$self_pgid\" ]", command_payload[2])
-        self.assertIn("kill -TERM -\"$pgid\"", command_payload[2])
-        self.assertIn("kill_tree TERM \"$pid\"", command_payload[2])
-        self.assertIn("kill -KILL -\"$pgid\"", command_payload[2])
-        self.assertIn("kill_tree KILL \"$pid\"", command_payload[2])
-
-    def test_sweep_orphaned_encode_processes_can_scope_to_recovered_prefix(self) -> None:
-        host_staging_root = self.root / "remote-transcode"
-        self.config.raw["remote_hosts"] = [
-            {
-                "host": "encode-a",
-                "label": "Encode A",
-                "mode": "ssh",
-                "capabilities": ["encode_queue"],
-                "staging_root": str(host_staging_root),
-            }
-        ]
-
-        with patch("mediaforce.web.app.run_remote_command") as run_remote_command_mock:
-            web_app._sweep_orphaned_encode_processes(self.config, prefixes=["tv/show"])
-
-        run_remote_command_mock.assert_called_once()
-        command_payload = run_remote_command_mock.call_args.args[1]
-        self.assertEqual(command_payload[:3], ["sh", "-lc", command_payload[2]])
-        self.assertEqual(command_payload[3], "mediaforce-sweep")
-        self.assertIn(
-            f"{re.escape(str(host_staging_root / 'tv' / 'show'))}(/|[[:space:]]|$)",
-            command_payload[4],
-        )
-        self.assertIn(
-            f"{re.escape(str(self.root / 'source' / 'tv' / 'show'))}(/|[[:space:]]|$)",
-            command_payload[4],
-        )
-        self.assertNotIn(re.escape(str(host_staging_root / "tv" / "showing")), command_payload[4])
-        self.assertNotIn(re.escape(str(self.root / "source" / "tv" / "showing")), command_payload[4])
+    def test_orphan_sweep_only_reaches_the_retained_jobs_resolved_outputs(self) -> None:
+        output = self._staging_path("owned-sweep.mkv")
+        self._write_manifest("owned-sweep.json", [{"staging_path": str(output)}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id="owned-sweep", manifest_name="owned-sweep.json", status="stopped",
+                           attempt_count=1, host={"mode": "ssh", "host": "owned-host"})
+        with patch.object(web_app, "run_remote_command") as broad, patch.object(
+                encode_runtime, "end_remote_output_writers") as end_writers:
+            web_app._sweep_orphaned_encode_processes(self.config)
+        broad.assert_not_called()
+        self.assertEqual({call.args[0]["host"] for call in end_writers.call_args_list}, {"owned-host"})
+        self.assertEqual({call.args[1] for call in end_writers.call_args_list},
+                         {output, staging_runtime.partial_output_path(output)})
 
     def test_create_app_registers_folder_status_route_before_catch_all_folder_route(self) -> None:
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
