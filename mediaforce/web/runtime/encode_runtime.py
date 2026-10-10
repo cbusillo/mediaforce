@@ -59,6 +59,7 @@ from mediaforce.encoding.free_space import ReserveInputError
 from mediaforce.encoding.staging import StagedOutputHeldForReviewError, UnreadableEncodeOutputError, partial_output_path, \
     safe_unlink
 from mediaforce.encoding.remote_cleanup import end_remote_output_writers
+from mediaforce.encoding.dispatch_coordination import STANDALONE_CLI_ENCODE_ORIGINS, locked_encode_dispatch as _locked_encode_dispatch
 from mediaforce.encoding.helpers import resolve_item_staging_path
 from mediaforce.encoding.streams import StreamPlanIdentityError
 from mediaforce.tuning.av1_cold_start import AV1ColdStartContractError
@@ -303,7 +304,11 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
                         if host_key in failed_hosts:
                             raise RuntimeError(failed_hosts[host_key])
                         try:
-                            end_remote_output_writers(host, target, run_command=run_remote_command)
+                            end_remote_output_writers(
+                                host, target, run_command=run_remote_command,
+                                ownership_check=(lambda: _assert_cleanup_ownership(connection, int(item_id)))
+                                if item_id is not None else None,
+                            )
                         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                             failed_hosts[host_key] = str(exc)
                             raise
@@ -401,8 +406,35 @@ def reconcile_encode_jobs(
         retry_not_before = deps.parse_iso(payload.get("retry_not_before"))
         if retry_not_before is not None and retry_not_before > now:
             continue
+        retry_host = object_dict(payload.get("host"))
+        state = load_queue_state(connection)
+        wake_error: str | None = None
+        if (not restart_recovery and not state.get("is_paused") and not state.get("stop_requested")
+                and execution_mode_for_host(retry_host) == "ssh"
+                and host_media_access_for_host(retry_host) != "stream"
+                and deps.scheduler_allows_encode_run(
+                    deps.schedule_profile_policy_for_host(config, retry_host),
+                    bypass_schedule=bool(payload.get("bypass_schedule")), now=now, host_payload=retry_host,
+                )):
+            connection.commit()
+            try:
+                if deps.host_lifecycle_start_command(retry_host):
+                    started = deps.ensure_encode_host_ready(config, retry_host)
+                    if started:
+                        # Use the existing preparation custody so the dispatched
+                        # worker, or unused-preparation cleanup, owns shutdown.
+                        with deps.scratch_admission_lock:
+                            deps.scratch_ready_hosts[_scratch_capacity_key(retry_host)] = {
+                                **retry_host, "scratch_admission_started": True,
+                            }
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                wake_error = str(exc)
         manifest_path = str(payload.get("manifest_path") or "").strip()
-        if manifest_path:
+        if wake_error is not None:
+            cleanup_outcome = _EncodeRetryArtifactCleanupResult(
+                _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED, detail=wake_error,
+            )
+        elif manifest_path:
             connection.commit()
             cleanup_outcome = _cleanup_encode_retry_artifacts(
                 connection,
@@ -642,11 +674,15 @@ def _clear_stale_encoding_items_when_idle(
             continue
         cleanup_succeeded = True
         for staging_path, host in _candidate_stale_staging_targets(config, row):
-            cleanup_result = _remove_stale_staging_path(staging_path, host=host)
-            cleanup_succeeded = cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANED and cleanup_succeeded
             cleanup_result = _remove_stale_staging_path(
-                partial_output_path(staging_path),
-                host=host,
+                staging_path, host=host,
+                ownership_check=lambda: _assert_cleanup_ownership(connection, item_id, protected_path=staging_path),
+            )
+            cleanup_succeeded = cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANED and cleanup_succeeded
+            partial_path = partial_output_path(staging_path)
+            cleanup_result = _remove_stale_staging_path(
+                partial_path, host=host,
+                ownership_check=lambda: _assert_cleanup_ownership(connection, item_id, protected_path=partial_path),
             )
             cleanup_succeeded = cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANED and cleanup_succeeded
         if not cleanup_succeeded:
@@ -675,25 +711,40 @@ def _clear_stale_encoding_items_when_idle(
 
 
 def _active_standalone_cli_encode(connection: DBClient, library_item_id: int) -> bool:
-    details_rows = connection.execute(
-        select(item_events.c.details_json)
+    events = connection.execute(
+        select(item_events.c.event_type, item_events.c.details_json, item_events.c.created_at)
         .where(item_events.c.library_item_id == library_item_id)
-        .where(item_events.c.event_type == "encoding_started")
+        .where(item_events.c.event_type.in_(("encoding_started", "encoding_completed", "encoding_failed",
+                                            "encoding_stopped", "encoding_needs_review")))
         .order_by(item_events.c.id.desc())
-    ).scalars().all()
-    for details_json in details_rows:
+    ).mappings().all()
+    finished: set[tuple[str, int, str]] = set()
+    for event in events:
         try:
-            details = json.loads(str(details_json))
+            details = json.loads(str(event["details_json"]))
         except (TypeError, ValueError):
             continue
-        if not isinstance(details, dict) or str(details.get("encode_origin") or "") not in {"cli", "cli-production", "cli-review"}:
+        if not isinstance(details, dict) or str(details.get("encode_origin") or "") not in STANDALONE_CLI_ENCODE_ORIGINS:
             continue
-        if _process_is_running(int_value(details.get("encode_owner_pid"))):
+        owner_pid = int_value(details.get("encode_owner_pid"))
+        attempt = (str(details["encode_origin"]), owner_pid, str(details.get("encode_started_at") or ""))
+        if event["event_type"] != "encoding_started":
+            finished.add(attempt)
+            continue
+        if attempt in finished:
+            continue
+        try:
+            started_at = datetime.fromisoformat(str(event["created_at"]))
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=UTC)
+        except (TypeError, ValueError):
+            started_at = None
+        if _process_is_running(owner_pid, started_before=started_at):
             return True
     return False
 
 
-def _process_is_running(process_id: int) -> bool:
+def _process_is_running(process_id: int, *, started_before: datetime | None = None) -> bool:
     if process_id <= 0:
         return False
     try:
@@ -702,7 +753,39 @@ def _process_is_running(process_id: int) -> bool:
         return False
     except PermissionError:
         return True
+    if started_before is not None:
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(process_id), "-o", "lstart="], capture_output=True, text=True, timeout=2,
+                env={"PATH": os.defpath, "LC_ALL": "C", "TZ": "UTC"},
+            )
+            if result.returncode == 0:
+                born = datetime.strptime(result.stdout.strip(), "%a %b %d %H:%M:%S %Y").replace(tzinfo=UTC)
+                return born <= started_before
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    # A live PID with unprovable birth remains protected.
     return True
+
+
+def _assert_cleanup_ownership(
+        connection: DBClient, library_item_id: int, *, protected_path: Path | None = None,
+) -> None:
+    connection.commit()
+    try:
+        if _active_standalone_cli_encode(connection, library_item_id):
+            raise RuntimeError("An active standalone encode owns this file; retry when it ends.")
+        if protected_path is not None:
+            current = connection.execute(
+                select(staged_artifacts, library_items.c.status.label("status"))
+                .join(library_items, library_items.c.id == staged_artifacts.c.library_item_id)
+                .where(staged_artifacts.c.library_item_id == library_item_id)
+            ).mappings().first()
+            if (current is not None and current["staging_path"] is not None
+                    and Path(str(current["staging_path"])) == protected_path and _staged_output_is_complete(current)):
+                raise RuntimeError("This output finished during cleanup; refresh it before retrying.")
+    finally:
+        connection.commit()
 
 
 def _staged_output_is_complete(row: Mapping[str, Any]) -> bool:
@@ -738,7 +821,13 @@ def _remove_stale_staging_path(
         *,
         host: dict[str, Any] | None = None,
         prefer_remote: bool = True,
+        ownership_check: Callable[[], None] | None = None,
 ) -> _StagingPathCleanupResult:
+    if ownership_check is not None:
+        try:
+            ownership_check()
+        except RuntimeError as exc:
+            return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANUP_DEFERRED, detail=str(exc))
     host_payload = object_dict(host)
     remote_mounted_host = (
         bool(host_payload)
@@ -751,7 +840,7 @@ def _remove_stale_staging_path(
             detail="The earlier remote host configuration is unavailable; restore it before retrying cleanup.",
         )
     if remote_mounted_host:
-        return _remove_remote_stale_staging_path(path, host_payload)
+        return _remove_remote_stale_staging_path(path, host_payload, ownership_check=ownership_check)
     try:
         if path.exists():
             result = _remove_path(path)
@@ -792,7 +881,9 @@ def _prune_empty_quality_temp_dir(path: Path) -> None:
             return
 
 
-def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> _StagingPathCleanupResult:
+def _remove_remote_stale_staging_path(
+        path: Path, host: dict[str, Any], *, ownership_check: Callable[[], None] | None = None,
+) -> _StagingPathCleanupResult:
     quoted_path = shlex.quote(str(path))
     script = f"rm -f {quoted_path}"
     if path.parent.name.startswith(".mediaforce-ab-av1-") or path.parent.name.startswith(".ab-av1-"):
@@ -803,7 +894,9 @@ def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> _Stag
             f"rmdir {quoted_parent} >/dev/null 2>&1 || true; fi; exit $status"
         )
     try:
-        end_remote_output_writers(host, path, run_command=run_remote_command)
+        end_remote_output_writers(host, path, run_command=run_remote_command, ownership_check=ownership_check)
+        if ownership_check is not None:
+            ownership_check()
         result = run_remote_command(host, ["sh", "-lc", script], timeout=10, wake_before_connect=False)
     except Exception as exc:
         return _StagingPathCleanupResult(
@@ -2232,17 +2325,6 @@ def _locked_manifest_file(manifest_path: Path, *, blocking: bool = True, suffix:
             yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-
-
-@contextmanager
-def _locked_encode_dispatch(connection: DBClient) -> Iterator[None]:
-    # Outputs can be shared across manifests. Keep dispatch out while their ownership
-    # is checked and cleaned, without holding SQLite's write lock across SSH calls.
-    database = next((row[2] for row in connection.exec_driver_sql("PRAGMA database_list").all() if row[1] == "main"), None)
-    if not database or database == ":memory:":
-        raise RuntimeError("Encode cleanup needs a persistent controller database.")
-    with _locked_manifest_file(Path(database), blocking=False, suffix=".encode-dispatch.lock"):
-        yield
 
 
 @contextmanager
@@ -4442,6 +4524,9 @@ def _cleanup_encode_retry_artifacts_locked(
                     partial_path,
                     host=host,
                     prefer_remote=False,
+                    ownership_check=(lambda: _assert_cleanup_ownership(
+                        connection, int(library_item_id), protected_path=partial_path,
+                    )) if library_item_id is not None else None,
                 )
                 if partial_cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_FAILED:
                     return _EncodeRetryArtifactCleanupResult(
@@ -4463,6 +4548,9 @@ def _cleanup_encode_retry_artifacts_locked(
                 staging_path,
                 host=host,
                 prefer_remote=False,
+                ownership_check=(lambda: _assert_cleanup_ownership(
+                    connection, int(library_item_id), protected_path=staging_path,
+                )) if library_item_id is not None else None,
             )
             if cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_FAILED:
                 return _EncodeRetryArtifactCleanupResult(

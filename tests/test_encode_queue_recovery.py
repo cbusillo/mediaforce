@@ -1172,14 +1172,15 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     details_json=json.dumps(
                         {
                             "encode_origin": "cli",
-                            "encode_owner_pid": os.getpid(),
+                            "encode_owner_pid": 12345,
                         },
                         separators=(",", ":"),
                     ),
                 )
             )
 
-            web_app._recover_encode_queue(connection, self.config)
+            with patch.object(encode_runtime, "_process_is_running", return_value=True):
+                web_app._recover_encode_queue(connection, self.config)
 
             item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
             assert item_status_row is not None
@@ -29075,6 +29076,221 @@ raise SystemExit(0)
             self.assertIsNone(saved["worker_id"])
             self.assertIsNotNone(saved["retry_not_before"])
             self.assertEqual(partial.read_text(), "interrupted frames")
+
+    def test_schedule_cleanup_retry_wakes_its_host_when_the_queue_window_reopens(self) -> None:
+        output = self._staging_path("schedule-reopen.mkv")
+        self._write_manifest("schedule-reopen.json", [{"staging_path": str(output)}])
+        awake = False
+        def wake(*_args: Any) -> bool:
+            nonlocal awake
+            awake = True
+            return True
+        def end(*_args: Any, **_kwargs: Any) -> None:
+            if not awake:
+                raise RuntimeError("computer is stopped")
+        with open_db(self.config.paths.db_path) as connection:
+            host = {"mode": "ssh", "host": "fixture", "start_command": "fixture-start"}
+            self._save_job(connection, job_id="schedule-reopen", manifest_name="schedule-reopen.json",
+                           status="retry_backoff", attempt_count=0, host=host,
+                           retry_not_before="2000-01-01T00:00:00+00:00")
+            job = load_encode_job(connection, "schedule-reopen")
+            job["progress"] = {"progress_state": "schedule_waiting"}
+            save_encode_job(connection, job)
+            connection.commit()
+            deps = replace(web_app._encode_queue_runtime_deps(), ensure_encode_host_ready=Mock(side_effect=wake),
+                           scheduler_allows_encode_run=Mock(return_value=True), scratch_ready_hosts={})
+            with patch.object(encode_runtime, "end_remote_output_writers", side_effect=end), patch.object(
+                    encode_runtime, "run_remote_command", new=_remote_cleanup_succeeds):
+                encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+            saved = load_encode_job(connection, "schedule-reopen")
+            self.assertEqual(saved["status"], "queued")
+            self.assertEqual(saved["host"], {})
+            self.assertEqual(saved["waiting_reason"], encode_runtime.SCHEDULE_CLOSE_WAITING_REASON)
+            self.assertTrue(awake)
+            prepared = list(deps.scratch_ready_hosts.values())
+            self.assertEqual(len(prepared), 1)
+            self.assertTrue(prepared[0]["scratch_admission_started"])
+
+    def test_cleanup_retry_does_not_wake_during_recovery_pause_stop_or_closed_window(self) -> None:
+        for reason in ("restart", "paused", "stopping", "closed"):
+            with self.subTest(reason=reason), open_db(self.config.paths.db_path) as connection:
+                name = f"wake-blocked-{reason}"
+                output = self._staging_path(f"{name}.mkv")
+                self._write_manifest(f"{name}.json", [{"staging_path": str(output)}])
+                self._save_job(connection, job_id=name, manifest_name=f"{name}.json", status="retry_backoff",
+                               attempt_count=0, retry_not_before="2000-01-01T00:00:00+00:00",
+                               host={"mode": "ssh", "host": "fixture", "start_command": "fixture-start",
+                                     "wake_mac": "aa:bb:cc:dd:ee:ff"})
+                state = load_queue_state(connection)
+                state.update({"is_paused": reason == "paused", "stop_requested": reason == "stopping", "updated_at": web_app._now_iso()})
+                save_queue_state(connection, state)
+                connection.commit()
+                deps = replace(web_app._encode_queue_runtime_deps(), ensure_encode_host_ready=Mock(),
+                               scheduler_allows_encode_run=Mock(return_value=reason != "closed"))
+                with patch.object(encode_runtime, "end_remote_output_writers", side_effect=RuntimeError("offline")), patch.object(
+                        encode_runtime, "run_remote_command") as remote:
+                    encode_runtime.reconcile_encode_jobs(connection, self.config, deps, restart_recovery=reason == "restart")
+                deps.ensure_encode_host_ready.assert_not_called()
+                remote.assert_not_called()
+                self.assertEqual(load_encode_job(connection, name)["status"], "retry_backoff")
+
+    def test_cli_terminal_event_releases_the_old_attempts_ownership(self) -> None:
+        for event_type in ("encoding_completed", "encoding_failed", "encoding_stopped", "encoding_needs_review"):
+            with self.subTest(event_type=event_type), open_db(self.config.paths.db_path) as connection:
+                source = self._create_source_file(f"{event_type}.mkv")
+                output = self._staging_path(f"{event_type}.mkv")
+                item_id = self._insert_library_item(connection, source, status="encoding")
+                details = {"encode_origin": "cli", "encode_owner_pid": 12345,
+                           "encode_started_at": "2000-01-01T00:00:00+00:00"}
+                for kind in ("encoding_started", event_type):
+                    connection.execute(item_events.insert().values(library_item_id=item_id,
+                        created_at=web_app._now_iso(), event_type=kind, details_json=json.dumps(details)))
+                self._write_manifest(f"{event_type}.json", [{"library_item_id": item_id, "staging_path": str(output)}])
+                self._save_job(connection, job_id=event_type, manifest_name=f"{event_type}.json", status="stopped",
+                               attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+                connection.commit()
+                with patch.object(encode_runtime, "_process_is_running", return_value=True), patch.object(
+                        encode_runtime, "end_remote_output_writers") as end_writers:
+                    encode_runtime.sweep_stopped_remote_encodes(connection, self.config, web_app._encode_queue_runtime_deps())
+                self.assertTrue(end_writers.called)
+                self.assertIn("remote_cleanup_verified", load_encode_job(connection, event_type)["progress"])
+
+    def test_recycled_cli_pid_does_not_claim_an_old_output(self) -> None:
+        source = self._create_source_file("recycled-cli.mkv")
+        output = self._staging_path("recycled-cli.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="encoding")
+            connection.execute(item_events.insert().values(library_item_id=item_id,
+                created_at="2000-01-01T00:00:00+00:00", event_type="encoding_started",
+                details_json=json.dumps({"encode_origin": "cli", "encode_owner_pid": 12345})))
+            self._write_manifest("recycled-cli.json", [{"library_item_id": item_id, "staging_path": str(output)}])
+            self._save_job(connection, job_id="recycled-cli", manifest_name="recycled-cli.json", status="stopped",
+                           attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+            connection.commit()
+            with patch.object(encode_runtime.os, "kill"), patch.object(encode_runtime.subprocess, "run",
+                    return_value=subprocess.CompletedProcess([], 0, "Fri Oct 9 14:00:00 2026\n", "")), patch.object(
+                    encode_runtime, "end_remote_output_writers") as end_writers:
+                encode_runtime.sweep_stopped_remote_encodes(connection, self.config, web_app._encode_queue_runtime_deps())
+            self.assertTrue(end_writers.called)
+            self.assertIn("remote_cleanup_verified", load_encode_job(connection, "recycled-cli")["progress"])
+
+    def test_cli_started_during_remote_probe_is_preserved_before_signalling(self) -> None:
+        from mediaforce.encoding import remote_cleanup
+        source = self._create_source_file("late-cli.mkv")
+        output = self._staging_path("late-cli.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="encoding")
+            self._write_manifest("late-cli.json", [{"library_item_id": item_id, "staging_path": str(output)}])
+            self._save_job(connection, job_id="late-cli", manifest_name="late-cli.json", status="stopped",
+                           attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+            connection.commit()
+            producer = remote_cleanup._RemoteProcess(100, 1, "Fri Oct 9 14:00:00 2026 ffmpeg", f"ffmpeg {output}", "S")
+            def writers(*_args: Any) -> set[int]:
+                connection.execute(item_events.insert().values(library_item_id=item_id,
+                    created_at=web_app._now_iso(), event_type="encoding_started",
+                    details_json=json.dumps({"encode_origin": "cli", "encode_owner_pid": 12345})))
+                connection.commit()
+                return {100}
+            def remote(_host: Any, args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(args, 0, f"f4\naw\nn{output}\n", "")
+            with patch.object(encode_runtime, "_process_is_running", return_value=True), patch.object(
+                    encode_runtime, "run_remote_command", side_effect=remote), patch.object(
+                    remote_cleanup, "_inventory", return_value={100: producer}), patch.object(
+                    remote_cleanup, "_output_writers", side_effect=writers), patch.object(
+                    remote_cleanup, "_signal") as signals, patch.object(remote_cleanup.time, "sleep"):
+                encode_runtime.sweep_stopped_remote_encodes(connection, self.config, web_app._encode_queue_runtime_deps())
+            signals.assert_not_called()
+            self.assertNotIn("remote_cleanup_verified", object_dict(load_encode_job(connection, "late-cli")["progress"]))
+
+    def test_completed_cli_handover_during_probe_keeps_its_output_and_row(self) -> None:
+        self._assert_completed_cli_handover_preserved(idle=False)
+
+    def test_idle_completed_cli_handover_during_probe_keeps_its_output_and_row(self) -> None:
+        self._assert_completed_cli_handover_preserved(idle=True)
+
+    def _assert_completed_cli_handover_preserved(self, *, idle: bool) -> None:
+        source = self._create_source_file("completed-handover.mkv")
+        output = self._staging_path("completed-handover.mkv")
+        partial = staging_runtime.partial_output_path(output)
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        partial.write_text("old frames")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="encoding")
+            self._insert_staged_artifact(connection, item_id, output)
+            connection.execute(update(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id).values(
+                encode_host_key="fixture", encode_host_mode="ssh", encode_media_access="mounted"))
+            manifest = self._write_manifest("completed-handover.json", [{"library_item_id": item_id, "staging_path": str(output)}])
+            self._save_job(connection, job_id="completed-handover", manifest_name=manifest.name, status="stopped",
+                           attempt_count=1, host={"mode": "ssh", "host": "fixture"})
+            connection.commit()
+            def complete(*_args: Any, **_kwargs: Any) -> None:
+                output.write_text("completed CLI output")
+                with open_db(self.config.paths.db_path) as producer:
+                    producer.execute(update(library_items).where(library_items.c.id == item_id).values(status="encoded"))
+                    producer.execute(update(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id).values(
+                        encode_completed_at=web_app._now_iso(), staging_fingerprint="completed-output"))
+                    started = web_app._now_iso()
+                    for kind in ("encoding_started", "encoding_completed"):
+                        producer.execute(item_events.insert().values(library_item_id=item_id, created_at=started,
+                            event_type=kind, details_json=json.dumps({"encode_origin": "cli", "encode_owner_pid": 12345,
+                                                                   "encode_started_at": started})))
+            with patch.object(encode_runtime, "host_config_for_key", return_value={"mode": "ssh", "host": "fixture"}), patch.object(
+                    encode_runtime, "end_remote_output_writers", side_effect=complete), patch.object(
+                    encode_runtime, "run_remote_command", new=_remote_cleanup_succeeds):
+                if idle:
+                    encode_runtime.clear_stale_encoding_items_when_idle(connection, self.config, web_app._encode_queue_runtime_deps())
+                else:
+                    encode_runtime._cleanup_encode_retry_artifacts(connection, manifest_path=manifest,
+                        host={"mode": "ssh", "host": "fixture"}, expected_job=load_encode_job(connection, "completed-handover"),
+                        deps=web_app._encode_queue_runtime_deps(), config=self.config)
+            self.assertTrue(output.exists())
+            self.assertEqual(output.read_text(), "completed CLI output")
+            self.assertIsNotNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+
+    def test_cli_publication_waits_for_cleanup_without_holding_sqlite_write_lock(self) -> None:
+        from mediaforce.encoding import manifest as encoder_manifest
+        source = self._create_source_file("publication.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source)
+            connection.commit()
+            attempting = threading.Event()
+            published = threading.Event()
+            errors: list[BaseException] = []
+            actual_lock = encoder_manifest.locked_encode_dispatch
+            def observed_lock(*args: Any, **kwargs: Any) -> Any:
+                attempting.set()
+                return actual_lock(*args, **kwargs)
+            def publish() -> None:
+                try:
+                    with open_db(self.config.paths.db_path) as producer:
+                        encoder_manifest._publish_encode_started(producer, item_id,
+                            {"encode_origin": "cli", "encode_owner_pid": 12345},
+                            execution._record_event, timestamp=web_app._now_iso)
+                    published.set()
+                except BaseException as exc:
+                    errors.append(exc)
+            thread = threading.Thread(target=publish)
+            with patch.object(encoder_manifest, "locked_encode_dispatch", side_effect=observed_lock):
+                try:
+                    with encode_runtime._locked_encode_dispatch(connection):
+                        thread.start()
+                        self.assertTrue(attempting.wait(5), str(errors))
+                        self.assertFalse(published.is_set())
+                        with open_db(self.config.paths.db_path) as observer:
+                            observer.exec_driver_sql("PRAGMA busy_timeout=100")
+                            observer.exec_driver_sql("BEGIN IMMEDIATE")
+                            self.assertEqual(observer.execute(select(func.count()).select_from(item_events)
+                                .where(item_events.c.library_item_id == item_id)
+                                .where(item_events.c.event_type == "encoding_started")).scalar_one(), 0)
+                            observer.exec_driver_sql("ROLLBACK")
+                finally:
+                    if thread.ident is not None:
+                        thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertTrue(published.is_set())
+            connection.commit()
+            self.assertEqual(self._library_item_value(connection, item_id, library_items.c.status)["status"], "encoding")
 
     def test_schedule_cleanup_leaves_database_writable(self) -> None:
         self._write_manifest("schedule-lock.json", [{"staging_path": str(self._staging_path("schedule-lock.mkv"))}])

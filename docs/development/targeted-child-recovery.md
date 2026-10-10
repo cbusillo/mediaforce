@@ -169,10 +169,15 @@ before deleting the partial file. Process birth time and command are checked
 before signals; unrelated encodes and readers of that file are preserved.
 
 The check runs even when the file is visible through the controller's mounted
-share. Recovery connects without waking sleeping computers. The retained-job
-sweep runs at startup and on Stop, rather than on each queue poll, and attempts
-an unavailable host only once per sweep. Automatic retry cleanup retains its
-existing backoff. A schedule-close transition completes cleanup before the
+share. Startup recovery and Stop connect without waking sleeping computers. The
+retained-job sweep runs at startup and on Stop, rather than on each queue poll,
+and attempts an unavailable host only once per sweep. A due automatic retry may
+start or wake its already-configured computer when the queue is running and its
+work window is open (or that item already bypasses its schedule). Startup,
+paused/stopping queues and closed work windows do not wake a computer for
+cleanup. Lifecycle starts use the existing preparation custody so a dispatched
+worker or unused-preparation cleanup owns shutdown. Automatic retry cleanup
+retains its existing backoff. A schedule-close transition completes cleanup before the
 computer's configured shutdown command. A late sweep result cannot overwrite
 a job that was requeued or changed while SSH was running. A failed host connection, incomplete inventory, or surviving writer
 keeps the unfinished file and delays automatic retry. Making a terminal file
@@ -180,7 +185,17 @@ again reports HTTP 409 with a wait message until cleanup succeeds. Retry through
 the same supported action once the host is reachable; no manual file deletion
 is needed. Startup and Stop also inspect retained stopped-job manifests when
 an earlier cleanup already removed the staging record. They preserve output
-paths currently owned by a running job. Finished and promoted outputs retain
+paths currently owned by a running job or an unfinished standalone CLI attempt.
+A CLI encode publishes its start reservation under the same controller dispatch
+lock before touching output. It waits for an in-flight cleanup pass without
+holding SQLite's write lock, then releases the lock before encoding; its active
+reservation keeps later cleanup out. CLI completion events release that
+attempt's reservation; a PID born after its
+start event is a replacement process. Unknown live-PID birth remains protected.
+CLI ownership is checked again after remote probes before signals and before
+remote removal. Cleanup also rereads completion evidence for the actual target;
+an output that finished while the old attempt was being checked remains attached
+to its durable row. Finished and promoted outputs retain
 their existing protection.
 
 This recovery is for mounted remote outputs. Scratch-host lifetime protection

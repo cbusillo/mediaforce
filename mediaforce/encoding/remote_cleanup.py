@@ -113,6 +113,7 @@ def _output_writers(host: dict[str, Any], path: Path,
 def end_remote_output_writers(
         host: dict[str, Any], path: Path, *,
         run_command: Callable[..., subprocess.CompletedProcess[str]] = run_remote_command,
+        ownership_check: Callable[[], None] | None = None,
 ) -> None:
     """Signal only verified ffmpeg writers and their Mediaforce connection wrapper.
 
@@ -149,16 +150,22 @@ def end_remote_output_writers(
     wrappers = {pid: process for pid, process in owned.items()
                 if Path(process.command.split()[0]).name in {"sh", "bash", "dash", "zsh"}}
     if wrappers:
+        if ownership_check is not None:
+            ownership_check()
         _signal(host, wrappers, "STOP", run_command)
         current = _inventory(host, run_command)
         if any(pid in current and current[pid].identity == process.identity and "T" not in current[pid].state
                for pid, process in wrappers.items()):
             raise RuntimeError("Could not pause the earlier connection watcher; wait before retrying.")
+        if ownership_check is not None:
+            ownership_check()
         _signal(host, wrappers, "KILL", run_command)
         current = _inventory(host, run_command)
         if any(pid in current and current[pid].identity == process.identity for pid, process in wrappers.items()):
             raise RuntimeError("The earlier connection watcher is still ending; wait before retrying.")
         owned = {pid: process for pid, process in owned.items() if pid not in wrappers}
+    if ownership_check is not None:
+        ownership_check()
     _signal(host, owned, "TERM", run_command)
     time.sleep(0.2)
     current = _inventory(host, run_command)
@@ -167,6 +174,8 @@ def end_remote_output_writers(
         if pid in current and current[pid].identity == process.identity
     }
     if remaining:
+        if ownership_check is not None:
+            ownership_check()
         _signal(host, remaining, "KILL", run_command)
         time.sleep(0.2)
         current = _inventory(host, run_command)
