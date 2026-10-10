@@ -399,7 +399,7 @@ def reconcile_encode_jobs(
         .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.created_at, literal_column("rowid"))
     ).mappings().fetchall()
-    retry_wake_errors: dict[str, str | None] = {}
+    retry_wake_errors: dict[tuple[str, str], str | None] = {}
     for row in retry_backoff_rows:
         payload = load_encode_job(connection, str(row["job_id"]))
         if payload is None:
@@ -418,12 +418,14 @@ def reconcile_encode_jobs(
                     bypass_schedule=bool(payload.get("bypass_schedule")), now=now, host_payload=retry_host,
                 )):
             connection.commit()
-            wake_key = _encode_duration_host_cache_key(retry_host)
+            start_command = deps.host_lifecycle_start_command(retry_host)
+            wake_key = (_encode_duration_host_cache_key(retry_host), start_command)
             try:
                 if wake_key in retry_wake_errors:
                     wake_error = retry_wake_errors[wake_key]
-                elif deps.host_lifecycle_start_command(retry_host):
+                elif start_command:
                     started = deps.ensure_encode_host_ready(config, retry_host)
+                    retry_wake_errors[wake_key] = None
                     if started:
                         # Use the existing preparation custody so the dispatched
                         # worker, or unused-preparation cleanup, owns shutdown.
@@ -433,7 +435,7 @@ def reconcile_encode_jobs(
                             }
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 wake_error = str(exc)
-            retry_wake_errors[wake_key] = wake_error
+                retry_wake_errors[wake_key] = wake_error
         manifest_path = str(payload.get("manifest_path") or "").strip()
         if wake_error is not None:
             cleanup_outcome = _EncodeRetryArtifactCleanupResult(
@@ -448,7 +450,7 @@ def reconcile_encode_jobs(
                 host=object_dict(payload.get("host")),
                 expected_job=payload,
                 deps=deps,
-            config=config,
+                config=config,
             )
         else:
             cleanup_outcome = _EncodeRetryArtifactCleanupResult(
@@ -715,17 +717,15 @@ def _clear_stale_encoding_items_when_idle(
     return len(stale_ids)
 
 
-def _active_standalone_cli_encode(
-        connection: DBClient, library_item_id: int | None, *, host: dict[str, Any] | None = None,
-) -> bool:
+def _active_standalone_cli_encode(connection: DBClient, library_item_id: int) -> bool:
     events = connection.execute(
-        select(item_events.c.library_item_id, item_events.c.event_type, item_events.c.details_json, item_events.c.created_at)
-        .where(item_events.c.library_item_id == library_item_id if library_item_id is not None else True)
+        select(item_events.c.event_type, item_events.c.details_json, item_events.c.created_at)
+        .where(item_events.c.library_item_id == library_item_id)
         .where(item_events.c.event_type.in_(("encoding_started", "encoding_completed", "encoding_failed",
                                             "encoding_stopped", "encoding_needs_review")))
         .order_by(item_events.c.id.desc())
     ).mappings().all()
-    finished: set[tuple[int, str, int, str]] = set()
+    finished: set[tuple[str, int, str]] = set()
     for event in events:
         try:
             details = json.loads(str(event["details_json"]))
@@ -734,18 +734,12 @@ def _active_standalone_cli_encode(
         if not isinstance(details, dict) or str(details.get("encode_origin") or "") not in STANDALONE_CLI_ENCODE_ORIGINS:
             continue
         owner_pid = int_value(details.get("encode_owner_pid"))
-        attempt = (int(event["library_item_id"]), str(details["encode_origin"]), owner_pid,
-                   str(details.get("encode_started_at") or ""))
+        attempt = (str(details["encode_origin"]), owner_pid, str(details.get("encode_started_at") or ""))
         if event["event_type"] != "encoding_started":
             finished.add(attempt)
             continue
         if attempt in finished:
             continue
-        if host is not None:
-            cli_host = {"key": details.get("encode_host_key")}
-            # Old CLI events without a host cannot prove that shutdown is safe.
-            if _host_identity_tokens(cli_host) and not _host_identity_matches(cli_host, host):
-                continue
         try:
             started_at = datetime.fromisoformat(str(event["created_at"]))
             if started_at.tzinfo is None:
@@ -4172,8 +4166,6 @@ def _host_has_other_running_jobs(config: MediaforceConfig, job_id: str, host_pay
     if not target_key:
         return False
     with open_db(config.paths.db_path) as connection:
-        if _active_standalone_cli_encode(connection, None, host=target_host):
-            return True
         sample_reservations = calibration_scratch_reservations(connection, config)
         if _host_identity_tokens(target_host) & sample_reservations.keys():
             return True
