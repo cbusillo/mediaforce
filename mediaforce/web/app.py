@@ -99,12 +99,10 @@ from mediaforce.library.candidate_selection import CandidateDecision, encode_can
     older_season_candidate_item_ids, older_season_override_selection, project_candidates, \
     restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, workflow_eligibility
 from mediaforce.hosts.types import HostSetupResult
-from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.quality import quality_toolchain_identity, run_sample_encode, select_quality_metric
 from mediaforce.remote import (
-    DEFAULT_HOST_CAPABILITIES,
     HostStatus,
     collect_host_statuses,
     learn_controller_smb_mounts,
@@ -202,7 +200,8 @@ from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_acti
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
 from mediaforce.web.runtime.episode_progress import folder_episodes_payload
-from mediaforce.web.runtime.encode_runtime import release_host_cooldowns, sync_encode_job_parent
+from mediaforce.web.runtime.encode_runtime import release_host_cooldowns, sync_encode_job_parent, \
+    sweep_stopped_remote_encodes
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle, run_supervised_worker_loop
@@ -1903,6 +1902,7 @@ def create_app(
                 connection,
                 job,
                 deps=_encode_queue_runtime_deps(),
+                config=current_config,
             ),
             save_encode_job=save_encode_job,
             load_advice_state=_load_advice_state_for_queue,
@@ -4448,18 +4448,7 @@ def _recover_calibration_jobs(connection: DBClient, config: MediaforceConfig) ->
 
 
 def _recover_encode_queue(connection: DBClient, config: MediaforceConfig) -> None:
-    running_prefixes = [
-        str(row["prefix"] or "").strip()
-        for row in connection.execute(
-            select(encode_jobs.c.prefix)
-            .where(encode_jobs.c.status == "running")
-            .where(encode_jobs.c.job_kind.in_(("single", "shard")))
-        ).mappings().fetchall()
-    ]
     runtime_recover_encode_queue(connection, config, _encode_queue_runtime_deps())
-    cleaned_prefixes = sorted({prefix for prefix in running_prefixes if prefix})
-    if cleaned_prefixes:
-        _sweep_orphaned_encode_processes(config, prefixes=cleaned_prefixes)
 
 
 def _reconcile_encode_jobs(
@@ -4883,63 +4872,11 @@ def _reset_background_worker_leadership_for_tests() -> None:
         lease.release()
 
 
-def _sweep_orphaned_encode_processes(config: MediaforceConfig, *, prefixes: list[str] | None = None) -> None:
-    normalized_prefixes = [prefix.strip().strip("/") for prefix in prefixes or [] if prefix.strip().strip("/")]
-
-    def path_filter_for_host(target_host: dict[str, Any]) -> str:
-        if not normalized_prefixes:
-            return ""
-        patterns: list[str] = []
-
-        def path_prefix_pattern(path: Path) -> str:
-            return f"{re.escape(str(path))}(/|[[:space:]]|$)"
-
-        for prefix in normalized_prefixes:
-            patterns.append(path_prefix_pattern(config.staging_root_for_host(target_host) / prefix))
-            for root_key, source_root in config.source_root_map_for_host(target_host).items():
-                root_prefix = str(root_key).strip().strip("/")
-                if prefix == root_prefix:
-                    patterns.append(path_prefix_pattern(source_root))
-                    continue
-                root_leader = f"{root_prefix}/"
-                if prefix.startswith(root_leader):
-                    patterns.append(path_prefix_pattern(source_root / prefix[len(root_leader):]))
-        return "|".join(patterns)
-
-    sweep_script = (
-        "self_pid=$$; "
-        "self_pgid=$(ps -o pgid= -p \"$self_pid\" 2>/dev/null | tr -d ' '); "
-        "kill_tree() ( signal=$1; target=$2; children=$(ps -axo pid=,ppid= | awk -v target=\"$target\" '$2 == target { print $1 }'); for child in $children; do kill_tree \"$signal\" \"$child\"; done; kill -\"$signal\" \"$target\" 2>/dev/null || true; ); "
-        "patterns='mediaforce_encoded_by=mediaforce|ab-av1 .*--temp-dir .*\\.mediaforce-ab-av1-'; "
-        "extra_patterns=$1; "
-        "pids=$(ps -axo pid=,command= | awk -v self=\"$self_pid\" -v pat=\"$patterns\" -v extra=\"$extra_patterns\" '$1 != self && $0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/ { pid=$1; $1=\"\"; if ($0 ~ pat && (extra == \"\" || $0 ~ extra)) print pid }' || true); "
-        "if [ -n \"$pids\" ]; then "
-        "for pid in $pids; do pgid=$(ps -o pgid= -p \"$pid\" 2>/dev/null | tr -d ' '); "
-        "if [ -n \"$pgid\" ] && [ \"$pgid\" != \"$self_pgid\" ]; then kill -TERM -\"$pgid\" 2>/dev/null || true; else kill_tree TERM \"$pid\"; fi; done; "
-        "sleep 2; "
-        "pids=$(ps -axo pid=,command= | awk -v self=\"$self_pid\" -v pat=\"$patterns\" -v extra=\"$extra_patterns\" '$1 != self && $0 !~ /(^|[[:space:]/])awk([[:space:]]|$)/ { pid=$1; $1=\"\"; if ($0 ~ pat && (extra == \"\" || $0 ~ extra)) print pid }' || true); "
-        "if [ -n \"$pids\" ]; then "
-        "for pid in $pids; do pgid=$(ps -o pgid= -p \"$pid\" 2>/dev/null | tr -d ' '); "
-        "if [ -n \"$pgid\" ] && [ \"$pgid\" != \"$self_pgid\" ]; then kill -KILL -\"$pgid\" 2>/dev/null || true; else kill_tree KILL \"$pid\"; fi; done; "
-        "fi; "
-        "fi"
-    )
-    for host in config.remote_hosts:
-        capabilities = {
-            str(capability).strip().lower()
-            for capability in object_list(host.get("capabilities") or list(DEFAULT_HOST_CAPABILITIES))
-            if str(capability).strip()
-        }
-        if "encode_queue" not in capabilities:
-            continue
-        if configured_remote_host_execution_mode(host) != "ssh":
-            continue
-        try:
-            path_filter = path_filter_for_host(host)
-            run_remote_command(host, ["sh", "-lc", sweep_script, "mediaforce-sweep", path_filter], timeout=10)
-        except Exception as exc:
-            host_label = str(host.get("label") or host.get("host") or host.get("key") or "remote host")
-            LOGGER.warning("Orphan encode sweep failed for %s: %s", host_label, exc)
+def _sweep_orphaned_encode_processes(config: MediaforceConfig) -> None:
+    # Recovery is queue-owned and output-scoped. A host-wide marker/group sweep
+    # could end a separate command-line encode or a reader of the same file.
+    with open_db(config.paths.db_path) as connection:
+        sweep_stopped_remote_encodes(connection, config, _encode_queue_runtime_deps())
 
 
 def _encode_queue_worker_loop(

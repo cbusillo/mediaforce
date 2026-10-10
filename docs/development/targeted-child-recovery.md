@@ -160,14 +160,48 @@ managed controller. SSH commands keep draining until the remote command exits,
 then report the error, because stopping the SSH client alone does not prove the
 remote encoder stopped.
 
-A queued encode on a mounted SSH host runs inside a connection watcher. The
-controller holds the connection's input open; when the controller stops the
-job, restarts, or loses the link, the watcher on the host ends the processes
-writing that job's partial output and removes the partial file. Before this, a
-stopped encode kept running on the host, competed with the host's next job and
-could leave a complete but unrecorded output (observed on 2026-09-19 and
-2026-09-20). A plain command-line encode is not watched. This can leave an output requiring user review;
-existing output and failure checks still apply.
+A queued encode on a mounted SSH host runs inside a connection watcher, but
+losing the controller does not prove that watcher finished. Startup recovery and
+retry cleanup therefore inspect the remote host before removing an interrupted
+output. They identify ffmpeg's own output and confirm its writable file through
+`lsof`, end and verify its Mediaforce connection wrapper before signalling the encoder or waiting children, and check again
+before deleting the partial file. Process birth time and command are checked
+before signals; unrelated encodes and readers of that file are preserved.
+
+The check runs even when the file is visible through the controller's mounted
+share. Startup recovery and Stop connect without waking sleeping computers. The
+retained-job sweep runs at startup and on Stop, rather than on each queue poll,
+and attempts an unavailable host only once per sweep. A due automatic retry may
+start or wake its already-configured computer when the queue is running and its
+work window is open (or that item already bypasses its schedule). Startup,
+paused/stopping queues and closed work windows do not wake a computer for
+cleanup. Lifecycle starts use the existing preparation custody so a dispatched
+worker or unused-preparation cleanup owns shutdown. Automatic retry cleanup
+retains its existing backoff. A schedule-close transition completes cleanup before the
+computer's configured shutdown command. A late sweep result cannot overwrite
+a job that was requeued or changed while SSH was running. A failed host connection, incomplete inventory, or surviving writer
+keeps the unfinished file and delays automatic retry. Making a terminal file
+again reports HTTP 409 with a wait message until cleanup succeeds. Retry through
+the same supported action once the host is reachable; no manual file deletion
+is needed. Startup and Stop also inspect retained stopped-job manifests when
+an earlier cleanup already removed the staging record. They preserve output
+paths currently owned by a running job or an unfinished standalone CLI attempt.
+A CLI encode publishes its start reservation under the same controller dispatch
+lock before touching output. It waits for an in-flight cleanup pass without
+holding SQLite's write lock, then releases the lock before encoding; its active
+reservation keeps later cleanup out. CLI completion events release that
+attempt's reservation; a PID born after its
+start event is a replacement process. Unknown live-PID birth remains protected.
+CLI ownership is checked again after remote probes before signals and before
+remote removal. Cleanup also rereads completion evidence for the actual target;
+an output that finished while the old attempt was being checked remains attached
+to its durable row. Finished and promoted outputs retain
+their existing protection.
+
+This recovery is for mounted remote outputs. Scratch-host lifetime protection
+remains described in [staged encode hosts](../architecture/staged-encode-hosts.md).
+A forced restart during a real approved encode is a separate runtime
+qualification; source fixtures alone do not prove it on the configured Macs.
 
 When a running job's lease has expired, the controller ends its worker only
 after 10 minutes with no sign of life: no progress write, no heartbeat, and no
@@ -196,3 +230,33 @@ parent detachment. Ordinary in-place writes and WAL checkpoints remain valid.
 The retained custody borrow and descriptor-relative identity checks continue
 through the SQLite connection lifetime and fail closed if the database or its
 parent identity changes.
+
+Remote cleanup also checks writable handles by the file itself: process-list text
+that escapes a non-ASCII path cannot silently authorize deletion. An unrecognised
+writer leaves cleanup deferred. Signal identities travel through stdin so the old
+connection watcher cannot match the cleanup command's arguments. Schedule-close
+cleanup performs remote I/O before taking the database write lock, then rechecks
+the saved attempt before changing queue state. Folder retries with held-back files
+keep each selected child's host identity.
+If an escaped path leaves a connection watcher unidentified even after its writer
+exits, reuse waits for that watcher to end. This can conservatively defer a
+non-ASCII output while another encoder or connection watcher remains on the same host,
+including when the old file has been unlinked.
+
+Cleanup and dispatch coordinate through a non-blocking lock beside the runtime
+manifest, separate from the manifest's short policy-edit lock. Cleanup holds it
+through its last remote operation; schedule closure holds it through its queue
+transition. A requeue returns its existing wait response while that cleanup runs,
+and dispatch leaves the queued job for a later pass. Process exit releases the
+lock automatically, so a controller crash does not leave a durable claim to
+manually clear. SQLite remains available while SSH is in flight.
+
+A stale artifact recorded as remote stays remote when its computer configuration
+is removed or repurposed. Cleanup waits for a matching reachable computer instead
+of treating the mounted file as locally owned.
+
+Cleanup also excludes new dispatch through a nonblocking lock beside the controller database. This covers jobs in different manifests that reuse the same output; database writes remain available during remote checks. Dispatch retries on its next queue pass. The lock releases when its owning process exits. Retained recovery and retry cleanup resolve outputs with the encoder's host-aware staging resolver, including host-specific staging roots. Artifact-only cleanup retains the recorded execution mode and storage access mode. If the earlier mounted remote host configuration is gone or has become local, cleanup preserves the file and record until the configuration is restored; it does not guess a remote endpoint from the old display key.
+
+Retry cleanup rechecks other running jobs' selected items and resolved outputs under the same dispatch lock before signalling or deleting. A newer active attempt preserves its output and staged record, and the older retry remains deferred. Legacy connection watchers ignore TERM and can run broad path matching when their waiting child exits; cleanup ends and verifies the watcher shells first so ending their children cannot release that command.
+
+New connection watchers retain the command shell's PID and birth/command identity. On connection loss they snapshot only that command's descendants and recheck each identity before signalling. They never select other processes by output-path text or remove files. Normal command exit retains its status; closing the connection afterward leaves the finished result alone. Startup and Stop use retained queue ownership instead of the former host-wide marker/group sweep, preserving separate command-line encodes and readers. Mounted-host exception handling keeps unfinished paths for verified cleanup. Stop confirms the queue stopped without claiming every file has been cleaned. Legacy watcher recovery first pauses and verifies all owned shells before ending them, preventing an outer shell's exit from releasing a still-running watcher.
