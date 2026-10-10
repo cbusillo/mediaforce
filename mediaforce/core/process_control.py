@@ -488,7 +488,7 @@ def _wait_for_target_exit(
         if not target_running():
             return True
         time.sleep(0.05)
-    return False
+    return not target_running()
 
 
 def _add_managed_process_cleanup_note(

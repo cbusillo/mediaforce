@@ -139,6 +139,8 @@ from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, obje
 from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
     register_frontend_routes, register_host_routes, register_operator_work_routes, register_queue_routes, \
     register_settings_routes
+from mediaforce.web.routes.releases import register_release_routes
+from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
 from mediaforce.web.checked_output_preview import (
     InvalidByteRange,
     checked_output_media_type,
@@ -1111,6 +1113,10 @@ def create_app(
             "controller_storage": controller_storage_recovery_snapshot(config),
         }
 
+    def _release_work_snapshot() -> ReleaseWorkSnapshot:
+        return release_work_payload(config.paths.db_path)
+
+    register_release_routes(app, work_snapshot=_release_work_snapshot)
     register_dashboard_routes(
         app,
         dashboard_payload=_dashboard_api_payload,
