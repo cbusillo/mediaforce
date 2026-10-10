@@ -29077,6 +29077,65 @@ raise SystemExit(0)
             self.assertIsNotNone(saved["retry_not_before"])
             self.assertEqual(partial.read_text(), "interrupted frames")
 
+    def test_cleanup_retry_wakes_each_host_once_per_pass(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for index, host_name in enumerate(("offline", "offline", "available")):
+                name = f"wake-once-{index}"
+                self._write_manifest(f"{name}.json", [{"staging_path": str(self._staging_path(f"{name}.mkv"))}])
+                self._save_job(connection, job_id=name, manifest_name=f"{name}.json", status="retry_backoff",
+                               attempt_count=0, retry_not_before="2000-01-01T00:00:00+00:00",
+                               host={"mode": "ssh", "host": host_name, "start_command": "fixture-start"})
+            connection.commit()
+            def wake(_config: Any, host: dict[str, Any]) -> bool:
+                if host["host"] == "offline":
+                    raise RuntimeError("computer is unavailable")
+                return False
+            deps = replace(web_app._encode_queue_runtime_deps(), ensure_encode_host_ready=Mock(side_effect=wake),
+                           scheduler_allows_encode_run=Mock(return_value=True), scratch_ready_hosts={})
+            with patch.object(encode_runtime, "end_remote_output_writers"), patch.object(
+                    encode_runtime, "run_remote_command", new=_remote_cleanup_succeeds):
+                encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+            self.assertEqual([call.args[1]["host"] for call in deps.ensure_encode_host_ready.call_args_list],
+                             ["offline", "available"])
+            self.assertEqual(load_encode_job(connection, "wake-once-2")["status"], "queued")
+
+    def test_permission_denied_pid_still_checks_its_birth(self) -> None:
+        cutoff = datetime(2026, 10, 9, tzinfo=UTC)
+        for birth, returncode, expected in (("Fri Oct 09 00:00:01 2026", 0, False),
+                                            ("Thu Oct 08 23:59:59 2026", 0, True), ("", 1, True)):
+            with self.subTest(birth=birth), patch.object(encode_runtime.os, "kill", side_effect=PermissionError), patch.object(
+                    encode_runtime.subprocess, "run", return_value=subprocess.CompletedProcess([], returncode, birth, "")):
+                self.assertEqual(encode_runtime._process_is_running(12345, started_before=cutoff), expected)
+
+    def test_active_cli_protects_its_computer_from_unused_preparation_shutdown(self) -> None:
+        source = self._create_source_file("cli-host-custody.mkv")
+        started = web_app._now_iso()
+        details = {"encode_origin": "cli", "encode_owner_pid": 12345, "encode_started_at": started,
+                   "encode_host_key": "fixture"}
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="encoding")
+            connection.execute(item_events.insert().values(library_item_id=item_id, created_at=started,
+                event_type="encoding_started", details_json=json.dumps(details)))
+        prepared = {"mode": "ssh", "host": "fixture", "scratch_admission_started": True}
+        deps = replace(web_app._encode_queue_runtime_deps(), scratch_ready_hosts={"prepared": prepared})
+        with patch.object(encode_runtime, "_process_is_running", return_value=True), patch.object(
+                encode_runtime, "_launch_scratch_admission_task") as lifecycle:
+            encode_runtime._stop_unused_scratch_preparations(self.config, deps)
+            lifecycle.assert_not_called()
+            self.assertFalse(encode_runtime._host_has_other_running_jobs(self.config, "", {"host": "other"}))
+            with open_db(self.config.paths.db_path) as connection:
+                other_id = self._insert_library_item(connection, self._create_source_file("cli-other-item.mkv"), status="encoded")
+                connection.execute(item_events.insert().values(library_item_id=other_id, created_at=started,
+                    event_type="encoding_completed", details_json=json.dumps(details)))
+            # A terminal event for another item cannot release this reservation.
+            encode_runtime._stop_unused_scratch_preparations(self.config, deps)
+            lifecycle.assert_not_called()
+            with open_db(self.config.paths.db_path) as connection:
+                connection.execute(item_events.insert().values(library_item_id=item_id, created_at=web_app._now_iso(),
+                    event_type="encoding_completed", details_json=json.dumps(details)))
+            encode_runtime._stop_unused_scratch_preparations(self.config, deps)
+            lifecycle.assert_called_once_with(self.config, deps, prepared, stop=True)
+
     def test_schedule_cleanup_retry_wakes_its_host_when_the_queue_window_reopens(self) -> None:
         output = self._staging_path("schedule-reopen.mkv")
         self._write_manifest("schedule-reopen.json", [{"staging_path": str(output)}])
