@@ -92,14 +92,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           # Pushes to main always run everything. Pull requests that change
           # only docs/ or Markdown files (other than the packaged README.md)
           # skip the product lanes; a job skipped by its condition satisfies
-          # required status checks.
+          # required status checks. A merge-train pull request never takes
+          # the docs-only skip: its newer skipped checks would hide a failed
+          # push run on the same commit.
           if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
             echo "product=true" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if [ "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY" ]; then
+            case "$HEAD_REF" in
+              launchplane/train/*)
+                echo "product=true" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
           fi
           files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename')"
           printf '%s\n' "$files"
