@@ -19,7 +19,8 @@ env:
 jobs:
   changes:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Room for a merge-train pull request to wait on its push run.
+    timeout-minutes: 55
     permissions:
       actions: read
       contents: read
@@ -53,26 +54,37 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Below the job timeout, and above the 45-minute acceptance limit.
+          PUSH_RUN_WAIT_MINUTES: "50"
         run: |
           # A merge-train candidate is pushed to launchplane/train/ (a full
-          # push run on that commit) before its pull request opens. The train
-          # reads every check run on the commit, so this run would only
-          # repeat it. Any doubt, including a base without the helper, runs
+          # push run on that commit) before its pull request opens. Only the
+          # newest check of each name counts, so this run skips only after
+          # that push run has passed; until then it waits. A failed push run,
+          # a base without the helper, a failed lookup, or the deadline runs
           # the full suite.
           covered=false
-          if [ -f scripts/ci_train_push_run.py ] &&
+          deadline=$(( $(date +%s) + PUSH_RUN_WAIT_MINUTES * 60 ))
+          while [ -f scripts/ci_train_push_run.py ] &&
             runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?event=push&head_sha=${HEAD_SHA}&per_page=100")" &&
-            decision="$(printf '%s' "$runs" | python3 -I scripts/ci_train_push_run.py \
+            state="$(printf '%s' "$runs" | python3 -I scripts/ci_train_push_run.py \
               --repository "$GITHUB_REPOSITORY" \
               --head-repository "$HEAD_REPOSITORY" \
               --head-ref "$HEAD_REF" \
               --head-sha "$HEAD_SHA" \
-              --workflow-path .github/workflows/ci.yml)"; then
-            covered="$decision"
-          fi
+              --workflow-path .github/workflows/ci.yml)"; do
+            if [ "$state" = "passed" ]; then
+              covered=true
+              break
+            fi
+            if [ "$state" != "running" ] || [ "$(date +%s)" -ge "$deadline" ]; then
+              break
+            fi
+            sleep 30
+          done
           echo "covered_by_push=${covered}" >> "$GITHUB_OUTPUT"
           if [ "$covered" = "true" ]; then
-            echo "Push run on ${HEAD_SHA} covers this candidate; product lanes skip here." >> "$GITHUB_STEP_SUMMARY"
+            echo "The push run on ${HEAD_SHA} passed; product lanes skip here." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Decide whether product checks are needed
