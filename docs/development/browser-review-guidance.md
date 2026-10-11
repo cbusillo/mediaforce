@@ -39,6 +39,9 @@ managed fixture server. Response capture runs only in GitHub Actions with a
 newly seeded fixture server; it excludes Settings and never includes review
 media. The upload uses the supported
 [Actions artifact contract](https://github.com/actions/upload-artifact).
+A Launchplane merge-train batch PR has no artifact of its own: its push run
+already tested that commit, so the PR run skips the product lanes. Review the
+constituent PR's artifact instead.
 
 When local builds are prohibited, download the artifact from the run for the
 reviewed PR head. Serve its static build with the captured synthetic responses
