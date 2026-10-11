@@ -28,16 +28,26 @@ jobs:
       product: ${{ steps.scope.outputs.product }}
       covered_by_push: ${{ steps.train.outputs.covered_by_push }}
     steps:
+      # Only a same-repository launchplane/train/ pull request can defer to
+      # its push run. The helper comes from the base commit, not the PR.
       - name: Check out the merge-train decision script
-        if: ${{ github.event_name == 'pull_request' }}
+        if: >-
+          ${{ github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          startsWith(github.event.pull_request.head.ref, 'launchplane/train/') }}
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
           sparse-checkout: scripts/ci_train_push_run.py
           sparse-checkout-cone-mode: false
 
       - name: Check whether a push run already covers this train candidate
         id: train
-        if: ${{ github.event_name == 'pull_request' }}
+        if: >-
+          ${{ github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          startsWith(github.event.pull_request.head.ref, 'launchplane/train/') }}
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
@@ -47,20 +57,19 @@ jobs:
           # A merge-train candidate is pushed to launchplane/train/ (a full
           # push run on that commit) before its pull request opens. The train
           # reads every check run on the commit, so this run would only
-          # repeat it. Any doubt runs the full suite.
+          # repeat it. Any doubt, including a base without the helper, runs
+          # the full suite.
           covered=false
-          case "$HEAD_REF" in
-            launchplane/train/*)
-              if runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?event=push&head_sha=${HEAD_SHA}&per_page=100")"; then
-                covered="$(printf '%s' "$runs" | python3 -I scripts/ci_train_push_run.py \
-                  --repository "$GITHUB_REPOSITORY" \
-                  --head-repository "$HEAD_REPOSITORY" \
-                  --head-ref "$HEAD_REF" \
-                  --head-sha "$HEAD_SHA" \
-                  --workflow-path .github/workflows/ci.yml)"
-              fi
-              ;;
-          esac
+          if [ -f scripts/ci_train_push_run.py ] &&
+            runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?event=push&head_sha=${HEAD_SHA}&per_page=100")" &&
+            decision="$(printf '%s' "$runs" | python3 -I scripts/ci_train_push_run.py \
+              --repository "$GITHUB_REPOSITORY" \
+              --head-repository "$HEAD_REPOSITORY" \
+              --head-ref "$HEAD_REF" \
+              --head-sha "$HEAD_SHA" \
+              --workflow-path .github/workflows/ci.yml)"; then
+            covered="$decision"
+          fi
           echo "covered_by_push=${covered}" >> "$GITHUB_OUTPUT"
           if [ "$covered" = "true" ]; then
             echo "Push run on ${HEAD_SHA} covers this candidate; product lanes skip here." >> "$GITHUB_STEP_SUMMARY"
