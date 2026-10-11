@@ -14,6 +14,7 @@ from mediaforce.core.schedule_deadline import guard_command_for_schedule_deadlin
     managed_schedule_close_deadline
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.staged_host import pull_output, remote_ffmpeg_command, staged_job_for_host
+from mediaforce.encoding.remote_cleanup import REMOTE_PROCESS_IDENTITY_SHELL, REMOTE_PROCESS_SIGNAL_SHELL
 
 
 _PROCESS_WAIT_POLL_SECONDS = 0.1
@@ -97,30 +98,39 @@ def _join_process_threads(
 
 
 def remote_script_ending_with_connection(script: str, owned_output: Path) -> str:
-    """Make a remote encode die with the SSH connection that started it.
-
-    Stopping an encode only ends the controller's SSH client. Without a terminal the remote
-    shell is not signalled, so its encoder kept running, competed with the host's next job and
-    left an unrecorded output. The watcher blocks on the connection's input; when the controller
-    stops, restarts or loses the link it ends the processes writing this job's output and removes
-    that partial file. The caller must hold the connection's stdin open for the whole run.
-    """
+    """End only the command this connection started; verified queue cleanup owns files."""
     owned = shlex.quote(str(owned_output))
-    return "\n".join(
-        [
-            # A background command's stdin is /dev/null in some shells, so hand it over explicitly.
-            "exec 3<&0",
-            # The watcher's own command line contains the path, so it ignores the TERM it sends and
-            # removes the partial before the final KILL takes everything that mentions the path.
-            f"( trap '' TERM; cat <&3 >/dev/null 2>&1; pkill -TERM -f -- {owned} 2>/dev/null; sleep 2; "
-            f"rm -f {owned}; pkill -KILL -f -- {owned} 2>/dev/null ) &",
-            "mediaforce_connection_watch=$!",
-            f"( {script} )",
-            "mediaforce_encode_status=$?",
-            'kill "$mediaforce_connection_watch" 2>/dev/null',
-            'exit "$mediaforce_encode_status"',
-        ]
-    )
+    return "\n".join([
+        f"mediaforce_owned_output={owned}",
+        "exec 3<&0",
+        # Keep a stable shell around the command, even when its last program execs.
+        f"(\n{script}\nmediaforce_status=$?; exit \"$mediaforce_status\"\n) </dev/null &",
+        "mediaforce_encode_pid=$!",
+        "pid=$mediaforce_encode_pid",
+        f"mediaforce_encode_identity=$({REMOTE_PROCESS_IDENTITY_SHELL})",
+        "export mediaforce_encode_pid mediaforce_encode_identity",
+        "(",
+        "  cat <&3 >/dev/null 2>&1",
+        # Snapshot descendants only while the original command shell still matches.
+        "  mediaforce_owned_processes=$(ps -ww -axo pid=,ppid=,lstart=,args= | awk '",
+        '    { pid=$1; parent[pid]=$2; $1=""; $2=""; $1=$1; sub(/^ +/, ""); identity[pid]=$0 }',
+        '    END { root=ENVIRON["mediaforce_encode_pid"]; expected=ENVIRON["mediaforce_encode_identity"];',
+        '      if (expected == "" || identity[root] != expected) exit;',
+        "      for (pid in parent) { walk=pid; for (n=0; n<NR && walk!=root && walk in parent; n++) walk=parent[walk];",
+        "        if (walk==root) print pid, identity[pid] } }')",
+        "  for signal in TERM KILL; do",
+        "    printf '%s\\n' \"$mediaforce_owned_processes\" | while read -r pid expected; do",
+        "      [ -n \"$pid\" ] || continue",
+        f"      {REMOTE_PROCESS_SIGNAL_SHELL}",
+        "    done",
+        "    [ \"$signal\" != TERM ] || sleep 0.2",
+        "  done",
+        ") >/dev/null 2>&1 &",
+        "mediaforce_connection_watch=$!",
+        "wait \"$mediaforce_encode_pid\"",
+        "mediaforce_encode_status=$?",
+        "exit \"$mediaforce_encode_status\"",
+    ])
 
 
 def run_encode_command(

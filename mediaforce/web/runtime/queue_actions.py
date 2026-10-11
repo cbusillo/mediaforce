@@ -52,7 +52,7 @@ def stop_encode_queue_action(
         cleared_stale_item_count = int(clear_stale_encoding_items() or 0)
     return {
         "ok": True,
-        "message": "Stopped and cleaned the encode queue.",
+        "message": "Stopped the encode queue.",
         "cleared_stale_item_count": cleared_stale_item_count,
     }
 

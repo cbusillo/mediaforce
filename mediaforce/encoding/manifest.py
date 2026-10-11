@@ -2,6 +2,7 @@ import json
 import logging
 import time
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
@@ -9,12 +10,14 @@ from sqlalchemy import update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.core.process_control import ProcessCancelledError, ProcessDeadlineEnforcementError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.encoding.dispatch_coordination import STANDALONE_CLI_ENCODE_ORIGINS, locked_encode_dispatch
 from mediaforce.encoding.cadence import CadenceResolutionError, cadence_filter
 from mediaforce.encoding.quality import (
     QualitySearchError,
@@ -340,8 +343,7 @@ def encode_one_item(
     staging_path = resolve_item_staging_path(config, item, host=host)
     staging_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if staging_path.exists() and not overwrite:
-        raise FileExistsError(f"Staging file already exists: {staging_path}")
+    _check_staging_target_available(staging_path, overwrite=overwrite)
 
     policy = item["resolved_policy"]
     compression_intent = compression_intent_from_item(item)
@@ -724,8 +726,6 @@ def encode_one_item(
         cadence_source_fingerprint=current_source_fingerprint,
     )
 
-    started_at = timestamp()
-    start_monotonic = time.monotonic()
     encode_event_details = _encode_event_details(
         manifest_path=manifest_path,
         index=index,
@@ -734,13 +734,11 @@ def encode_one_item(
         host=host,
         encode_context=encode_context,
     )
-    record_event(connection, item["library_item_id"], "encoding_started", {**encode_event_details, "encode_started_at": started_at})
-    connection.execute(
-        update(library_items)
-        .where(library_items.c.id == item["library_item_id"])
-        .values(status="encoding", updated_at=started_at)
+    started_at = _publish_encode_started(
+        connection, item["library_item_id"], encode_event_details, record_event, timestamp=timestamp,
+        before_publish=lambda: _check_staging_target_available(staging_path, overwrite=overwrite),
     )
-    connection.commit()
+    start_monotonic = time.monotonic()
 
     temp_output = partial_output_path(staging_path)
     if temp_output.exists():
@@ -1102,7 +1100,10 @@ def encode_one_item(
             exc,
             record_event,
         )
-        _cleanup_paths_without_masking(exc, temp_output, staging_path)
+        if execution_mode_for_host(host) == "ssh" and host_media_access_for_host(host) != "stream":
+            exc.add_note("Interrupted mounted output is preserved until remote ownership cleanup succeeds.")
+        else:
+            _cleanup_paths_without_masking(exc, temp_output, staging_path)
         raise
 
     staged_stat = staging_path.stat()
@@ -1616,6 +1617,31 @@ def _quality_observation_provenance(
             encode_context=encode_context,
         ),
     }
+
+
+def _check_staging_target_available(staging_path: Path, *, overwrite: bool) -> None:
+    if staging_path.exists() and not overwrite:
+        raise FileExistsError(f"Staging file already exists: {staging_path}")
+
+
+def _publish_encode_started(
+        connection: DBClient, library_item_id: int, details: dict[str, Any],
+        record_event: Callable[..., None], *, timestamp: Callable[[], str],
+        before_publish: Callable[[], None] | None = None,
+) -> str:
+    standalone = str(details.get("encode_origin") or "") in STANDALONE_CLI_ENCODE_ORIGINS
+    if standalone:
+        connection.commit()
+    with locked_encode_dispatch(connection, blocking=True) if standalone else nullcontext():
+        if before_publish is not None:
+            before_publish()
+        started_at = timestamp()
+        record_event(connection, library_item_id, "encoding_started", {**details, "encode_started_at": started_at})
+        connection.execute(update(library_items).where(library_items.c.id == library_item_id).values(
+            status="encoding", updated_at=started_at,
+        ))
+        connection.commit()
+    return started_at
 
 
 def _encode_event_details(

@@ -2425,15 +2425,12 @@ def _prepare_terminal_job_except(
         return
     selected_indexes = [index for index in object_list(job.get("manifest_indexes")) if isinstance(index, int)]
     if str(job.get("job_kind") or "") == "folder":
-        child_indexes = [
-            index
-            for child in list_child_encode_jobs(connection, str(job.get("job_id") or ""))
-            if str(child.get("status") or "") != "completed"
-            for index in object_list(child.get("manifest_indexes"))
-            if isinstance(index, int)
-        ]
-        if child_indexes:
-            selected_indexes = child_indexes
+        children = list_child_encode_jobs(connection, str(job.get("job_id") or ""))
+        if children:
+            for child in children:
+                if str(child.get("status") or "") != "completed":
+                    _prepare_terminal_job_except(connection, child, excluded_indexes, prepare_fn)
+            return
     if not selected_indexes:
         selected_indexes = list(range(len(_manifest_items(job))))
     kept_indexes = sorted(set(selected_indexes) - excluded_indexes)

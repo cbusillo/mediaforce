@@ -475,7 +475,7 @@ def summarize_encode_queue(
         "needs_attention": _count_jobs(connection, statuses=("needs_attention",), job_kinds=DISPLAY_ENCODE_JOB_KINDS),
         # Counted on the runnable parts: a show whose row reads needs_attention can still have
         # episodes queued for a later host window, and the display counts above miss them.
-        "pending_work": _count_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES, job_kinds=RUNNABLE_ENCODE_JOB_KINDS),
+        "pending_work": count_pending_encode_work(connection),
     }
     needs_attention = list_encode_jobs(
         connection,
@@ -505,6 +505,10 @@ def summarize_encode_queue(
         "needs_attention_count": counts["needs_attention"],
         "pending_work_count": counts["pending_work"],
     }
+
+
+def count_pending_encode_work(connection: DBClient) -> int:
+    return _count_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES, job_kinds=RUNNABLE_ENCODE_JOB_KINDS)
 
 
 def _count_jobs(connection: DBClient, *, statuses: tuple[str, ...], job_kinds: tuple[str, ...] | None = None) -> int:
