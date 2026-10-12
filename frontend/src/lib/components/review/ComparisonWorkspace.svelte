@@ -1390,7 +1390,8 @@
 		border: 1px solid var(--mf-line);
 		border-radius: 7px;
 		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
+		grid-auto-columns: minmax(0, 1fr);
+		grid-auto-flow: column;
 		margin: 0;
 		overflow: hidden;
 	}
@@ -1570,6 +1571,7 @@
 		}
 
 		.review-ledger {
+			grid-auto-flow: row;
 			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 

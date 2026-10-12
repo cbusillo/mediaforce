@@ -37,6 +37,7 @@ import {
 	episodeLabel,
 	exactItemFilename,
 	exactReviewSizeFacts,
+	soundCheckView,
 	expectedSizeChange,
 	folderSizeTargetAnalysis,
 	formatDecimalFileSize,
@@ -929,6 +930,47 @@ describe('season experience translation', () => {
 			estimatedOutputBytes: null,
 			estimatedSpaceSavedBytes: null
 		});
+	});
+
+	it('shows the sound check result in plain words', () => {
+		expect(
+			soundCheckView({
+				audio_quality: { status: 'passed', sound_score: 4.478, max_sound_score: 4.73 }
+			})?.factValue
+		).toBe('Passed · 4.48 of 4.73');
+
+		const failed = soundCheckView({
+			audio_quality: {
+				status: 'failed',
+				checks: [
+					{ label: 'Sound score', passed: false, detail: '4.10 of 4.73; needs 4.30' },
+					{ label: 'Dialogue', passed: true, detail: '+0.0 dB' }
+				]
+			}
+		});
+		expect(failed?.factValue).toBe('Did not pass');
+		expect(failed?.problems).toEqual(['Sound score: 4.10 of 4.73; needs 4.30']);
+
+		const unmeasured = soundCheckView({
+			audio_quality: { status: 'unmeasured', reason: "Docker isn't running." }
+		});
+		expect(unmeasured?.factValue).toBe('Not measured');
+		expect(unmeasured?.detail).toBe("Docker isn't running.");
+
+		expect(soundCheckView({ audio_quality: { status: 'unchanged' } })?.factValue).toBe(
+			'Kept as is'
+		);
+		expect(soundCheckView({})).toBeNull();
+	});
+
+	it('names the sound check stage', () => {
+		expect(
+			calibrationStageLabel({
+				job_id: 'sample-1',
+				status: 'running',
+				progress: { schema_version: 1, stage: 'checking_sound' }
+			})
+		).toBe('Checking the sound');
 	});
 
 	it('identifies a blocked cadence decision that needs Activity resolution', () => {

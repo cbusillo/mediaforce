@@ -132,6 +132,11 @@ follow-up target lands above the band, the next sample draft carries the learned
 size ceiling forward instead of repeating the oversized run. The current fast
 sample engine is still `ab-av1`; scene-aware engine work is tracked separately so
 host orchestration and review workflow can stay stable while that bakeoff happens.
+When a sample re-encodes the audio, Mediaforce also checks the sound: a ViSQOL
+score against the original, plus loudness, dialogue, peak and clipping guards.
+ViSQOL runs from a local Docker image; build it once with
+`docker build -t mediaforce-visqol:38d0b01 docker/visqol`. See
+`docs/architecture/sample-sound-check.md`.
 Once a sample is approved, the show or season page offers the compress action
 (for example `Compress the season`), which queues the real encode from that
 approval rather than from an unsaved preview.

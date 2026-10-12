@@ -64,6 +64,9 @@ recovery from recognized internal trace failure codes after restart.
 - A blocked contract clears proposal queueability, and confirmation recomputes
   the contract against current source, policy, calibration, and failed-job state
   before a sample job is written.
+- A sample sound check that failed or could not run sets the comparison
+  reason and an `audio_quality_layout` risk (see
+  `docs/architecture/sample-sound-check.md`).
 - Names, era, genre, or category may be carried as non-authoritative context,
   but they do not trigger denoise, deinterlace, grain handling, resizing, or
   audio changes.

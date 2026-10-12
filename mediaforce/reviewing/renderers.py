@@ -2,6 +2,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from mediaforce.encoding.streams import opus_encode_arguments
+
 
 NATIVE_COMPARE_FILTER = (
     "[0:v]setsar=1[left];"
@@ -553,16 +555,12 @@ def _production_audio_render_command(
         "-vn",
         "-sn",
         "-dn",
-        "-c:a",
-        "libopus",
-        "-b:a",
-        str(audio_plan.get("production_bitrate_text") or "128k"),
+        *opus_encode_arguments(
+            channels=channels,
+            bitrate_text=str(audio_plan.get("production_bitrate_text") or "128k"),
+        ),
+        str(output_path),
     ]
-    if channels >= 8:
-        cmd.extend(["-af", "channelmap=channel_layout=7.1", "-mapping_family", "1"])
-    elif channels >= 6:
-        cmd.extend(["-af", "channelmap=channel_layout=5.1", "-mapping_family", "1"])
-    cmd.append(str(output_path))
     return cmd
 
 

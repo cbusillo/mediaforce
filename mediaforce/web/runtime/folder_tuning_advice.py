@@ -13,6 +13,7 @@ from mediaforce.advising.policy import (
     policy_key_paths,
 )
 from mediaforce.advising.routing import AdvisorRouting, advisor_routing_from_config
+from mediaforce.encoding.audio_quality import sample_sound_check_summary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict, object_list
@@ -1049,6 +1050,7 @@ def build_run_verdict_payload(
             "predicted_total_size_bytes": sample_result.get("predicted_total_size_bytes"),
             "predicted_encode_percent": sample_result.get("predicted_encode_percent"),
             "predicted_encode_seconds": sample_result.get("predicted_encode_seconds"),
+            "sound_check": sample_sound_check_summary(sample_result),
         },
     }
     target_analysis = size_budget_sample_analysis(
@@ -1630,6 +1632,7 @@ def summarize_calibration_result(calibration_payload: dict[str, Any]) -> dict[st
             "quality_score": sample_result.get("quality_score"),
             "predicted_total_size_bytes": sample_result.get("predicted_total_size_bytes"),
             "predicted_encode_percent": sample_result.get("predicted_encode_percent"),
+            "sound_check": sample_sound_check_summary(sample_result),
         }
     else:
         encode_result = object_dict(calibration_payload.get("encode_result"))

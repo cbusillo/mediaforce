@@ -339,6 +339,23 @@ def _opus_layout_filter(track: dict[str, Any]) -> str | None:
     return None
 
 
+# alimiter only sees sample peaks, so it runs at 4x the rate to catch most
+# inter-sample peaks. -1 dBTP leaves room for Opus's own overshoot.
+TRUE_PEAK_LIMITER_FILTER = "aresample=192000,alimiter=limit=0.891251:level=false:latency=true,aresample=48000"
+
+
+def opus_audio_filter(layout_filter: str | None) -> str:
+    return ",".join(part for part in (layout_filter, TRUE_PEAK_LIMITER_FILTER) if part)
+
+
+def opus_encode_arguments(*, channels: int, bitrate_text: str) -> list[str]:
+    layout_filter = _opus_layout_filter({"channels": channels})
+    arguments = ["-c:a", "libopus", "-af", opus_audio_filter(layout_filter)]
+    if layout_filter:
+        arguments.extend(["-mapping_family", "1"])
+    return [*arguments, "-b:a", bitrate_text]
+
+
 def _check(validation: dict[str, Any], passed: bool, message: str) -> None:
     validation["checks"].append({"passed": passed, "message": message})
     validation["passed"] = validation["passed"] and passed

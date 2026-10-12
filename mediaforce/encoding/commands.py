@@ -3,7 +3,7 @@ from typing import Any, Callable
 
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.quality import QualitySearchResult
-from mediaforce.encoding.streams import ProductionStreamPlan
+from mediaforce.encoding.streams import ProductionStreamPlan, opus_audio_filter
 from mediaforce.encoding.video_filters import build_video_filter
 from mediaforce.encoding.helpers import build_svt_params
 
@@ -125,8 +125,8 @@ def build_ffmpeg_command(
             cmd.extend([f"-disposition:a:{output_index}", "default"])
             if codec == "libopus":
                 layout_filter = opus_layout_filter({"channels": audio.channels})
+                cmd.extend([f"-af:a:{output_index}", opus_audio_filter(layout_filter)])
                 if layout_filter:
-                    cmd.extend([f"-af:a:{output_index}", layout_filter])
                     cmd.extend([f"-mapping_family:a:{output_index}", "1"])
                 cmd.extend([f"-b:a:{output_index}", str(audio.output_bitrate_text)])
         if not selection.audio_streams:
@@ -150,8 +150,8 @@ def build_ffmpeg_command(
             cmd.extend([f"-disposition:a:{output_index}", "default"])
             if codec == "libopus":
                 layout_filter = opus_layout_filter(audio)
+                cmd.extend([f"-af:a:{output_index}", opus_audio_filter(layout_filter)])
                 if layout_filter:
-                    cmd.extend([f"-af:a:{output_index}", layout_filter])
                     cmd.extend([f"-mapping_family:a:{output_index}", "1"])
                 cmd.extend([f"-b:a:{output_index}", opus_bitrate(audio, audio_policy)])
 

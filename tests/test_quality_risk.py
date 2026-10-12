@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from mediaforce.core.evidence import stable_policy_hash
+from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.tuning.quality_risk import (
     build_quality_risk_contract,
     compile_allow_listed_transform_fragment,
@@ -205,6 +206,35 @@ class QualityRiskContractTests(unittest.TestCase):
             with self.subTest(field=field, value=value):
                 invalid = {**trace, "best_reachable_candidate": {**trace["best_reachable_candidate"], field: value}}
                 self.assertIsNone(target_size_search_public_view(invalid)["under_target_review_candidate"])
+
+    def test_failed_or_unmeasured_sound_check_asks_for_comparison(self) -> None:
+        baseline = self._contract(policy={"video": {"target_vmaf": 90.0}}, records=[])
+        failed_check = {
+            "status": "failed",
+            "checks": [
+                {"key": "sound_score", "label": "Sound score", "passed": False, "detail": "4.10 of 4.73; needs 4.30"},
+            ],
+        }
+        for audio_quality, risk_level in (
+                (failed_check, "high"),
+                ({"status": "unmeasured", "reason": "Docker isn't running."}, "unknown"),
+        ):
+            with self.subTest(status=audio_quality["status"]):
+                contract = self._contract(
+                    policy={"video": {"target_vmaf": 90.0}},
+                    records=[],
+                    sample_result={"predicted_encode_percent": 12.0, "audio_quality": audio_quality},
+                )
+
+                self.assertNotEqual(baseline["verdict"], "request_comparison")
+                self.assertEqual(contract["verdict"], "request_comparison")
+                self.assertIn("sound check", str(object_dict(contract["deterministic_gates"])["comparison_reason"]))
+                sound_risks = [
+                    object_dict(risk)
+                    for risk in object_list(contract["typed_risks"])
+                    if object_dict(risk).get("tag") == "audio_quality_layout"
+                ]
+                self.assertEqual([risk["level"] for risk in sound_risks], [risk_level])
 
     def test_target_size_quality_conflict_is_typed_without_exposing_raw_candidates(self) -> None:
         trace = self._target_size_trace(status="quality_conflict")
