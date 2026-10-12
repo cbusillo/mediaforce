@@ -294,6 +294,30 @@ def test_concurrent_starts_share_one_owner(dev: DevFixture) -> None:
     assert dev.run('stop').returncode == 0
 
 
+@pytest.mark.parametrize('state', ['running', 'failed'])
+def test_start_waits_for_competing_launcher_to_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: str,
+) -> None:
+    pending = True
+    polls = iter((None, 0))
+
+    def poll() -> int | None:
+        nonlocal pending
+        result = next(polls)
+        pending = result is None
+        return result
+
+    launcher = Mock(pid=11, poll=poll)
+    owner = {'state': state, 'launcher': 22}
+    request = Mock(side_effect=[{'state': 'stopped'}, owner, owner, owner])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(dev_processes, 'request', request)
+    monkeypatch.setattr(dev_processes.subprocess, 'Popen', Mock(return_value=launcher))
+    monkeypatch.setattr(dev_processes.time, 'sleep', lambda _seconds: None)
+    assert dev_processes.start('backend', ['fixture'], tmp_path, '127.0.0.1', 1234) == owner
+    assert not pending, 'Start returned while its competing launcher could still start another server'
+
+
 @pytest.mark.parametrize('malformed', [False, True])
 def test_observation_failure_retains_owner_until_cleanup_can_finish(dev: DevFixture, malformed: bool) -> None:
     dev.env['TEST_STUBBORN'] = '1'

@@ -329,7 +329,10 @@ def start(component: str, command: list[str], cwd: Path, host: str, port: int) -
     while time.monotonic() < deadline:
         status = request(component, "status")
         if status["state"] in {"running", "failed"}:
-            return status
+            # A competing launcher must exit before a later Stop can release
+            # the lock; otherwise it could start a replacement after Start returns.
+            if launcher is None or launcher.pid == status.get("launcher") or launcher.poll() is not None:
+                return status
         if status["state"] == "stopped":
             if launcher is not None and launcher.poll() is not None:
                 return {"state": "failed", "error": "launcher exited before startup; see component log"}

@@ -538,6 +538,9 @@ or `frontend` as a second argument to manage one component, for example
 and Vite uses `--strictPort`. Start reuses an existing owner; use Restart to
 apply changes to its host, port or configuration.
 
+Concurrent Start commands wait for their competing launchers to exit before
+reporting the shared owner, so a subsequent Stop cannot leave a new server behind.
+
 If Start reaches its listening deadline, it reports failure while the server
 continues starting under the same watchdog. Use Status to check for readiness
 or Stop to cancel startup; a crash still triggers cleanup. Startup work is not
