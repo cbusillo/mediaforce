@@ -295,7 +295,8 @@ export function libraryPolicyDefaults(libraryType: LibraryType): LibraryPolicy {
 			series_lifecycle_mode: 'auto',
 			current_season_inactive_days: 365,
 			season_acquisition_hold_days: 30,
-			series_metadata_stale_days: 7
+			series_metadata_stale_days: 7,
+			audio_preset: ''
 		};
 	}
 	if (libraryType === 'movie') {

@@ -192,6 +192,7 @@ series_metadata = Table(
     Column("tmdb_series_id", Integer),
     Column("tmdb_status", Text),
     Column("tmdb_in_production", Integer),
+    Column("tmdb_genres_json", Text),
     Column("tmdb_observed_at", Text),
     Column("updated_at", Text, nullable=False),
 )

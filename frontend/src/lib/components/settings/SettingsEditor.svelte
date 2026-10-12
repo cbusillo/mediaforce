@@ -738,6 +738,7 @@
 								libraries={draft.libraries}
 								typeOptions={savedSettings.library_type_options}
 								profileOptions={savedSettings.library_profile_options}
+								audioPresetOptions={savedSettings.audio_preset_options}
 								plexReady={draft.metadata.plex.token_configured}
 								plexTokenEnv={draft.metadata.plex.token_env}
 								onLibrariesChange={updateLibraries}

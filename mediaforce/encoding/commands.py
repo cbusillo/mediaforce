@@ -1,11 +1,12 @@
 from pathlib import Path
 from typing import Any, Callable
 
-from mediaforce.core.type_defs import object_dict
+from mediaforce.core.type_defs import int_value, object_dict
 from mediaforce.encoding.quality import QualitySearchResult
-from mediaforce.encoding.streams import ProductionStreamPlan, opus_audio_filter
+from mediaforce.encoding.streams import ProductionStreamPlan, opus_encode_arguments
 from mediaforce.encoding.video_filters import build_video_filter
 from mediaforce.encoding.helpers import build_svt_params
+from mediaforce.reviewing.helpers import planned_output_channels
 
 
 def build_ffmpeg_command(
@@ -23,7 +24,6 @@ def build_ffmpeg_command(
         ffmpeg_binary: Callable[[], str],
         ffmpeg_hwaccel_input_args: Callable[..., list[str]],
         audio_codec: Callable[[dict[str, Any], dict[str, Any]], str],
-        opus_layout_filter: Callable[[dict[str, Any]], str | None],
         opus_bitrate: Callable[[dict[str, Any], dict[str, Any]], str],
         format_crf: Callable[[float], str],
         host: dict[str, Any] | None = None,
@@ -120,15 +120,19 @@ def build_ffmpeg_command(
     if isinstance(selection, ProductionStreamPlan):
         for output_index, audio in enumerate(selection.audio_streams):
             codec = str(audio.codec_argument or "copy")
-            cmd.extend([f"-c:a:{output_index}", codec])
+            if codec == "libopus":
+                cmd.extend(
+                    opus_encode_arguments(
+                        channels=audio.channels or 2,
+                        bitrate_text=str(audio.output_bitrate_text),
+                        output_channels=audio.output_channels,
+                        stream_index=output_index,
+                    )
+                )
+            else:
+                cmd.extend([f"-c:a:{output_index}", codec])
             cmd.extend([f"-metadata:s:a:{output_index}", "language=eng"])
             cmd.extend([f"-disposition:a:{output_index}", "default"])
-            if codec == "libopus":
-                layout_filter = opus_layout_filter({"channels": audio.channels})
-                cmd.extend([f"-af:a:{output_index}", opus_audio_filter(layout_filter)])
-                if layout_filter:
-                    cmd.extend([f"-mapping_family:a:{output_index}", "1"])
-                cmd.extend([f"-b:a:{output_index}", str(audio.output_bitrate_text)])
         if not selection.audio_streams:
             cmd.extend(["-an"])
 
@@ -145,15 +149,19 @@ def build_ffmpeg_command(
     else:
         for output_index, audio in enumerate(selection["audio_tracks"]):
             codec = audio_codec(audio, audio_policy)
-            cmd.extend([f"-c:a:{output_index}", codec])
+            if codec == "libopus":
+                cmd.extend(
+                    opus_encode_arguments(
+                        channels=int_value(audio.get("channels")) or 2,
+                        bitrate_text=opus_bitrate(audio, audio_policy),
+                        output_channels=planned_output_channels(audio, audio_policy),
+                        stream_index=output_index,
+                    )
+                )
+            else:
+                cmd.extend([f"-c:a:{output_index}", codec])
             cmd.extend([f"-metadata:s:a:{output_index}", "language=eng"])
             cmd.extend([f"-disposition:a:{output_index}", "default"])
-            if codec == "libopus":
-                layout_filter = opus_layout_filter(audio)
-                cmd.extend([f"-af:a:{output_index}", opus_audio_filter(layout_filter)])
-                if layout_filter:
-                    cmd.extend([f"-mapping_family:a:{output_index}", "1"])
-                cmd.extend([f"-b:a:{output_index}", opus_bitrate(audio, audio_policy)])
 
         for output_index, subtitle in enumerate(selection["subtitle_tracks"]):
             codec = "srt" if subtitle["codec_name"] in text_subtitle_codecs else "copy"

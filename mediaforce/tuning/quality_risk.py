@@ -140,6 +140,8 @@ ALLOW_LISTED_AUDIO_KEYS = frozenset(
     }
 )
 ALLOW_LISTED_SUBTITLE_KEYS = frozenset({"keep_languages", "prefer_text", "keep_forced", "default_mode"})
+# Set only by the owner's sound choice for a show or library; never by a proposal.
+OWNER_ONLY_AUDIO_KEYS = frozenset({"preset", "downmix_to_stereo"})
 
 _QUALITY_RISK_TEXT_PATTERNS = {
     "softness_detail_loss": re.compile(r"\b(?:soft|softness|blurr(?:y|ed|ing)?|detail\s+loss|faces?\s+look)\b", re.I),
@@ -313,7 +315,11 @@ def compile_allow_listed_transform_fragment(
             allowed_keys.update(ALLOW_LISTED_SUBTITLE_KEYS)
         filtered_section: dict[str, Any] = {}
         for key, value in raw_section.items():
-            if key not in allowed_keys:
+            if key not in allowed_keys or (
+                    section == "audio"
+                    and key in OWNER_ONLY_AUDIO_KEYS
+                    and value != object_dict(base_payload.get(section)).get(key)
+            ):
                 rejected_keys.append(f"{section}.{key}")
                 continue
             if value is not None and not _policy_value_valid(

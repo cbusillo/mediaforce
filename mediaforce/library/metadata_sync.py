@@ -263,6 +263,7 @@ def _sync_plex(
             tmdb_series_id=tmdb_id,
             tmdb_status=None,
             tmdb_in_production=None,
+            tmdb_genres_json=None,
             tmdb_observed_at=None,
             updated_at=observed_at_text,
         )
@@ -281,6 +282,7 @@ def _sync_plex(
             update_values.update({
                 "tmdb_status": None,
                 "tmdb_in_production": None,
+                "tmdb_genres_json": None,
                 "tmdb_observed_at": None,
             })
         connection.execute(
@@ -320,6 +322,7 @@ def _sync_tmdb(
         select(
             series_metadata.c.series_prefix,
             series_metadata.c.tmdb_series_id,
+            series_metadata.c.tmdb_genres_json,
             series_metadata.c.tmdb_observed_at,
         ).where(series_metadata.c.series_prefix.in_(series_prefixes))
     ).mappings().fetchall()
@@ -330,7 +333,8 @@ def _sync_tmdb(
         if series_id is None:
             continue
         previous = _parse_timestamp(row["tmdb_observed_at"])
-        if previous is not None and observed_at - previous < refresh_interval:
+        # Rows saved before genres were kept refresh once, so suggestions need not wait a full interval.
+        if previous is not None and observed_at - previous < refresh_interval and row["tmdb_genres_json"] is not None:
             stats.cached += 1
             continue
         try:
@@ -351,6 +355,7 @@ def _sync_tmdb(
             .values(
                 tmdb_status=series.status,
                 tmdb_in_production=(1 if series.in_production else 0) if series.in_production is not None else None,
+                tmdb_genres_json=json.dumps(list(series.genres), separators=(",", ":")),
                 tmdb_observed_at=observed_at_text,
                 updated_at=observed_at_text,
             )

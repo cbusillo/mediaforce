@@ -15,6 +15,7 @@
 		libraries,
 		typeOptions,
 		profileOptions,
+		audioPresetOptions,
 		plexReady,
 		plexTokenEnv,
 		onLibrariesChange,
@@ -26,6 +27,7 @@
 		libraries: SettingsLibrary[];
 		typeOptions: SettingsPayload['library_type_options'];
 		profileOptions: SettingsPayload['library_profile_options'];
+		audioPresetOptions: SettingsPayload['audio_preset_options'];
 		plexReady: boolean;
 		plexTokenEnv: string;
 		onLibrariesChange: (libraries: SettingsLibrary[]) => void;
@@ -262,6 +264,19 @@
 								<option value="auto">Automatic from TMDB</option>
 								<option value="on">Always protect latest season</option>
 								<option value="off">Off</option>
+							</select>
+						</label>
+						<label class="stacked-field">
+							<span>Sound for shows</span>
+							<select
+								class="field"
+								value={selected.policy.audio_preset ?? ''}
+								onchange={(event) => patchPolicy({ audio_preset: selectValue(event) })}
+							>
+								<option value="">Standard</option>
+								{#each audioPresetOptions as option (option.key)}
+									<option value={option.key}>{option.label}</option>
+								{/each}
 							</select>
 						</label>
 						<label class="stacked-field">

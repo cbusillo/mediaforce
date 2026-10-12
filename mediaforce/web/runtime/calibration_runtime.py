@@ -372,6 +372,7 @@ def _review_audio_plan(stream_budget: Any) -> dict[str, Any] | None:
         "source_stream_index": stream.source_index,
         "source_codec": stream.source_codec,
         "source_channels": stream.channels or 2,
+        "production_channels": stream.output_channels or stream.channels or 2,
         "production_action": stream.action,
         "production_codec": stream.output_codec or stream.source_codec,
         "production_bitrate_bps": stream.output_bitrate_bps,

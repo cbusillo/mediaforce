@@ -558,6 +558,7 @@ def _production_audio_render_command(
         *opus_encode_arguments(
             channels=channels,
             bitrate_text=str(audio_plan.get("production_bitrate_text") or "128k"),
+            output_channels=int(audio_plan.get("production_channels") or channels),
         ),
         str(output_path),
     ]

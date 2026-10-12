@@ -61,6 +61,8 @@ def default_library_policy(library_type: LibraryType) -> dict[str, Any]:
             "current_season_inactive_days": 365,
             "season_acquisition_hold_days": 30,
             "series_metadata_stale_days": 7,
+            # Empty keeps the configured audio policy; a preset key applies to every show.
+            "audio_preset": "",
         }
     if library_type == "movie":
         return {

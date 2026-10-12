@@ -54,8 +54,9 @@ target-device playback invariants.
 ## Type policies
 
 TV exposes current-season mode, inactivity release days, acquisition hold days,
-and series-status freshness. These values layer above global planning defaults
-and below explicit folder overrides.
+series-status freshness, and the default sound choice for shows (see
+`sound-choices.md`). These values layer above global planning and audio
+defaults and below explicit folder overrides.
 
 Movies records title grouping, separate editions, extras inclusion, and ranking
 intent. Other records a bounded top-level folder or exact-file work unit and

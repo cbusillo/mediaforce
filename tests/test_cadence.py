@@ -638,7 +638,6 @@ class CadenceTests(unittest.TestCase):
             ffmpeg_binary=lambda: "ffmpeg",
             ffmpeg_hwaccel_input_args=lambda *_args, **_kwargs: [],
             audio_codec=lambda *_args: "copy",
-            opus_layout_filter=lambda *_args: None,
             opus_bitrate=lambda *_args: "128k",
             format_crf=lambda value: str(value),
         )
