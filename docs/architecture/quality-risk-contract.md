@@ -69,6 +69,8 @@ recovery from recognized internal trace failure codes after restart.
   `docs/architecture/sample-sound-check.md`).
 - `audio.preset` and `audio.downmix_to_stereo` are owner-only: a proposal that
   changes them is rejected (see `sound-choices.md`).
+- A TMDB genre (Reality, Talk) may suggest a sound choice for the owner to
+  confirm; it never applies one (see `sound-choices.md`).
 - Names, era, genre, or category may be carried as non-authoritative context,
   but they do not trigger denoise, deinterlace, grain handling, resizing, or
   audio changes.

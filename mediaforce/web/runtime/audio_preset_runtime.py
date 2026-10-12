@@ -1,14 +1,23 @@
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+import json
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from mediaforce.core.audio_presets import AUDIO_PRESETS, KEEP_SURROUND
-from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.type_defs import object_dict
+from sqlalchemy import select
+
+from mediaforce.core.audio_presets import AUDIO_PRESETS, KEEP_SURROUND, SPEECH_STEREO
+from mediaforce.core.config import MediaforceConfig, load_runtime_settings, update_runtime_settings
+from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import series_metadata
+from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.library.media_scopes import normalize_scope_prefix
 
 AudioPresetSource = Literal["show", "library", "default"]
+# TMDB genre names whose shows are mostly talking; they only ever suggest a choice.
+SPEECH_GENRES = ("Reality", "Talk")
+SUGGESTION_DISMISSALS_KEY = "audio_preset_suggestions_dismissed"
 
 
 def tv_show_prefix(config: MediaforceConfig, prefix: str) -> str | None:
@@ -18,19 +27,61 @@ def tv_show_prefix(config: MediaforceConfig, prefix: str) -> str | None:
     return "/".join(parts[:2])
 
 
-def show_audio_preset_payload(config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+def show_audio_preset_payload(
+        config: MediaforceConfig,
+        prefix: str,
+        *,
+        genres: Sequence[str] = (),
+) -> dict[str, Any] | None:
     show_prefix = tv_show_prefix(config, prefix)
     if show_prefix is None:
         return None
     current = str(object_dict(config.resolve_policy(prefix).get("audio")).get("preset") or "")
     library_default = _library_default_preset(config, show_prefix)
+    source = _preset_source(config, prefix, show_prefix, library_default)
     return {
         "show_prefix": show_prefix,
         "current": current if current in AUDIO_PRESETS else KEEP_SURROUND,
-        "source": _preset_source(config, prefix, show_prefix, library_default),
+        "source": source,
         "library_default": library_default,
         "options": [preset.to_payload() for preset in AUDIO_PRESETS.values()],
+        "suggestion": (
+            _genre_suggestion(genres)
+            if source == "default" and show_prefix not in dismissed_suggestions(config.paths.runtime_settings_path)
+            else None
+        ),
     }
+
+
+def series_genres(connection: DBClient, show_prefix: str) -> tuple[str, ...]:
+    genres_json = connection.execute(
+        select(series_metadata.c.tmdb_genres_json).where(series_metadata.c.series_prefix == show_prefix)
+    ).scalar_one_or_none()
+    try:
+        return tuple(str(genre) for genre in object_list(json.loads(genres_json or "[]")))
+    except json.JSONDecodeError:
+        return ()
+
+
+def dismissed_suggestions(runtime_settings_path: Path) -> set[str]:
+    return {str(prefix) for prefix in object_list(load_runtime_settings(runtime_settings_path).get(SUGGESTION_DISMISSALS_KEY))}
+
+
+def dismiss_suggestion(runtime_settings_path: Path, show_prefix: str) -> None:
+    def _apply(runtime_settings: dict[str, Any]) -> dict[str, Any]:
+        dismissed = {str(prefix) for prefix in object_list(runtime_settings.get(SUGGESTION_DISMISSALS_KEY))}
+        runtime_settings[SUGGESTION_DISMISSALS_KEY] = sorted(dismissed | {show_prefix})
+        return runtime_settings
+
+    update_runtime_settings(runtime_settings_path, _apply)
+
+
+def _genre_suggestion(genres: Sequence[str]) -> dict[str, str] | None:
+    genre = next((name for name in SPEECH_GENRES if name in genres), None)
+    if genre is None:
+        return None
+    preset = AUDIO_PRESETS[SPEECH_STEREO]
+    return {"preset": preset.key, "label": preset.label, "reason": f"TMDB lists this show as {genre}."}
 
 
 def _preset_source(

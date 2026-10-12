@@ -1867,4 +1867,11 @@ export interface AudioPresetPayload {
 	source: 'show' | 'library' | 'default';
 	library_default: string | null;
 	options: AudioPresetOption[];
+	suggestion?: AudioPresetSuggestion | null;
+}
+
+export interface AudioPresetSuggestion {
+	preset: string;
+	label: string;
+	reason: string;
 }

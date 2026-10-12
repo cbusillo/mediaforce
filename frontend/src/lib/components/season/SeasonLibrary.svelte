@@ -352,6 +352,30 @@
 		}
 	}
 
+	async function dismissSoundSuggestion() {
+		if (!selectedShow || soundSavingPrefix) return;
+		const show = selectedShow;
+		soundSavingPrefix = show.prefix;
+		policyError = '';
+		try {
+			const response = await postJson<{
+				ok: boolean;
+				message?: string;
+				audio_preset?: AudioPresetPayload;
+			}>(`/api/folders/${encodePrefix(show.prefix)}/audio-preset-suggestion/dismiss`, {});
+			if (!response.ok || !response.audio_preset) {
+				throw new Error(response.message || 'The sound suggestion could not be dismissed.');
+			}
+			if (selectedShow?.prefix === show.prefix) showSound = response.audio_preset;
+		} catch (error) {
+			policyError = `${show.title}: ${
+				error instanceof Error ? error.message : 'The sound suggestion could not be dismissed.'
+			}`;
+		} finally {
+			if (soundSavingPrefix === show.prefix) soundSavingPrefix = '';
+		}
+	}
+
 	function selectShow(prefix: string, revealInspector = false) {
 		selectedShowPrefix = prefix;
 		detailExpanded = revealInspector && !window.matchMedia('(max-width: 760px)').matches;
@@ -567,6 +591,7 @@
 											preset={showSound}
 											saving={soundSavingPrefix === selectedShow.prefix}
 											onChoose={(preset) => void saveSoundChoice(preset)}
+											onDismissSuggestion={() => void dismissSoundSuggestion()}
 										/>
 									{/if}
 									<div>
