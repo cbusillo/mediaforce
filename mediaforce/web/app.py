@@ -49,7 +49,8 @@ from mediaforce.tuning.target_default_context import (
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, migrate_config_state, \
     set_runtime_folder_audio_preset, update_runtime_settings, update_runtime_folder_policy_values, \
     upsert_runtime_folder_policy_override
-from mediaforce.web.runtime.audio_preset_runtime import show_audio_preset_payload, tv_show_prefix
+from mediaforce.web.runtime.audio_preset_runtime import dismiss_suggestion, series_genres, show_audio_preset_payload, \
+    tv_show_prefix
 from mediaforce.web.runtime.automatic_publish import publish_checked_files_once
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
@@ -1352,7 +1353,7 @@ def create_app(
                 "folder_scan_job": folder_scan_job,
                 "metric_support": metric_support,
                 "metric_status_copy": _metric_status_copy(metric_support),
-                "audio_preset": show_audio_preset_payload(config, normalized_prefix),
+                "audio_preset": _show_audio_preset_payload(connection, normalized_prefix),
             }
             if summary.get("item_count", 0) == 0:
                 status_code = 200 if folder_scan_job and folder_scan_job.get("status") in {"queued", "running"} else 404
@@ -2302,6 +2303,23 @@ def create_app(
             "lifecycle": lifecycle,
         }
 
+    def _show_audio_preset_payload(connection: DBClient, normalized_prefix: str) -> dict[str, Any] | None:
+        show_prefix = tv_show_prefix(config, normalized_prefix)
+        genres = series_genres(connection, show_prefix) if show_prefix else ()
+        return show_audio_preset_payload(config, normalized_prefix, genres=genres)
+
+    def _audio_preset_payload(normalized_prefix: str) -> dict[str, Any] | None:
+        with open_db(config.paths.db_path) as connection:
+            return _show_audio_preset_payload(connection, normalized_prefix)
+
+    def _dismiss_audio_preset_suggestion_action(normalized_prefix: str) -> dict[str, Any]:
+        show_prefix = tv_show_prefix(config, normalized_prefix)
+        if show_prefix is None:
+            raise HTTPException(status_code=400, detail="A sound suggestion applies only to TV shows.")
+        dismiss_suggestion(config.paths.runtime_settings_path, show_prefix)
+        _reset_folder_card_cache()
+        return {"ok": True, "message": "Kept the current sound.", "audio_preset": _audio_preset_payload(normalized_prefix)}
+
     def _save_audio_preset_action(normalized_prefix: str, preset_key: str) -> dict[str, Any]:
         nonlocal config
         show_prefix = tv_show_prefix(config, normalized_prefix)
@@ -2322,7 +2340,7 @@ def create_app(
         return {
             "ok": True,
             "message": f"{show_prefix.split('/', 1)[1]} now uses {preset.label} sound. Make a new sample to hear it.",
-            "audio_preset": show_audio_preset_payload(config, normalized_prefix),
+            "audio_preset": _audio_preset_payload(normalized_prefix),
         }
 
     register_folder_routes(
@@ -2348,7 +2366,8 @@ def create_app(
         clear_folder_tuning_action=_clear_folder_tuning_action,
         save_series_lifecycle_action=_save_series_lifecycle_action,
         save_audio_preset_action=_save_audio_preset_action,
-        audio_preset_payload=lambda prefix: show_audio_preset_payload(config, prefix),
+        audio_preset_payload=_audio_preset_payload,
+        dismiss_audio_preset_suggestion_action=_dismiss_audio_preset_suggestion_action,
         approve_measured_encode_recovery_action=_approve_measured_encode_recovery_action,
         accept_ambiguous_motion_action=_accept_ambiguous_motion_action,
         queue_folder_encode_action=_queue_folder_encode_action,

@@ -22,7 +22,7 @@ from mediaforce.encoding.streams import (
     resolve_stream_plan,
 )
 from mediaforce.tuning.quality_risk import compile_allow_listed_transform_fragment
-from mediaforce.web.runtime.audio_preset_runtime import show_audio_preset_payload
+from mediaforce.web.runtime.audio_preset_runtime import dismiss_suggestion, show_audio_preset_payload
 from mediaforce.web.settings_runtime import SettingsValidationError, normalize_submitted_library_policy
 
 BASE_AUDIO: dict[str, Any] = {
@@ -249,3 +249,44 @@ def test_library_setting_accepts_only_known_sound_choices() -> None:
     with pytest.raises(SettingsValidationError):
         normalize_submitted_library_policy("tv", {"audio_preset": "louder"})
 
+
+
+def test_reality_and_talk_shows_are_offered_speech_heavy(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    reality = show_audio_preset_payload(config, SHOW, genres=("Drama", "Reality"))
+    talk = show_audio_preset_payload(config, SHOW, genres=("Talk",))
+    drama = show_audio_preset_payload(config, SHOW, genres=("Drama",))
+
+    assert reality is not None and talk is not None and drama is not None
+    assert reality["suggestion"] == {
+        "preset": SPEECH_STEREO,
+        "label": "Speech-heavy",
+        "reason": "TMDB lists this show as Reality.",
+    }
+    assert talk["suggestion"]["reason"] == "TMDB lists this show as Talk."
+    assert drama["suggestion"] is None
+    assert reality["current"] == KEEP_SURROUND
+
+
+def test_a_suggestion_never_changes_the_policy(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    show_audio_preset_payload(config, SHOW, genres=("Reality",))
+
+    assert config.resolve_policy(f"{SHOW}/Season 10")["audio"] == BASE_AUDIO
+
+
+def test_no_suggestion_once_the_owner_has_decided(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text(json.dumps({FOLDER_POLICY_OVERRIDES_KEY: []}))
+    set_runtime_folder_audio_preset(runtime, SHOW, KEEP_SURROUND, BASE_AUDIO)
+    chosen = show_audio_preset_payload(_config(tmp_path, overrides=_saved_overrides(runtime)), SHOW, genres=("Reality",))
+    library = show_audio_preset_payload(_config(tmp_path, library_preset=KEEP_SURROUND), "tv/Survivor", genres=("Reality",))
+    dismiss_suggestion(runtime, "tv/Survivor")
+    dismissed = show_audio_preset_payload(_config(tmp_path), "tv/Survivor/Season 2", genres=("Reality",))
+
+    assert chosen is not None and library is not None and dismissed is not None
+    assert chosen["suggestion"] is None
+    assert library["suggestion"] is None
+    assert dismissed["suggestion"] is None

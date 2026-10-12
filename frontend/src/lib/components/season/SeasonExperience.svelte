@@ -1122,6 +1122,16 @@
 		});
 	}
 
+	async function dismissSoundSuggestion() {
+		await runAction('deciding', 'We couldn’t dismiss the sound suggestion.', async () => {
+			const response = ensureOk(
+				await postJson<ActionResponse>(endpoint('audio-preset-suggestion/dismiss'), {}),
+				'We couldn’t dismiss the sound suggestion.'
+			);
+			actionMessage = response.message || '';
+		});
+	}
+
 	async function encodeAmbiguousMotionAsIs() {
 		await runAction('deciding', 'We couldn’t record that decision.', async () => {
 			const response = ensureOk(
@@ -2094,6 +2104,7 @@
 							preset={folder.audio_preset}
 							saving={actionPhase === 'deciding'}
 							onChoose={(preset) => void chooseSound(preset)}
+							onDismissSuggestion={() => void dismissSoundSuggestion()}
 						/>
 					</div>
 				{/if}

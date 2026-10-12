@@ -1932,10 +1932,10 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             for row, item_id in zip(rows, inserted_ids, strict=True)
         }
         timestamp = _now()
-        for series_prefix, tmdb_series_id in (
-            (CURRENT_SERIES_PREFIX, 4242),
-            (PROTECTED_READY_SERIES_PREFIX, 4343),
-            (SHOW_JOB_HOLD_SERIES_PREFIX, 4444),
+        for series_prefix, tmdb_series_id, genres in (
+            (CURRENT_SERIES_PREFIX, 4242, ["Reality"]),
+            (PROTECTED_READY_SERIES_PREFIX, 4343, ["Drama"]),
+            (SHOW_JOB_HOLD_SERIES_PREFIX, 4444, ["Comedy"]),
         ):
             connection.execute(
                 series_metadata.insert().values(
@@ -1944,6 +1944,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                     tmdb_series_id=tmdb_series_id,
                     tmdb_status="Returning Series",
                     tmdb_in_production=1,
+                    tmdb_genres_json=json.dumps(genres),
                     tmdb_observed_at=timestamp,
                     updated_at=timestamp,
                 )

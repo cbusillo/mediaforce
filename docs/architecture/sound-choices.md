@@ -62,3 +62,21 @@ Only the owner sets a sound choice. `preset` and `downmix_to_stereo` are
 owner-only keys: the quality-risk compiler rejects any proposal that changes
 them (`OWNER_ONLY_AUDIO_KEYS`). Names, era or genre never apply a choice; see
 `quality-risk-contract.md`.
+
+## Genre suggestions
+
+TMDB genres are kept in `series_metadata.tmdb_genres_json` during the metadata
+sync. Rows saved before genres were kept refresh once at the next sync instead
+of waiting out the refresh interval.
+
+When a show has no sound choice of its own and its library has no default,
+and TMDB lists it as Reality or Talk, the show's Sound control offers
+Speech-heavy with the reason ("TMDB lists this show as Reality."):
+
+- **Use Speech-heavy** makes the same explicit choice as the Sound control.
+- **Keep as is** records the dismissal under
+  `audio_preset_suggestions_dismissed` in runtime settings. It writes no
+  policy, so it never unbinds an approval.
+
+A suggestion is never applied without that one confirmation, and building it
+never changes a policy.

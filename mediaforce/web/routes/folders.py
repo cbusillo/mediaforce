@@ -37,6 +37,7 @@ def register_folder_routes(
         save_series_lifecycle_action: Callable[[str, str], dict[str, Any]],
         save_audio_preset_action: Callable[[str, str], dict[str, Any]],
         audio_preset_payload: Callable[[str], dict[str, Any] | None],
+        dismiss_audio_preset_suggestion_action: Callable[[str], dict[str, Any]],
         approve_measured_encode_recovery_action: Callable[[str, str], dict[str, Any]],
         queue_folder_encode_action: Callable[[str, str, bool, bool, str], dict[str, Any]],
         queue_older_seasons_encode_action: Callable[[str, str, bool, bool, str], dict[str, Any]],
@@ -156,6 +157,11 @@ def register_folder_routes(
             prefix.strip("/"),
             str(body.get("preset", "")),
         )
+        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    @app.post("/api/folders/{prefix:path}/audio-preset-suggestion/dismiss")
+    async def api_folder_audio_preset_suggestion_dismiss(prefix: str) -> JSONResponse:
+        result = await run_in_threadpool(dismiss_audio_preset_suggestion_action, prefix.strip("/"))
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/queue-encode")

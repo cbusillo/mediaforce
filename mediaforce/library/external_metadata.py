@@ -48,6 +48,7 @@ class TmdbSeries:
     series_id: int
     status: str | None
     in_production: bool | None
+    genres: tuple[str, ...] = ()
 
 
 class _SameOriginRedirectHandler(HTTPRedirectHandler):
@@ -240,7 +241,17 @@ class TmdbClient:
             series_id=series_id,
             status=str(payload.get("status") or "").strip() or None,
             in_production=in_production if isinstance(in_production, bool) else None,
+            genres=_tmdb_genre_names(payload.get("genres")),
         )
+
+
+def _tmdb_genre_names(value: Any) -> tuple[str, ...]:
+    names: list[str] = []
+    for genre in value if isinstance(value, list) else []:
+        name = str(genre.get("name") or "").strip() if isinstance(genre, dict) else ""
+        if name:
+            names.append(name)
+    return tuple(names)
 
 
 def map_plex_part_path(path: str, mappings: tuple[PlexPathMapping, ...]) -> str | None:

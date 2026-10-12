@@ -94,7 +94,7 @@ class ExternalMetadataTests(unittest.TestCase):
                     }
                 }, {}
             if url.endswith("/tv/42"):
-                return {"id": 42, "status": "Returning Series", "in_production": True}, {}
+                return {"id": 42, "status": "Returning Series", "in_production": True, "genres": [{"id": 10764, "name": "Reality"}]}, {}
             raise AssertionError(url)
 
         plex = PlexClient(
@@ -118,6 +118,7 @@ class ExternalMetadataTests(unittest.TestCase):
         self.assertEqual(movie.part_path, "/plex/movies/Movie.mkv")
         self.assertEqual(item.season_index, 0)
         self.assertEqual(series.status, "Returning Series")
+        self.assertEqual(series.genres, ("Reality",))
         plex_queries = [parse_qs(urlsplit(url).query) for url, _headers in requests if url.startswith("http://plex")]
         self.assertEqual([query.get("type") for query in plex_queries], [["2"], ["1"], ["4"]])
         self.assertEqual(plex_queries[0].get("includeGuids"), ["1"])
@@ -350,6 +351,7 @@ class ExternalMetadataTests(unittest.TestCase):
         self.assertEqual(stats.tmdb.refreshed, 1)
         self.assertEqual(cached_before["plex_item_rating_key"], "episode-1")
         self.assertEqual(series_before["tmdb_status"], "Returning Series")
+        self.assertEqual(series_before["tmdb_genres_json"], '["Reality"]')
         self.assertEqual(stale_item_count, [])
         self.assertEqual(stale_series_count, [])
         self.assertEqual(failed.status, "completed_with_warnings")
@@ -388,6 +390,45 @@ class ExternalMetadataTests(unittest.TestCase):
         self.assertEqual(cached.plex.status, "completed")
         self.assertEqual(cached.plex.cached, 1)
         self.assertIn("Using Plex metadata cached", cached.plex.message or "")
+
+    def test_series_saved_before_genres_refresh_without_waiting_for_the_interval(self) -> None:
+        config = self._config()
+        rel_path = "tv/Show/Season 1/Episode 01.mkv"
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(connection, self.root / "source" / rel_path, rel_path)
+            with patch.dict(
+                    os.environ,
+                    {"MEDIAFORCE_PLEX_TOKEN": "plex-secret", "MEDIAFORCE_TMDB_TOKEN": "tmdb-secret"},
+                    clear=False,
+            ):
+                sync_external_metadata(connection, config, now=OBSERVED_AT, fetch_json_fn=self._successful_fetch)
+                connection.execute(series_metadata.update().values(tmdb_genres_json=None))
+                tmdb_urls: list[str] = []
+
+                def tmdb_only_fetch(url: str, headers: Mapping[str, str], timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
+                    if not urlsplit(url).path.endswith("/tv/42"):
+                        raise AssertionError("fresh Plex caches should avoid network calls")
+                    tmdb_urls.append(url)
+                    return self._successful_fetch(url, headers, timeout)
+
+                refreshed = sync_external_metadata(
+                    connection,
+                    config,
+                    now=OBSERVED_AT + timedelta(minutes=30),
+                    fetch_json_fn=tmdb_only_fetch,
+                )
+                cached = sync_external_metadata(
+                    connection,
+                    config,
+                    now=OBSERVED_AT + timedelta(minutes=40),
+                    fetch_json_fn=tmdb_only_fetch,
+                )
+                genres_json = connection.execute(select(series_metadata.c.tmdb_genres_json)).scalar_one()
+
+        self.assertEqual(refreshed.tmdb.refreshed, 1)
+        self.assertEqual(cached.tmdb.cached, 1)
+        self.assertEqual(len(tmdb_urls), 1)
+        self.assertEqual(genres_json, '["Reality"]')
 
     def test_missing_referenced_show_preserves_last_good_cache(self) -> None:
         config = self._config()
@@ -563,7 +604,7 @@ class ExternalMetadataTests(unittest.TestCase):
             self_authorization = dict(headers).get("Authorization")
             if self_authorization != "Bearer tmdb-secret":
                 raise AssertionError("TMDB bearer token was not sent")
-            return {"id": 42, "status": "Returning Series", "in_production": True}, {}
+            return {"id": 42, "status": "Returning Series", "in_production": True, "genres": [{"id": 10764, "name": "Reality"}]}, {}
         raise AssertionError(url)
 
 
