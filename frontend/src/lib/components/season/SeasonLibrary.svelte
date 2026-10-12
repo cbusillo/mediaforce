@@ -2,8 +2,9 @@
 	import { libraryCopy } from '$lib/library-copy';
 	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
-	import { postJson } from '$lib/api/client';
+	import { fetchJson, postJson } from '$lib/api/client';
 	import type {
+		AudioPresetPayload,
 		DashboardFoldersPayload,
 		DashboardSummaryPayload,
 		FolderCard,
@@ -31,6 +32,7 @@
 	} from '$lib/season/library';
 	import LibraryLayout from '$lib/components/workstation/LibraryLayout.svelte';
 	import StateBadge from '$lib/components/workstation/StateBadge.svelte';
+	import SoundChoice from '$lib/components/season/SoundChoice.svelte';
 	import { summarizeWorkStates } from '$lib/components/workstation/library-layout';
 	import type {
 		LibraryMetric,
@@ -68,6 +70,8 @@
 	let policySavingPrefix = $state('');
 	let policySavingTitle = $state('');
 	let policyError = $state('');
+	let showSound = $state<AudioPresetPayload | null>(null);
+	let soundSavingPrefix = $state('');
 
 	onMount(() => {
 		if (window.matchMedia('(max-width: 760px)').matches) detailExpanded = false;
@@ -305,6 +309,73 @@
 		}
 	}
 
+	$effect(() => {
+		const prefix = selectedShow?.prefix;
+		showSound = null;
+		if (!prefix) return;
+		let cancelled = false;
+		fetchJson<{ audio_preset: AudioPresetPayload }>(
+			`/api/folders/${encodePrefix(prefix)}/audio-preset`
+		)
+			.then((response) => {
+				if (!cancelled) showSound = response.audio_preset;
+			})
+			.catch(() => {
+				if (!cancelled) showSound = null;
+			});
+		return () => {
+			cancelled = true;
+		};
+	});
+
+	async function saveSoundChoice(preset: string) {
+		if (!selectedShow || soundSavingPrefix) return;
+		const show = selectedShow;
+		soundSavingPrefix = show.prefix;
+		policyError = '';
+		try {
+			const response = await postJson<{
+				ok: boolean;
+				message?: string;
+				audio_preset?: AudioPresetPayload;
+			}>(`/api/folders/${encodePrefix(show.prefix)}/audio-preset`, { preset });
+			if (!response.ok || !response.audio_preset) {
+				throw new Error(response.message || 'The sound choice could not be saved.');
+			}
+			if (selectedShow?.prefix === show.prefix) showSound = response.audio_preset;
+		} catch (error) {
+			policyError = `${show.title}: ${
+				error instanceof Error ? error.message : 'The sound choice could not be saved.'
+			}`;
+		} finally {
+			if (soundSavingPrefix === show.prefix) soundSavingPrefix = '';
+		}
+	}
+
+	async function dismissSoundSuggestion() {
+		if (!selectedShow || soundSavingPrefix) return;
+		const show = selectedShow;
+		soundSavingPrefix = show.prefix;
+		policyError = '';
+		try {
+			const response = await postJson<{
+				ok: boolean;
+				message?: string;
+				audio_preset?: AudioPresetPayload;
+			}>(`/api/folders/${encodePrefix(show.prefix)}/audio-preset-suggestion/dismiss`, {});
+			if (!response.ok || !response.audio_preset) {
+				throw new Error(response.message || 'The sound suggestion could not be dismissed.');
+			}
+			if (selectedShow?.prefix === show.prefix) showSound = response.audio_preset;
+		} catch (error) {
+			policyError = `${show.title}: ${
+				error instanceof Error ? error.message : 'The sound suggestion could not be dismissed.'
+			}`;
+		} finally {
+			if (soundSavingPrefix === show.prefix) soundSavingPrefix = '';
+		}
+	}
+
 	function selectShow(prefix: string, revealInspector = false) {
 		selectedShowPrefix = prefix;
 		detailExpanded = revealInspector && !window.matchMedia('(max-width: 760px)').matches;
@@ -515,6 +586,14 @@
 												: lifecycleModeCopy()}
 										</small>
 									</label>
+									{#if showSound}
+										<SoundChoice
+											preset={showSound}
+											saving={soundSavingPrefix === selectedShow.prefix}
+											onChoose={(preset) => void saveSoundChoice(preset)}
+											onDismissSuggestion={() => void dismissSoundSuggestion()}
+										/>
+									{/if}
 									<div>
 										<strong>{providerStateCopy()}</strong>
 										{#if lifecycleAvailable}
@@ -925,6 +1004,17 @@
 		min-width: 0;
 	}
 
+	/* In a row, sound choices are one or two words; the newest-season options are sentences. */
+	@media (min-width: 761px) {
+		.show-policy label {
+			flex: 1 1 0;
+		}
+
+		.show-policy > :global(.sound-choice) {
+			flex: 0 1 220px;
+		}
+	}
+
 	.show-policy label small {
 		color: var(--mf-fg-tertiary);
 		font-size: 11px;
@@ -1257,7 +1347,8 @@
 			gap: var(--mf-space-3);
 		}
 
-		.show-policy label {
+		.show-policy label,
+		.show-policy > :global(.sound-choice) {
 			width: 100%;
 		}
 

@@ -1,5 +1,6 @@
 from typing import Any
 
+from mediaforce.core.audio_presets import AUDIO_PRESETS
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.library.library_settings import LIBRARY_PROFILE_OPTIONS, LIBRARY_TYPE_OPTIONS
 from mediaforce.library.metadata_sync import metadata_configuration_status
@@ -49,6 +50,7 @@ def settings_page_payload(
             library_type: list(options)
             for library_type, options in LIBRARY_PROFILE_OPTIONS.items()
         },
+        "audio_preset_options": [preset.to_payload() for preset in AUDIO_PRESETS.values()],
         "remote_hosts": index_settings_remote_rows(remote_hosts) if remote_hosts is not None else settings_remote_rows_for_config(config),
         "transcode_root": resolved_transcode_root,
         "catalog_refresh_hours": settings_catalog_refresh_hours_for_config(config),

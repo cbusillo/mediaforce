@@ -46,8 +46,13 @@ def select_primary_audio_track(audio_tracks: list[dict[str, Any]]) -> dict[str, 
     return sorted(candidates, key=sort_key)[0]
 
 
-def planned_opus_bitrate(audio_track: dict[str, Any], audio_policy: dict[str, Any]) -> str:
+def planned_output_channels(audio_track: Mapping[str, Any], audio_policy: Mapping[str, Any]) -> int:
     channels = int_value(audio_track.get("channels")) or 2
+    return 2 if audio_policy.get("downmix_to_stereo") is True and channels > 2 else channels
+
+
+def planned_opus_bitrate(audio_track: dict[str, Any], audio_policy: dict[str, Any]) -> str:
+    channels = planned_output_channels(audio_track, audio_policy)
     if channels >= 8:
         return str(audio_policy.get("surround_7_1_opus_bitrate") or "320k")
     if channels >= 6:

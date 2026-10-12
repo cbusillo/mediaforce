@@ -35,6 +35,9 @@ def register_folder_routes(
         folder_ai_tune_confirm_action: Callable[[str, str, str], dict[str, Any]],
         clear_folder_tuning_action: Callable[[str], dict[str, Any]],
         save_series_lifecycle_action: Callable[[str, str], dict[str, Any]],
+        save_audio_preset_action: Callable[[str, str], dict[str, Any]],
+        audio_preset_payload: Callable[[str], dict[str, Any] | None],
+        dismiss_audio_preset_suggestion_action: Callable[[str], dict[str, Any]],
         approve_measured_encode_recovery_action: Callable[[str, str], dict[str, Any]],
         queue_folder_encode_action: Callable[[str, str, bool, bool, str], dict[str, Any]],
         queue_older_seasons_encode_action: Callable[[str, str, bool, bool, str], dict[str, Any]],
@@ -82,6 +85,13 @@ def register_folder_routes(
     @app.get("/api/folders/{prefix:path}/review-compare/download")
     def api_folder_review_compare_download(prefix: str) -> FileResponse:
         return download_review_compare_action(prefix.strip("/"))
+
+    @app.get("/api/folders/{prefix:path}/audio-preset")
+    async def api_folder_audio_preset_state(prefix: str) -> JSONResponse:
+        payload = audio_preset_payload(prefix.strip("/"))
+        if payload is None:
+            return JSONResponse({"ok": False, "message": "A sound choice applies only to TV shows."}, status_code=404)
+        return JSONResponse({"ok": True, "audio_preset": payload})
 
     @app.get("/api/folders/{prefix:path}")
     def api_folder(prefix: str) -> JSONResponse:
@@ -137,6 +147,21 @@ def register_folder_routes(
             prefix.strip("/"),
             str(body.get("mode", "")),
         )
+        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    @app.post("/api/folders/{prefix:path}/audio-preset")
+    async def api_folder_audio_preset(prefix: str, request: Request) -> JSONResponse:
+        body = await _request_body(request)
+        result = await run_in_threadpool(
+            save_audio_preset_action,
+            prefix.strip("/"),
+            str(body.get("preset", "")),
+        )
+        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    @app.post("/api/folders/{prefix:path}/audio-preset-suggestion/dismiss")
+    async def api_folder_audio_preset_suggestion_dismiss(prefix: str) -> JSONResponse:
+        result = await run_in_threadpool(dismiss_audio_preset_suggestion_action, prefix.strip("/"))
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/queue-encode")
