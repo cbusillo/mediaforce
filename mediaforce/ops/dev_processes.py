@@ -271,6 +271,7 @@ def serve(component: str, command: list[str], cwd: Path, host: str, port: int) -
                         while b"\n" in pending:
                             line, pending = pending.split(b"\n", 1)
                             status = json.loads(line)
+                            status["launcher"] = os.getpid()
                     else:
                         try:
                             with server.accept()[0] as client:

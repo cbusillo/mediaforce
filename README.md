@@ -539,7 +539,8 @@ and Vite uses `--strictPort`. Start reuses an existing owner; use Restart to
 apply changes to its host, port or configuration.
 
 Concurrent Start commands wait for their competing launchers to exit before
-reporting the shared owner, so a subsequent Stop cannot leave a new server behind.
+reporting the shared owner. Once every Start reports that owner, Stop cannot
+leave a competing launcher that starts another server.
 
 If Start reaches its listening deadline, it reports failure while the server
 continues starting under the same watchdog. Use Status to check for readiness
