@@ -32,12 +32,17 @@ That produces a misaligned clip that scores far too low.
 
 | Check | Fails when |
 | --- | --- |
-| Sound score | the mean ViSQOL score is below `audio.min_sound_score` (default 4.3) |
+| Sound score | the mean ViSQOL score is below the floor: 4.3, or an `audio.min_sound_score` folder override |
 | Dialogue | speech-band loudness relative to the whole mix drops by more than 1.5 dB |
 | Volume | integrated loudness moves by more than 2 dB |
 | Loud and quiet parts | loudness range moves by more than 2 dB |
 | Peaks | the new true peak is above 0 dBTP and more than 0.5 dB above the original's |
 | Clipping | the flat factor rises by more than 0.5 |
+
+The default floor lives in code (`DEFAULT_MIN_SOUND_SCORE`), not in
+`defaults.toml`. A new key in a default policy section changes the policy hash
+for every folder, so seasons approved earlier would stop matching their
+approval.
 
 The 4.3 floor comes from the Big Brother remake measurements on #868: stereo
 Opus at 96 kbps averaged 4.44 or higher on every episode, and a stereo Opus

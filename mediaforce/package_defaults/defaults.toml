@@ -87,8 +87,6 @@ convert_to_opus_codecs = [
 stereo_opus_bitrate = "128k"
 surround_5_1_opus_bitrate = "256k"
 surround_7_1_opus_bitrate = "320k"
-# Lowest average ViSQOL score (1 to 4.73) a sample may have when its audio is re-encoded.
-min_sound_score = 4.3
 
 [subtitle]
 keep_languages = ["eng"]
