@@ -59,6 +59,7 @@ def sample_run(tmp_path: Path) -> dict[str, Any]:
     deps.quality_toolchain_identity = None
     deps.plan_av1_cold_start = None
     deps.secure_review_artifacts = None
+    deps.check_sample_audio = None
     deps.review_url = lambda _config, path: str(path)
     deps.encode_preview_clips = Mock(return_value=[])
     deps.render_source_review_clips = Mock(return_value=[])

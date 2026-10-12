@@ -37,6 +37,7 @@ from mediaforce import execution, quality, remote, review, state_cleanup
 from mediaforce.core import binaries, config as config_runtime
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
+from mediaforce.encoding.streams import opus_audio_filter
 from mediaforce.library.background_work import set_background_work_paused
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import content_intent_boundary_observations
@@ -11129,8 +11130,15 @@ raise SystemExit(0)
                             with patch.object(
                                     web_app, "render_source_review_clips", return_value=[source_clip]
                             ) as source_mock:
-                                with patch.object(web_app, "generate_compare_clips_from_review_pairs",
-                                                  return_value=[compare_clip]):
+                                with (
+                                    patch.object(web_app, "generate_compare_clips_from_review_pairs",
+                                                 return_value=[compare_clip]),
+                                    patch.object(
+                                        web_app,
+                                        "check_sample_audio",
+                                        return_value={"status": "passed", "sound_score": 4.5},
+                                    ) as sound_check_mock,
+                                ):
                                     payload, cleanup_path = web_app._run_sampled_calibration(
                                         config=self.config,
                                         prefix="tv/show",
@@ -11198,6 +11206,10 @@ raise SystemExit(0)
         self.assertEqual(source_mock.call_args.kwargs["audio_plan"]["production_codec"], "opus")
         self.assertEqual(payload["review_moments"][0]["role"], "hard")
         self.assertEqual(payload["review_moments"][0]["evidence_id"], "ev1_fingerprint")
+        self.assertEqual(payload["sample_result"]["audio_quality"], {"status": "passed", "sound_score": 4.5})
+        self.assertEqual(sound_check_mock.call_args.kwargs["source_path"], source_path)
+        self.assertEqual(sound_check_mock.call_args.kwargs["audio_plan"]["production_action"], "transcode")
+        self.assertEqual(sound_check_mock.call_args.kwargs["audio_policy"]["surround_5_1_opus_bitrate"], "256k")
         self.assertEqual(
             payload["sample_result"]["stream_budget_ledger"]["ledger_id"],
             payload["sample_item"]["stream_budget_ledger"]["ledger_id"],
@@ -16731,7 +16743,10 @@ raise SystemExit(0)
         self.assertEqual(production_audio_cmd[production_audio_cmd.index("-map") + 1], "0:3")
         self.assertEqual(production_audio_cmd[production_audio_cmd.index("-c:a") + 1], "libopus")
         self.assertEqual(production_audio_cmd[production_audio_cmd.index("-b:a") + 1], "256k")
-        self.assertIn("channelmap=channel_layout=5.1", production_audio_cmd)
+        self.assertEqual(
+            production_audio_cmd[production_audio_cmd.index("-af") + 1],
+            opus_audio_filter("channelmap=channel_layout=5.1"),
+        )
         self.assertEqual(production_preview_cmd[production_preview_cmd.index("-map", 1) + 1], "0:v:0")
         self.assertIn("1:a:0", production_preview_cmd)
         self.assertEqual(browser_preview_cmd[browser_preview_cmd.index("-c:v") + 1], "libx264")
@@ -18720,7 +18735,10 @@ raise SystemExit(0)
         production_preview_cmd = remote_mock.call_args_list[1].args[1]
         browser_preview_cmd = remote_mock.call_args_list[2].args[1]
         cleanup_cmd = remote_mock.call_args_list[3].args[1]
-        self.assertIn("channelmap=channel_layout=7.1", production_audio_cmd)
+        self.assertEqual(
+            production_audio_cmd[production_audio_cmd.index("-af") + 1],
+            opus_audio_filter("channelmap=channel_layout=7.1"),
+        )
         self.assertIn("1:a:0", production_preview_cmd)
         self.assertEqual(browser_preview_cmd[browser_preview_cmd.index("-c:v") + 1], "libx264")
         self.assertIn("/tmp/.output-production-preview.mp4", cleanup_cmd)

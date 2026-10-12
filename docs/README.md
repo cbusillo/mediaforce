@@ -35,6 +35,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   non-video overhead, uncertainty, and deterministic size feasibility
 - `docs/architecture/quality-risk-contract.md`: versioned quality-risk facts,
   gates, interpretation, and current review authority
+- `docs/architecture/sample-sound-check.md`: ViSQOL and ffmpeg sound checks on
+  samples whose audio is re-encoded, the true-peak limiter, and the ViSQOL image
 - `docs/architecture/compression-intent-authority.md`: versioned compression
   strategy, deterministic size direction, evidence authorization, and
   item-local escalation

@@ -77,6 +77,7 @@
 		seasonEpisodeNavigationUnavailable,
 		seasonPromotionIntegrity,
 		sizeHeldRecords,
+		soundCheckView,
 		seasonEpisodeOptions,
 		stagedEpisodeLinks,
 		shouldPrioritizeScopeActivity,
@@ -389,6 +390,7 @@
 		expectedSizeChange(originalSeasonSize, expectedEpisodeBytes)
 	);
 	const exactReviewFacts = $derived(exactReviewSizeFacts(originalSeasonSize, expectedEpisodeBytes));
+	const soundCheck = $derived(soundCheckView(sampleResult));
 	const exactApprovedRangeLabel = $derived(
 		targetSummary
 			? `${formatDecimalFileSize(targetSummary.finalLowerBoundBytes)}–${formatDecimalFileSize(targetSummary.finalUpperBoundBytes)}`
@@ -532,9 +534,13 @@
 	);
 	const activeSampleStageKey = $derived(asText(activeSampleProgress.stage));
 	const activeSampleBuildingComparison = $derived(
-		['selecting_review_moments', 'building_review', 'saving_results', 'completed'].includes(
-			activeSampleStageKey
-		)
+		[
+			'selecting_review_moments',
+			'building_review',
+			'checking_sound',
+			'saving_results',
+			'completed'
+		].includes(activeSampleStageKey)
 	);
 	const activeSampleEpisodeTargetLabel = $derived(
 		targetSummary?.targetBytes ? formatDecimalFileSize(targetSummary.targetBytes) : sizeTargetLabel
@@ -2390,6 +2396,22 @@
 					</div>
 				{/if}
 
+				{#if soundCheck && (soundCheck.status === 'failed' || soundCheck.status === 'unmeasured')}
+					<div
+						class={`target-warning ${soundCheck.status === 'unmeasured' ? 'target-warning--under' : ''}`}
+						role="status"
+					>
+						<div>
+							<span>Sound check</span>
+							<strong>{soundCheck.headline}</strong>
+						</div>
+						<p>
+							{#each soundCheck.problems as problem (problem)}{problem}<br />{/each}
+							{soundCheck.detail}
+						</p>
+					</div>
+				{/if}
+
 				{#if currentPair}
 					<ComparisonWorkspace
 						pairs={reviewPairs}
@@ -2423,7 +2445,8 @@
 										? formatDecimalFileSize(exactReviewFacts.estimatedSpaceSavedBytes)
 										: 'No estimate'
 							},
-							{ label: showCopy.sizeGoal, value: sizeTargetLabel }
+							{ label: showCopy.sizeGoal, value: sizeTargetLabel },
+							...(soundCheck ? [{ label: 'Sound check', value: soundCheck.factValue }] : [])
 						]}
 						decisionTargetId="season-review-decision"
 						canCreateSoundSample={sampleHasAudio}

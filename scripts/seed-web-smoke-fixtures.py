@@ -678,6 +678,7 @@ def _write_review_sample_state(
     target_mode: str | None = None,
     target_megabytes: float | None = None,
     untested_sibling: dict[str, Any] | None = None,
+    audio_quality: dict[str, Any] | None = None,
 ) -> None:
     row = rows_by_prefix[prefix]
     policy = json.loads(json.dumps(config.resolve_policy(row["rel_path"])))
@@ -761,6 +762,7 @@ def _write_review_sample_state(
             "quality_score": quality_score,
             "cadence_evidence_id": evidence_ids[0],
             "media_fingerprint_evidence_id": evidence_ids[1],
+            **({"audio_quality": audio_quality} if audio_quality is not None else {}),
         },
         "advice": {"run_verdict": run_verdict},
         "review_moments": [
@@ -883,6 +885,32 @@ def _write_review_sample_state(
     )
 
 
+def _fixture_sound_check(*, passed: bool) -> dict[str, Any]:
+    sound_score = 4.48 if passed else 4.12
+    return {
+        "schema_version": 1,
+        "status": "passed" if passed else "failed",
+        "reason": None,
+        "sound_score": sound_score,
+        "min_sound_score": 4.3,
+        "max_sound_score": 4.73,
+        "checks": [
+            {
+                "key": "sound_score",
+                "label": "Sound score",
+                "passed": passed,
+                "detail": f"{sound_score:.2f} of 4.73; needs 4.30",
+            },
+            {
+                "key": "dialogue",
+                "label": "Dialogue",
+                "passed": True,
+                "detail": "-0.2 dB against the rest of the sound; may drop 1.5 dB",
+            },
+        ],
+    }
+
+
 def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]]) -> None:
     _write_review_sample_state(
         config,
@@ -910,6 +938,7 @@ def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]])
         review_slug="web-smoke-review-ready",
         predicted_total_size_bytes=398_000_000,
         quality_score=96.2,
+        audio_quality=_fixture_sound_check(passed=True),
         untested_sibling={
             "rel_path": "tv/Review Ready/Season 1/Episode 02.mkv",
             "file_name": "Episode 02.mkv",
@@ -927,6 +956,7 @@ def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]])
         review_slug="web-smoke-review-ready-exact",
         predicted_total_size_bytes=398_000_000,
         quality_score=96.2,
+        audio_quality=_fixture_sound_check(passed=False),
     )
     _write_review_sample_state(
         config,

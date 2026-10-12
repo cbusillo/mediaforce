@@ -78,6 +78,7 @@ class CalibrationRunDeps:
     select_quality_metric: Callable[..., Any] | None = None
     plan_av1_cold_start: Callable[..., Any] | None = None
     secure_review_artifacts: Callable[..., Any] | None = None
+    check_sample_audio: Callable[..., Any] | None = None
 
 
 class _CalibrationTelemetry:
@@ -1020,6 +1021,17 @@ def _run_sampled_calibration_on_host(
     review_artifact_size_bytes = sum(max(0, int_value(getattr(clip, "size_bytes", None))) for clip in preview_clips)
     if progress_callback is not None:
         progress_callback("building_review", completed=3, total=3)
+    audio_quality = None
+    if deps.check_sample_audio is not None:
+        if progress_callback is not None:
+            progress_callback("checking_sound")
+        audio_quality = deps.check_sample_audio(
+            source_path=controller_source_path,
+            audio_plan=review_audio_plan,
+            duration_seconds=float_value(sample_item.get("duration_seconds")),
+            audio_policy=object_dict(policy.get("audio")) or object_dict(config.raw.get("audio")),
+            process_controller=process_controller,
+        )
     estimated_total_size_bytes = (
         sample_result.predicted_encode_size_bytes + stream_budget.non_video_bytes
         if stream_budget.non_video_bytes is not None
@@ -1056,6 +1068,7 @@ def _run_sampled_calibration_on_host(
             "quality_metric": sample_result.metric,
             "quality_target": quality_result.target,
             "quality_score": sample_result.score,
+            "audio_quality": audio_quality,
             "predicted_video_size_bytes": sample_result.predicted_encode_size_bytes,
             "predicted_total_size_bytes": estimated_total_size_bytes,
             "predicted_encode_percent": (
