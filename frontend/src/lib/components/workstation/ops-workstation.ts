@@ -179,6 +179,7 @@ function calibrationProgressCopy(job: CalibrationJob, status: string): string {
 		stage,
 		{
 			building_review: 'Working',
+			checking_sound: 'Working',
 			encoding_full_calibration: 'Working',
 			inspecting_source: 'Working',
 			measuring_quality: 'Working',

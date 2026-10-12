@@ -866,6 +866,55 @@ export function exactReviewSizeFacts(
 	};
 }
 
+export interface SoundCheckView {
+	status: 'passed' | 'failed' | 'unmeasured' | 'unchanged';
+	factValue: string;
+	headline: string;
+	detail: string;
+	problems: string[];
+}
+
+export function soundCheckView(sampleResult: unknown): SoundCheckView | null {
+	const check = record(record(sampleResult).audio_quality);
+	const status = text(check.status);
+	const score = numberValue(check.sound_score);
+	const ceiling = numberValue(check.max_sound_score);
+	const reason = text(check.reason);
+	if (status === 'passed') {
+		return {
+			status,
+			factValue: `Passed · ${score.toFixed(2)} of ${ceiling.toFixed(2)}`,
+			headline: 'The new sound passed its check.',
+			detail: '',
+			problems: []
+		};
+	}
+	if (status === 'failed') {
+		return {
+			status,
+			factValue: 'Did not pass',
+			headline: 'The new sound did not pass its check.',
+			detail: 'Listen to the Sample before approving.',
+			problems: records(check.checks)
+				.filter((item) => item.passed !== true)
+				.map((item) => `${text(item.label)}: ${text(item.detail)}`)
+		};
+	}
+	if (status === 'unmeasured') {
+		return {
+			status,
+			factValue: 'Not measured',
+			headline: 'The new sound could not be checked.',
+			detail: reason || 'Create the sample again to check the sound.',
+			problems: []
+		};
+	}
+	if (status === 'unchanged') {
+		return { status, factValue: 'Kept as is', headline: '', detail: reason, problems: [] };
+	}
+	return null;
+}
+
 function formatQualityMemoryNumber(value: number | null | undefined): string {
 	if (value == null || !Number.isFinite(value)) return '—';
 	return value.toLocaleString('en-US', {
@@ -1237,6 +1286,7 @@ export function calibrationStageLabel(job: CalibrationJobPayload | null | undefi
 		measuring_quality: 'Measuring picture quality',
 		selecting_review_moments: 'Choosing review moments',
 		building_review: 'Building comparison clips',
+		checking_sound: 'Checking the sound',
 		encoding_full_calibration: 'Compressing the sample',
 		saving_results: 'Saving sample results',
 		completed: 'Complete'
