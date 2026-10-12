@@ -9,7 +9,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow, open_db
@@ -28,11 +28,12 @@ from mediaforce.library.remake_intents import (
 )
 from mediaforce.library.staged_integrity import staged_validation_outcome
 from mediaforce.tuning.calibration_jobs import EXECUTION_ACTIVE_JOB_STATUSES, load_latest_job
-from mediaforce.web.runtime.encode_runtime import remove_stale_staging_path
+from mediaforce.web.runtime.encode_runtime import (
+    remove_stale_staging_path, staged_output_cleanup_blocker, staged_output_cleanup_target,
+)
 from mediaforce.web.runtime.ambiguous_motion import _legacy_queue_mode
 from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, _staged_policy_states, \
     staged_requeue_size_blocker
-from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,9 @@ def remake_staged_files(
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
                     continue
                 intent = remake_intent(row)
+                if intent.get("state") != "removed" and (reason := staged_output_cleanup_blocker(connection, config, row)):
+                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
+                    continue
                 if not intent or requested_copy_is_present(row):
                     run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
                     intent = {"prefix": run_prefix, "mode": mode, "approval": recovery["approval"],
@@ -386,8 +390,11 @@ def staged_remake_records(
 def _load_remake_row(connection: DBClient, item_id: int) -> DBRow | None:
     return connection.execute(
         select(staged_artifacts, library_items.c.rel_path,
-               library_items.c.source_path.label("original_source_path"))
-        .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
+               library_items.c.source_path.label("original_source_path"),
+               func.coalesce(func.nullif(encode_jobs.c.last_host_json, "{}"),
+                             encode_jobs.c.host_json).label("saved_host_json"))
+        .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id)
+                     .outerjoin(encode_jobs, encode_jobs.c.job_id == staged_artifacts.c.encode_job_id))
         .where(staged_artifacts.c.library_item_id == item_id)
     ).mappings().fetchone()
 
@@ -425,19 +432,20 @@ def _run_context(
 
 
 def _remove_finished_output(config: MediaforceConfig, row: Any) -> bool:
-    staging_value = str(row["staging_path"] or "").strip()
-    if not staging_value:
-        return True
-    host_key = str(row["encode_host_key"] or "").strip()
-    host = (
-        host_config_for_key(config, host_key)
-        if host_key
-        else {"mode": str(row["encode_host_mode"] or ""), "media_access": str(row["encode_media_access"] or "")}
-    )
-    staging_path = Path(staging_value)
-    if not remove_stale_staging_path(partial_output_path(staging_path), host=host):
+    target = staged_output_cleanup_target(config, row)
+    if target is None:
         return False
-    return remove_stale_staging_path(staging_path, host=host)
+    staging_path, host = target
+
+    def check_ownership() -> None:
+        with open_db(config.paths.db_path) as connection:
+            if reason := staged_output_cleanup_blocker(connection, config, row):
+                raise RuntimeError(reason)
+
+    if not remove_stale_staging_path(partial_output_path(staging_path), host=host,
+                                     ownership_check=check_ownership):
+        return False
+    return remove_stale_staging_path(staging_path, host=host, ownership_check=check_ownership)
 
 
 def _record_decision(connection: Any, library_item_id: int, answer: str, size_prediction: dict[str, Any], now: str) -> None:

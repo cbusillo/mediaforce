@@ -24614,6 +24614,110 @@ raise SystemExit(0)
         self.assertEqual(promoted_item_ids, [exact_id])
         self.assertNotIn(sibling_id, promoted_item_ids)
 
+    @patch("mediaforce.hosts.config.host_targets_current_machine", return_value=False)
+    def test_stale_requeue_preserves_removed_remote_host_in_exact_scope(self, _local: Mock) -> None:
+        source = self._create_source_file("removed-host.mkv")
+        stage = self._staging_path("removed-host.mkv")
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_bytes(b"remote-owned")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="encoding")
+            self._insert_staged_artifact(connection, item_id, stage)
+            connection.execute(update(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id).values(
+                encode_host_key="worker", encode_host_mode="ssh", encode_media_access="mounted"))
+            before = dict(connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id)).mappings().one())
+            folder_actions_runtime._reset_stale_prefix_encoding_items_for_requeue(
+                connection, self.config, "tv/show/removed-host.mkv", now_iso=web_app._now_iso,
+            )
+            for host in (
+                    {"host": "worker", "mode": "local", "media_access": "mounted"},
+                    {"host": "different-worker", "label": "worker", "mode": "ssh"},
+            ):
+                self.config.raw["remote_hosts"] = [host]
+                folder_actions_runtime._reset_stale_prefix_encoding_items_for_requeue(
+                    connection, self.config, "tv/show/removed-host.mkv", now_iso=web_app._now_iso,
+                )
+            self.assertEqual(stage.read_bytes(), b"remote-owned")
+            self.assertEqual(connection.execute(select(library_items.c.status).where(
+                library_items.c.id == item_id)).scalar_one(), "encoding")
+            self.assertEqual(dict(connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id)).mappings().one()), before)
+
+    @patch("mediaforce.hosts.config.host_targets_current_machine", return_value=False)
+    def test_stale_requeue_missing_path_uses_saved_host_root_or_defers(self, _local: Mock) -> None:
+        source = self._create_source_file("root.mkv")
+        controller = self._staging_path("root.mkv")
+        controller.parent.mkdir(parents=True, exist_ok=True)
+        controller.write_bytes(b"controller-copy")
+        remote_root = self.root / "saved-remote-root"
+        host = {"host": "worker@example", "mode": "ssh", "media_access": "mounted",
+                "staging_root": str(remote_root)}
+        self.config.raw["remote_hosts"] = [{**host, "staging_root": str(self.root / "new-remote-root")}]
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="encoding")
+            self._insert_staged_artifact(connection, item_id, Path("unused"))
+            connection.execute(update(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id).values(
+                staging_path="", encode_host_key="worker@example", encode_host_mode="ssh", encode_media_access="mounted",
+                encode_job_id="saved-root"))
+            folder_actions_runtime._reset_stale_prefix_encoding_items_for_requeue(
+                connection, self.config, "tv/show/root.mkv", now_iso=web_app._now_iso,
+            )
+            self.assertEqual(controller.read_bytes(), b"controller-copy")
+            self.assertIsNotNone(connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id)).first())
+            connection.execute(encode_jobs.insert().values(
+                job_id="saved-root", prefix="tv/show", job_kind="single", status="stopped", manifest_path="unused",
+                item_count=1, host_json="{}", last_host_json=json.dumps(host), created_at="now", updated_at="now"))
+            cleanup = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+            with patch.object(encode_runtime, "end_remote_output_writers"), patch.object(
+                    encode_runtime, "run_remote_command", cleanup):
+                folder_actions_runtime._reset_stale_prefix_encoding_items_for_requeue(
+                    connection, self.config, "tv/show/root.mkv", now_iso=web_app._now_iso,
+                )
+            self.assertEqual(cleanup.call_count, 2)
+            for call in cleanup.call_args_list:
+                self.assertIn(str(remote_root / "tv/show"), call.args[1][-1])
+            self.assertEqual(controller.read_bytes(), b"controller-copy")
+            self.assertEqual(connection.execute(select(library_items.c.status).where(
+                library_items.c.id == item_id)).scalar_one(), "planned")
+            self.assertIsNone(connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id)).first())
+
+    def test_stale_exact_requeue_preserves_active_queue_and_cli_owners(self) -> None:
+        source = self._create_source_file("owned.mkv")
+        stage = self._staging_path("owned.mkv")
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_bytes(b"owned")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="encoding")
+            self._insert_staged_artifact(connection, item_id, stage)
+            manifest = self._write_manifest("active-exact.json", [{"library_item_id": item_id, "staging_path": str(stage)}])
+            for status in ("queued", "retry_backoff", "running"):
+                with self.subTest(status=status):
+                    connection.execute(encode_jobs.insert().values(
+                        job_id="active-exact", prefix="tv/show/owned.mkv", job_kind="single", status=status,
+                        manifest_path=str(manifest), item_count=1, host_json="{}", created_at="now", updated_at="now"))
+                    folder_actions_runtime._reset_stale_prefix_encoding_items_for_requeue(
+                        connection, self.config, "tv/show/owned.mkv", now_iso=web_app._now_iso,
+                    )
+                    self.assertEqual(stage.read_bytes(), b"owned")
+                    self.assertEqual(connection.execute(select(library_items.c.status).where(
+                        library_items.c.id == item_id)).scalar_one(), "encoding")
+                    connection.execute(delete(encode_jobs).where(encode_jobs.c.job_id == "active-exact"))
+            connection.execute(item_events.insert().values(
+                library_item_id=item_id, event_type="encoding_started", created_at="2026-01-01T00:00:00+00:00",
+                details_json=json.dumps({"encode_origin": "cli", "encode_owner_pid": 12345,
+                                         "encode_started_at": "2026-01-01T00:00:00+00:00"})))
+            with patch.object(encode_runtime, "_process_is_running", return_value=True) as live:
+                folder_actions_runtime._reset_stale_prefix_encoding_items_for_requeue(
+                    connection, self.config, "tv/show/owned.mkv", now_iso=web_app._now_iso,
+                )
+            live.assert_called()
+            self.assertEqual(stage.read_bytes(), b"owned")
+            self.assertIsNotNone(connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id)).first())
+
     def test_stale_requeue_exact_file_does_not_reset_similarly_named_sibling(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             exact_id, sibling_id = self._insert_exact_root_staged_items(connection, status="encoding")

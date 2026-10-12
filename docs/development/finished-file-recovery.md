@@ -114,3 +114,12 @@ Within one integrity-page response, remake checks reuse each run manifest's pars
 record, including an unreadable result. The next page request reads it again.
 The per-file decision reads the manifest and current guards afresh under its
 write lock; displayed availability is never authorization to remove a copy.
+
+Cleanup uses the saved output path and execution mode. A missing or repurposed
+SSH host cannot turn a mounted remote output into controller-local cleanup;
+restore the original host configuration, then retry **Make again** or the folder
+queue action. Saved streamed outputs remain controller-owned copies even if the
+remote host is removed or its media access changes. When an output path is
+missing, a saved host staging root can reconstruct it; without that provenance,
+cleanup waits instead of guessing the controller path. Active queue membership,
+output paths and standalone CLI ownership also protect exact-file actions.
