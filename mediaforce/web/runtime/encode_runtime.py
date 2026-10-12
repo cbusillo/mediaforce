@@ -204,10 +204,12 @@ def recover_encode_queue(
 
 def _active_encode_outputs(
         connection: DBClient, config: MediaforceConfig | None, *, exclude_job_id: str | None = None,
+        statuses: tuple[str, ...] = ("running",),
 ) -> tuple[set[int], set[str]] | None:
-    query = select(encode_jobs.c.job_id, encode_jobs.c.manifest_path,
+    query = select(encode_jobs.c.job_id, encode_jobs.c.status, encode_jobs.c.manifest_path,
                    encode_jobs.c.manifest_indexes_json, encode_jobs.c.host_json).where(
-        encode_jobs.c.status == "running", encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+        encode_jobs.c.status.in_(statuses), encode_jobs.c.job_kind.in_(
+            (*RUNNABLE_ENCODE_JOB_KINDS, "folder") if "queued" in statuses else RUNNABLE_ENCODE_JOB_KINDS))
     if exclude_job_id:
         query = query.where(encode_jobs.c.job_id != exclude_job_id)
     active_items: set[int] = set()
@@ -217,12 +219,21 @@ def _active_encode_outputs(
             manifest = json.loads(Path(row["manifest_path"]).read_text())
             indexes = json.loads(row["manifest_indexes_json"] or "null")
             items = object_list(manifest.get("items"))
+            if not items:
+                return None
             selected = indexes if isinstance(indexes, list) else range(len(items))
             active_host = object_dict(json.loads(row["host_json"] or "{}"))
             for index in selected:
                 item = object_dict(items[index])
                 if item.get("library_item_id") is not None:
                     active_items.add(int(item["library_item_id"]))
+                if row["status"] != "running":
+                    if item.get("library_item_id") is None:
+                        return None
+                    continue
+                recorded_path = str(item.get("staging_path") or "").strip()
+                if recorded_path:
+                    active_paths.update((recorded_path, str(partial_output_path(Path(recorded_path)))))
                 path = (
                     str(resolve_item_staging_path(config, item, host=active_host,
                                                   host_media_access_for_host=host_media_access_for_host))
@@ -810,17 +821,65 @@ def _candidate_stale_staging_targets(
         config: MediaforceConfig,
         row: Mapping[str, Any],
 ) -> list[tuple[Path, dict[str, Any] | None]]:
+    target = staged_output_cleanup_target(config, row)
+    return [target] if target is not None else []
+
+
+def staged_output_cleanup_target(
+        config: MediaforceConfig, row: Mapping[str, Any],
+) -> tuple[Path, dict[str, Any] | None] | None:
+    """Resolve saved custody without turning a former SSH copy into a local file."""
     staging_value = str(row.get("staging_path") or "").strip()
-    if not staging_value:
-        return []
+    try:
+        saved_host = object_dict(json.loads(str(row.get("saved_host_json") or "{}")))
+    except (ValueError, TypeError):
+        saved_host = {}
     host_key = str(row.get("encode_host_key") or row.get("encode_host_label") or "").strip()
-    host_config = host_config_for_key(config, host_key) if host_key else {}
-    if str(row.get("encode_host_mode") or "") == "ssh" and execution_mode_for_host(host_config) != "ssh":
-        # A removed or repurposed computer is not proof its old remote writer ended.
-        host_config = {"mode": "ssh", "remote_cleanup_unavailable": True}
-    if str(row.get("encode_host_mode") or "") == "ssh":
-        host_config = {**host_config, "media_access": str(row.get("encode_media_access") or "mounted")}
-    return [(Path(staging_value), host_config or None)]
+    host = host_config_for_key(config, host_key) if host_key else {}
+    saved_mode = str(row.get("encode_host_mode") or saved_host.get("mode") or "").strip()
+    saved_access = str(row.get("encode_media_access") or saved_host.get("media_access") or "").strip()
+    if saved_mode == "ssh":
+        compatible = bool(host) and execution_mode_for_host(host) == "ssh"
+        saved_endpoint = str(saved_host.get("host") or "").strip()
+        if saved_endpoint and str(host.get("host") or "") != saved_endpoint:
+            compatible = False
+        # A label reused for another SSH endpoint does not identify the saved computer.
+        if not saved_endpoint and host_key and str(host.get("host") or "") != host_key:
+            compatible = False
+        if not compatible:
+            host = {"mode": "ssh", "remote_cleanup_unavailable": True}
+        host = {**host, "media_access": saved_access or "mounted"}
+    elif saved_mode:
+        host = {"mode": saved_mode, "media_access": saved_access or "mounted"}
+    elif saved_access:
+        host = {**host, "media_access": saved_access}
+    if not staging_value:
+        saved_root = str(saved_host.get("staging_root") or "").strip()
+        rel_path = str(row.get("rel_path") or "").strip()
+        if not saved_root or not rel_path:
+            return None
+        root = config.staging_root if saved_access == "stream" else Path(saved_root).expanduser()
+        staging_value = str(root / Path(rel_path).with_suffix(f".{config.output_container}"))
+    return Path(staging_value), host or None
+
+
+def staged_output_cleanup_blocker(
+        connection: DBClient, config: MediaforceConfig, row: Mapping[str, Any],
+) -> str:
+    target = staged_output_cleanup_target(config, row)
+    if target is None:
+        return "The saved output path is unavailable; restore it before retrying cleanup."
+    path, host = target
+    if (object_dict(host).get("remote_cleanup_unavailable")
+            and host_media_access_for_host(host) != "stream"):
+        return "The earlier remote host configuration is unavailable; restore it before retrying cleanup."
+    item_id = int(row.get("library_item_id") or row.get("id") or 0)
+    active = _active_encode_outputs(connection, config, statuses=("queued", "retry_backoff", "running"))
+    if (active is None or item_id in active[0]
+            or str(path) in active[1] or str(partial_output_path(path)) in active[1]
+            or _active_standalone_cli_encode(connection, item_id)):
+        return "An active encode may own this file or its output; retry when it ends."
+    return ""
 
 
 def _remove_stale_staging_path(
@@ -873,9 +932,11 @@ def remove_stale_staging_path(
         *,
         host: dict[str, Any] | None = None,
         prefer_remote: bool = True,
+        ownership_check: Callable[[], None] | None = None,
 ) -> bool:
     return (
-        _remove_stale_staging_path(path, host=host, prefer_remote=prefer_remote).outcome
+        _remove_stale_staging_path(path, host=host, prefer_remote=prefer_remote,
+                                   ownership_check=ownership_check).outcome
         is _StagingPathCleanupOutcome.CLEANED
     )
 
