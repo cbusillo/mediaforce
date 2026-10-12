@@ -292,6 +292,48 @@ def test_concurrent_starts_share_one_owner(dev: DevFixture) -> None:
     owners = {json.loads(result.stdout.split(': ', 1)[1])['pid'] for result in results}
     assert owners == {dev.status()['pid']}
     assert dev.run('stop').returncode == 0
+    dev.assert_empty()
+
+    def fixture_processes_gone() -> bool:
+        for pid in Path(dev.env['TEST_REGISTRY']).read_text().splitlines():
+            try:
+                os.getpgid(int(pid))
+            except ProcessLookupError:
+                continue
+            return False
+        return True
+
+    wait_until(fixture_processes_gone)
+
+
+@pytest.mark.parametrize('state', ['running', 'failed'])
+def test_start_waits_for_competing_launcher_to_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, state: str,
+) -> None:
+    pending = True
+    polls = iter((None, 0))
+
+    def poll() -> int | None:
+        nonlocal pending
+        result = next(polls)
+        pending = result is None
+        return result
+
+    def wait(timeout: float | None = None) -> int:
+        nonlocal pending
+        pending = False
+        return 0
+
+    launcher = Mock(pid=11, poll=poll, wait=wait)
+    owner = {'state': state, 'launcher': 22}
+    spawn = Mock(return_value=launcher)
+    request = Mock(side_effect=lambda *_args: owner if spawn.called else {'state': 'stopped'})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(dev_processes, 'request', request)
+    monkeypatch.setattr(dev_processes.subprocess, 'Popen', spawn)
+    monkeypatch.setattr(dev_processes.time, 'sleep', lambda _seconds: None)
+    assert dev_processes.start('backend', ['fixture'], tmp_path, '127.0.0.1', 1234) == owner
+    assert not pending, 'Start returned while its competing launcher could still start another server'
 
 
 @pytest.mark.parametrize('malformed', [False, True])
@@ -784,6 +826,7 @@ raise SystemExit(module.serve('backend', [sys.argv[3], '--port', sys.argv[4]],
         wait_until(lambda: dev.status()['state'] == 'running')
         dev.run('stop')
         assert dev.status()['state'] == 'failed'
+        assert dev.status()['launcher'] == broker.pid
         assert dev.run('start').returncode != 0
         assert dev.status()['state'] == 'failed'
     finally:
@@ -1002,11 +1045,14 @@ raise SystemExit(module.serve('backend', [sys.argv[3], '--port', sys.argv[4]],
 
 
 @pytest.mark.parametrize('guardian_status', [0, 256])
+@pytest.mark.parametrize('reported_failure', [False, True])
 def test_parent_connection_reset_observes_guardian_exit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guardian_status: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guardian_status: int, reported_failure: bool,
 ) -> None:
     parent = Mock(spec=socket.socket)
-    parent.recv.side_effect = ConnectionResetError(errno.ECONNRESET, 'unread Stop')
+    reports = [json.dumps({'state': 'failed', 'error': 'fixture cleanup failure'}).encode() + b'\n'] \
+        if reported_failure else []
+    parent.recv.side_effect = [*reports, ConnectionResetError(errno.ECONNRESET, 'unread Stop')]
     child = Mock(spec=socket.socket)
     server_context = MagicMock()
     server = server_context.__enter__.return_value
@@ -1028,6 +1074,7 @@ def test_parent_connection_reset_observes_guardian_exit(
     else:
         assert failure.call_args.args[0] is server
         assert failure.call_args.args[1]['state'] == 'failed'
+        assert failure.call_args.args[1]['launcher'] == os.getpid()
     parent.close.assert_called()
 
 
