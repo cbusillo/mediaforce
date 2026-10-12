@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, cast, Protocol, TypeAlias
 
 from fastapi import HTTPException
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 
 from mediaforce.core.config import MediaforceConfig, load_config, with_folder_policy_override
 from mediaforce.core.db import DBClient, open_db
@@ -50,7 +50,9 @@ from mediaforce.web.runtime.folder_tuning_advice import review_gate
 from mediaforce.web.runtime.production_holds import approval_identity, queue_mode, record_holds, release_holds
 from mediaforce.web.runtime.left_out_files import LeftOutFile, cadence_left_out_files, drop_manifest_items, \
     left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response
-from mediaforce.web.runtime.encode_runtime import remove_stale_staging_path
+from mediaforce.web.runtime.encode_runtime import (
+    remove_stale_staging_path, staged_output_cleanup_blocker, staged_output_cleanup_target,
+)
 from mediaforce.web.runtime.folder_tuning_helpers import (
     allows_measured_size_quality_tradeoff,
     proposal_alignment_issue,
@@ -58,7 +60,6 @@ from mediaforce.web.runtime.folder_tuning_helpers import (
     size_budget_sample_issue,
     video_quality_improvement_change,
 )
-from mediaforce.web.runtime.host_runtime import host_config_for_key
 
 ActionPayload: TypeAlias = dict[str, Any]
 FolderItem: TypeAlias = dict[str, Any]
@@ -2745,30 +2746,27 @@ def _reset_stale_prefix_encoding_items_for_requeue(
                 .values(status="encoded", updated_at=updated_at)
             )
             continue
-        staging_value = str(row["staging_path"] or "").strip()
-        rel_path = str(row["rel_path"] or "").strip()
-        staging_path: Path | None = Path(staging_value) if staging_value else None
-        if staging_path is None and rel_path:
-            output_suffix = str(object_dict(config.media).get("output_container") or "").strip()
-            output_suffix = f".{output_suffix.lstrip('.')}" if output_suffix else Path(rel_path).suffix or ".mkv"
-            staging_path = config.staging_root / Path(rel_path).with_suffix(output_suffix)
-        if staging_path is not None:
-            host_key = str(row["encode_host_key"] or "").strip()
-            host = (
-                host_config_for_key(config, host_key)
-                if host_key
-                else {
-                    "mode": str(row["encode_host_mode"] or "").strip(),
-                    "media_access": str(row["encode_media_access"] or "").strip(),
-                }
-            )
-            cleanup_succeeded = remove_stale_staging_path(staging_path, host=host)
-            cleanup_succeeded = remove_stale_staging_path(
-                partial_output_path(staging_path),
-                host=host,
-            ) and cleanup_succeeded
-            if not cleanup_succeeded:
-                continue
+        target_row = dict(row)
+        if not str(row["staging_path"] or "").strip():
+            # Only rows with no saved artifact may use the controller's current root.
+            if row["artifact_item_id"] is None:
+                target_row["staging_path"] = str(
+                    config.staging_root / Path(str(row["rel_path"])).with_suffix(f".{config.output_container}")
+                )
+        target = staged_output_cleanup_target(config, target_row)
+        if target is None or staged_output_cleanup_blocker(connection, config, target_row):
+            continue
+        staging_path, host = target
+
+        def check_ownership() -> None:
+            if reason := staged_output_cleanup_blocker(connection, config, target_row):
+                raise RuntimeError(reason)
+
+        if not remove_stale_staging_path(staging_path, host=host, ownership_check=check_ownership):
+            continue
+        if not remove_stale_staging_path(partial_output_path(staging_path), host=host,
+                                         ownership_check=check_ownership):
+            continue
         connection.execute(
             delete(staged_artifacts)
             .where(staged_artifacts.c.library_item_id == row["id"])
@@ -2801,6 +2799,7 @@ def _stale_prefix_encoding_rows_for_requeue(
             library_items.c.id,
             library_items.c.rel_path,
             library_items.c.status,
+            staged_artifacts.c.library_item_id.label("artifact_item_id"),
             staged_artifacts.c.staging_path,
             staged_artifacts.c.encode_completed_at,
             staged_artifacts.c.staging_fingerprint,
@@ -2808,12 +2807,14 @@ def _stale_prefix_encoding_rows_for_requeue(
             staged_artifacts.c.encode_host_key,
             staged_artifacts.c.encode_host_mode,
             staged_artifacts.c.encode_media_access,
+            func.coalesce(func.nullif(encode_jobs.c.last_host_json, "{}"),
+                          encode_jobs.c.host_json).label("saved_host_json"),
         )
         .select_from(
             library_items.outerjoin(
                 staged_artifacts,
                 staged_artifacts.c.library_item_id == library_items.c.id,
-            )
+            ).outerjoin(encode_jobs, encode_jobs.c.job_id == staged_artifacts.c.encode_job_id)
         )
         .where(scope_rel_path_filter(library_items.c.rel_path, scope))
         .where(library_items.c.status == "encoding")

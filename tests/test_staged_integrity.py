@@ -1,6 +1,7 @@
 import hashlib
 import json
 import tempfile
+import subprocess
 import unittest
 from collections.abc import Collection
 from typing import Any
@@ -20,7 +21,7 @@ from mediaforce.library.staged_integrity import (
     integrity_disposition_blocks_promotion,
     staged_integrity_report,
 )
-from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK, FINAL_SIZE_GOAL_CHECK
+from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK, FINAL_SIZE_GOAL_CHECK, partial_output_path
 from mediaforce.execution import PromotionResult
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action
 from mediaforce.web.runtime import folder_actions, size_held
@@ -315,6 +316,85 @@ class StagedIntegrityTests(unittest.TestCase):
         request = {"size_goal": {"mode": "normalized", "value_mb": value_mb, "reference_runtime_minutes": 45}}
         return {"schema_version": 1, "sample_job_id": sample, "policy_hash": "new-policy",
                 "operator_intent": request, "operator_intent_hash": f"sha256:{stable_json_hash(request)}"}
+
+    @patch("mediaforce.hosts.config.host_targets_current_machine", return_value=False)
+    def test_remake_preserves_removed_remote_host_then_retries_recorded_path(self, _local: Mock) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        partial = partial_output_path(stage)
+        partial.write_bytes(b"partial")
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
+                encode_host_key="worker@example", encode_host_mode="ssh", encode_media_access="mounted"))
+            before = dict(connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id)).mappings().one())
+        queue = Mock(return_value={"ok": True})
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=Mock(), queue_items=queue, current_approval=lambda _prefix: self._new_remake_approval(),
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(stage.read_bytes(), b"compressed")
+        self.assertEqual(partial.read_bytes(), b"partial")
+        queue.assert_not_called()
+        with open_db(self.config.paths.db_path) as connection:
+            after = dict(connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id)).mappings().one())
+        self.assertEqual(after, before)
+        self.config.raw["remote_hosts"] = [{"host": "worker@example", "mode": "ssh", "media_access": "stream",
+                                            "staging_root": str(self.root / "changed-root")}]
+        from mediaforce.web.runtime import encode_runtime
+        cleanup = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        with patch.object(encode_runtime, "end_remote_output_writers"), patch.object(
+                encode_runtime, "run_remote_command", cleanup):
+            result = decide_size_held_file(
+                self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+                validate_items=Mock(), queue_items=queue, current_approval=lambda _prefix: self._new_remake_approval(),
+            )
+        self.assertTrue(result["ok"], result)
+        queue.assert_called_once()
+        self.assertEqual(cleanup.call_count, 2)
+        for call in cleanup.call_args_list:
+            self.assertEqual(call.args[0]["media_access"], "mounted")
+            self.assertIn(str(stage.parent), call.args[1][-1])
+            self.assertNotIn("changed-root", call.args[1][-1])
+        # The fake SSH command must never remove a controller-visible alias.
+        self.assertEqual(stage.read_bytes(), b"compressed")
+        self.assertEqual(partial.read_bytes(), b"partial")
+
+
+    @patch("mediaforce.hosts.config.host_targets_current_machine", return_value=False)
+    def test_remake_saved_stream_copy_stays_controller_owned(self, _local: Mock) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
+                encode_host_key="removed@example", encode_host_mode="ssh", encode_media_access="stream"))
+        from mediaforce.web.runtime import encode_runtime
+        with patch.object(encode_runtime, "run_remote_command", side_effect=AssertionError("no SSH for stream copy")):
+            result = decide_size_held_file(
+                self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+                validate_items=Mock(), queue_items=lambda *_args: {"ok": True},
+                current_approval=lambda _prefix: self._new_remake_approval(),
+            )
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(stage.exists())
+
+    def test_remake_preserves_output_owned_by_standalone_cli(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(item_events.insert().values(
+                library_item_id=item_id, event_type="encoding_started", created_at="2026-01-01T00:00:00+00:00",
+                details_json=json.dumps({"encode_origin": "cli", "encode_owner_pid": 12345,
+                                         "encode_started_at": "2026-01-01T00:00:00+00:00"})))
+        from mediaforce.web.runtime import encode_runtime
+        with patch.object(encode_runtime, "_process_is_running", return_value=True) as live:
+            result = decide_size_held_file(
+                self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+                validate_items=Mock(), queue_items=Mock(side_effect=AssertionError("owned file must not queue")),
+                current_approval=lambda _prefix: self._new_remake_approval(),
+            )
+        self.assertFalse(result["ok"], result)
+        live.assert_called()
+        self.assertEqual(stage.read_bytes(), b"compressed")
 
     def test_final_size_remake_requires_new_sample_and_goal_before_removal(self) -> None:
         item_id, stage, _manifest = self._final_size_file()
