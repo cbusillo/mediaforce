@@ -21,6 +21,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from mediaforce.core.audio_presets import AUDIO_PRESETS, PRESET_AUDIO_KEYS, apply_audio_preset, audio_preset_values
 from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import (
     FileIntegrityError,
@@ -319,6 +320,9 @@ class MediaforceConfig:
                 ):
                     if key in library_policy:
                         policy["planning"][key] = copy.deepcopy(library_policy[key])
+                audio_preset = str(library_policy.get("audio_preset") or "")
+                if audio_preset in AUDIO_PRESETS:
+                    apply_audio_preset(policy["audio"], audio_preset, self.audio)
         matching_overrides: list[tuple[int, int, dict[str, Any]]] = []
         for index, override in enumerate(self.overrides):
             prefix = str(override.get("path_prefix", "")).strip("/")
@@ -347,6 +351,11 @@ class MediaforceConfig:
                                 ),
                                 "override_prefix": prefix,
                             }
+                    if section == "audio" and normalized_values.get("preset"):
+                        # A chosen sound owns every preset key, including ones it leaves unset.
+                        for preset_key in PRESET_AUDIO_KEYS:
+                            if preset_key not in normalized_values:
+                                policy["audio"].pop(preset_key, None)
                     policy[section].update(normalized_values)
         return policy, target_provenance
 
@@ -575,6 +584,42 @@ def update_runtime_folder_policy_values(
         ]
         updated.append(existing)
         runtime_settings[FOLDER_POLICY_OVERRIDES_KEY] = updated
+        return runtime_settings
+
+    update_runtime_settings(path, _apply)
+
+
+def set_runtime_folder_audio_preset(
+        path: Path,
+        prefix: str,
+        preset_key: str,
+        base_audio: dict[str, Any],
+) -> None:
+    """Apply a sound choice to a show and to every saved override inside it.
+
+    Saved season approvals carry a full audio snapshot that would otherwise
+    shadow the show's choice, so they change with it and need a new sample.
+    """
+    values, removed_keys = audio_preset_values(preset_key, base_audio)
+    normalized_prefix = prefix.strip("/")
+
+    def _apply(runtime_settings: dict[str, Any]) -> dict[str, Any]:
+        overrides = _normalize_folder_policy_overrides(runtime_settings.get(FOLDER_POLICY_OVERRIDES_KEY))
+        if not any(str(item.get("path_prefix", "")).strip("/") == normalized_prefix for item in overrides):
+            overrides.append({"path_prefix": normalized_prefix, "note": BENCH_SAVED_OVERRIDE_NOTE})
+        for override in overrides:
+            override_prefix = str(override.get("path_prefix", "")).strip("/")
+            if not override_prefix or not _path_prefix_matches(override_prefix, normalized_prefix):
+                continue
+            existing_audio = override.get("audio")
+            if override_prefix != normalized_prefix and not isinstance(existing_audio, dict):
+                continue
+            audio = copy.deepcopy(existing_audio) if isinstance(existing_audio, dict) else {}
+            audio.update(copy.deepcopy(values))
+            for removed_key in removed_keys:
+                audio.pop(removed_key, None)
+            override["audio"] = audio
+        runtime_settings[FOLDER_POLICY_OVERRIDES_KEY] = overrides
         return runtime_settings
 
     update_runtime_settings(path, _apply)

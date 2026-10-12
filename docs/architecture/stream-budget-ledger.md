@@ -4,7 +4,8 @@
 
 - `mediaforce/encoding/streams.py` owns the immutable production stream plan:
   selected audio, subtitles, and attachments plus copy, transcode, or drop
-  decisions and output codec/bitrate details.
+  decisions and output codec/bitrate details. A stereo downmix records
+  `output_channels` on the audio stream (see `sound-choices.md`).
 - `mediaforce/tuning/stream_budget.py` prices that plan against the canonical
   per-item size goal. It is the only authority for non-video overhead,
   remaining video bytes/bitrate, uncertainty, and arithmetic feasibility.

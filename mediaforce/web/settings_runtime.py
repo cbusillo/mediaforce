@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from mediaforce.core.audio_presets import AUDIO_PRESETS
 from mediaforce.core.config import DEFAULT_CATALOG_REFRESH_HOURS, FOLDER_POLICY_OVERRIDES_KEY, MediaforceConfig
 from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY
 from mediaforce.hosts.config import normalize_host_capabilities
@@ -651,6 +652,9 @@ def normalize_submitted_library_policy(library_type: str, value: Any) -> dict[st
         lifecycle_mode = str(policy.get("series_lifecycle_mode") or "auto").strip().lower()
         if lifecycle_mode not in {"auto", "on", "off"}:
             raise SettingsValidationError("TV current-season protection must be Automatic, Always, or Off.")
+        audio_preset = str(policy.get("audio_preset") or "").strip()
+        if audio_preset and audio_preset not in AUDIO_PRESETS:
+            raise SettingsValidationError("Choose a supported sound choice for TV shows.")
         return {
             "series_lifecycle_mode": lifecycle_mode,
             "current_season_inactive_days": _library_policy_integer(
@@ -662,6 +666,7 @@ def normalize_submitted_library_policy(library_type: str, value: Any) -> dict[st
             "series_metadata_stale_days": _library_policy_integer(
                 policy.get("series_metadata_stale_days"), label="Series metadata freshness", minimum=1, maximum=365
             ),
+            "audio_preset": audio_preset,
         }
     if library_type == "movie":
         grouping = str(policy.get("grouping") or "title")

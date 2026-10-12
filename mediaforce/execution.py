@@ -32,7 +32,7 @@ from mediaforce.encoding.staging import PromotionRestoreError, PromotionWaiting,
     promote_one_item as promote_one_item_impl, remux_container_metadata, validate_one_item as validate_one_item_impl
 from mediaforce.encoding.streams import ProductionStreamPlan, _audio_codec as _audio_codec_impl, _check as _check_impl, \
     _format_crf as _format_crf_impl, _opus_bitrate as _opus_bitrate_impl, \
-    _opus_layout_filter as _opus_layout_filter_impl, _parse_bitrate_text as _parse_bitrate_text_impl, \
+    _parse_bitrate_text as _parse_bitrate_text_impl, \
     _pick_audio as _pick_audio_impl, _pick_subtitles as _pick_subtitles_impl, \
     _record_event as _record_event_impl, _select_streams as _select_streams_impl, \
     _source_has_preservable_subtitles as _source_has_preservable_subtitles_impl
@@ -629,7 +629,6 @@ def _build_ffmpeg_command(
         ffmpeg_binary=ffmpeg_binary,
         ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
         audio_codec=_audio_codec,
-        opus_layout_filter=_opus_layout_filter,
         opus_bitrate=_opus_bitrate,
         format_crf=_format_crf,
     )
@@ -897,10 +896,6 @@ def _audio_codec(track: dict[str, Any], audio_policy: dict[str, Any]) -> str:
 
 def _opus_bitrate(track: dict[str, Any], audio_policy: dict[str, Any]) -> str:
     return _opus_bitrate_impl(track, audio_policy)
-
-
-def _opus_layout_filter(track: dict[str, Any]) -> str | None:
-    return _opus_layout_filter_impl(track)
 
 
 def _check(validation: dict[str, Any], passed: bool, message: str) -> None:

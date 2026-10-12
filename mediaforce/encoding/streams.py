@@ -8,7 +8,12 @@ from mediaforce.core.db_tables import item_events
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.core.utils import timestamp
-from mediaforce.reviewing.helpers import planned_audio_action, planned_opus_bitrate, select_primary_audio_track
+from mediaforce.reviewing.helpers import (
+    planned_audio_action,
+    planned_opus_bitrate,
+    planned_output_channels,
+    select_primary_audio_track,
+)
 
 
 TEXT_SUBTITLE_CODECS = frozenset({"ass", "mov_text", "srt", "ssa", "subrip", "text", "webvtt"})
@@ -34,6 +39,7 @@ class PlannedStream:
     output_bitrate_bps: int | None = None
     output_bitrate_text: str | None = None
     channels: int | None = None
+    output_channels: int | None = None
     language: str | None = None
     default: bool = False
     forced: bool = False
@@ -44,7 +50,7 @@ class PlannedStream:
     mime_type: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "kind": self.kind,
             "source_index": self.source_index,
             "source_codec": self.source_codec,
@@ -63,6 +69,10 @@ class PlannedStream:
             "file_name": self.file_name,
             "mime_type": self.mime_type,
         }
+        # Only a downmix records output channels, so existing plan identities stay valid.
+        if self.output_channels is not None:
+            payload["output_channels"] = self.output_channels
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +189,8 @@ def resolve_stream_plan(
         source_codec = str(track.get("codec_name") or "unknown").lower()
         codec_argument = _audio_codec(track, audio_policy)
         output_bitrate_text = _opus_bitrate(track, audio_policy) if codec_argument == "libopus" else None
+        source_channels = _positive_int(track.get("channels"))
+        output_channels = planned_output_channels(track, audio_policy) if codec_argument == "libopus" else None
         streams.append(
             PlannedStream(
                 kind="audio",
@@ -193,7 +205,8 @@ def resolve_stream_plan(
                     else None
                 ),
                 output_bitrate_text=output_bitrate_text,
-                channels=_positive_int(track.get("channels")),
+                channels=source_channels,
+                output_channels=output_channels if output_channels != (source_channels or 2) else None,
                 language=_optional_text(track.get("language")),
                 default=bool(track.get("default")),
                 source_bitrate_bps=_positive_int(track.get("bit_rate")),
@@ -348,12 +361,27 @@ def opus_audio_filter(layout_filter: str | None) -> str:
     return ",".join(part for part in (layout_filter, TRUE_PEAK_LIMITER_FILTER) if part)
 
 
-def opus_encode_arguments(*, channels: int, bitrate_text: str) -> list[str]:
-    layout_filter = _opus_layout_filter({"channels": channels})
-    arguments = ["-c:a", "libopus", "-af", opus_audio_filter(layout_filter)]
-    if layout_filter:
-        arguments.extend(["-mapping_family", "1"])
-    return [*arguments, "-b:a", bitrate_text]
+# Uses swresample's standard downmix, the same matrix as -ac 2.
+DOWNMIX_TO_STEREO_FILTER = "aformat=channel_layouts=stereo"
+
+
+def opus_encode_arguments(
+        *,
+        channels: int,
+        bitrate_text: str,
+        output_channels: int | None = None,
+        stream_index: int | None = None,
+) -> list[str]:
+    # -c and -b always name the audio stream; -af and -mapping_family take a
+    # stream specifier only when the command has several outputs to choose from.
+    audio = ":a" if stream_index is None else f":a:{stream_index}"
+    stream = "" if stream_index is None else audio
+    downmix = output_channels == 2 and channels > 2
+    layout_filter = DOWNMIX_TO_STEREO_FILTER if downmix else _opus_layout_filter({"channels": channels})
+    arguments = [f"-c{audio}", "libopus", f"-af{stream}", opus_audio_filter(layout_filter)]
+    if layout_filter and not downmix:
+        arguments.extend([f"-mapping_family{stream}", "1"])
+    return [*arguments, f"-b{audio}", bitrate_text]
 
 
 def _check(validation: dict[str, Any], passed: bool, message: str) -> None:
@@ -405,6 +433,7 @@ def _planned_stream_from_payload(payload: dict[str, Any]) -> PlannedStream:
         output_bitrate_bps=_positive_int(payload.get("output_bitrate_bps")),
         output_bitrate_text=_optional_text(payload.get("output_bitrate_text")),
         channels=_positive_int(payload.get("channels")),
+        output_channels=_positive_int(payload.get("output_channels")),
         language=_optional_text(payload.get("language")),
         default=bool(payload.get("default")),
         forced=bool(payload.get("forced")),

@@ -36,6 +36,7 @@ from mediaforce.encoding.staging import (
 )
 from mediaforce.encoding.streams import ProductionStreamPlan
 from mediaforce.encoding.video_filters import planned_output_dimensions
+from mediaforce.reviewing.helpers import planned_output_channels
 from mediaforce.tuning.production_lineage import capture_production_identity, completed_target_lineage
 from mediaforce.tuning.compression_intent import (
     CompressionAuthorizationDecision,
@@ -172,6 +173,7 @@ def describe_item_plan(
             audio_plan = {
                 "source_codec": selected_audio_plan.source_codec,
                 "channels": selected_audio_plan.channels,
+                "output_channels": selected_audio_plan.output_channels or selected_audio_plan.channels,
                 "language": selected_audio_plan.language or "und",
                 "action": "convert" if selected_audio_plan.action == "transcode" else "copy",
                 "output_codec": selected_audio_plan.output_codec,
@@ -183,6 +185,7 @@ def describe_item_plan(
             audio_plan = {
                 "source_codec": None,
                 "channels": None,
+                "output_channels": None,
                 "language": None,
                 "action": "none",
                 "output_codec": None,
@@ -204,6 +207,11 @@ def describe_item_plan(
         audio_plan = {
             "source_codec": str(selected_audio.get("codec_name") or "unknown"),
             "channels": int_value(selected_audio.get("channels")),
+            "output_channels": (
+                planned_output_channels(selected_audio, policy["audio"])
+                if chosen_audio_codec == "libopus"
+                else int_value(selected_audio.get("channels"))
+            ),
             "language": selected_audio.get("language") or "und",
             "action": "convert" if chosen_audio_codec == "libopus" else "copy",
             "output_codec": "opus" if chosen_audio_codec == "libopus" else str(selected_audio.get("codec_name") or "unknown"),

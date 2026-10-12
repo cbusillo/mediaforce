@@ -19,7 +19,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict, object_list
 from mediaforce.execution import resolve_stream_budget_ledger
 from mediaforce.library.folder_profiles import inspect_prefix
-from mediaforce.reviewing.helpers import planned_audio_action, select_primary_audio_track
+from mediaforce.reviewing.helpers import planned_audio_action, planned_output_channels, select_primary_audio_track
 from mediaforce.tuning.tuning_memory import retrieve_learning_context
 from mediaforce.tuning.size_goals import (
     DECIMAL_MEGABYTE_BYTES,
@@ -372,7 +372,7 @@ def audio_tradeoff_hint(
     codec_name = str(track.get("codec_name") or "").strip().lower() or None
     if planned_audio_action(track, policy) != "libopus":
         return None
-    channels = max(2, int_value(track.get("channels")) or 2)
+    channels = max(2, planned_output_channels(track, policy))
     policy_key, fallback_kbps = _audio_bitrate_key_for_channels(channels)
     target_kbps = parse_audio_bitrate_kbps(policy.get(policy_key), fallback_kbps)
     next_lower_kbps = _next_lower_audio_bitrate_kbps(policy_key, target_kbps)

@@ -29,6 +29,7 @@ from sqlalchemy import func
 from sqlalchemy import literal_column
 from sqlalchemy import select
 
+from mediaforce.core.audio_presets import AUDIO_PRESETS
 from mediaforce.advisor import TuningPolicyResponse
 from mediaforce.advising.routing import advisor_routing_from_config
 from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
@@ -46,7 +47,9 @@ from mediaforce.tuning.target_default_context import (
     unavailable_target_default_evidence,
 )
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, migrate_config_state, \
-    update_runtime_settings, update_runtime_folder_policy_values, upsert_runtime_folder_policy_override
+    set_runtime_folder_audio_preset, update_runtime_settings, update_runtime_folder_policy_values, \
+    upsert_runtime_folder_policy_override
+from mediaforce.web.runtime.audio_preset_runtime import show_audio_preset_payload, tv_show_prefix
 from mediaforce.web.runtime.automatic_publish import publish_checked_files_once
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
@@ -1349,6 +1352,7 @@ def create_app(
                 "folder_scan_job": folder_scan_job,
                 "metric_support": metric_support,
                 "metric_status_copy": _metric_status_copy(metric_support),
+                "audio_preset": show_audio_preset_payload(config, normalized_prefix),
             }
             if summary.get("item_count", 0) == 0:
                 status_code = 200 if folder_scan_job and folder_scan_job.get("status") in {"queued", "running"} else 404
@@ -2298,6 +2302,29 @@ def create_app(
             "lifecycle": lifecycle,
         }
 
+    def _save_audio_preset_action(normalized_prefix: str, preset_key: str) -> dict[str, Any]:
+        nonlocal config
+        show_prefix = tv_show_prefix(config, normalized_prefix)
+        if show_prefix is None:
+            raise HTTPException(status_code=400, detail="A sound choice can only be set for a TV show.")
+        preset = AUDIO_PRESETS.get(preset_key.strip())
+        if preset is None:
+            raise HTTPException(status_code=400, detail="Choose a supported sound choice.")
+        set_runtime_folder_audio_preset(
+            config.paths.runtime_settings_path,
+            show_prefix,
+            preset.key,
+            config.audio,
+        )
+        config = load_config(config.paths.config_path)
+        app.state.config = config
+        _reset_folder_card_cache()
+        return {
+            "ok": True,
+            "message": f"{show_prefix.split('/', 1)[1]} now uses {preset.label} sound. Make a new sample to hear it.",
+            "audio_preset": show_audio_preset_payload(config, normalized_prefix),
+        }
+
     register_folder_routes(
         app,
         folder_status_payload=_folder_status_payload,
@@ -2320,6 +2347,8 @@ def create_app(
         folder_ai_tune_confirm_action=_folder_ai_tune_confirm_action,
         clear_folder_tuning_action=_clear_folder_tuning_action,
         save_series_lifecycle_action=_save_series_lifecycle_action,
+        save_audio_preset_action=_save_audio_preset_action,
+        audio_preset_payload=lambda prefix: show_audio_preset_payload(config, prefix),
         approve_measured_encode_recovery_action=_approve_measured_encode_recovery_action,
         accept_ambiguous_motion_action=_accept_ambiguous_motion_action,
         queue_folder_encode_action=_queue_folder_encode_action,

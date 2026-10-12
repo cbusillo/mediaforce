@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.responses import Response
 from starlette.requests import Request
-from starlette.routing import Route
+from starlette.routing import Match, Route
 
 from mediaforce.web.routes.completed import COMPLETED_CLEANUP_ERROR_MESSAGE, register_completed_routes
 from mediaforce.web.routes.folders import register_folder_routes
@@ -59,7 +59,7 @@ class WebRouteSecurityTests(unittest.TestCase):
             download_review_compare_action=_empty_file_response,
             folder_ai_tune_action=lambda *_args: {}, folder_ai_tune_preview_action=lambda *_args: {},
             folder_ai_tune_confirm_action=lambda *_args: {}, clear_folder_tuning_action=lambda *_args: {},
-            save_series_lifecycle_action=lambda *_args: {}, approve_measured_encode_recovery_action=lambda *_args: {},
+            save_series_lifecycle_action=lambda *_args: {}, save_audio_preset_action=lambda *_args: {}, audio_preset_payload=lambda _prefix: None, approve_measured_encode_recovery_action=lambda *_args: {},
             queue_folder_encode_action=lambda *_args: {}, queue_older_seasons_encode_action=lambda *_args: {},
             validate_folder_outputs_action=lambda *_args: {}, promote_folder_outputs_action=lambda *_args: {},
             save_profile_action=lambda *_args: {},
@@ -80,6 +80,30 @@ class WebRouteSecurityTests(unittest.TestCase):
             self.assertEqual(raised.exception.status_code, 400)
         self.assertEqual(len(calls), 1)
 
+    def test_sound_choice_read_is_not_taken_by_the_folder_route(self) -> None:
+        app = FastAPI()
+        reads: list[str] = []
+        register_folder_routes(
+            app, folder_status_payload=lambda _prefix: {},
+            folder_content_payload=lambda _prefix: ({"folder": True}, 200),
+            download_review_compare_action=_empty_file_response,
+            folder_ai_tune_action=lambda *_args: {}, folder_ai_tune_preview_action=lambda *_args: {},
+            folder_ai_tune_confirm_action=lambda *_args: {}, clear_folder_tuning_action=lambda *_args: {},
+            save_series_lifecycle_action=lambda *_args: {}, save_audio_preset_action=lambda *_args: {},
+            audio_preset_payload=lambda prefix: reads.append(prefix) or {"current": "speech_stereo"},
+            approve_measured_encode_recovery_action=lambda *_args: {},
+            queue_folder_encode_action=lambda *_args: {}, queue_older_seasons_encode_action=lambda *_args: {},
+            validate_folder_outputs_action=lambda *_args: {}, promote_folder_outputs_action=lambda *_args: {},
+            save_profile_action=lambda *_args: {},
+        )
+        scope = {"type": "http", "method": "GET", "path": "/api/folders/tv/Show/audio-preset"}
+        route = next(route for route in app.routes if isinstance(route, Route) and route.matches(scope)[0] == Match.FULL)
+
+        response = asyncio.run(route.endpoint(**route.matches(scope)[1]["path_params"]))
+
+        self.assertEqual(json.loads(response.body), {"ok": True, "audio_preset": {"current": "speech_stereo"}})
+        self.assertEqual(reads, ["tv/Show"])
+
     def test_checked_output_preview_routes_forward_normalized_scope_and_range(self) -> None:
         app = FastAPI()
         captured: list[tuple[str, str | None]] = []
@@ -93,6 +117,8 @@ class WebRouteSecurityTests(unittest.TestCase):
             folder_ai_tune_confirm_action=lambda *_args: {},
             clear_folder_tuning_action=lambda _prefix: {},
             save_series_lifecycle_action=lambda _prefix, _mode: {},
+            save_audio_preset_action=lambda _prefix, _preset: {},
+            audio_preset_payload=lambda _prefix: None,
             approve_measured_encode_recovery_action=lambda *_args: {},
             queue_folder_encode_action=lambda *_args: {},
             queue_older_seasons_encode_action=lambda *_args: {},
@@ -161,6 +187,8 @@ class WebRouteSecurityTests(unittest.TestCase):
             folder_ai_tune_confirm_action=lambda _prefix, _proposal_id, _membership_token: {"ok": True},
             clear_folder_tuning_action=lambda _prefix: {},
             save_series_lifecycle_action=lambda _prefix, _mode: {"ok": True},
+            save_audio_preset_action=lambda _prefix, _preset: {},
+            audio_preset_payload=lambda _prefix: None,
             approve_measured_encode_recovery_action=lambda _prefix, _membership_token: {},
             queue_folder_encode_action=lambda _prefix, _notes, _bypass_schedule, _override_policy_holds, _membership_token: {},
             queue_older_seasons_encode_action=lambda _prefix, _notes, _bypass, _confirmed, _token: {},
@@ -220,6 +248,8 @@ class WebRouteSecurityTests(unittest.TestCase):
             folder_ai_tune_confirm_action=lambda *_args: {"ok": True},
             clear_folder_tuning_action=lambda _prefix: {},
             save_series_lifecycle_action=lambda _prefix, _mode: {},
+            save_audio_preset_action=lambda _prefix, _preset: {},
+            audio_preset_payload=lambda _prefix: None,
             approve_measured_encode_recovery_action=lambda _prefix, token: capture("recovery", token),
             queue_folder_encode_action=lambda _prefix, _notes, _bypass, _override, token: capture("queue", token),
             queue_older_seasons_encode_action=lambda _prefix, _notes, _bypass, confirmed, token: capture(
@@ -287,6 +317,8 @@ class WebRouteSecurityTests(unittest.TestCase):
                 folder_ai_tune_confirm_action=lambda *_args: {},
                 clear_folder_tuning_action=lambda _prefix: {},
                 save_series_lifecycle_action=lambda _prefix, _mode: {},
+                save_audio_preset_action=lambda _prefix, _preset: {},
+                audio_preset_payload=lambda _prefix: None,
                 approve_measured_encode_recovery_action=lambda *_args: {},
                 queue_folder_encode_action=lambda *args: queue("scope", *args),
                 queue_older_seasons_encode_action=lambda *args: queue("older_seasons", *args),
@@ -345,6 +377,8 @@ class WebRouteSecurityTests(unittest.TestCase):
             folder_ai_tune_confirm_action=lambda *_args: {},
             clear_folder_tuning_action=lambda _prefix: {},
             save_series_lifecycle_action=lambda _prefix, _mode: {},
+            save_audio_preset_action=lambda _prefix, _preset: {},
+            audio_preset_payload=lambda _prefix: None,
             approve_measured_encode_recovery_action=lambda _prefix, _membership_token: {},
             queue_folder_encode_action=lambda *_args: {},
             queue_older_seasons_encode_action=lambda *_args: {},
