@@ -100,6 +100,7 @@ from mediaforce.library.candidate_selection import CandidateDecision, encode_can
     restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, workflow_eligibility
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.encoding.audio_quality import check_sample_audio
 from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.quality import quality_toolchain_identity, run_sample_encode, select_quality_metric
 from mediaforce.remote import (
@@ -4014,6 +4015,7 @@ def _calibration_run_deps() -> CalibrationRunDeps:
         quality_toolchain_identity=quality_toolchain_identity,
         select_quality_metric=select_quality_metric,
         plan_av1_cold_start=_plan_av1_cold_start_for_calibration,
+        check_sample_audio=check_sample_audio,
     )
 
 

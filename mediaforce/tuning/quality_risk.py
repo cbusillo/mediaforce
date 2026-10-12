@@ -9,6 +9,7 @@ from typing import Any, Literal, Mapping
 from mediaforce.advisor import apply_seed_policy
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.encoding.audio_quality import sample_audio_review_reason
 from mediaforce.tuning.target_size_search import (
     TARGET_SIZE_SEARCH_SCHEMA_VERSION,
     target_size_transform_plan_valid,
@@ -1187,6 +1188,8 @@ def _deterministic_gates(
         if str(object_dict(target_size_trace.get("curve")).get("shape") or "") == "non_monotonic":
             comparison_reason = comparison_reason or "The measured target-size curve is non-monotonic and needs comparison."
     if not comparison_reason:
+        comparison_reason = sample_audio_review_reason(object_dict(sample_result.get("audio_quality"))) or ""
+    if not comparison_reason:
         fingerprint_status = str(fingerprint_decision.get("status") or "unknown")
         fingerprint_confidence = float_value(fingerprint_decision.get("confidence"))
         low_confidence = object_list(fingerprint_decision.get("low_confidence_advisories"))
@@ -1274,6 +1277,16 @@ def _typed_quality_risks(
                 rationale=rationale,
                 evidence_ids=_normalized_evidence_ids([fingerprint_decision.get("evidence_id")]),
             )
+    audio_quality = object_dict(sample_result.get("audio_quality"))
+    audio_reason = sample_audio_review_reason(audio_quality)
+    if audio_reason:
+        _add_risk(
+            risks_by_tag,
+            tag="audio_quality_layout",
+            level="high" if audio_quality.get("status") == "failed" else "unknown",
+            rationale=audio_reason,
+            evidence_ids=[],
+        )
     cadence_class = str(cadence_decision.get("classification") or "unknown")
     if cadence_class in {"mixed", "telecine", "tff", "bff", "unknown"}:
         _add_risk(
