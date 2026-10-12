@@ -993,6 +993,7 @@ export interface LibraryPolicy {
 	current_season_inactive_days?: number;
 	season_acquisition_hold_days?: number;
 	series_metadata_stale_days?: number;
+	audio_preset?: string;
 	grouping?: 'title' | 'folder' | 'file';
 	editions?: 'separate';
 	extras?: 'exclude' | 'include';
@@ -1071,6 +1072,7 @@ export interface SettingsPayload {
 	libraries: SettingsLibrary[];
 	library_type_options: Array<{ key: LibraryType; label: string }>;
 	library_profile_options: Record<LibraryType, Array<{ key: string; label: string }>>;
+	audio_preset_options: AudioPresetOption[];
 	remote_hosts: SettingsHost[];
 	transcode_root: string;
 	catalog_refresh_hours: string;
@@ -1717,6 +1719,7 @@ export interface FolderPayload {
 	failed_target_size_search?: QualityRiskTargetSizeSearch | null;
 	approved_season_shortcut?: Record<string, unknown> | null;
 	series_context?: { prefix: string; title: string } | null;
+	audio_preset?: AudioPresetPayload | null;
 	pending_proposal?: Record<string, unknown> | null;
 	review_gate?: Record<string, unknown>;
 	calibration_queue?: Record<string, unknown>;
@@ -1850,4 +1853,18 @@ export interface FolderStatusPayload {
 	folder_scan_job: Record<string, unknown> | null;
 	workflow_state?: FolderWorkflowState | null;
 	staged_integrity?: StagedIntegrityPayload;
+}
+
+export interface AudioPresetOption {
+	key: string;
+	label: string;
+	summary: string;
+}
+
+export interface AudioPresetPayload {
+	show_prefix: string;
+	current: string;
+	source: 'show' | 'library' | 'default';
+	library_default: string | null;
+	options: AudioPresetOption[];
 }

@@ -141,6 +141,7 @@ describe('settings draft helpers', () => {
 			{ key: 'spatial', label: '3D / VR' },
 			{ key: 'other', label: 'Other' }
 		],
+		audio_preset_options: [],
 		library_profile_options: {
 			tv: [{ key: 'inherit_defaults', label: 'Use assistant defaults' }],
 			movie: [{ key: 'movie_balanced', label: 'Balanced movie' }],

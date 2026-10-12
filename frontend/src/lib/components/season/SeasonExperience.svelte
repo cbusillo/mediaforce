@@ -6,6 +6,7 @@
 	import { onMount, tick } from 'svelte';
 
 	import { ApiError, apiDownloadHref, postJson } from '$lib/api/client';
+	import SoundChoice from '$lib/components/season/SoundChoice.svelte';
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import SeasonIntegrityPanel from '$lib/components/season/SeasonIntegrityPanel.svelte';
 	import WaitingReasons from '$lib/components/season/WaitingReasons.svelte';
@@ -1111,6 +1112,16 @@
 		);
 	}
 
+	async function chooseSound(preset: string) {
+		await runAction('deciding', 'We couldn’t save the sound choice.', async () => {
+			const response = ensureOk(
+				await postJson<ActionResponse>(endpoint('audio-preset'), { preset }),
+				'We couldn’t save the sound choice.'
+			);
+			actionMessage = response.message || '';
+		});
+	}
+
 	async function encodeAmbiguousMotionAsIs() {
 		await runAction('deciding', 'We couldn’t record that decision.', async () => {
 			const response = ensureOk(
@@ -2076,6 +2087,16 @@
 						>Saved when you create the sample so retries keep the same quality preference.</small
 					>
 				</div>
+
+				{#if folder.audio_preset}
+					<div class="goal-sound">
+						<SoundChoice
+							preset={folder.audio_preset}
+							saving={actionPhase === 'deciding'}
+							onChoose={(preset) => void chooseSound(preset)}
+						/>
+					</div>
+				{/if}
 
 				{#if selectedGoal && selectedCompressionIntentContract}
 					<div class="goal-contract">
@@ -5676,6 +5697,10 @@
 	.goal-copy p {
 		margin: 12px 0 0;
 		padding: 0;
+	}
+
+	.goal-sound {
+		max-width: 420px;
 	}
 
 	.compression-intent {
