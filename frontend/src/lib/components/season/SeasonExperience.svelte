@@ -3223,12 +3223,19 @@
 				<p class="eyebrow">
 					{targetConstraint
 						? 'Size needs a change'
-						: humanState.recoveryKind === 'test'
-							? 'Sample needs retry'
-							: 'A small snag'}
+						: humanState.recoveryKind === 'files'
+							? 'Check the files below'
+							: humanState.recoveryKind === 'test'
+								? 'Sample needs retry'
+								: 'A small snag'}
 				</p>
 				<h1>{targetConstraint?.title || `${humanState.label}.`}</h1>
-				<p class="lede">{targetConstraint?.detail || plainFailureMessage(folder, status)}</p>
+				<p class="lede">
+					{targetConstraint?.detail ||
+						(humanState.recoveryKind === 'files'
+							? humanState.detail
+							: plainFailureMessage(folder, status))}
+				</p>
 				<WaitingReasons
 					anchorId="season-decisions"
 					reasons={waitingReasons}
@@ -3244,6 +3251,9 @@
 								? 'The saved measurements are not visual approval. A fresh sample rechecks the source and settings before review.'
 								: 'Choose a viable goal, then Mediaforce can create a fresh sample.'}</span
 						>
+					{:else if humanState.recoveryKind === 'files'}
+						<strong>Each file is handled separately.</strong>
+						<span>Files that pass their checks can continue while these need attention.</span>
 					{:else if humanState.recoveryKind === 'test'}
 						<strong>Your library is safe.</strong>
 						<span>Nothing was replaced. Trying again rebuilds the comparison.</span>
@@ -3286,28 +3296,52 @@
 					</div>
 				{/if}
 				<div class="help-actions">
-					<button
-						class="primary-button"
-						type="button"
-						onclick={() => (targetConstraint ? recoverTargetConstraint() : recoverSeason())}
-					>
-						{targetConstraint?.recoveryLabel ||
-							(recoveryNeedsFreshGoal
-								? 'Choose size and settings'
-								: recoveryNeedsAdjustment
-									? 'Review retry'
-									: humanState.recoveryKind === 'test'
-										? 'Retry sample'
-										: isExactItemScope
-											? 'Retry this episode'
-											: 'Retry unfinished episodes')}
-					</button>
-					{#if humanState.recoveryKind === 'test' && !targetConstraint}
-						<button class="secondary-button" type="button" onclick={chooseDifferentSize}>
-							Choose a different size or settings
+					{#if humanState.recoveryKind === 'files'}
+						{#if promotionIntegrity.canFinish}
+							<button class="primary-button" type="button" onclick={finishSeason}>
+								Replace checked files
+							</button>
+						{/if}
+						{#if (status.workflow_state ?? folder.workflow_state)?.counts.ready_to_validate}
+							<button class="secondary-button" type="button" onclick={checkOutputs}>
+								Check new files
+							</button>
+						{/if}
+						{#if folder.media_scope?.kind === 'tv_season'}
+							<a class="text-link" href="#season-episodes-title">Review episodes</a>
+						{/if}
+					{:else}
+						<button
+							class="primary-button"
+							type="button"
+							onclick={() => (targetConstraint ? recoverTargetConstraint() : recoverSeason())}
+						>
+							{targetConstraint?.recoveryLabel ||
+								(recoveryNeedsFreshGoal
+									? 'Choose size and settings'
+									: recoveryNeedsAdjustment
+										? 'Review retry'
+										: humanState.recoveryKind === 'test'
+											? 'Retry sample'
+											: isExactItemScope
+												? 'Retry this episode'
+												: 'Retry unfinished episodes')}
 						</button>
+						{#if humanState.recoveryKind === 'test' && !targetConstraint}
+							<button class="secondary-button" type="button" onclick={chooseDifferentSize}>
+								Choose a different size or settings
+							</button>
+						{/if}
 					{/if}
 				</div>
+				{#if humanState.recoveryKind === 'files' && promotionIntegrity.canFinish}
+					<p class="action-note">
+						Replacing installs only checked files and keeps their originals in the cleanup folder.
+					</p>
+				{/if}
+				{#if humanState.recoveryKind === 'files' && promotionIntegrity.available}
+					<SeasonIntegrityPanel integrity={promotionIntegrity} tone="blocked" />
+				{/if}
 			</section>
 		{/if}
 

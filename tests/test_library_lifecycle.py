@@ -1,4 +1,5 @@
 import copy
+import json
 import tempfile
 import tomllib
 import unittest
@@ -7,7 +8,8 @@ from pathlib import Path
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
-from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata
+from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata, staged_artifacts
+from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
 from mediaforce.library.candidate_selection import (
     older_season_override_selection,
     project_candidates,
@@ -16,7 +18,9 @@ from mediaforce.library.candidate_selection import (
 )
 from mediaforce.library.representatives import load_representative_selection
 from mediaforce.library.run_manifests import build_run_manifest, create_folder_manifest, select_encode_candidates
-from mediaforce.library.workflow_state import EncodeEligibility, build_folder_workflow_state, derive_item_workflow_state
+from mediaforce.library.workflow_state import EncodeEligibility, build_folder_workflow_state, \
+    build_folder_workflow_states, derive_item_workflow_state
+from mediaforce.web.runtime.episode_progress import load_season_episode_progress
 from mediaforce.web.routes.folders import _request_flag
 from mediaforce.web.runtime.folder_cards import list_folder_cards
 
@@ -518,6 +522,78 @@ class LibraryLifecycleTests(unittest.TestCase):
 
         self.assertEqual(state.state, "held")
         self.assertEqual(state.blocker, "This season is still receiving episodes.")
+
+    def test_failed_check_agrees_across_season_show_and_episode_without_holding_other_files(self) -> None:
+        config = self._config()
+        season = "tv/Show/Season 1"
+        other_season = "tv/Show/Season 2"
+        with open_db(config.paths.db_path) as connection:
+            failed_id = self._insert_item(connection, f"{season}/Episode 01.mkv", age_days=100)
+            ready_id = self._insert_item(connection, f"{season}/Episode 02.mkv", age_days=100)
+            other_id = self._insert_item(connection, f"{other_season}/Episode 01.mkv", age_days=100)
+            for item_id in (failed_id, ready_id, other_id):
+                connection.execute(library_items.update().where(library_items.c.id == item_id).values(status="encoded"))
+                connection.execute(staged_artifacts.insert().values(
+                    library_item_id=item_id,
+                    staging_path=str(self.root / "staging" / f"{item_id}.mkv"),
+                    validation_json=json.dumps({"passed": False}) if item_id == failed_id else None,
+                    updated_at=NOW.isoformat(),
+                ))
+
+            single = build_folder_workflow_state(connection, season)
+            bulk = build_folder_workflow_states(connection, ["tv/Show", season, other_season])
+            episodes = load_season_episode_progress(connection, single.items, [])
+
+        self.assertEqual(single.state, "blocked")
+        self.assertEqual(single.primary_lane, "blocked")
+        self.assertEqual(single.counts["blocked"], 1)
+        self.assertEqual(single.counts["ready_to_validate"], 1)
+        self.assertEqual(single.to_payload(), bulk[season].to_payload())
+        self.assertEqual(bulk["tv/Show"].state, "blocked")
+        self.assertEqual(bulk[other_season].state, "ready_to_validate")
+        self.assertEqual({episode["stage"] for episode in episodes}, {"needs_you", "checking"})
+
+        with open_db(config.paths.db_path) as connection:
+            connection.execute(staged_artifacts.update().where(
+                staged_artifacts.c.library_item_id == failed_id,
+            ).values(validation_json=json.dumps({"passed": True}), validated_at=NOW.isoformat()))
+            connection.execute(library_items.update().where(library_items.c.id == failed_id).values(status="validated"))
+            settled = build_folder_workflow_state(connection, season)
+
+        self.assertFalse(settled.blockers)
+        self.assertEqual(settled.counts["ready_to_promote"], 1)
+
+    def test_staged_check_attention_precedes_policy_hold_but_not_active_or_published_file(self) -> None:
+        row = {
+            "item_id": 1,
+            "rel_path": "tv/Show/Season 1/Episode 01.mkv",
+            "status": "encoded",
+            "staged_library_item_id": 1,
+            "staging_path": "staging/episode.mkv",
+            "promoted_at": None,
+            "validation_json": json.dumps({"passed": False}),
+        }
+        state = derive_item_workflow_state(row, encode_eligible=False, policy_blocker="Recent season")
+        self.assertEqual(state.state, "blocked")
+        self.assertTrue(state.blocker)
+        for status, expected in (("encoding", "encoding"), ("promoted", "complete"), ("missing", "missing")):
+            with self.subTest(status=status):
+                self.assertEqual(derive_item_workflow_state({**row, "status": status}).state, expected)
+        size_held = derive_item_workflow_state({
+            **row,
+            "validation_json": json.dumps({
+                "passed": False,
+                "size_prediction": {"held": True},
+                "checks": [{"passed": False, "message": FAR_BELOW_PREDICTION_CHECK}],
+            }),
+        })
+        self.assertEqual(size_held.state, "blocked")
+        self.assertNotEqual(size_held.blocker, state.blocker)
+        self.assertEqual(derive_item_workflow_state({**row, "promoted_at": NOW.isoformat()}).state, "complete")
+        self.assertEqual(derive_item_workflow_state({**row, "staging_path": None}).state, "blocked")
+        for validation in (None, "invalid-json", json.dumps({"passed": True})):
+            with self.subTest(validation=validation):
+                self.assertEqual(derive_item_workflow_state({**row, "validation_json": validation}).state, "ready_to_validate")
 
     def test_folder_cards_keep_held_candidates_without_estimating_savings(self) -> None:
         config = self._config()

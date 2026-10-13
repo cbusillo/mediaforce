@@ -26,7 +26,7 @@ from mediaforce.library.remake_intents import (
     save_remake_intent,
     stored_validation as _stored_validation,
 )
-from mediaforce.library.staged_integrity import staged_validation_outcome
+from mediaforce.library.staged_validation import staged_validation_outcome
 from mediaforce.tuning.calibration_jobs import EXECUTION_ACTIVE_JOB_STATUSES, load_latest_job
 from mediaforce.web.runtime.encode_runtime import (
     remove_stale_staging_path, staged_output_cleanup_blocker, staged_output_cleanup_target,

@@ -17,7 +17,7 @@ from mediaforce.encoding.encode_queue import encode_run_rel_paths, list_child_en
     list_encode_runs_for_prefix
 from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
 from mediaforce.library.media_scopes import resolve_media_scope
-from mediaforce.library.staged_integrity import staged_validation_outcome
+from mediaforce.library.staged_validation import staged_validation_outcome
 from mediaforce.library.workflow_state import ItemWorkflowState, build_folder_workflow_state
 from mediaforce.web.runtime.encode_runtime import size_exception_question, unfinished_child_reason
 

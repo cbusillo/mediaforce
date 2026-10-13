@@ -302,6 +302,9 @@ Guidance:
   - typed, bounded, read-only staged-output reconciliation for durable artifact
     rows and configured staging roots; owns integrity dispositions, compact
     summaries, bounded detail records, and safe next-action contracts
+- `staged_validation.py`
+  - recorded check outcomes shared by integrity, workflow summaries, Episodes,
+    and file-size decisions without importing their orchestration layers
 - `folder_profiles.py`
   - folder inspection and suggested override shaping
 - `run_manifests.py`

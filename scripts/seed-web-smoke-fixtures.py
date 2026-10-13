@@ -2879,7 +2879,6 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio partial-promotion fixture",
                 "route": "/folders/tv/Partial%20Promotion/Season%201",
                 "marker": "Partial Promotion",
-                "stageMarker": "Some episodes are ready",
             },
             {
                 "label": "Folder Studio finished fixture",

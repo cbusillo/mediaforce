@@ -45,7 +45,7 @@ export interface HumanSeasonState {
 	label: string;
 	detail: string;
 	tone: HumanSeasonTone;
-	recoveryKind?: 'test' | 'season';
+	recoveryKind?: 'test' | 'season' | 'files';
 }
 
 export interface SeasonPromotionIntegrityBlocker {
@@ -2012,10 +2012,10 @@ export function librarySeasonState(
 	if (card.workflow_state?.primary_lane === 'blocked') {
 		return {
 			key: 'needs_help',
-			label: 'Cannot start',
-			detail: 'Open the season to see what must be fixed before work can continue.',
+			label: 'Needs attention',
+			detail: card.workflow_state.blockers.join(' ') || card.workflow_state.detail,
 			tone: 'attention',
-			recoveryKind: 'season'
+			recoveryKind: 'files'
 		};
 	}
 	if (card.workflow_state?.primary_lane === 'encode') {
@@ -2192,6 +2192,15 @@ export function detailSeasonState(
 				: 'Completed episodes are safe. Try the unfinished work again.',
 			tone: 'attention',
 			recoveryKind: 'season'
+		};
+	}
+	if (workflow?.primary_lane === 'blocked') {
+		return {
+			key: 'needs_help',
+			label: 'Needs attention',
+			detail: workflow.blockers.join(' ') || workflow.detail,
+			tone: 'attention',
+			recoveryKind: 'files'
 		};
 	}
 	if (workflow?.primary_lane === 'validate') {

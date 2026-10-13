@@ -13,8 +13,7 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import library_items, staged_artifacts
-from mediaforce.core.type_defs import object_dict, object_list
-from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
+from mediaforce.core.type_defs import object_dict
 from mediaforce.library.media_scopes import (
     MediaScope,
     media_group_scope_for_rel_path,
@@ -23,6 +22,7 @@ from mediaforce.library.media_scopes import (
 )
 from mediaforce.library.movie_library import movie_promotion_conflicts
 from mediaforce.library.remake_intents import remake_intent
+from mediaforce.library.staged_validation import held_size_prediction, staged_validation_passed
 
 IntegrityDisposition = Literal[
     "promotable",
@@ -54,7 +54,7 @@ _BLOCKING_DISPOSITION_VALUES: tuple[IntegrityDisposition, ...] = (
     "remote_only_or_unreachable",
     "not_started",
 )
-_BLOCKING_DISPOSITIONS = frozenset(_BLOCKING_DISPOSITION_VALUES)
+_BLOCKING_DISPOSITIONS: frozenset[IntegrityDisposition] = frozenset(_BLOCKING_DISPOSITION_VALUES)
 _TEMPORARY_SUFFIXES = (".part", ".partial", ".tmp", ".temp", ".working")
 _TEMPORARY_MARKERS = (".partial.", ".part.", ".tmp.", ".temp.", ".working.")
 _IGNORED_DISCOVERY_NAMES = frozenset({".ds_store"})
@@ -78,7 +78,7 @@ class StagedIntegrityRecord:
     publish_wait_reason: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        payload = {
+        payload: dict[str, Any] = {
             "disposition": self.disposition,
             "item_id": self.item_id,
             "rel_path": self.rel_path,
@@ -430,9 +430,9 @@ def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> Staged
             staging_path,
             "The local staged output no longer matches the recorded size or modification time.",
         )
-    validation_passed = _validation_passed(row["validation_json"])
-    held_size_prediction = _held_size_prediction(row["validation_json"])
-    if held_size_prediction is not None:
+    validation_passed = staged_validation_passed(row["validation_json"])
+    size_prediction = held_size_prediction(row["validation_json"])
+    if size_prediction is not None:
         return replace(
             _record(
                 "size_held",
@@ -441,7 +441,7 @@ def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> Staged
                 staging_path,
                 "The finished file is far smaller than its sample predicted and waits for the owner.",
             ),
-            size_prediction=held_size_prediction,
+            size_prediction=size_prediction,
         )
     if validation_passed is False:
         return _record("validation_failed", item_id, rel_path, staging_path, "Machine validation recorded a failure.")
@@ -608,46 +608,6 @@ def _next_action(disposition: IntegrityDisposition) -> str:
         "not_started": "queue_encode",
         "retained": "release_retained_output",
     }[disposition]
-
-
-def _held_size_prediction(raw_validation: Any) -> dict[str, Any] | None:
-    """The size comparison of a file whose only failed check is being far smaller than predicted."""
-    try:
-        payload = object_dict(json.loads(str(raw_validation or "{}")))
-    except json.JSONDecodeError:
-        return None
-    size_prediction = object_dict(payload.get("size_prediction"))
-    if payload.get("passed") is not False or not size_prediction.get("held"):
-        return None
-    failed = [
-        str(object_dict(check).get("message") or "")
-        for check in object_list(payload.get("checks"))
-        if object_dict(check).get("passed") is False
-    ]
-    if failed != [FAR_BELOW_PREDICTION_CHECK]:
-        return None
-    return size_prediction
-
-
-def staged_validation_outcome(raw_validation: Any) -> Literal["size_held", "failed"] | None:
-    """Whether a staged file's recorded check waits on the owner, and why; None when it does not."""
-    if _held_size_prediction(raw_validation) is not None:
-        return "size_held"
-    if _validation_passed(raw_validation) is False:
-        return "failed"
-    return None
-
-
-def _validation_passed(raw_validation: Any) -> bool | None:
-    if not isinstance(raw_validation, str) or not raw_validation.strip():
-        return None
-    try:
-        payload = json.loads(raw_validation)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
-        return None
-    return bool(payload["passed"])
 
 
 def _row_has_remote_origin(row: DBRow) -> bool:

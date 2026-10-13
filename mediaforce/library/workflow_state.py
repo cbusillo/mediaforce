@@ -3,7 +3,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Mapping
 
-from sqlalchemy import or_, select
+from sqlalchemy import Select, or_, select
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db import DBRow
@@ -14,6 +14,7 @@ from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, encode_ru
     unfinished_breakdown_groups, unfinished_breakdown_summary
 from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, normalize_scope_prefix, \
     path_matches_scope, resolve_media_scope, resolve_media_scopes, scope_rel_path_filter, scopes_overlap
+from mediaforce.library.staged_validation import staged_validation_outcome
 
 WorkflowItemState = Literal[
     "missing",
@@ -234,7 +235,7 @@ def normalize_prefix(prefix: str) -> str:
 
 
 def derive_item_workflow_state(
-        row: DBRow,
+        row: Mapping[str, Any],
         *,
         encode_eligible: bool = True,
         policy_blocker: str | None = None,
@@ -243,6 +244,7 @@ def derive_item_workflow_state(
     status = str(row["status"] or "idle")
     has_staged_output = row["staged_library_item_id"] is not None and row["staging_path"] is not None
     promoted_at = row["promoted_at"]
+    validation = staged_validation_outcome(row.get("validation_json")) if has_staged_output else None
     state: WorkflowItemState
     lane: WorkflowLane
     blocker: str | None = None
@@ -256,6 +258,14 @@ def derive_item_workflow_state(
     elif status == "encoding":
         state = "encoding"
         lane = "processing"
+    elif validation is not None:
+        state = "blocked"
+        lane = "blocked"
+        blocker = (
+            "A finished file is much smaller than expected; keep it or make it again."
+            if validation == "size_held"
+            else "A finished file didn't pass its check."
+        )
     elif not encode_eligible:
         state = "blocked" if encode_blocked else "held"
         lane = "blocked" if encode_blocked else "none"
@@ -305,8 +315,8 @@ def _derive_item_workflow_state(
     )
 
 
-def _load_item_rows(connection: DBClient, scope: MediaScope) -> list[DBRow]:
-    query = (
+def _item_rows_query() -> Select[Any]:
+    return (
         select(
             library_items.c.id.label("item_id"),
             library_items.c.rel_path,
@@ -314,6 +324,7 @@ def _load_item_rows(connection: DBClient, scope: MediaScope) -> list[DBRow]:
             staged_artifacts.c.library_item_id.label("staged_library_item_id"),
             staged_artifacts.c.staging_path,
             staged_artifacts.c.validated_at,
+            staged_artifacts.c.validation_json,
             staged_artifacts.c.promoted_at,
         )
         .select_from(
@@ -322,37 +333,24 @@ def _load_item_rows(connection: DBClient, scope: MediaScope) -> list[DBRow]:
                 staged_artifacts.c.library_item_id == library_items.c.id,
             )
         )
-        .where(scope_rel_path_filter(library_items.c.rel_path, scope))
         .order_by(library_items.c.rel_path)
     )
-    return connection.execute(query).mappings().fetchall()
+
+
+def _load_item_rows(connection: DBClient, scope: MediaScope) -> list[DBRow]:
+    query = _item_rows_query().where(scope_rel_path_filter(library_items.c.rel_path, scope))
+    return list(connection.execute(query).mappings().fetchall())
 
 
 def _load_item_rows_for_scopes(connection: DBClient, scopes: list[MediaScope]) -> list[DBRow]:
     rows_by_key: dict[tuple[int, str | None], DBRow] = {}
     for scope_batch in _chunks(scopes, PREFIX_QUERY_BATCH_SIZE):
-        query = (
-            select(
-                library_items.c.id.label("item_id"),
-                library_items.c.rel_path,
-                library_items.c.status,
-                staged_artifacts.c.library_item_id.label("staged_library_item_id"),
-                staged_artifacts.c.staging_path,
-                staged_artifacts.c.validated_at,
-                staged_artifacts.c.promoted_at,
-            )
-            .select_from(
-                library_items.outerjoin(
-                    staged_artifacts,
-                    staged_artifacts.c.library_item_id == library_items.c.id,
-                )
-            )
-            .where(or_(*(scope_rel_path_filter(library_items.c.rel_path, scope) for scope in scope_batch)))
-            .order_by(library_items.c.rel_path)
+        query = _item_rows_query().where(
+            or_(*(scope_rel_path_filter(library_items.c.rel_path, scope) for scope in scope_batch))
         )
         for row in connection.execute(query).mappings().fetchall():
             rows_by_key[(int(row["item_id"]), row["staging_path"])] = row
-    return sorted(rows_by_key.values(), key=lambda row: str(row["rel_path"]))
+    return sorted(rows_by_key.values(), key=lambda item_row: str(item_row["rel_path"]))
 
 
 def _chunks(values: list[Any], size: int) -> list[list[Any]]:
@@ -471,7 +469,8 @@ def _folder_summary(
             WorkflowNextAction("monitor_encode", "Monitor encode", True, prefix),
         )
 
-    actionable_lanes = [lane for lane in ("validate", "promote", "encode") if lane_counts.get(lane, 0) > 0]
+    candidate_lanes: tuple[WorkflowLane, ...] = ("validate", "promote", "encode")
+    actionable_lanes = [lane for lane in candidate_lanes if lane_counts.get(lane, 0) > 0]
     if len(actionable_lanes) > 1:
         return (
             "mixed",
