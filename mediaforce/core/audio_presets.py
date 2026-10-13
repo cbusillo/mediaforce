@@ -76,6 +76,17 @@ def audio_preset_values(key: str, base_audio: Mapping[str, Any]) -> tuple[dict[s
     )
 
 
+def owner_sound_keys(audio_policy: Mapping[str, Any]) -> frozenset[str]:
+    """Audio keys only the owner's sound choice may change.
+
+    Once a show or library has a sound choice, every key that choice writes
+    belongs to it; tuning proposals may still change the rest.
+    """
+    if str(audio_policy.get("preset") or "") in AUDIO_PRESETS:
+        return frozenset(PRESET_AUDIO_KEYS)
+    return frozenset({"preset", "downmix_to_stereo"})
+
+
 def apply_audio_preset(audio_policy: dict[str, Any], key: str, base_audio: Mapping[str, Any]) -> None:
     values, removed = audio_preset_values(key, base_audio)
     audio_policy.update(values)

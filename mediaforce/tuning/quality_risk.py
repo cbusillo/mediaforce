@@ -7,6 +7,7 @@ import re
 from typing import Any, Literal, Mapping
 
 from mediaforce.advisor import apply_seed_policy
+from mediaforce.core.audio_presets import owner_sound_keys
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.audio_quality import sample_audio_review_reason
@@ -140,8 +141,6 @@ ALLOW_LISTED_AUDIO_KEYS = frozenset(
     }
 )
 ALLOW_LISTED_SUBTITLE_KEYS = frozenset({"keep_languages", "prefer_text", "keep_forced", "default_mode"})
-# Set only by the owner's sound choice for a show or library; never by a proposal.
-OWNER_ONLY_AUDIO_KEYS = frozenset({"preset", "downmix_to_stereo"})
 
 _QUALITY_RISK_TEXT_PATTERNS = {
     "softness_detail_loss": re.compile(r"\b(?:soft|softness|blurr(?:y|ed|ing)?|detail\s+loss|faces?\s+look)\b", re.I),
@@ -317,7 +316,7 @@ def compile_allow_listed_transform_fragment(
         for key, value in raw_section.items():
             if key not in allowed_keys or (
                     section == "audio"
-                    and key in OWNER_ONLY_AUDIO_KEYS
+                    and key in owner_sound_keys(object_dict(base_payload.get(section)))
                     and value != object_dict(base_payload.get(section)).get(key)
             ):
                 rejected_keys.append(f"{section}.{key}")

@@ -22,6 +22,7 @@ from mediaforce.encoding.streams import (
     resolve_stream_plan,
 )
 from mediaforce.tuning.quality_risk import compile_allow_listed_transform_fragment
+from mediaforce.web.runtime.folder_tuning_advice import apply_policy_fragment
 from mediaforce.web.runtime.audio_preset_runtime import dismiss_suggestion, show_audio_preset_payload
 from mediaforce.web.settings_runtime import SettingsValidationError, normalize_submitted_library_policy
 
@@ -241,6 +242,33 @@ def test_proposals_cannot_change_the_owner_sound_choice() -> None:
     assert flipped == ["audio.downmix_to_stereo"]
     assert introduced == ["audio.preset"]
     assert unchanged == []
+
+
+def test_proposals_cannot_change_what_the_sound_choice_set() -> None:
+    owner_policy = {"audio": {**BASE_AUDIO, **audio_preset_values(SPEECH_STEREO, BASE_AUDIO)[0]}}
+    stock_fragment = {"audio": {"stereo_opus_bitrate": "128k", "copy_codecs": ["aac", "opus"]}}
+
+    _, _, rejected = compile_allow_listed_transform_fragment(owner_policy, stock_fragment)
+    _, _, allowed = compile_allow_listed_transform_fragment({"audio": dict(BASE_AUDIO)}, {"audio": {"stereo_opus_bitrate": "96k"}})
+
+    assert sorted(rejected) == ["audio.copy_codecs", "audio.stereo_opus_bitrate"]
+    assert allowed == []
+
+
+def test_bench_tuning_keeps_the_sound_choice() -> None:
+    speech_audio = {**BASE_AUDIO, **audio_preset_values(SPEECH_STEREO, BASE_AUDIO)[0]}
+    owner_policy = {"audio": speech_audio, "video": {"crf": 50}}
+    bench_fragment = {"audio": {**BASE_AUDIO, "surround_5_1_opus_bitrate": "192k"}, "video": {"crf": 57}}
+
+    tuned = apply_policy_fragment(owner_policy, bench_fragment)
+    unchosen = apply_policy_fragment({"audio": dict(BASE_AUDIO)}, {"audio": {"stereo_opus_bitrate": "96k"}})
+
+    assert {key: tuned["audio"][key] for key in speech_audio if key != "surround_5_1_opus_bitrate"} == {
+        key: value for key, value in speech_audio.items() if key != "surround_5_1_opus_bitrate"
+    }
+    assert tuned["audio"]["surround_5_1_opus_bitrate"] == "192k"
+    assert tuned["video"]["crf"] == 57
+    assert unchosen["audio"]["stereo_opus_bitrate"] == "96k"
 
 
 def test_library_setting_accepts_only_known_sound_choices() -> None:
