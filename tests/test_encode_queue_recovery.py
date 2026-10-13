@@ -74,7 +74,7 @@ from mediaforce.library.media_scopes import media_scope_from_prefix
 from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts import status_runtime as host_status_runtime
 from mediaforce.hosts.types import VMAF_MODEL_MISSING_ISSUE, is_vmaf_model_load_failure
-from mediaforce.remote import HostStatus
+from mediaforce.remote import HostReadinessError, HostStatus
 from mediaforce.tuning.calibration_jobs import list_queue_summary, \
     load_active_overlapping_job as load_active_overlapping_calibration_job, \
     load_latest_job as load_latest_calibration_job, \
@@ -11710,7 +11710,7 @@ raise SystemExit(0)
         self.assertEqual(resolved, missing)
         recovery_supported.assert_called_once_with(self.config, host_config, missing)
 
-    def test_resolve_sample_host_allows_closed_encode_schedule_for_manual_samples(self) -> None:
+    def _night_window_sample_hosts(self) -> tuple[MediaforceConfig, list[HostStatus]]:
         config = replace(
             self.config,
             raw={
@@ -11721,7 +11721,12 @@ raise SystemExit(0)
                         "host": "cbusillo@localhost",
                         "capabilities": ["encode_queue", "sample_calibration"],
                         "schedule_profile": "tou_vb",
-                    }
+                    },
+                    {
+                        "label": "M1 mini",
+                        "host": "cbusillo@m1-mini",
+                        "capabilities": ["encode_queue", "sample_calibration"],
+                    },
                 ],
                 "encode_queue": {
                     "schedule_profiles": [
@@ -11750,15 +11755,99 @@ raise SystemExit(0)
                 missing_paths=[],
                 repo_path=str(self.root),
                 utc_offset_minutes=-240,
-            )
+            ),
+            HostStatus(
+                key="cbusillo@m1-mini",
+                label="M1 mini",
+                mode="ssh",
+                priority=80,
+                capabilities=["encode_queue", "sample_calibration"],
+                available=True,
+                message="Mounted and ready",
+                missing_paths=[],
+                repo_path=str(self.root),
+                utc_offset_minutes=-240,
+            ),
         ]
+        return config, statuses
 
-        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses):
-            with patch("mediaforce.web.app.datetime") as fake_datetime:
-                fake_datetime.now.return_value = web_app._parse_iso("2026-05-24T16:30:00+00:00")
-                host = web_app._resolve_sample_host(config, "cbusillo@localhost")
+    @contextmanager
+    def _at(self, iso_timestamp: str) -> Iterator[None]:
+        frozen = datetime.fromisoformat(iso_timestamp)
+
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> datetime:
+                return frozen.astimezone(tz) if tz is not None else frozen
+
+        with patch("mediaforce.web.app.datetime", FrozenDatetime), patch(
+                "mediaforce.web.runtime.encode_scheduler.datetime", FrozenDatetime
+        ):
+            yield
+
+    def test_resolve_sample_host_refuses_a_host_outside_its_work_window(self) -> None:
+        config, statuses = self._night_window_sample_hosts()
+
+        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses), self._at(
+                "2026-05-24T16:30:00+00:00"
+        ):
+            with self.assertRaises(HTTPException) as refused:
+                web_app._resolve_sample_host(config, "cbusillo@localhost")
+            open_host = web_app._resolve_sample_host(config, "cbusillo@m1-mini")
+
+        self.assertEqual(refused.exception.status_code, 400)
+        self.assertIn("M4 Studio is outside its work window", str(refused.exception.detail))
+        self.assertEqual(open_host.key, "cbusillo@m1-mini")
+
+    def test_resolve_sample_host_accepts_a_host_inside_its_work_window(self) -> None:
+        config, statuses = self._night_window_sample_hosts()
+
+        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses), self._at(
+                "2026-05-24T05:30:00+00:00"
+        ):
+            host = web_app._resolve_sample_host(config, "cbusillo@localhost")
 
         self.assertEqual(host.key, "cbusillo@localhost")
+
+    def test_default_sample_host_skips_this_machine_outside_its_work_window(self) -> None:
+        config, statuses = self._night_window_sample_hosts()
+
+        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses):
+            with self._at("2026-05-24T16:30:00+00:00"):
+                afternoon_key = web_app._default_sample_host_key(config)
+                afternoon_choices = web_app._sample_host_options_from_statuses(config, statuses)
+            with self._at("2026-05-24T05:30:00+00:00"):
+                night_key = web_app._default_sample_host_key(config)
+
+        self.assertEqual(afternoon_key, "cbusillo@m1-mini")
+        self.assertEqual(night_key, "cbusillo@localhost")
+        closed_choice = next(choice for choice in afternoon_choices if choice["key"] == "cbusillo@localhost")
+        self.assertFalse(closed_choice["available"])
+        self.assertFalse(closed_choice["schedule_open"])
+        self.assertEqual(closed_choice["detail"], "Outside its work window")
+
+    def test_resolve_sample_host_explains_when_every_sample_host_is_outside_its_window(self) -> None:
+        config, statuses = self._night_window_sample_hosts()
+        config.raw["remote_hosts"][1]["schedule_profile"] = "tou_vb"
+
+        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses), self._at(
+                "2026-05-24T16:30:00+00:00"
+        ):
+            with self.assertRaises(HTTPException) as refused:
+                web_app._resolve_sample_host(config, "")
+
+        self.assertIn("No sample machine is inside its work window", str(refused.exception.detail))
+
+    def test_queued_sample_does_not_start_after_its_host_window_closes(self) -> None:
+        config, statuses = self._night_window_sample_hosts()
+
+        with patch("mediaforce.web.app.ensure_sample_host_ready", return_value=statuses[0]), self._at(
+                "2026-05-24T16:30:00+00:00"
+        ):
+            with self.assertRaises(HostReadinessError) as refused:
+                web_app._ensure_sample_host_ready(config, {"key": "cbusillo@localhost"})
+
+        self.assertIn("M4 Studio is outside its work window", str(refused.exception))
 
     def test_resolve_sample_host_rejects_non_sample_host(self) -> None:
         statuses = [

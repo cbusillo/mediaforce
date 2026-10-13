@@ -3,6 +3,7 @@ import subprocess
 import time
 from dataclasses import asdict
 from datetime import UTC, datetime
+from collections.abc import Callable
 from typing import Any
 
 from sqlalchemy import func
@@ -17,6 +18,9 @@ from mediaforce.web.runtime.controller_storage_recovery import controller_storag
 from mediaforce.remote import HostReadinessError, HostStatus, collect_host_statuses, host_status_targets_current_machine, \
     normalize_host_media_access, recover_remote_host_mounts, remote_mount_recovery_supported, \
     run_host_lifecycle_command
+
+
+SAMPLE_HOST_OUTSIDE_WINDOW_DETAIL = "Outside its work window"
 
 
 def _progress_float(job: dict[str, Any], key: str) -> float:
@@ -459,8 +463,17 @@ def stop_encode_host_if_configured(host_payload: dict[str, Any] | None, *,
         raise RuntimeError(lifecycle_command_error_detail(result, "host stop command failed"))
 
 
-def default_sample_host_key(config: MediaforceConfig, *, safe_collect_statuses: Any) -> str:
-    statuses = sample_calibration_host_statuses(config, safe_collect_statuses=safe_collect_statuses)
+def default_sample_host_key(
+        config: MediaforceConfig,
+        *,
+        safe_collect_statuses: Any,
+        window_open: Callable[[HostStatus], bool] = lambda _status: True,
+) -> str:
+    statuses = [
+        status
+        for status in sample_calibration_host_statuses(config, safe_collect_statuses=safe_collect_statuses)
+        if window_open(status)
+    ]
     ready_key = default_sample_host_key_from_statuses(statuses)
     if ready_key:
         return ready_key
@@ -471,11 +484,16 @@ def default_sample_host_key(config: MediaforceConfig, *, safe_collect_statuses: 
     return ""
 
 
-def default_sample_host_key_from_statuses(statuses: list[HostStatus]) -> str:
-    for status in statuses:
+def default_sample_host_key_from_statuses(
+        statuses: list[HostStatus],
+        *,
+        window_open: Callable[[HostStatus], bool] = lambda _status: True,
+) -> str:
+    open_statuses = [status for status in statuses if window_open(status)]
+    for status in open_statuses:
         if status.available and host_status_targets_current_machine(status):
             return status.key
-    for status in statuses:
+    for status in open_statuses:
         if status.available:
             return status.key
     return ""
@@ -511,18 +529,21 @@ def sample_host_options_from_statuses(
     for status in statuses:
         schedule_fields = object_dict(schedule_fields_for_host(status)) if schedule_fields_for_host else {}
         storage_recovery_available = bool(schedule_fields.get("storage_recovery_available"))
+        outside_window = schedule_fields.get("schedule_open") is False
+        if outside_window:
+            detail = SAMPLE_HOST_OUTSIDE_WINDOW_DETAIL
+        elif storage_recovery_available:
+            detail = "Storage will reconnect when the test starts."
+        elif not status.available:
+            detail = status.message
+        else:
+            detail = "This machine" if host_status_targets_current_machine(status) else "Remote host"
         options.append(
             {
                 "key": status.key,
                 "label": status.label,
-                "detail": (
-                    "Storage will reconnect when the test starts."
-                    if storage_recovery_available
-                    else status.message if not status.available else (
-                        "This machine" if host_status_targets_current_machine(status) else "Remote host"
-                    )
-                ),
-                "available": status.available or storage_recovery_available,
+                "detail": detail,
+                "available": (status.available or storage_recovery_available) and not outside_window,
                 **schedule_fields,
             }
         )
