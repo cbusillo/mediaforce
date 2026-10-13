@@ -70,7 +70,13 @@ Mediaforce purges cached review clips, temporary calibration manifests, and
 `/Volumes/media/transcode/_calibration/` scratch outputs after `14` days.
 While the web UI or CLI is in active use, it also retries that cleanup sweep at
 most once per hour so stale files get another chance to disappear if an earlier
-pass raced or only cleaned up partially.
+pass raced or only cleaned up partially. The same sweep keeps only the newest
+two folders under the support directory's `deployments/` (each holds a full
+database copy for rollback) and removes `operations/` evidence folders whose
+files are older than 30 days. Age comes from the files inside a folder, not
+the folder's own modified time, which Finder changes just by opening it. Set
+`kept_deploy_backups` and `operation_evidence_retention_days` under
+`[state.cleanup]` to change these.
 
 Completed calibration jobs also clean up their own temporary manifest and
 scratch encode directory right away after compare clips are generated, so only
