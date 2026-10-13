@@ -129,6 +129,10 @@ def _production_approval_contract(calibration: ActionPayload) -> ActionPayload |
         request = intent.request_payload()
     if not sample_job_id or not policy_hash or not request:
         return None
+    # A show's sound choice is part of what the owner asked for, so a new choice counts as a changed request.
+    audio_preset = str(object_dict(object_dict(calibration.get("policy")).get("audio")).get("preset") or "")
+    if audio_preset:
+        request = {**request, "audio_preset": audio_preset}
     return {
         "schema_version": _PRODUCTION_APPROVAL_CONTRACT_SCHEMA_VERSION,
         "sample_job_id": sample_job_id,

@@ -3212,7 +3212,12 @@ def _default_sample_host_key_from_statuses(config: MediaforceConfig, statuses: l
 
 
 def _sample_host_window_open(config: MediaforceConfig, status: HostStatus) -> bool:
-    host_payload = {**_host_config_for_key(config, status.key), **asdict(status)}
+    return _sample_job_host_window_open(config, asdict(status))
+
+
+def _sample_job_host_window_open(config: MediaforceConfig, host: dict[str, Any]) -> bool:
+    host_key = str(host.get("key") or host.get("host") or host.get("label") or "").strip()
+    host_payload = {**_host_config_for_key(config, host_key), **host}
     policy = _schedule_profile_policy_for_host(config, host_payload)
     return _evaluate_encode_schedule_transition(policy, host_payload=host_payload).is_open
 
@@ -4030,6 +4035,7 @@ def _calibration_queue_runtime_deps() -> CalibrationQueueRuntimeDeps:
         sample_calibration_concurrency=SAMPLE_CALIBRATION_CONCURRENCY,
         full_calibration_concurrency=FULL_CALIBRATION_CONCURRENCY,
         calibration_queue_poll_seconds=CALIBRATION_QUEUE_POLL_SECONDS,
+        host_window_open=_sample_job_host_window_open,
     )
 
 
