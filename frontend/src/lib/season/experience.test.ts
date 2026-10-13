@@ -1422,6 +1422,36 @@ describe('season experience translation', () => {
 		).toMatchObject({ key: 'ready_to_compare', label: 'Ready to review' });
 	});
 
+	it('offers a fresh sample for review while a finished file is blocked', () => {
+		const blocked = {
+			...workflowState('blocked'),
+			blockers: ["A finished file didn't pass its check."]
+		};
+		const reviewReady = {
+			browser_review_ready: true,
+			review_pairs: browserReadyReviewPairs()
+		};
+
+		expect(
+			detailSeasonState(
+				folder({
+					calibration: { ...reviewReady, draft_hash: 'draft-2', accepted_draft_hash: 'draft-1' },
+					workflow_state: blocked
+				}),
+				status
+			)
+		).toMatchObject({ key: 'ready_to_compare', label: 'Ready to review' });
+		expect(
+			detailSeasonState(
+				folder({
+					calibration: { ...reviewReady, draft_hash: 'draft-1', accepted_draft_hash: 'draft-1' },
+					workflow_state: blocked
+				}),
+				status
+			)
+		).toMatchObject({ key: 'needs_help', label: 'Needs attention' });
+	});
+
 	it('shows an interrupted season before an older approved test', () => {
 		expect(
 			detailSeasonState(

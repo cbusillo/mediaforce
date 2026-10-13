@@ -2194,7 +2194,15 @@ export function detailSeasonState(
 			recoveryKind: 'season'
 		};
 	}
-	if (workflow?.primary_lane === 'blocked') {
+	// A blocked file is remade only after a fresh sample is approved, so an
+	// unapproved sample ready for review comes first; the held file's question
+	// stays on screen below it.
+	const freshSampleAwaitsReview =
+		Boolean(draftHash) &&
+		draftHash !== acceptedHash &&
+		!isActiveJob(sampleJob) &&
+		reviewAvailability(folder).isBrowserReady;
+	if (workflow?.primary_lane === 'blocked' && !freshSampleAwaitsReview) {
 		return {
 			key: 'needs_help',
 			label: 'Needs attention',
