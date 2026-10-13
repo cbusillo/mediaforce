@@ -108,6 +108,7 @@ from mediaforce.encoding.audio_quality import check_sample_audio
 from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.quality import quality_toolchain_identity, run_sample_encode, select_quality_metric
 from mediaforce.remote import (
+    HostReadinessError,
     HostStatus,
     collect_host_statuses,
     learn_controller_smb_mounts,
@@ -1587,7 +1588,7 @@ def create_app(
         sample_host_statuses = _cached_sample_calibration_host_statuses(config)
         sample_host_choices = _sample_host_options_from_statuses(config, sample_host_statuses)
         sample_host_key = _sample_host_key_from_choices(
-            _default_sample_host_key_from_statuses(sample_host_statuses),
+            _default_sample_host_key_from_statuses(config, sample_host_statuses),
             sample_host_choices,
         )
         return (
@@ -3196,11 +3197,34 @@ def _stop_encode_host_if_configured(config: MediaforceConfig, host_payload: dict
 
 
 def _default_sample_host_key(config: MediaforceConfig) -> str:
-    return default_sample_host_key(config, safe_collect_statuses=_safe_collect_host_statuses)
+    return default_sample_host_key(
+        config,
+        safe_collect_statuses=_safe_collect_host_statuses,
+        window_open=lambda status: _sample_host_window_open(config, status),
+    )
 
 
-def _default_sample_host_key_from_statuses(statuses: list[HostStatus]) -> str:
-    return default_sample_host_key_from_statuses(statuses)
+def _default_sample_host_key_from_statuses(config: MediaforceConfig, statuses: list[HostStatus]) -> str:
+    return default_sample_host_key_from_statuses(
+        statuses,
+        window_open=lambda status: _sample_host_window_open(config, status),
+    )
+
+
+def _sample_host_window_open(config: MediaforceConfig, status: HostStatus) -> bool:
+    host_payload = {**_host_config_for_key(config, status.key), **asdict(status)}
+    policy = _schedule_profile_policy_for_host(config, host_payload)
+    return _evaluate_encode_schedule_transition(policy, host_payload=host_payload).is_open
+
+
+def _ensure_sample_host_ready(config: MediaforceConfig, host_payload: dict[str, Any] | None) -> HostStatus:
+    status = ensure_sample_host_ready(config, host_payload)
+    if not _sample_host_window_open(config, status):
+        raise HostReadinessError(
+            f"{status.label or status.key} is outside its work window. Make the sample again on a machine inside its window.",
+            failure_kind="host_unavailable",
+        )
+    return status
 
 
 def _sample_calibration_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
@@ -3267,6 +3291,11 @@ def _resolve_sample_host(config: MediaforceConfig, host_key: str) -> HostStatus:
     if requested_key in {"", "local"}:
         requested_key = _default_sample_host_key(config)
     if not requested_key:
+        if statuses:
+            raise HTTPException(
+                status_code=400,
+                detail="No sample machine is inside its work window right now. Try again when one opens.",
+            )
         raise HTTPException(
             status_code=400,
             detail="Configure at least one sample-calibration host in Settings before running sampled calibration.",
@@ -3276,6 +3305,11 @@ def _resolve_sample_host(config: MediaforceConfig, host_key: str) -> HostStatus:
         raise HTTPException(status_code=400, detail="Unknown sampled calibration host")
     if not host.available and not remote_mount_recovery_supported(config, _host_config_for_key(config, host.key), host):
         raise HTTPException(status_code=400, detail=host.message)
+    if not _sample_host_window_open(config, host):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{host.label or host.key} is outside its work window. Choose a machine inside its window.",
+        )
     return host
 
 
@@ -4031,7 +4065,7 @@ def _encode_queue_runtime_deps() -> EncodeQueueRuntimeDeps:
 def _calibration_run_deps() -> CalibrationRunDeps:
     return CalibrationRunDeps(
         now_iso=_now_iso,
-        ensure_sample_host_ready=ensure_sample_host_ready,
+        ensure_sample_host_ready=_ensure_sample_host_ready,
         load_job_state=_load_job_state,
         sample_item=_sample_item,
         save_job_state=_save_job_state,
