@@ -29,7 +29,11 @@ from mediaforce.tuning.content_intent_observations import (
 )
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.tuning.stream_budget import StreamBudgetProjectionBlocker, stream_budget_projection_blocker
-from mediaforce.web.runtime.folder_tuning_advice import operator_preserves_source_resolution, operator_request_from_intent
+from mediaforce.web.runtime.folder_tuning_advice import (
+    apply_policy_fragment,
+    operator_preserves_source_resolution,
+    operator_request_from_intent,
+)
 from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker
 from mediaforce.web.runtime.folder_tuning_helpers import (
     allows_measured_size_quality_tradeoff,
@@ -632,6 +636,16 @@ def _keep_first_size_budget_sample(
     return payload
 
 
+def _tuning_base_policy(resolved_policy: dict[str, Any], calibration: dict[str, Any] | None) -> dict[str, Any]:
+    """Layer the last sample's policy over the folder's live settings.
+
+    The live sound choice wins over whatever audio the last sample used.
+    """
+    if not calibration:
+        return resolved_policy
+    return apply_policy_fragment(resolved_policy, object_dict(calibration.get("policy")))
+
+
 def folder_ai_tune_preview_action(
         config: MediaforceConfig,
         deps: FolderAiTuneDeps,
@@ -671,11 +685,7 @@ def folder_ai_tune_preview_action(
             return cadence_blocker
         calibration = deps.load_calibration_state(config, normalized_prefix)
         resolved_policy = object_dict(sample_item.get("resolved_policy"))
-        current_policy = (
-            merge_policy_fragments(resolved_policy, object_dict(calibration.get("policy")))
-            if calibration
-            else resolved_policy
-        )
+        current_policy = _tuning_base_policy(resolved_policy, calibration)
     if object_dict(operator_intent):
         try:
             operator_request = operator_request_from_intent(
@@ -806,11 +816,7 @@ def folder_ai_tune_confirm_action(
             return {"ok": False, "message": "The folder needs a first sample before the bench can tune a retry."}
 
         resolved_policy = object_dict(sample_item.get("resolved_policy"))
-        policy_source = (
-            merge_policy_fragments(resolved_policy, object_dict(calibration.get("policy")))
-            if calibration
-            else resolved_policy
-        )
+        policy_source = _tuning_base_policy(resolved_policy, calibration)
         final_policy = deps.apply_policy_fragment(policy_source, applied_policy)
         compression_intent_drift = proposal_compression_intent_drift(
             config,
@@ -1312,11 +1318,7 @@ def _tuned_preview_action(
     if not trimmed_note:
         raise HTTPException(status_code=400, detail="Add a note so the tuner knows what to change before running another sample.")
     resolved_policy = object_dict(sample_item.get("resolved_policy"))
-    current_policy = (
-        merge_policy_fragments(resolved_policy, object_dict(calibration.get("policy")))
-        if calibration
-        else resolved_policy
-    )
+    current_policy = _tuning_base_policy(resolved_policy, calibration)
     quality_risk_feedback_state = _persist_quality_risk_feedback(
         config,
         deps,

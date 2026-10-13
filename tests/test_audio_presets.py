@@ -22,6 +22,7 @@ from mediaforce.encoding.streams import (
     resolve_stream_plan,
 )
 from mediaforce.tuning.quality_risk import compile_allow_listed_transform_fragment
+from mediaforce.web.runtime.folder_ai_tuning import _tuning_base_policy
 from mediaforce.web.runtime.folder_tuning_advice import apply_policy_fragment
 from mediaforce.web.runtime.audio_preset_runtime import dismiss_suggestion, show_audio_preset_payload
 from mediaforce.web.settings_runtime import SettingsValidationError, normalize_submitted_library_policy
@@ -269,6 +270,16 @@ def test_bench_tuning_keeps_the_sound_choice() -> None:
     assert tuned["audio"]["surround_5_1_opus_bitrate"] == "192k"
     assert tuned["video"]["crf"] == 57
     assert unchosen["audio"]["stereo_opus_bitrate"] == "96k"
+
+
+def test_tuning_starts_from_the_live_sound_choice_not_the_last_sample() -> None:
+    speech_audio = {**BASE_AUDIO, **audio_preset_values(SPEECH_STEREO, BASE_AUDIO)[0]}
+    last_sample = {"policy": {"audio": {**BASE_AUDIO, "preset": SPEECH_STEREO}, "video": {"crf": 57}}}
+
+    base = _tuning_base_policy({"audio": speech_audio, "video": {"crf": 50}}, last_sample)
+
+    assert base["audio"] == speech_audio
+    assert base["video"]["crf"] == 57
 
 
 def test_library_setting_accepts_only_known_sound_choices() -> None:
