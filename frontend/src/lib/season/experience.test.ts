@@ -1625,6 +1625,21 @@ describe('season experience translation', () => {
 		).toMatchObject({ key: expectedKey });
 	});
 
+	it('shows file check blockers ahead of sample setup without offering an encode retry', () => {
+		const workflow = {
+			...workflowState('blocked'),
+			blockers: ['A failed file check', 'A missing finished copy']
+		};
+		const detail = detailSeasonState(folder({ workflow_state: workflow }), status);
+		const library = librarySeasonState({ ...card, workflow_state: workflow }, dashboard);
+		expect(detail).toMatchObject({
+			key: 'needs_help',
+			recoveryKind: 'files',
+			detail: workflow.blockers.join(' ')
+		});
+		expect(library).toEqual(detail);
+	});
+
 	it('keeps season finishing blocked until the complete integrity inventory is loaded', () => {
 		expect(
 			detailSeasonState(folder({ workflow_state: workflowState('promote') }), status)

@@ -105,6 +105,18 @@ policy. All override paths bypass only current-season and acquisition timing
 holds. Missing sources, active processing, staged-output consistency,
 validation, promotion, and other workflow safety rules still apply.
 
+Season, show, and Library workflow summaries read the recorded staged-file
+check outcome as well as the library status. A failed check or a file held
+for being much smaller than predicted needs attention, even if the library
+row still says encoded or the season has since become protected. Other files
+remain ready for their own checks or publication. Missing, actively encoding,
+and already published files retain those states ahead of an older check.
+The recorded-outcome reader lives in `mediaforce/library/staged_validation.py`
+and is shared by these summaries, Episodes, and staged integrity.
+The season recovery view lists those file blockers instead of offering a
+generic encode retry. It keeps the file inventory and supported checking or
+replacement of ready sibling files reachable.
+
 ## Manifest provenance
 
 Every selected manifest item carries a versioned `selection_provenance` payload
