@@ -1,24 +1,40 @@
-# System-owned releases
+# Releases
 
-Mediaforce release work is tracked in [#730](https://github.com/cbusillo/mediaforce/issues/730).
-Release acceptance and controller behavior belong to
-[Launchplane's release review](https://github.com/cbusillo/launchplane/blob/main/docs/release-review.md),
-under the Director's [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md).
-Mediaforce does not keep a second approval record or offer an agent deploy command.
+Agents deploy Mediaforce `main` to the controller themselves with a staged,
+gated deploy script. The Director decided this on 2026-10-13
+([direction#82](https://github.com/cbusillo/direction/issues/82)). Launchplane
+does not manage Mediaforce. A system-owned release flow
+([#730](https://github.com/cbusillo/mediaforce/issues/730),
+[Launchplane#3184](https://github.com/cbusillo/launchplane/issues/3184)) is a
+possible future replacement, not a gate on deploys today.
 
-## Supported path and remaining integration
+## Staged deploy
 
-Launchplane's release worker separates the candidate and recorded acceptance
-from the system's backup, promotion, post-checks and recovery. Its generic-web
-driver targets managed web deployments; it cannot replace a macOS login item's
-checkout. The Odoo release panel is likewise not a Mediaforce request path.
-Neither an issue comment nor a successful dry run is release acceptance.
+Each deploy gets its own folder under
+`~/Library/Application Support/mediaforce/deployments/<branch>-<sha>-<date>/`,
+holding a `deploy.sh` copied from the previous one with its target and comments
+changed. The script:
 
-[Launchplane#3184](https://github.com/cbusillo/launchplane/issues/3184) owns the
-missing macOS adapter and release-request integration. Until that exists and is
-qualified, an agent cannot request a working Mediaforce release through the
-supported controller. This source preparation does not activate a worker,
-install a login item, enable releases, take a live backup, or deploy a runtime.
+1. refuses to run unless the encode queue is paused and no encode, sample or
+   full run is running (pause with `POST /api/encode-queue/pause`; queued work
+   survives the restart);
+2. refuses a dirty runtime checkout;
+3. stops the login item and waits for port 8777 to close;
+4. takes an online SQLite backup to `before.sqlite` and checks it with
+   `pragma quick_check`;
+5. checks out the target commit detached, runs
+   `uv sync --active --locked --inexact --no-install-project --no-dev`, and
+   replaces `frontend/build` with a prebuilt `frontend-build/` staged beside the
+   script (built from a clean worktree at the same commit), keeping the old one
+   as `frontend-build.before/`;
+6. starts the login item (retrying once), waits for the API, and resumes the
+   queue.
+
+Database migrations run when the service starts. The script's header names the
+rollback: the previous commit and, when a migration ran, restoring
+`before.sqlite` with the service stopped. The hourly cleanup keeps the newest
+`state.cleanup.kept_deploy_backups` deploy folders (two by default), so the
+running build and its rollback stay on disk.
 
 ## Work evidence
 
