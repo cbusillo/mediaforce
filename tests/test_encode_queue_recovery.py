@@ -19946,6 +19946,44 @@ raise SystemExit(0)
         self.assertEqual(pending_status, "pending_review")
         self.assertEqual(replacement_status, "running")
 
+    def test_a_sample_waits_while_its_machine_is_outside_its_work_window(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, prefix, host_key, created_at in (
+                ("closed-host-sample", "tv/show/season-1", "cbusillo@localhost", "2026-08-22T00:00:00+00:00"),
+                ("open-host-sample", "tv/show/season-2", "cbusillo@m1-mini", "2026-08-22T01:00:00+00:00"),
+            ):
+                save_calibration_job(
+                    connection,
+                    {
+                        "job_id": job_id,
+                        "prefix": prefix,
+                        "status": "queued",
+                        "lane": "sample",
+                        "action": "ai_tune",
+                        "host": {"key": host_key},
+                        "policy": {},
+                        "sample_item": {},
+                        "created_at": created_at,
+                        "finished_at": None,
+                        "updated_at": created_at,
+                    },
+                )
+
+        deps = web_app._calibration_queue_runtime_deps()
+        deps.host_window_open = lambda _config, host: host.get("key") != "cbusillo@localhost"
+        with patch("mediaforce.web.runtime.job_runtime.load_config", return_value=self.config), patch(
+            "mediaforce.web.runtime.job_runtime.dispatch_calibration_job"
+        ) as dispatch:
+            job_runtime.process_calibration_queue_once(config_path=self.config.paths.config_path, deps=deps)
+
+        dispatch.assert_called_once()
+        self.assertEqual(dispatch.call_args.args[1]["job_id"], "open-host-sample")
+        with open_db(self.config.paths.db_path) as connection:
+            waiting_status = connection.scalar(
+                select(calibration_jobs.c.status).where(calibration_jobs.c.job_id == "closed-host-sample")
+            )
+        self.assertEqual(waiting_status, "queued")
+
     def test_encode_queue_worker_loop_logs_pass_failures_and_keeps_running(self) -> None:
         deps = Mock()
         deps.logger = Mock()

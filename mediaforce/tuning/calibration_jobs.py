@@ -13,7 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from mediaforce.core.db import DBClient
 from mediaforce.core.db import DBRow
 from mediaforce.core.db_tables import calibration_jobs
-from mediaforce.core.type_defs import JSONValue
+from mediaforce.core.type_defs import JSONValue, object_dict
 from mediaforce.library.media_scopes import resolve_media_scope, scope_prefix_overlap_filter
 
 T = TypeVar("T")
@@ -209,6 +209,7 @@ def claim_next_queued_calibration_job(
         owner_pid: int,
         started_at: str,
         excluded_prefixes: tuple[str, ...] = (),
+        excluded_job_ids: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     candidate_query = (
         select(calibration_jobs.c.job_id)
@@ -219,6 +220,8 @@ def claim_next_queued_calibration_job(
     )
     if excluded_prefixes:
         candidate_query = candidate_query.where(calibration_jobs.c.prefix.not_in(excluded_prefixes))
+    if excluded_job_ids:
+        candidate_query = candidate_query.where(calibration_jobs.c.job_id.not_in(excluded_job_ids))
     candidate_job_id = candidate_query.scalar_subquery()
     row = connection.execute(
         update(calibration_jobs)
@@ -235,6 +238,15 @@ def claim_next_queued_calibration_job(
         .returning(*calibration_jobs.c, _rowid_column())
     ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
+
+
+def queued_job_hosts(connection: DBClient, *, lane: str) -> list[tuple[str, dict[str, Any]]]:
+    rows = connection.execute(
+        select(calibration_jobs.c.job_id, calibration_jobs.c.host_json)
+        .where(calibration_jobs.c.lane == lane)
+        .where(calibration_jobs.c.status == "queued")
+    ).mappings().fetchall()
+    return [(str(row["job_id"]), object_dict(_loads_optional(row["host_json"], default={}))) for row in rows]
 
 
 def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict[str, Any]:

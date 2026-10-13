@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy import update
 
 from mediaforce.tuning.calibration_jobs import RUNNING_JOB_STATUSES, claim_next_queued_calibration_job, \
+    queued_job_hosts, \
     load_active_overlapping_job, \
     load_latest_failed_sample_job, \
     load_latest_failed_target_size_sample_job, load_latest_job, load_latest_overlapping_job, \
@@ -83,6 +84,7 @@ class CalibrationQueueRuntimeDeps:
     sample_calibration_concurrency: int
     full_calibration_concurrency: int
     calibration_queue_poll_seconds: float
+    host_window_open: Callable[[MediaforceConfig, dict[str, Any]], bool] = lambda _config, _host: True
 
 
 def calibration_job_public_payload(
@@ -852,6 +854,12 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
                 running_by_lane[lane] += 1
 
         for lane, capacity in capacities.items():
+            # A sample waits in the queue while its machine is outside its work window.
+            outside_window = tuple(
+                job_id
+                for job_id, host in queued_job_hosts(connection, lane=lane)
+                if host and not deps.host_window_open(config, host)
+            )
             while running_by_lane[lane] < capacity:
                 started_at = deps.now_iso()
                 payload = claim_next_queued_calibration_job(
@@ -860,6 +868,7 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
                     owner_pid=os.getpid(),
                     started_at=started_at,
                     excluded_prefixes=tuple(sorted(active_prefixes)),
+                    excluded_job_ids=outside_window,
                 )
                 if payload is None:
                     break
