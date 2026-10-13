@@ -23,6 +23,10 @@ from mediaforce.remote import run_remote_command
 SECONDS_PER_DAY = 86400
 SECONDS_PER_MINUTE = 60
 DEFAULT_ORPHAN_TEMP_RETENTION_MINUTES = 6 * 60
+DEFAULT_KEPT_DEPLOY_BACKUPS = 2
+DEFAULT_OPERATION_EVIDENCE_RETENTION_DAYS = 30
+# Finder writes these when someone opens a folder; they say nothing about when the work happened.
+IGNORED_FOR_AGE = frozenset({".DS_Store"})
 REMOTE_PROCESS_PROBE_TIMEOUT_SECONDS = 4
 ACTIVE_ARTIFACT_STATUSES = {
     "queued",
@@ -78,6 +82,12 @@ def purge_transient_artifacts(config: MediaforceConfig, *, force: bool = False) 
     _prune_matching_files(config.paths.web_state_dir, "calibration-*.json", cutoff)
     _prune_matching_files(config.paths.web_state_dir, "*.job.json", cutoff)
     _prune_run_manifests(config, cutoff)
+    support_dir = config.paths.db_path.parent
+    _prune_deploy_backups(support_dir / "deployments", keep=_kept_deploy_backups(config))
+    _prune_operation_evidence(
+        support_dir / "operations",
+        now - _operation_evidence_retention_days(config) * SECONDS_PER_DAY,
+    )
     _write_cleanup_stamp(config)
     return True
 
@@ -86,6 +96,17 @@ def _retention_days(config: MediaforceConfig) -> int:
     cleanup = config.raw.get("state", {}).get("cleanup", {})
     value = cleanup.get("transient_artifact_retention_days", 14)
     return max(int(value), 0)
+
+
+def _kept_deploy_backups(config: MediaforceConfig) -> int:
+    cleanup = config.raw.get("state", {}).get("cleanup", {})
+    return max(int(cleanup.get("kept_deploy_backups", DEFAULT_KEPT_DEPLOY_BACKUPS)), 1)
+
+
+def _operation_evidence_retention_days(config: MediaforceConfig) -> int:
+    cleanup = config.raw.get("state", {}).get("cleanup", {})
+    value = cleanup.get("operation_evidence_retention_days", DEFAULT_OPERATION_EVIDENCE_RETENTION_DAYS)
+    return max(int(value), 1)
 
 
 def _cleanup_interval_seconds(config: MediaforceConfig) -> int:
@@ -195,6 +216,38 @@ def _prune_matching_directories(
         ):
             continue
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _prune_deploy_backups(root: Path, *, keep: int) -> None:
+    """Keep the newest deploy folders; only the latest database copy is a useful rollback."""
+    folders = sorted(_child_directories(root), key=_content_mtime, reverse=True)
+    for folder in folders[keep:]:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _prune_operation_evidence(root: Path, cutoff: float) -> None:
+    for folder in _child_directories(root):
+        if _content_mtime(folder) < cutoff:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def _child_directories(root: Path) -> list[Path]:
+    try:
+        return [child for child in root.iterdir() if child.is_dir() and not child.is_symlink()]
+    except OSError:
+        return []
+
+
+def _content_mtime(folder: Path) -> float:
+    """When the work in a folder last changed, judged from its files rather than the folder itself."""
+    newest = 0.0
+    try:
+        files = [path for path in folder.rglob("*") if path.is_file() and path.name not in IGNORED_FOR_AGE]
+    except OSError:
+        return time.time()
+    for path in files:
+        newest = max(newest, _mtime(path))
+    return newest or _mtime(folder)
 
 
 def _prune_run_manifests(config: MediaforceConfig, cutoff: float) -> None:

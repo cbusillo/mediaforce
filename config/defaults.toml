@@ -12,6 +12,9 @@ runtime_reservation_dir = "~/Library/Application Support/mediaforce-runtime-rese
 transient_artifact_retention_days = 14
 orphan_temp_retention_minutes = 360
 periodic_sweep_minutes = 60
+# Deploy folders kept under the support directory; each holds a full database copy for rollback.
+kept_deploy_backups = 2
+operation_evidence_retention_days = 30
 
 [media]
 staging_root = "/Volumes/media/transcode"
