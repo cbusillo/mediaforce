@@ -14,6 +14,7 @@ from mediaforce.advising.policy import (
 )
 from mediaforce.advising.routing import AdvisorRouting, advisor_routing_from_config
 from mediaforce.encoding.audio_quality import sample_sound_check_summary
+from mediaforce.core.audio_presets import owner_sound_keys
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict, object_list
@@ -872,7 +873,10 @@ def _resolved_size_goal_label(size_goal: SizeGoalIntent, target_size_bytes: int)
 
 def apply_policy_fragment(policy: dict[str, Any], fragment: dict[str, Any] | None) -> dict[str, Any]:
     updated_policy = json.loads(json.dumps(policy))
+    owner_audio_keys = owner_sound_keys(object_dict(updated_policy.get("audio")))
     for section, values in merge_policy_fragments(fragment).items():
+        if section == "audio":
+            values = {key: value for key, value in values.items() if key not in owner_audio_keys}
         updated_policy.setdefault(section, {}).update(values)
     return updated_policy
 
