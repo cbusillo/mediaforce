@@ -3482,7 +3482,11 @@
 						<select bind:value={selectedHostKey}>
 							{#each hostOptions as host (host.key)}
 								<option value={host.key} disabled={host.available === false}>
-									{host.label || host.key}{host.available === false ? ' — unavailable' : ''}
+									{host.label || host.key}{host.schedule_open === false
+										? ' — outside its work window'
+										: host.available === false
+											? ' — unavailable'
+											: ''}
 								</option>
 							{/each}
 						</select>
