@@ -771,10 +771,11 @@ def operator_request_from_intent(
         "measured_size_followup": False,
         "reasoning_note": "The operator selected a typed size and resolution intent in the guided workflow.",
     }
-    planned_policy = merge_policy_fragments(
-        current_policy,
+    intent_fragment = _without_sound_choice_changes(
         intent.policy_fragment(item_runtime_seconds=duration_seconds),
+        current_policy,
     )
+    planned_policy = merge_policy_fragments(current_policy, intent_fragment)
     size_request = size_budget_request(
         note,
         sample_item,
@@ -839,7 +840,7 @@ def operator_request_from_intent(
         "evidence_authority": "none",
         "size_budget_request": size_request,
         "scale_request": scale_request,
-        "applied_policy": intent.policy_fragment(item_runtime_seconds=duration_seconds),
+        "applied_policy": intent_fragment,
     }
     feedback_tags = [
         str(tag).strip()[:64]
@@ -855,6 +856,24 @@ def operator_request_from_intent(
     if evidence_authority in _EVIDENCE_AUTHORITY_VALUES:
         request["evidence_authority"] = evidence_authority
     return request
+
+
+def _without_sound_choice_changes(fragment: dict[str, Any], current_policy: dict[str, Any]) -> dict[str, Any]:
+    """Drop intent audio values that would change the folder's sound choice.
+
+    A saved intent can carry audio from an older sample; the sound choice wins.
+    """
+    current_audio = object_dict(current_policy.get("audio"))
+    owner_keys = owner_sound_keys(current_audio)
+    audio = {
+        key: value
+        for key, value in object_dict(fragment.get("audio")).items()
+        if key not in owner_keys or value == current_audio.get(key)
+    }
+    trimmed = {section: values for section, values in fragment.items() if section != "audio"}
+    if audio:
+        trimmed["audio"] = audio
+    return trimmed
 
 
 def _positive_float_value(value: Any) -> float | None:
