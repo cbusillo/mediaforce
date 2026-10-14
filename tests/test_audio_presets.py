@@ -24,7 +24,7 @@ from mediaforce.encoding.streams import (
 )
 from mediaforce.tuning.quality_risk import compile_allow_listed_transform_fragment
 from mediaforce.web.runtime.folder_ai_tuning import _tuning_base_policy
-from mediaforce.web.runtime.folder_tuning_advice import apply_policy_fragment
+from mediaforce.web.runtime.folder_tuning_advice import apply_policy_fragment, operator_request_from_intent
 from mediaforce.web.runtime.audio_preset_runtime import dismiss_suggestion, show_audio_preset_payload
 from mediaforce.web.settings_runtime import SettingsValidationError, normalize_submitted_library_policy
 
@@ -295,6 +295,30 @@ def test_the_bench_proposal_cannot_change_the_sound_choice() -> None:
     assert applied["audio"]["surround_5_1_opus_bitrate"] == "192k"
     assert all(applied["audio"].get(key, speech_audio[key]) == speech_audio[key] for key in speech_audio if key != "surround_5_1_opus_bitrate")
     assert unchosen["audio"] == {"stereo_opus_bitrate": "96k"}
+
+
+def test_a_saved_intent_with_older_sound_keeps_the_sound_choice() -> None:
+    speech_audio = {**BASE_AUDIO, **audio_preset_values(SPEECH_STEREO, BASE_AUDIO)[0]}
+    stale_audio = {key: value for key, value in BASE_AUDIO.items()}
+    intent = {
+        "schema_version": 2,
+        "size_goal": {"mode": "normalized", "value_mb": 220.0, "reference_runtime_minutes": 45.0},
+        "resolution": {"mode": "source", "max_height": None},
+        "compression_intent": {"schema_version": 1, "level": "perceptual_floor", "confirmed": True},
+        "streams": {"audio": stale_audio},
+    }
+    sample_item = {"duration_seconds": 2600.0, "source_size_bytes": 4_000_000_000, "audio_summary": [], "subtitle_summary": []}
+
+    request = operator_request_from_intent(
+        intent,
+        note="Make a fresh sample.",
+        sample_item=sample_item,
+        current_policy={"audio": speech_audio, "video": {}},
+    )
+
+    applied_audio = request["applied_policy"].get("audio", {})
+    assert all(applied_audio.get(key, speech_audio[key]) == speech_audio[key] for key in speech_audio)
+    assert applied_audio["keep_languages"] == ["eng"]
 
 
 def test_library_setting_accepts_only_known_sound_choices() -> None:
