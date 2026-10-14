@@ -24760,6 +24760,23 @@ raise SystemExit(0)
         self.assertNotIn(sibling_id, promoted_item_ids)
 
     @patch("mediaforce.hosts.config.host_targets_current_machine", return_value=False)
+    def test_saved_ssh_output_uses_a_configured_host_that_leaves_mode_unset(self, _local: Mock) -> None:
+        self.config.raw["remote_hosts"] = [{"host": "worker@example", "label": "Worker", "media_access": "mounted"}]
+        row = {"library_item_id": 1, "staging_path": "/Volumes/media/transcode/tv/show/a.mkv",
+               "encode_host_key": "worker@example", "encode_host_mode": "ssh", "encode_media_access": "mounted",
+               "saved_host_json": json.dumps({"host": "worker@example"})}
+        target = encode_runtime.staged_output_cleanup_target(self.config, row)
+        assert target is not None
+        host = target[1] or {}
+        self.assertEqual(host.get("mode"), "ssh")
+        self.assertEqual(host.get("host"), "worker@example")
+        self.assertNotIn("remote_cleanup_unavailable", host)
+        self.config.raw["remote_hosts"] = [{"host": "worker@example", "mode": "local", "media_access": "mounted"}]
+        target = encode_runtime.staged_output_cleanup_target(self.config, row)
+        assert target is not None
+        self.assertTrue((target[1] or {}).get("remote_cleanup_unavailable"))
+
+    @patch("mediaforce.hosts.config.host_targets_current_machine", return_value=False)
     def test_stale_requeue_preserves_removed_remote_host_in_exact_scope(self, _local: Mock) -> None:
         source = self._create_source_file("removed-host.mkv")
         stage = self._staging_path("removed-host.mkv")

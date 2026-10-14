@@ -595,6 +595,24 @@ class LibraryLifecycleTests(unittest.TestCase):
             with self.subTest(validation=validation):
                 self.assertEqual(derive_item_workflow_state({**row, "validation_json": validation}).state, "ready_to_validate")
 
+    def test_removed_remake_copy_returns_the_file_to_the_encode_lane(self) -> None:
+        validation = {"passed": False, "remake_intent": {"prefix": "tv/Show", "mode": "older_seasons", "state": "removed"}}
+        row = {
+            "item_id": 1,
+            "rel_path": "tv/Show/Season 1/Episode 01.mkv",
+            "status": "planned",
+            "staged_library_item_id": 1,
+            "staging_path": "staging/episode.mkv",
+            "promoted_at": None,
+            "validation_json": json.dumps(validation),
+        }
+        removed = derive_item_workflow_state(row)
+        self.assertEqual((removed.state, removed.lane), ("encode_candidate", "encode"))
+        self.assertFalse(removed.has_staged_output)
+        requested = derive_item_workflow_state({**row, "validation_json": json.dumps(
+            {**validation, "remake_intent": {**validation["remake_intent"], "state": "requested"}})})
+        self.assertEqual(requested.lane, "blocked")
+
     def test_folder_cards_keep_held_candidates_without_estimating_savings(self) -> None:
         config = self._config()
         with open_db(config.paths.db_path) as connection:
