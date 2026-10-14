@@ -14,6 +14,7 @@ from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, encode_ru
     unfinished_breakdown_groups, unfinished_breakdown_summary
 from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, normalize_scope_prefix, \
     path_matches_scope, resolve_media_scope, resolve_media_scopes, scope_rel_path_filter, scopes_overlap
+from mediaforce.library.remake_intents import remake_intent
 from mediaforce.library.staged_validation import staged_validation_outcome
 
 WorkflowItemState = Literal[
@@ -242,7 +243,9 @@ def derive_item_workflow_state(
         encode_blocked: bool = False,
 ) -> ItemWorkflowState:
     status = str(row["status"] or "idle")
-    has_staged_output = row["staged_library_item_id"] is not None and row["staging_path"] is not None
+    # A remake that already removed its finished copy waits to be queued, not on that copy's old check.
+    has_staged_output = (row["staged_library_item_id"] is not None and row["staging_path"] is not None
+                         and remake_intent(row).get("state") != "removed")
     promoted_at = row["promoted_at"]
     validation = staged_validation_outcome(row.get("validation_json")) if has_staged_output else None
     state: WorkflowItemState

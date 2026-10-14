@@ -27,6 +27,7 @@ from fastapi import HTTPException
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.runtime.scratch_reservations import calibration_scratch_reservations
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
+from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
 from mediaforce.core.db import DBClient, is_database_busy_failure, open_db
 from mediaforce.core.db_tables import encode_jobs
@@ -839,15 +840,15 @@ def staged_output_cleanup_target(
     saved_mode = str(row.get("encode_host_mode") or saved_host.get("mode") or "").strip()
     saved_access = str(row.get("encode_media_access") or saved_host.get("media_access") or "").strip()
     if saved_mode == "ssh":
-        compatible = bool(host) and execution_mode_for_host(host) == "ssh"
+        # Configured hosts leave `mode` unset; a remote host entry means SSH unless it targets this machine.
+        compatible = bool(host) and configured_remote_host_execution_mode(host) == "ssh"
         saved_endpoint = str(saved_host.get("host") or "").strip()
         if saved_endpoint and str(host.get("host") or "") != saved_endpoint:
             compatible = False
         # A label reused for another SSH endpoint does not identify the saved computer.
         if not saved_endpoint and host_key and str(host.get("host") or "") != host_key:
             compatible = False
-        if not compatible:
-            host = {"mode": "ssh", "remote_cleanup_unavailable": True}
+        host = {**host, "mode": "ssh"} if compatible else {"mode": "ssh", "remote_cleanup_unavailable": True}
         host = {**host, "media_access": saved_access or "mounted"}
     elif saved_mode:
         host = {"mode": saved_mode, "media_access": saved_access or "mounted"}

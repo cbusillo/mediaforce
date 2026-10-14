@@ -18,7 +18,7 @@ def stored_validation(row: Any) -> dict[str, Any]:
     if row is None:
         return {}
     try:
-        return object_dict(json.loads(str(row["validation_json"] or "{}")))
+        return object_dict(json.loads(str(row.get("validation_json") or "{}")))
     except json.JSONDecodeError:
         return {}
 
