@@ -188,3 +188,26 @@ def test_watcher_is_gone_before_its_waiting_child_is_signalled() -> None:
         end_remote_output_writers({"host": "fixture"}, output, run_command=runner)
     assert not unsafe_wakeup
     assert 20 in processes
+
+
+@pytest.mark.parametrize("remote_deletes", [False, True])
+def test_mounted_remote_removal_counts_only_when_the_file_is_gone(tmp_path: Path, remote_deletes: bool) -> None:
+    output = tmp_path / "transcode" / "episode.mkv"
+    output.parent.mkdir()
+    output.write_bytes(b"old copy")
+    host = {"mode": "ssh", "host": "encode-remote", "media_access": "mounted"}
+
+    def remote_rm(_host: dict[str, object], _command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        # A share that is not mounted on the encode computer still lets `rm -f` exit 0.
+        if remote_deletes:
+            output.unlink()
+        return _result("")
+
+    with (
+        patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers"),
+        patch("mediaforce.web.runtime.encode_runtime.run_remote_command", side_effect=remote_rm),
+    ):
+        removed = encode_runtime.remove_stale_staging_path(output, host=host)
+
+    assert removed is remote_deletes
+    assert output.exists() is not remote_deletes

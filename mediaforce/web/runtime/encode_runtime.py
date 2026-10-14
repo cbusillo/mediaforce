@@ -907,7 +907,23 @@ def _remove_stale_staging_path(
             detail="The earlier remote host configuration is unavailable; restore it before retrying cleanup.",
         )
     if remote_mounted_host:
-        return _remove_remote_stale_staging_path(path, host_payload, ownership_check=ownership_check)
+        result = _remove_remote_stale_staging_path(path, host_payload, ownership_check=ownership_check)
+        if result.outcome is not _StagingPathCleanupOutcome.CLEANED:
+            return result
+        # `rm -f` also succeeds when the share is not mounted there; the controller sees the same path.
+        try:
+            still_present = path.exists()
+        except OSError as exc:
+            return _StagingPathCleanupResult(
+                _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
+                detail=f"{path}: storage did not answer ({exc})",
+            )
+        if still_present:
+            return _StagingPathCleanupResult(
+                _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
+                detail=f"{path}: the encode computer reported it removed, but it is still on the share",
+            )
+        return result
     try:
         if path.exists():
             result = _remove_path(path)
