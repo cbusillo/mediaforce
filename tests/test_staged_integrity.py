@@ -1,6 +1,7 @@
 import hashlib
 import json
 import tempfile
+import shlex
 import subprocess
 import unittest
 from collections.abc import Collection
@@ -343,7 +344,13 @@ class StagedIntegrityTests(unittest.TestCase):
         self.config.raw["remote_hosts"] = [{"host": "worker@example", "mode": "ssh", "media_access": "stream",
                                             "staging_root": str(self.root / "changed-root")}]
         from mediaforce.web.runtime import encode_runtime
-        cleanup = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+
+        def remote_rm(_host: dict[str, Any], command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            # The mounted share is the same file on the encode computer.
+            Path(shlex.split(command[-1])[-1]).unlink(missing_ok=True)
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        cleanup = Mock(side_effect=remote_rm)
         with patch.object(encode_runtime, "end_remote_output_writers"), patch.object(
                 encode_runtime, "run_remote_command", cleanup):
             result = decide_size_held_file(
@@ -357,9 +364,8 @@ class StagedIntegrityTests(unittest.TestCase):
             self.assertEqual(call.args[0]["media_access"], "mounted")
             self.assertIn(str(stage.parent), call.args[1][-1])
             self.assertNotIn("changed-root", call.args[1][-1])
-        # The fake SSH command must never remove a controller-visible alias.
-        self.assertEqual(stage.read_bytes(), b"compressed")
-        self.assertEqual(partial.read_bytes(), b"partial")
+        self.assertFalse(stage.exists())
+        self.assertFalse(partial.exists())
 
 
     @patch("mediaforce.hosts.config.host_targets_current_machine", return_value=False)

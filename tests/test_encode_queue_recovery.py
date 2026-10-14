@@ -3549,9 +3549,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             save_encode_job(connection, still_waiting)
 
         cleanup_result = subprocess.CompletedProcess(["ssh", "remote-a"], 0, "1 0 S Fri Oct 9 14:00:00 2026 sshd\n", "")
+
+        def remote_after_reboot(_host: dict[str, Any], command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            # The remote removal reaches the same mounted file the controller sees.
+            if command[:2] == ["sh", "-lc"] and command[2].startswith("rm -f "):
+                partial_path.unlink(missing_ok=True)
+            return cleanup_result
+
         with open_db(self.config.paths.db_path) as connection, patch(
             "mediaforce.web.runtime.encode_runtime.run_remote_command",
-            return_value=cleanup_result,
+            side_effect=remote_after_reboot,
         ):
             web_app._reconcile_encode_jobs(connection, self.config)
             recovered = load_encode_job(connection, "job-host-reboot")
