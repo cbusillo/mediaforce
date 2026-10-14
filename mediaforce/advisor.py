@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mediaforce.core.audio_presets import owner_sound_keys
 from mediaforce.core.type_defs import JSONObject, JSONValue, int_value, object_dict, object_list
 from mediaforce.advising.failures import ASSISTANT_FAILURE_CODES, ASSISTANT_INVALID_RESPONSE_CODES
 from mediaforce.advising.policy import compact_policy_payload as _compact_policy_payload_impl, \
@@ -810,6 +811,13 @@ def apply_seed_policy(
             base_section if isinstance(base_section, dict) else {},
             mode=mode,
         )
+        if section == "audio" and isinstance(base_section, dict):
+            owner_keys = owner_sound_keys(base_section)
+            updates = {
+                key: value
+                for key, value in updates.items()
+                if key not in owner_keys or value == base_section.get(key)
+            }
         if updates:
             applied_policy.setdefault(section, {}).update(updates)
             applied_fragment[section] = updates

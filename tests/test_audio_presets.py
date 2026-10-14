@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from mediaforce.advisor import apply_seed_policy
 from mediaforce.core.audio_presets import KEEP_SURROUND, SPEECH_STEREO, SPEECH_STEREO_BITRATE, audio_preset_values
 from mediaforce.core.config import (
     FOLDER_POLICY_OVERRIDES_KEY,
@@ -280,6 +281,20 @@ def test_tuning_starts_from_the_live_sound_choice_not_the_last_sample() -> None:
 
     assert base["audio"] == speech_audio
     assert base["video"]["crf"] == 57
+
+
+def test_the_bench_proposal_cannot_change_the_sound_choice() -> None:
+    speech_audio = {**BASE_AUDIO, **audio_preset_values(SPEECH_STEREO, BASE_AUDIO)[0]}
+    proposal = {"audio": {**BASE_AUDIO, "surround_5_1_opus_bitrate": "192k"}, "video": {"crf": 57}}
+
+    tuned, applied = apply_seed_policy({"audio": speech_audio, "video": {"crf": 50}}, proposal, mode="tune")
+    _, unchosen = apply_seed_policy({"audio": dict(BASE_AUDIO)}, {"audio": {"stereo_opus_bitrate": "96k"}}, mode="tune")
+
+    assert tuned["audio"]["stereo_opus_bitrate"] == SPEECH_STEREO_BITRATE
+    assert tuned["audio"]["copy_codecs"] == speech_audio["copy_codecs"]
+    assert applied["audio"]["surround_5_1_opus_bitrate"] == "192k"
+    assert all(applied["audio"].get(key, speech_audio[key]) == speech_audio[key] for key in speech_audio if key != "surround_5_1_opus_bitrate")
+    assert unchosen["audio"] == {"stereo_opus_bitrate": "96k"}
 
 
 def test_library_setting_accepts_only_known_sound_choices() -> None:
