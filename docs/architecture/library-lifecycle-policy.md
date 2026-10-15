@@ -52,7 +52,9 @@ Activity evidence is the newest of:
 
 The scanner records `content_version_changed_at` on first discovery, when a
 missing source returns, and when the source fingerprint changes. Promotion also
-records the source-version change. Replacement detection uses a bounded content
+records the source-version change, stamped with the promotion time; a change at
+exactly the file's own `promoted_at` is Mediaforce's compressed copy, not new
+content, so it does not refresh the guard. Replacement detection uses a bounded content
 signature sampled from the beginning, middle, and end of the file, so an mtime
 touch does not create a false 30-day hold and a same-size replacement is still
 detected.
