@@ -201,30 +201,45 @@ class LibraryLifecycleTests(unittest.TestCase):
 
     def test_publishing_a_compressed_copy_does_not_restart_the_acquisition_hold(self) -> None:
         config = self._config()
+        published_at = NOW - timedelta(days=3)
         with open_db(config.paths.db_path) as connection:
-            published = self._insert_item(connection, "tv/Show/Season 3/Episode 01.mkv", age_days=100)
-            waiting = self._insert_item(connection, "tv/Show/Season 3/Episode 02.mkv", age_days=100)
-            for item_id in (published, waiting):
-                self._insert_plex_metadata(connection, item_id, added_at=NOW - timedelta(days=900), season_index=3)
-            published_at = (NOW - timedelta(days=3)).isoformat(timespec="seconds")
-            connection.execute(
-                library_items.update()
-                .where(library_items.c.id == published)
-                .values(status="promoted", content_version_changed_at=published_at)
+            # Promotion can record the content change a few seconds before the publish itself.
+            waiting = self._insert_published_season(
+                connection, "tv/Show", published_at=published_at, changed_at=published_at - timedelta(seconds=9),
             )
-            connection.execute(staged_artifacts.insert().values(
-                library_item_id=published,
-                staging_path=str(self.root / "staging" / "published.mkv"),
-                promoted_at=published_at,
-                updated_at=published_at,
-            ))
-            self._insert_series_metadata(connection, "tv/Show", status="Ended", in_production=False)
+            replaced_later = self._insert_published_season(
+                connection, "tv/Other", published_at=published_at, changed_at=published_at + timedelta(days=1),
+            )
 
-            decisions = project_candidates(connection, config, prefixes=["tv/Show"], now=NOW)
+            decisions = project_candidates(connection, config, prefixes=["tv/Show", "tv/Other"], now=NOW)
 
-        waiting_decision = next(decision for decision in decisions if decision.row["item_id"] == waiting)
-        self.assertEqual(waiting_decision.hold_reasons, ())
-        self.assertTrue(waiting_decision.eligible)
+        by_id = {decision.row["item_id"]: decision for decision in decisions}
+        self.assertEqual(by_id[waiting].hold_reasons, ())
+        self.assertTrue(by_id[waiting].eligible)
+        # A replacement after the publish is new content and still restarts the hold.
+        self.assertEqual([reason.code for reason in by_id[replaced_later].hold_reasons], ["recent_acquisition"])
+
+    def _insert_published_season(
+            self, connection: DBClient, show: str, *, published_at: datetime, changed_at: datetime,
+    ) -> int:
+        """A long-held season with one published episode and one still waiting; returns the waiting one."""
+        published = self._insert_item(connection, f"{show}/Season 3/Episode 01.mkv", age_days=100)
+        waiting = self._insert_item(connection, f"{show}/Season 3/Episode 02.mkv", age_days=100)
+        for item_id in (published, waiting):
+            self._insert_plex_metadata(connection, item_id, added_at=NOW - timedelta(days=900), season_index=3)
+        connection.execute(
+            library_items.update()
+            .where(library_items.c.id == published)
+            .values(status="promoted", content_version_changed_at=changed_at.isoformat(timespec="seconds"))
+        )
+        connection.execute(staged_artifacts.insert().values(
+            library_item_id=published,
+            staging_path=str(self.root / "staging" / f"{published}.mkv"),
+            promoted_at=published_at.isoformat(timespec="seconds"),
+            updated_at=published_at.isoformat(timespec="seconds"),
+        ))
+        self._insert_series_metadata(connection, show, status="Ended", in_production=False)
+        return waiting
 
     def test_acquisition_guard_holds_whole_season_from_newest_episode(self) -> None:
         config = self._config(mode="off")
