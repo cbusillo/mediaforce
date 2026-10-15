@@ -199,6 +199,33 @@ class LibraryLifecycleTests(unittest.TestCase):
 
         self.assertEqual([reason.code for reason in decisions[0].hold_reasons], ["recent_acquisition"])
 
+    def test_publishing_a_compressed_copy_does_not_restart_the_acquisition_hold(self) -> None:
+        config = self._config()
+        with open_db(config.paths.db_path) as connection:
+            published = self._insert_item(connection, "tv/Show/Season 3/Episode 01.mkv", age_days=100)
+            waiting = self._insert_item(connection, "tv/Show/Season 3/Episode 02.mkv", age_days=100)
+            for item_id in (published, waiting):
+                self._insert_plex_metadata(connection, item_id, added_at=NOW - timedelta(days=900), season_index=3)
+            published_at = (NOW - timedelta(days=3)).isoformat(timespec="seconds")
+            connection.execute(
+                library_items.update()
+                .where(library_items.c.id == published)
+                .values(status="promoted", content_version_changed_at=published_at)
+            )
+            connection.execute(staged_artifacts.insert().values(
+                library_item_id=published,
+                staging_path=str(self.root / "staging" / "published.mkv"),
+                promoted_at=published_at,
+                updated_at=published_at,
+            ))
+            self._insert_series_metadata(connection, "tv/Show", status="Ended", in_production=False)
+
+            decisions = project_candidates(connection, config, prefixes=["tv/Show"], now=NOW)
+
+        waiting_decision = next(decision for decision in decisions if decision.row["item_id"] == waiting)
+        self.assertEqual(waiting_decision.hold_reasons, ())
+        self.assertTrue(waiting_decision.eligible)
+
     def test_acquisition_guard_holds_whole_season_from_newest_episode(self) -> None:
         config = self._config(mode="off")
         with open_db(config.paths.db_path) as connection:

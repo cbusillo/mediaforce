@@ -992,6 +992,9 @@ def _content_activity_at(row: dict[str, Any]) -> datetime | None:
         return _latest_timestamp((changed_at, discovered_at))
     # Plex knows when the file arrived, so Mediaforce first seeing it later is not activity; a later replacement is.
     replaced_at = changed_at if changed_at is not None and (discovered_at is None or changed_at > discovered_at) else None
+    # Publishing Mediaforce's own compressed copy stamps the change with the publish time; that is not new content.
+    if replaced_at is not None and replaced_at == _parse_timestamp(row.get("promoted_at")):
+        replaced_at = None
     return _latest_timestamp((plex_added_at, replaced_at))
 
 
