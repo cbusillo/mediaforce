@@ -50,6 +50,7 @@ def register_folder_routes(
         accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
         decide_size_held_action: Callable[[str, int | Collection[int], bool], dict[str, Any]] | None = None,
         folder_episodes_payload: Callable[[str], dict[str, Any]] | None = None,
+        use_show_settings_action: Callable[[str], dict[str, Any]] | None = None,
 ) -> None:
     staged_integrity_payload = folder_staged_integrity_payload or (lambda _prefix, _offset, _limit: {})
     preview_payload = checked_output_preview_payload or (
@@ -139,6 +140,14 @@ def register_folder_routes(
     def api_folder_clear_tuning(prefix: str) -> JSONResponse:
         result = clear_folder_tuning_action(prefix.strip("/"))
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    if use_show_settings_action is not None:
+        use_show_settings = use_show_settings_action
+
+        @app.post("/api/folders/{prefix:path}/use-show-settings")
+        async def api_folder_use_show_settings(prefix: str) -> JSONResponse:
+            result = await run_in_threadpool(use_show_settings, prefix.strip("/"))
+            return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/series-lifecycle")
     async def api_folder_series_lifecycle(prefix: str, request: Request) -> JSONResponse:
