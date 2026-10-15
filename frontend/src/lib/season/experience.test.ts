@@ -1537,6 +1537,45 @@ describe('season experience translation', () => {
 		).toMatchObject({ key: 'ready_to_compare', label: 'Ready to review' });
 	});
 
+	it('orders a saved sample by its own finish time once its job leaves the payload', () => {
+		const stoppedEncode = {
+			job_id: 'encode-old',
+			prefix: card.prefix,
+			status: 'needs_attention',
+			finished_at: '2026-10-15T08:07:38+00:00',
+			updated_at: '2026-10-15T23:05:35+00:00',
+			error: 'Final output size missed the approved target band.'
+		};
+		const savedSample = (sampleFinishedAt: string) =>
+			folder({
+				calibration: {
+					job_id: 'sample-new',
+					draft_hash: 'draft-new',
+					accepted_draft_hash: null,
+					browser_review_ready: true,
+					review_pairs: browserReadyReviewPairs(),
+					sample_finished_at: sampleFinishedAt
+				},
+				calibration_job: null,
+				review_gate: { status: 'needs_approval', can_confirm_full: false },
+				encode_job: stoppedEncode,
+				workflow_state: workflowState('attention', 'needs_attention')
+			});
+
+		expect(
+			detailSeasonState(savedSample('2026-10-15T15:16:00+00:00'), {
+				...status,
+				calibration_job: null
+			})
+		).toMatchObject({ key: 'ready_to_compare', label: 'Ready to review' });
+		expect(
+			detailSeasonState(savedSample('2026-10-15T07:00:00+00:00'), {
+				...status,
+				calibration_job: null
+			})
+		).toMatchObject({ key: 'needs_help' });
+	});
+
 	it('recognizes a saved test that never produced comparison media', () => {
 		expect(
 			detailSeasonState(

@@ -1379,6 +1379,12 @@ def create_app(
             advice_state = _load_advice_state(config, normalized_prefix)
             pending_proposal_raw = _load_pending_proposal(config, normalized_prefix)
             calibration = _load_calibration_state(config, normalized_prefix)
+            if calibration and calibration.get("job_id"):
+                # The sample's job leaves the page payload an hour after it finishes, so the
+                # saved sample carries its own finish time for ordering against other work.
+                calibration_sample_job = load_job(connection, str(calibration["job_id"]))
+                if calibration_sample_job is not None:
+                    calibration["sample_finished_at"] = calibration_sample_job.get("finished_at")
             resolved_policy = object_dict(sample_item.get("resolved_policy"))
             policy_source = (
                 _apply_policy_fragment(resolved_policy, object_dict(calibration.get("policy")))
