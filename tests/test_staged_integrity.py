@@ -948,6 +948,26 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertEqual(result["removed_library_item_ids"], [item_id])
         self.assertIn("not accepted", result["left_out"][0]["reason"])
 
+    def test_keeping_a_size_goal_miss_binds_the_keep_to_that_copy_and_checks_only_it(self) -> None:
+        item_id, stage, _manifest = self._final_size_file()
+        checked: list[list[int]] = []
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=True, now_iso=lambda: "2026-10-15T03:30:00+00:00",
+            validate_items=lambda _prefix, ids: checked.append(list(ids)) or {"ok": True, "validated_count": 1},
+            queue_items=lambda *_args: self.fail("keeping must not queue anything"),
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            row = connection.execute(select(staged_artifacts.c.validation_json, staged_artifacts.c.staging_size_bytes)
+                                     .where(staged_artifacts.c.library_item_id == item_id)).one()
+        kept = json.loads(str(row.validation_json))["final_size_goal"]
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(checked, [[item_id]])
+        self.assertEqual(kept["owner_kept_at"], "2026-10-15T03:30:00+00:00")
+        self.assertEqual(kept["owner_kept_bytes"], row.staging_size_bytes)
+        self.assertGreater(kept["owner_kept_bytes"], 0)
+        self.assertTrue(stage.exists())
+
     def test_other_validation_failures_and_keep_cannot_bypass_the_size_contract(self) -> None:
         item_id, stage, _manifest = self._final_size_file(extra_failure=True)
         for keep in (False, True):

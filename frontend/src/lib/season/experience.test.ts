@@ -62,6 +62,7 @@ import {
 	seasonEpisodeNavigationUnavailable,
 	seasonPromotionIntegrity,
 	sizeHeldRecords,
+	canKeepStagedCopy,
 	seasonEpisodeOptions,
 	sampleSearchTechnicalDetail,
 	stagedEpisodeLinks,
@@ -3071,5 +3072,26 @@ describe('finished-file recovery', () => {
 			]
 		} as unknown as Parameters<typeof sizeHeldRecords>[0];
 		expect(sizeHeldRecords(integrity).map((file) => file.item_id)).toEqual([1, 2]);
+	});
+
+	it('offers keep for a held copy or a size-goal miss, never for other remakes', () => {
+		type Record = Parameters<typeof canKeepStagedCopy>[0];
+		const file = (overrides: object) =>
+			({ item_id: 1, disposition: 'validation_failed', ...overrides }) as unknown as Record;
+		expect(canKeepStagedCopy(file({ disposition: 'size_held' }))).toBe(true);
+		expect(
+			canKeepStagedCopy(
+				file({ remake: { reason: 'final_size', blocked_reason: 'Approve a fresh sample.' } })
+			)
+		).toBe(true);
+		expect(
+			canKeepStagedCopy(
+				file({ remake: { reason: 'final_size', blocked_reason: '', pending: true } })
+			)
+		).toBe(false);
+		expect(
+			canKeepStagedCopy(file({ remake: { reason: 'settings_history', blocked_reason: '' } }))
+		).toBe(false);
+		expect(canKeepStagedCopy(file({}))).toBe(false);
 	});
 });

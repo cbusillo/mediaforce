@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { StagedIntegrityRecord } from '$lib/api/types';
-	import { formatDecimalFileSize } from '$lib/season/experience';
+	import { canKeepStagedCopy, formatDecimalFileSize } from '$lib/season/experience';
 
 	let {
 		records,
@@ -67,7 +67,8 @@
 									: 'This compressed copy is already removed.')}
 						{:else}
 							{#if record.remake?.reason === 'final_size'}
-								Missed its approved size goal.
+								Missed its approved size goal; every other check passed. Keep it as it is, or make
+								it again.
 							{:else if record.remake?.reason === 'settings_history'}
 								Its approved settings were not recorded.
 							{:else}
@@ -89,7 +90,7 @@
 						{/if}
 					</span>
 					<span class="size-held__actions">
-						{#if record.disposition === 'size_held'}
+						{#if canKeepStagedCopy(record)}
 							<button
 								type="button"
 								disabled={busy}
