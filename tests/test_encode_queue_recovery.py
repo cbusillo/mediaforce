@@ -14165,6 +14165,39 @@ raise SystemExit(0)
                 validation["checks"],
             )
 
+    def test_an_owner_keep_accepts_only_the_kept_copy_outside_the_final_size_band(self) -> None:
+        staged_probe = ProbeSummary(
+            duration_seconds=60.0, video_codec="av1", video_bitrate=900000, width=1920, height=1080,
+            pix_fmt="yuv420p10le", audio_track_count=1, subtitle_track_count=0, english_audio_count=1,
+            english_subtitle_count=0, default_audio_language="eng", default_subtitle_language=None,
+            audio_summary_json="[]", subtitle_summary_json="[]",
+        )
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        size_goal = {"target_size_bytes": 100, "final_output_tolerance_percent": 5,
+                     "final_lower_bound_bytes": 95, "final_upper_bound_bytes": 105}
+        outcomes: dict[int, bool] = {}
+        for kept_bytes in (110, 109):
+            name = f"episode-kept-{kept_bytes}.mkv"
+            source_path = self._create_source_file(name)
+            staging_path = self._staging_path(name)
+            staging_path.parent.mkdir(parents=True, exist_ok=True)
+            staging_path.write_bytes(b"x" * 110)
+            with open_db(self.config.paths.db_path) as connection:
+                item_id = self._insert_library_item(connection, source_path, status="encoded")
+                self._insert_staged_artifact(connection, item_id, staging_path)
+                connection.execute(update(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id).values(
+                    validation_json=json.dumps({"final_size_goal": {"owner_kept_at": "now", "owner_kept_bytes": kept_bytes}})))
+                item = {"library_item_id": item_id, "source_size_bytes": 200, "duration_seconds": 60.0,
+                        "subtitle_summary": [], "resolved_operator_intent": {"size_goal": size_goal}}
+                with patch("mediaforce.execution.probe_media", return_value=staged_probe):
+                    validation = execution.validate_one_item(connection, self.config, item)
+                    again = execution.validate_one_item(connection, self.config, item)
+            outcomes[kept_bytes] = validation["passed"]
+            self.assertEqual(again["passed"], validation["passed"])
+
+        # A keep recorded for a different copy (one byte off) does not carry to this one.
+        self.assertEqual(outcomes, {110: True, 109: False})
+
     def _validate_with_prediction(
             self,
             name: str,

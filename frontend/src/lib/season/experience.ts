@@ -166,6 +166,14 @@ export function stagedIntegrityDispositionCopy(disposition: StagedIntegrityDispo
 	);
 }
 
+/** A held copy, or one whose only failed check is its size goal, can be kept as it is. */
+export function canKeepStagedCopy(record: StagedIntegrityRecord): boolean {
+	return (
+		record.disposition === 'size_held' ||
+		(record.remake?.reason === 'final_size' && !record.remake.pending)
+	);
+}
+
 /** Unpublished files with a supported per-file keep or remake action. */
 export function sizeHeldRecords(integrity: SeasonPromotionIntegrity): StagedIntegrityRecord[] {
 	return integrity.records.filter(

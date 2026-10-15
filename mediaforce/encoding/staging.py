@@ -307,6 +307,9 @@ def validate_one_item(
                 and quality_target_met
             )
         )
+        # The owner's keep covers only the exact copy they saw; a remade file must meet its goal again.
+        kept = object_dict(_stored_validation(row).get("final_size_goal"))
+        owner_kept = bool(kept.get("owner_kept_at")) and int_value(kept.get("owner_kept_bytes")) == staged_size_bytes
         validation["final_size_goal"] = {
             "target_size_bytes": int_value(resolved_size_goal.get("target_size_bytes")) or None,
             "lower_bound_bytes": final_lower_bound_bytes,
@@ -314,10 +317,12 @@ def validate_one_item(
             "tolerance_percent": float_value(resolved_size_goal.get("final_output_tolerance_percent")) or None,
             "accepted_under_target": accepted_under_target,
             "quality_target_met": quality_target_met,
+            **({"owner_kept_at": kept["owner_kept_at"], "owner_kept_bytes": staged_size_bytes} if owner_kept else {}),
         }
         check(
             validation,
-            accepted_under_target or final_lower_bound_bytes <= staged_size_bytes <= final_upper_bound_bytes,
+            owner_kept or accepted_under_target
+            or final_lower_bound_bytes <= staged_size_bytes <= final_upper_bound_bytes,
             FINAL_SIZE_GOAL_CHECK,
         )
 

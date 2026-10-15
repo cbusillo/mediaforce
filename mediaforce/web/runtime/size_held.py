@@ -81,7 +81,8 @@ def decide_size_held_file(
         ):
             return {"ok": False, "message": NOT_HELD_MESSAGE}
         held = staged_validation_outcome(row["validation_json"]) == "size_held"
-        if not held:
+        final_size_miss = _missed_only_final_size(validation)
+        if not held and not final_size_miss:
             return {"ok": False, "message": NOT_HELD_MESSAGE}
         intent = remake_intent(row)
         if intent and not requested_copy_is_present(row):
@@ -89,7 +90,12 @@ def decide_size_held_file(
         name = Path(str(row["rel_path"])).name
         now = now_iso()
         validation.pop(INTENT_KEY, None)
-        validation["size_prediction"] = {**size_prediction, "owner_kept_at": now, "held": False}
+        if held:
+            validation["size_prediction"] = {**size_prediction, "owner_kept_at": now, "held": False}
+        if final_size_miss:
+            # Bound to this copy's size, so a later remake must meet its goal again.
+            validation["final_size_goal"] = {**object_dict(validation.get("final_size_goal")), "owner_kept_at": now,
+                                             "owner_kept_bytes": int(row["staging_size_bytes"] or 0)}
         connection.execute(
             update(staged_artifacts)
             .where(staged_artifacts.c.library_item_id == int(library_item_id))
@@ -229,6 +235,12 @@ def remake_staged_files(
     }
 
 
+def _missed_only_final_size(validation: Mapping[str, Any]) -> bool:
+    failed = [str(object_dict(check).get("message") or "") for check in object_list(validation.get("checks"))
+              if object_dict(check).get("passed") is False]
+    return validation.get("passed") is False and failed == [FINAL_SIZE_GOAL_CHECK]
+
+
 def staged_remake_details(
         connection: DBClient,
         row: Any,
@@ -250,10 +262,8 @@ def staged_remake_details(
     if requested_copy_is_present(row):
         intent = {}
     validation = _stored_validation(row)
-    failed = [str(object_dict(check).get("message") or "") for check in object_list(validation.get("checks"))
-              if object_dict(check).get("passed") is False]
     held = staged_validation_outcome(row["validation_json"]) == "size_held"
-    final_size = validation.get("passed") is False and failed == [FINAL_SIZE_GOAL_CHECK]
+    final_size = _missed_only_final_size(validation)
     missing_policy = validation.get("passed") is True and (
         policy_states if policy_states is not None else _staged_policy_states(
             connection, {int(row["library_item_id"])}, accepted_policy_hash="", manifest_reader=manifest_reader,
