@@ -147,6 +147,7 @@ from mediaforce.web.routes import register_completed_routes, register_dashboard_
     register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
+from mediaforce.web.runtime.show_settings_runtime import use_show_settings
 from mediaforce.web.checked_output_preview import (
     InvalidByteRange,
     checked_output_media_type,
@@ -2269,6 +2270,30 @@ def create_app(
                 prefix=normalized_prefix,
             )
 
+    def _use_show_settings_action(normalized_prefix: str) -> dict[str, Any]:
+        nonlocal config
+
+        def show_has_approval(show_prefix: str) -> bool:
+            calibration = _load_calibration_state(config, show_prefix)
+            return (
+                calibration is not None
+                and bool(object_dict(calibration).get("accepted_policy_hash"))
+                and bool(_review_gate(calibration).get("can_confirm_full"))
+            )
+
+        result = use_show_settings(
+            config,
+            normalized_prefix,
+            show_has_approval=show_has_approval,
+            season_has_tuning=lambda prefix: _calibration_file(config, prefix).exists(),
+            clear_tuning=_clear_folder_tuning_action,
+        )
+        if result.get("changed"):
+            config = load_config(config.paths.config_path)
+            app.state.config = config
+            _reset_folder_card_cache()
+        return result
+
     def _save_series_lifecycle_action(normalized_prefix: str, mode: str) -> dict[str, Any]:
         nonlocal config
         normalized_mode = mode.strip().lower()
@@ -2377,6 +2402,7 @@ def create_app(
         promote_folder_outputs_action=_promote_folder_outputs_action,
         decide_size_held_action=_decide_size_held_action,
         save_profile_action=_save_profile_action,
+        use_show_settings_action=_use_show_settings_action,
     )
     register_child_recovery_routes(app, recover_children_action=_recover_children_action)
     register_size_decision_routes(app, decide_size_exception_action=_decide_size_exception_action)
