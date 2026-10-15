@@ -367,25 +367,22 @@ class TargetSizeProductionTests(unittest.TestCase):
                 nonlocal encode_count
                 encode_count += 1
 
-            with self.assertRaises(FinalSizeMissError):
-                self._encode_with_output_sizes(
-                    connection,
-                    item,
-                    warm_quality,
-                    [5_500_000, 5_500_000],
-                    during_encode=count_encode,
-                    warm_start_plan=self._warm_start_plan(first_crf=28.0),
-                    search_results=[warm_quality, baseline_quality],
-                    search_call_kwargs=search_calls,
-                )
+            self._encode_with_output_sizes(
+                connection,
+                item,
+                warm_quality,
+                [5_500_000, 5_500_000],
+                during_encode=count_encode,
+                warm_start_plan=self._warm_start_plan(first_crf=28.0),
+                search_results=[warm_quality, baseline_quality],
+                search_call_kwargs=search_calls,
+            )
 
             self.assertEqual(len(search_calls), 2)
             self.assertEqual(encode_count, 2)
-            event_types = connection.execute(select(item_events.c.event_type)).scalars().all()
-            self.assertIn("encoding_needs_review", event_types)
-            self.assertNotIn("encoding_failed", event_types)
+            self._assert_kept_final_size_miss(connection, item_id, staging_path)
 
-    def test_failed_fresh_fallback_remains_a_needs_review_outcome(self) -> None:
+    def test_failed_fresh_fallback_keeps_the_missed_copy_for_review(self) -> None:
         source_path = self._source_file("episode-warm-fallback-failed.mkv")
         staging_path = self._staging_path("episode-warm-fallback-failed.mkv")
         with open_db(self.config.paths.db_path) as connection:
@@ -406,24 +403,19 @@ class TargetSizeProductionTests(unittest.TestCase):
                 trace={"candidate_count": 2, "candidates": [{"crf": 30.0}, {"crf": 32.0}]},
             )
 
-            with self.assertRaisesRegex(FinalSizeMissError, "fresh baseline search also failed"):
-                self._encode_with_output_sizes(
-                    connection,
-                    item,
-                    warm_quality,
-                    [5_500_000],
-                    warm_start_plan=self._warm_start_plan(first_crf=28.0),
-                    search_results=[warm_quality, baseline_error],
-                )
+            self._encode_with_output_sizes(
+                connection,
+                item,
+                warm_quality,
+                [5_500_000],
+                warm_start_plan=self._warm_start_plan(first_crf=28.0),
+                search_results=[warm_quality, baseline_error],
+            )
 
-            event_types = connection.execute(select(item_events.c.event_type)).scalars().all()
-            self.assertIn("encoding_needs_review", event_types)
-            self.assertNotIn("encoding_failed", event_types)
+            completed = self._assert_kept_final_size_miss(connection, item_id, staging_path)
+            self.assertIn("fresh baseline search also failed", completed["final_size_miss"])
             observation = connection.execute(select(quality_search_observations)).mappings().one()
             shadow = json.loads(cast(str, observation["shadow_json"]))
-            self.assertEqual(observation["outcome_kind"], "final_size_failure")
-            self.assertEqual(observation["learning_eligible"], 0)
-            self.assertEqual(observation["exclusion_reason"], "final_size_miss")
             self.assertEqual(shadow["warm_start"]["execution"]["fallback_reason"], "baseline_search_failed")
             self.assertEqual(shadow["warm_start"]["execution"]["baseline_candidate_count"], 2)
             self.assertEqual(shadow["comparison"]["candidate_count"], 3)
@@ -853,7 +845,7 @@ class TargetSizeProductionTests(unittest.TestCase):
                 ["over_target", "inside_target_band"],
             )
 
-    def test_encode_surfaces_needs_review_when_final_miss_has_no_measured_retry(self) -> None:
+    def test_encode_keeps_the_missed_copy_when_final_miss_has_no_measured_retry(self) -> None:
         source_path = self._source_file("episode-target-review.mkv")
         staging_path = self._staging_path("episode-target-review.mkv")
         with open_db(self.config.paths.db_path) as connection:
@@ -869,17 +861,11 @@ class TargetSizeProductionTests(unittest.TestCase):
                 target_size_trace=self._trace(item, selected_crf=28.0),
             )
 
-            with self.assertRaisesRegex(RuntimeError, "Final output size missed"):
-                self._encode_with_output_sizes(connection, item, quality, [5_400_000])
+            self._encode_with_output_sizes(connection, item, quality, [5_400_000])
 
-            events = self._events(connection, item_id)
-            event_types = [event["event_type"] for event in events]
-            self.assertEqual(event_types.count("encoding_needs_review"), 1)
-            self.assertNotIn("encoding_failed", event_types)
-            failed_details = json.loads(cast(str, events[-1]["details_json"]))
-            self.assertEqual(failed_details["failure_kind"], "target_size_needs_review")
-            self.assertEqual(failed_details["target_size_verification"]["status"], "over_target")
-            failed_trace = failed_details["target_size_trace"]
+            completed = self._assert_kept_final_size_miss(connection, item_id, staging_path)
+            event_types = [event["event_type"] for event in self._events(connection, item_id)]
+            failed_trace = completed["target_size_trace"]
             self.assertEqual(failed_trace["status"], "needs_review")
             self.assertEqual(
                 failed_trace["selection_reason"],
@@ -894,11 +880,7 @@ class TargetSizeProductionTests(unittest.TestCase):
             observation = connection.execute(select(quality_search_observations)).mappings().one()
             outcome = json.loads(cast(str, observation["outcome_json"]))
             candidate_trace = json.loads(cast(str, observation["candidate_trace_json"]))
-            self.assertEqual(observation["outcome_kind"], "final_size_failure")
-            self.assertEqual(observation["learning_eligible"], 0)
-            self.assertEqual(observation["exclusion_reason"], "final_size_miss")
             self.assertIsNotNone(observation["search_signature_id"])
-            self.assertIsNone(observation["shadow_json"])
             self.assertTrue(outcome["search_selected"])
             self.assertFalse(outcome["terminal_success"])
             self.assertEqual(outcome["quality_memory_arm"], "ineligible")
@@ -909,7 +891,6 @@ class TargetSizeProductionTests(unittest.TestCase):
             )
             timing = json.loads(cast(str, observation["timing_json"]))
             self.assertGreater(timing["workflow_duration_seconds"], 0)
-            self.assertFalse(staging_path.exists())
 
     def test_encode_persists_rejected_retry_measurement_reason(self) -> None:
         source_path = self._source_file("episode-target-retry-rejected.mkv")
@@ -940,21 +921,18 @@ class TargetSizeProductionTests(unittest.TestCase):
                 stdout="below floor",
             )
 
-            with self.assertRaisesRegex(RuntimeError, "Final output size missed"):
-                self._encode_with_output_sizes(
-                    connection,
-                    item,
-                    quality,
-                    [5_400_000],
-                    retry_sample=rejected_sample,
-                )
+            self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_400_000],
+                retry_sample=rejected_sample,
+            )
 
-            events = self._events(connection, item_id)
-            failed_details = json.loads(cast(str, events[-1]["details_json"]))
-            rejection_trace = failed_details["target_size_trace"]
+            completed = self._assert_kept_final_size_miss(connection, item_id, staging_path)
+            rejection_trace = completed["target_size_trace"]
             self.assertEqual(rejection_trace["selection_reason"], "final_retry_measurement_below_quality_floor")
             self.assertEqual(rejection_trace["final_retry_calibration"]["status"], "rejected")
-            self.assertFalse(staging_path.exists())
 
     def test_encode_preserves_primary_error_when_failure_event_write_fails(self) -> None:
         source_path = self._source_file("episode-primary-failure.mkv")
@@ -1610,6 +1588,28 @@ class TargetSizeProductionTests(unittest.TestCase):
             )
         )
         return int(result.inserted_primary_key[0])
+
+    def _assert_kept_final_size_miss(
+            self, connection: DBClient, item_id: int, staging_path: Path,
+    ) -> dict[str, Any]:
+        """A size miss with no retry left stays staged and recorded as a miss, never as learning."""
+        self.assertTrue(staging_path.exists())
+        artifact = self._staged_artifact(connection, item_id, staged_artifacts.c.validation_json)
+        assert artifact is not None
+        validation = json.loads(cast(str, artifact["validation_json"]))
+        self.assertFalse(validation["passed"])
+        self.assertEqual(validation["target_size_verification"]["status"], "over_target")
+        events = self._events(connection, item_id)
+        event_types = [event["event_type"] for event in events]
+        self.assertNotIn("encoding_failed", event_types)
+        self.assertEqual(event_types[-1], "encoding_completed")
+        completed = json.loads(cast(str, events[-1]["details_json"]))
+        self.assertIn("Final output size missed", completed["final_size_miss"])
+        observation = connection.execute(select(quality_search_observations)).mappings().one()
+        self.assertEqual(observation["outcome_kind"], "final_size_failure")
+        self.assertEqual(observation["learning_eligible"], 0)
+        self.assertEqual(observation["exclusion_reason"], "final_size_miss")
+        return completed
 
     @staticmethod
     def _staged_artifact(connection: DBClient, item_id: int, *columns: Any) -> Mapping[str, object] | None:

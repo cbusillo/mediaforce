@@ -67,7 +67,6 @@ from mediaforce.tuning.quality_shadow import (
 from mediaforce.tuning.quality_warm_start import QUALITY_WARM_START_EXPERIMENT_VERSION, QualityWarmStartPlan, \
     plan_quality_warm_start
 from mediaforce.tuning.target_size_search import (
-    FinalSizeMissError,
     FinalSizeVerification,
     TargetSizeSearchError,
     retry_quality_result_for_final_miss,
@@ -759,6 +758,8 @@ def encode_one_item(
     retry_count = 0
     quality_retry_measurement_seconds = 0.0
     warm_start_final_fallback_used = False
+    # A size miss with no safe retry left keeps its copy, so the owner can keep it or make it again.
+    kept_final_size_miss: str | None = None
     try:
         while True:
             result = run_encode_command(
@@ -804,7 +805,6 @@ def encode_one_item(
             ) or final_trace
             if final_verification.passed:
                 break
-            safe_unlink(staging_path)
             quality_result.target_size_trace = final_trace
             warm_trace = _quality_result_warm_start_trace(quality_result)
             if (
@@ -844,10 +844,11 @@ def encode_one_item(
                         baseline_duration_seconds=baseline_seconds,
                     )
                     final_trace = object_dict(quality_result.target_size_trace) or final_trace
-                    raise FinalSizeMissError(
+                    kept_final_size_miss = (
                         f"{_final_size_miss_message(final_verification)} "
                         f"The fresh baseline search also failed: {quality_error_message(baseline_error)}"
-                    ) from baseline_error
+                    )
+                    break
                 baseline_seconds = max(time.monotonic() - baseline_started, 0.0)
                 quality_search_duration_seconds = round(
                     quality_search_duration_seconds + baseline_seconds,
@@ -895,6 +896,7 @@ def encode_one_item(
                         record_event,
                 ):
                     LOGGER.warning("%s", event_error)
+                safe_unlink(staging_path)
                 continue
 
             def measure_retry_candidate(crf: float) -> Any:
@@ -956,7 +958,8 @@ def encode_one_item(
                 }
             )
             if retry_quality is None:
-                raise FinalSizeMissError(_final_size_miss_message(final_verification))
+                kept_final_size_miss = _final_size_miss_message(final_verification)
+                break
             final_trace = object_dict(retry_quality.target_size_trace) or final_trace
             retry_payload["target_size_trace"] = final_trace
             retry_count += 1
@@ -979,6 +982,7 @@ def encode_one_item(
                 }
                 retry_quality.target_size_trace = final_trace
             safe_unlink(temp_output)
+            safe_unlink(staging_path)
             quality_result = retry_quality
             ffmpeg_cmd = build_ffmpeg_command(
                 source_path=source_path,
@@ -1000,93 +1004,7 @@ def encode_one_item(
             )
     except Exception as exc:
         failed_at = timestamp()
-        if (
-                isinstance(exc, FinalSizeMissError)
-                and final_verification is not None
-        ):
-            quality_result.target_size_trace = final_trace
-            actual_output_bytes = final_verification.actual_output_bytes
-            source_size_bytes = int_value(item.get("source_size_bytes"))
-            size_ratio = (
-                actual_output_bytes / source_size_bytes
-                if actual_output_bytes is not None and source_size_bytes > 0
-                else None
-            )
-            failure_shadow_payload = None
-            failure_warm_trace = _quality_result_warm_start_trace(quality_result)
-            warm_start_attempted = failure_warm_trace.get("attempted") is True
-            if (
-                    warm_start_attempted
-                    and planned_quality_context is not None
-                    and warm_start_plan is not None
-            ):
-                try:
-                    failure_shadow_payload = build_quality_shadow_payload(
-                        warm_start_plan.recommendation,
-                        selected_crf=quality_result.crf,
-                        selected_score=quality_result.score,
-                        minimum_quality_score=planned_quality_context.minimum_quality_score,
-                        candidate_count=quality_result_candidate_count(quality_result),
-                        search_duration_seconds=quality_search_duration_seconds,
-                        actual_output_bytes=actual_output_bytes,
-                        size_target_bytes=planned_quality_context.size_target_bytes,
-                        warm_start_plan=warm_start_plan.to_payload(),
-                        warm_start_trace=failure_warm_trace,
-                        context=planned_quality_context.to_payload(),
-                        final_size_miss=True,
-                        selected_candidate_role=str(
-                            object_dict(
-                                object_dict(getattr(quality_result, "target_size_trace", None)).get(
-                                    "selected_candidate"
-                                )
-                            ).get("role")
-                            or ""
-                        ) or None,
-                    )
-                except Exception as shadow_error:
-                    LOGGER.warning("Quality warm-start failure telemetry failed: %s", shadow_error)
-            observation = build_selected_quality_observation(
-                **observation_common(quality_observation_partial_context),
-                context=planned_quality_context,
-                quality_result=quality_result,
-                retry_measurement_seconds=quality_retry_measurement_seconds,
-                encode_completed_at=failed_at,
-                encode_duration_seconds=round(max(time.monotonic() - start_monotonic, 0.0), 3),
-                workflow_duration_seconds=round(
-                    max(time.monotonic() - quality_search_start_monotonic, 0.0),
-                    3,
-                ),
-                quality_memory_arm=(
-                    warm_start_plan.experiment_arm if warm_start_plan is not None else "ineligible"
-                ),
-                quality_memory_experiment_version=(
-                    QUALITY_WARM_START_EXPERIMENT_VERSION if warm_start_plan is not None else None
-                ),
-                quality_memory_scope=(
-                    warm_start_plan.recommendation.scope if warm_start_plan is not None else None
-                ),
-                quality_memory_scope_prefix=(
-                    warm_start_plan.scope_prefix if warm_start_plan is not None else None
-                ),
-                quality_memory_search_signature_id=(
-                    warm_start_plan.recommendation.search_signature_id
-                    if warm_start_plan is not None
-                    else None
-                ),
-                actual_output_bytes=actual_output_bytes,
-                size_ratio=round(size_ratio, 6) if size_ratio is not None else None,
-                recorded_at=failed_at,
-                outcome_kind=OUTCOME_FINAL_SIZE_FAILURE,
-                learning_eligible=False,
-                exclusion_reason="final_size_miss",
-                shadow_payload=failure_shadow_payload,
-            )
-            for note in _persist_quality_observation_best_effort(connection, observation):
-                exc.add_note(note)
-        if isinstance(exc, FinalSizeMissError):
-            event_type = "encoding_needs_review"
-        else:
-            event_type = "encoding_stopped" if isinstance(exc, ProcessCancelledError) else "encoding_failed"
+        event_type = "encoding_stopped" if isinstance(exc, ProcessCancelledError) else "encoding_failed"
         _persist_failure_event_without_masking(
             connection,
             item["library_item_id"],
@@ -1241,6 +1159,7 @@ def encode_one_item(
             "quality_warm_start": _quality_result_warm_start_trace(quality_result) or None,
             "quality_search_run_id": quality_search_run_id,
             "compression_intent_id": compression_intent.semantic_id,
+            "final_size_miss": kept_final_size_miss,
         },
         record_event,
     )
@@ -1310,7 +1229,8 @@ def encode_one_item(
                 warm_start_trace=warm_start_trace,
                 context=quality_observation_context.to_payload(),
                 final_size_miss=(
-                    str(warm_start_trace.get("fallback_reason") or "") == "final_size_miss"
+                    kept_final_size_miss is not None
+                    or str(warm_start_trace.get("fallback_reason") or "") == "final_size_miss"
                 ),
                 selected_candidate_role=str(
                     object_dict(
@@ -1370,6 +1290,15 @@ def encode_one_item(
         size_ratio=round(size_ratio, 6) if size_ratio is not None else None,
         recorded_at=now,
         shadow_payload=shadow_payload,
+        **(
+            {
+                "outcome_kind": OUTCOME_FINAL_SIZE_FAILURE,
+                "learning_eligible": False,
+                "exclusion_reason": "final_size_miss",
+            }
+            if kept_final_size_miss is not None
+            else {}
+        ),
     )
     for observation_error in _persist_quality_observation_best_effort(connection, observation):
         LOGGER.warning("%s", observation_error)
