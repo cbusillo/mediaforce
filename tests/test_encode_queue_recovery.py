@@ -19870,6 +19870,50 @@ raise SystemExit(0)
             },
         )
 
+    def test_folder_api_gives_the_saved_sample_its_job_finish_time(self) -> None:
+        source_path = self._create_source_file("episode-sample-finish.mkv")
+        self.config.raw.update({"video": {}, "audio": {}, "subtitle": {}, "planning": {}})
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(connection, source_path)
+            save_calibration_job(
+                connection,
+                {
+                    "job_id": "sample-done",
+                    "prefix": "tv/show",
+                    "status": "completed",
+                    "lane": "sample",
+                    "action": "baseline",
+                    "created_at": "2026-10-15T14:40:00+00:00",
+                    "updated_at": "2026-10-15T15:16:00+00:00",
+                    "finished_at": "2026-10-15T15:16:00+00:00",
+                },
+            )
+            connection.commit()
+        calibration = {"job_id": "sample-done", "draft_hash": "draft-new"}
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
+            "mediaforce.web.app._start_encode_queue_worker"
+        ):
+            app = web_app.create_app(self.config.paths.config_path)
+
+        folder_endpoint = next(
+            route.endpoint
+            for route in app.router.routes
+            if getattr(route, "path", "") == "/api/folders/{prefix:path}"
+        )
+        with patch("mediaforce.web.app._load_scan_status", return_value=None), patch(
+                "mediaforce.web.app._cached_sample_calibration_host_statuses", return_value=[]
+        ), patch("mediaforce.web.app._load_calibration_state", return_value=calibration), patch(
+            "mediaforce.web.app._preview_hotspots", return_value=[]
+        ), patch("mediaforce.web.app.describe_item_plan", return_value={}):
+            response = folder_endpoint("tv/show")
+        payload = json.loads(response.body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["calibration"]["sample_finished_at"], "2026-10-15T15:16:00+00:00")
+
     def test_folder_endpoint_returns_payload_for_fully_promoted_prefix(self) -> None:
         from mediaforce.web import app as folder_web_app
 
