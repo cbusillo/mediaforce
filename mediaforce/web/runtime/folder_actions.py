@@ -1,6 +1,6 @@
-import hashlib
 import json
 import math
+from collections import Counter
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -46,8 +46,12 @@ from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
 from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_queue_partition, \
     cadence_safety_partition, older_season_cadence_payload
-from mediaforce.web.runtime.folder_tuning_advice import review_gate
-from mediaforce.web.runtime.production_holds import approval_identity, queue_mode, record_holds, release_holds
+from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
+from mediaforce.web.runtime.production_holds import queue_mode, record_holds, release_holds
+from mediaforce.web.runtime.production_approval import NEARER_APPROVAL_CODE, approval_needs_fresh_sample_response, \
+    cached_calibration_loader, effective_production_approval, governed_by, nearer_approval_reason, \
+    production_approval_contract, production_approval_identity, production_approval_matches, \
+    valid_production_approval_contract
 from mediaforce.web.runtime.left_out_files import LeftOutFile, cadence_left_out_files, drop_manifest_items, \
     left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response
 from mediaforce.web.runtime.encode_runtime import (
@@ -85,7 +89,6 @@ LoadSampleItemFn: TypeAlias = Callable[[DBClient, MediaforceConfig, str], Folder
 QueueFolderEncodeActionFn: TypeAlias = Callable[[str, str, bool], ActionPayload]
 ValidateScopeActionFn: TypeAlias = Callable[[DBClient, str], ActionPayload | None]
 
-_PRODUCTION_APPROVAL_CONTRACT_SCHEMA_VERSION = 1
 _FINAL_SIZE_RECOVERY_BLOCKER_CODE = "final_size_recovery_contract_unchanged"
 _FINAL_SIZE_RECOVERY_BLOCKER_MESSAGE = (
     "The latest production encode missed its approved final-size target under the same reviewed settings. "
@@ -105,82 +108,6 @@ _FINAL_SIZE_POSSIBLY_MISSED_REASON = (
 )
 
 
-def _calibration_policy_hash(payload: ActionPayload) -> str:
-    policy_payload = object_dict(payload.get("policy"))
-    encoded = json.dumps(policy_payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()[:16]
-
-
-def _production_approval_contract(calibration: ActionPayload) -> ActionPayload | None:
-    sample_job_id = str(calibration.get("accepted_sample_job_id") or "").strip()
-    policy_hash = str(calibration.get("accepted_policy_hash") or "").strip()
-    sample_item = object_dict(calibration.get("sample_item"))
-    operator_intent = object_dict(sample_item.get("resolved_operator_intent"))
-    request = object_dict(operator_intent.get("request"))
-    if not request:
-        policy = object_dict(calibration.get("policy"))
-        intent = operator_intent_from_policy(
-            object_dict(policy.get("video")),
-            audio_policy=object_dict(policy.get("audio")),
-            subtitle_policy=object_dict(policy.get("subtitle")),
-        )
-        if intent.requires_confirmation:
-            return None
-        request = intent.request_payload()
-    if not sample_job_id or not policy_hash or not request:
-        return None
-    # A show's sound choice is part of what the owner asked for, so a new choice counts as a changed request.
-    audio_preset = str(object_dict(object_dict(calibration.get("policy")).get("audio")).get("preset") or "")
-    if audio_preset:
-        request = {**request, "audio_preset": audio_preset}
-    return {
-        "schema_version": _PRODUCTION_APPROVAL_CONTRACT_SCHEMA_VERSION,
-        "sample_job_id": sample_job_id,
-        "policy_hash": policy_hash,
-        "operator_intent_hash": f"sha256:{stable_json_hash(request)}",
-        "operator_intent": request,
-    }
-
-
-def current_production_approval_matches(
-        calibration: ActionPayload | None,
-        manifest: ManifestPayload,
-        item: FolderItem,
-) -> bool:
-    if calibration is None or not review_gate(calibration).get("can_confirm_full"):
-        return False
-    accepted_hash = str(calibration.get("accepted_policy_hash") or "")
-    if not accepted_hash or accepted_hash != _calibration_policy_hash(calibration):
-        return False
-    contract = object_dict(manifest.get("selection")).get("production_approval_contract")
-    if contract:
-        recorded = _valid_production_approval_contract(object_dict(contract))
-        return recorded is not None and recorded == _production_approval_contract(calibration)
-    policy = object_dict(item.get("resolved_policy"))
-    return bool(policy and accepted_hash and _calibration_policy_hash({"policy": policy}) == accepted_hash)
-
-
-def production_approval_identity(calibration: ActionPayload) -> str:
-    """The approval a production run is queued under, as recorded on the files it holds back."""
-    return approval_identity(calibration, _production_approval_contract(calibration))
-
-
-def _valid_production_approval_contract(payload: Mapping[str, Any] | None) -> ActionPayload | None:
-    contract = object_dict(payload)
-    request = object_dict(contract.get("operator_intent"))
-    if (
-            int_value(contract.get("schema_version")) != _PRODUCTION_APPROVAL_CONTRACT_SCHEMA_VERSION
-            or not str(contract.get("sample_job_id") or "").strip()
-            or not str(contract.get("policy_hash") or "").strip()
-            or not request
-    ):
-        return None
-    expected_hash = f"sha256:{stable_json_hash(request)}"
-    if str(contract.get("operator_intent_hash") or "").strip() != expected_hash:
-        return None
-    return contract
-
-
 def _terminal_production_approval_contract(
         job: JobPayload, *, manifest_reader: ManifestReader = read_manifest,
 ) -> ActionPayload | None:
@@ -189,7 +116,7 @@ def _terminal_production_approval_contract(
         return None
     manifest = object_dict(manifest_reader(Path(manifest_value)))
     selection = object_dict(manifest.get("selection"))
-    return _valid_production_approval_contract(selection.get("production_approval_contract"))
+    return valid_production_approval_contract(selection.get("production_approval_contract"))
 
 
 def _legacy_final_size_goal_changed(
@@ -250,7 +177,7 @@ def _final_size_requeue_contract_blocker(
     if str(failure_analysis.get("kind") or "") != "final_size_target_miss":
         return None
     previous_contract = _terminal_production_approval_contract(job_payload, manifest_reader=manifest_reader)
-    current = _valid_production_approval_contract(current_contract)
+    current = valid_production_approval_contract(current_contract)
     changed_sample = bool(
         previous_contract
         and current
@@ -341,7 +268,7 @@ def _record_final_size_misses(
             if _final_size_requeue_contract_blocker(job, current_contract) is None:
                 _record_legacy_final_size_recovery(connection, job, item_ids, current_contract, now=now)
                 continue  # A legacy run whose size goal has since changed may retry.
-            contract = _valid_production_approval_contract(current_contract) or {}
+            contract = valid_production_approval_contract(current_contract) or {}
         in_library = set(connection.execute(
             select(library_items.c.id).where(library_items.c.id.in_(sorted(set(item_ids.values()))))
         ).scalars())
@@ -386,7 +313,7 @@ def _record_legacy_final_size_recovery(
 
     Preserve that evidence and append its verified recovery under the current approval.
     """
-    current = _valid_production_approval_contract(current_contract)
+    current = valid_production_approval_contract(current_contract)
     if current is None:
         return
     latest: dict[int, ActionPayload] = {}
@@ -433,7 +360,7 @@ def _recorded_final_size_miss_left_out(
             .order_by(item_events.c.id.asc())
     ).mappings():
         latest[int(row["library_item_id"])] = object_dict(json.loads(row["details_json"] or "{}"))
-    current = _valid_production_approval_contract(current_contract)
+    current = valid_production_approval_contract(current_contract)
     left_out: list[LeftOutFile] = []
     for item_id, details in sorted(latest.items()):
         if current is not None and str(details.get("job_id") or "") in recovered_legacy_job_ids:
@@ -507,6 +434,28 @@ def _normalized_number(value: Any) -> float | None:
 
 def _normalized_text(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _nearer_approval_left_out(
+        config: MediaforceConfig,
+        items: list[FolderItem],
+        queued_contract: ActionPayload,
+        load_calibration_state: LoadCalibrationStateFn,
+) -> list[LeftOutFile]:
+    """Files a nearer approval governs, which publishing would never accept from this run."""
+    load = cached_calibration_loader(load_calibration_state)
+    left_out: list[LeftOutFile] = []
+    for item in items:
+        rel_path = str(item.get("rel_path") or "")
+        approval = effective_production_approval(config, rel_path, load)
+        if approval is not None and not governed_by(approval, queued_contract):
+            left_out.append(LeftOutFile(
+                int(item.get("library_item_id") or 0),
+                rel_path,
+                NEARER_APPROVAL_CODE,
+                nearer_approval_reason(config, approval, rel_path),
+            ))
+    return left_out
 
 
 def _folder_encode_queue_message(
@@ -799,8 +748,8 @@ def queue_folder_encode_action(
             raise HTTPException(status_code=400, detail="Run a sampled calibration first.")
         calibration_payload = object_dict(calibration)
         calibration_policy = object_dict(calibration_payload.get("policy"))
-        production_approval_contract = _production_approval_contract(calibration_payload)
-        if expected_approval_contract is not None and production_approval_contract != expected_approval_contract:
+        queued_contract = production_approval_contract(calibration_payload)
+        if expected_approval_contract is not None and queued_contract != expected_approval_contract:
             return {"ok": False, "code": "remake_approval_changed",
                     "message": "The approved settings changed after this remake was saved. Nothing was queued."}
         hold_mode = queue_mode(
@@ -879,6 +828,9 @@ def queue_folder_encode_action(
                         "Make and approve a revised test before starting the season."
                     ),
                 )
+        if queued_contract is None:
+            # Publishing could never accept files made under it, so the supported way on is a fresh sample.
+            return approval_needs_fresh_sample_response()
         if joining_held_files:
             # Held files join as their own run beside the scope's running one, minus any it is making.
             busy_item_ids = active_encode_library_item_ids(connection, normalized_prefix)
@@ -900,7 +852,7 @@ def queue_folder_encode_action(
                 recovery_left_out: list[LeftOutFile] = []
                 if recovery_plan is not None:
                     recovery_plan, recovery_left_out = _hold_files_that_need_a_fresh_plan(
-                        active_encode_job, recovery_plan, production_approval_contract,
+                        active_encode_job, recovery_plan, queued_contract,
                     )
                 if recovery_plan is not None:
                     recovery_plan, partition_left_out = _partition_active_recovery_plan(
@@ -1181,10 +1133,10 @@ def queue_folder_encode_action(
                 status_code=400,
                 detail=f"No encode candidates were found for this folder. Next action: {action_label}.",
             )
-        _record_final_size_misses(connection, normalized_prefix, production_approval_contract, now=now_iso())
+        _record_final_size_misses(connection, normalized_prefix, queued_contract, now=now_iso())
         final_size_requeue_blocker = _final_size_requeue_contract_blocker(
             latest_encode_job,
-            production_approval_contract,
+            queued_contract,
         )
         final_size_miss_indexes: dict[int, int] = {}
         if final_size_requeue_blocker is not None:
@@ -1217,14 +1169,14 @@ def queue_folder_encode_action(
         left_out_ids = {file.library_item_id for file in left_out}
         left_out.extend(
             file
-            for file in _recorded_final_size_miss_left_out(connection, manifest["items"], production_approval_contract)
+            for file in _recorded_final_size_miss_left_out(connection, manifest["items"], queued_contract)
             if file.library_item_id not in left_out_ids
         )
         selection = object_dict(manifest.get("selection"))
         # Files accepted later can join this run under the same mode; see ambiguous_motion.
         selection["queue_mode"] = hold_mode
-        if production_approval_contract is not None:
-            selection["production_approval_contract"] = production_approval_contract
+        if queued_contract is not None:
+            selection["production_approval_contract"] = queued_contract
         manifest["selection"] = selection
         if older_season_selection is not None and older_season_cadence_partition is not None:
             manifest_item_ids = {
@@ -1254,6 +1206,12 @@ def queue_folder_encode_action(
                 "excluded_item_count": len(older_season_cadence_partition.excluded_item_ids),
                 "excluded_library_item_ids": sorted(older_season_cadence_partition.excluded_item_ids),
             }
+        left_out_ids = {file.library_item_id for file in left_out}
+        left_out.extend(
+            file
+            for file in _nearer_approval_left_out(config, manifest["items"], queued_contract, load_calibration_state)
+            if file.library_item_id not in left_out_ids
+        )
         drop_manifest_items(manifest, {file.library_item_id for file in left_out})
         cadence_partition = cadence_queue_partition(
             connection,
@@ -1296,7 +1254,7 @@ def queue_folder_encode_action(
             _reset_stale_prefix_encoding_items_for_requeue(connection, config, normalized_prefix, now_iso=now_iso)
         attach_target_lineage(
             connection, manifest=manifest, calibration=calibration_payload,
-            advice_state=advice_state, approval_contract=production_approval_contract,
+            advice_state=advice_state, approval_contract=queued_contract,
         )
         saved_profile_path = config.paths.runtime_settings_path
         upsert_override(saved_profile_path, normalized_prefix, calibration_policy)
@@ -1481,7 +1439,7 @@ def approve_measured_encode_recovery_action(
             )
 
     calibration_payload["accepted_at"] = now_iso()
-    calibration_payload["accepted_policy_hash"] = _calibration_policy_hash(calibration_payload)
+    calibration_payload["accepted_policy_hash"] = calibration_policy_hash(calibration_payload)
     calibration_payload["accepted_draft_hash"] = calibration_draft_hash(calibration_payload)
     recovery_summary = (
         f"Measured item-local recovery for {len(item_recoveries)} failed "
@@ -1910,6 +1868,24 @@ def promote_folder_outputs_action(
             if busy:
                 waiting.append({"code": "season_active_encode_job", "count": len(busy), "next_action": "wait_for_encode_job"})
             items = [item for item in items if item not in busy]
+            if items and load_calibration_state_fn is None:
+                return {
+                    "ok": False,
+                    "code": "promotion_check_unavailable",
+                    "message": "Mediaforce cannot check these files safely right now, so nothing was published.",
+                    "blockers": [
+                        {"code": "season_policy_gate_unavailable", "count": 1, "next_action": "restore_policy_gate"},
+                    ],
+                    "promoted_count": 0,
+                }
+            if items and load_calibration_state_fn is not None:
+                items, not_approved = _approved_staged_items(
+                    connection, config, items, load_calibration_state_fn=load_calibration_state_fn,
+                )
+                waiting.extend(
+                    {"code": code, "count": count, "next_action": _waiting_next_action(code)}
+                    for code, count in not_approved.items()
+                )
         if not items:
             return {
                 "ok": False,
@@ -2084,24 +2060,11 @@ def tv_promotion_readiness_payload(
     if load_calibration_state_fn is None and candidates:
         blockers.append({"code": "season_policy_gate_unavailable", "count": 1, "next_action": "restore_policy_gate"})
     if load_calibration_state_fn is not None and candidates:
-        accepted_policy_hash = _accepted_tv_scope_policy_hash(
-            config,
-            scope,
-            load_calibration_state_fn=load_calibration_state_fn,
+        candidates, not_approved = _approved_staged_items(
+            connection, config, candidates, load_calibration_state_fn=load_calibration_state_fn,
         )
-        policy_states = _staged_policy_states(
-            connection,
-            {int_value(item.get("library_item_id")) for item in candidates},
-            accepted_policy_hash=accepted_policy_hash,
-        )
-        approved: list[FolderItem] = []
-        for item in candidates:
-            state = policy_states.get(int_value(item.get("library_item_id")), "season_policy_provenance_missing")
-            if state is None:
-                approved.append(item)
-            else:
-                wait(state)
-        candidates = approved
+        for code, count in not_approved.items():
+            wait(code, count)
     conflicted_paths = _conflicted_rel_paths(config, candidates)
     if conflicted_paths:
         conflicted = [item for item in candidates if str(item.get("rel_path") or "") in conflicted_paths]
@@ -2159,34 +2122,16 @@ def _waiting_next_action(code: str) -> str:
     }.get(code, "inspect_integrity_detail")
 
 
-def _accepted_tv_scope_policy_hash(
-        config: MediaforceConfig,
-        scope: MediaScope,
-        *,
-        load_calibration_state_fn: LoadCalibrationStateFn,
-) -> str:
-    prefixes = [scope.prefix]
-    if scope.kind == "tv_season" and scope.parent_prefix:
-        prefixes.append(scope.parent_prefix)
-    for prefix in prefixes:
-        calibration = object_dict(load_calibration_state_fn(config, prefix))
-        accepted_policy_hash = str(calibration.get("accepted_policy_hash") or "").strip()
-        if accepted_policy_hash:
-            return accepted_policy_hash
-    return ""
-
-
-def _staged_policy_states(
+def staged_run_items(
         connection: DBClient,
-        library_item_ids: set[int],
+        library_item_ids: Collection[int],
         *,
-        accepted_policy_hash: str,
         manifest_reader: ManifestReader = read_manifest,
-) -> dict[int, str | None]:
-    """None when the file was made under an approved policy, otherwise the waiting code.
+) -> dict[int, tuple[ManifestPayload, FolderItem]]:
+    """Each finished file's saved run plan and its own entry in it.
 
-    A file counts as approved when its recorded policy matches the current approval, or when the run
-    that made it recorded the production approval it ran under.
+    A file missing here has no settings history: its plan, its entry, or the policy it was made with
+    cannot be read.
     """
     rows = connection.execute(
         select(
@@ -2196,31 +2141,53 @@ def _staged_policy_states(
         )
         .where(staged_artifacts.c.library_item_id.in_(sorted(library_item_ids)))
     ).mappings().fetchall()
-    manifest_cache: dict[Path, ActionPayload | None] = {}
-    states: dict[int, str | None] = {}
+    manifest_cache: dict[Path, ManifestPayload | None] = {}
+    run_items: dict[int, tuple[ManifestPayload, FolderItem]] = {}
     for row in rows:
-        item_id = int(row["library_item_id"])
         manifest_value = str(row["manifest_path"] or "").strip()
         item_index = row["item_index"]
         if not manifest_value or not isinstance(item_index, int):
-            states[item_id] = "season_policy_provenance_missing"
             continue
         manifest_path = Path(manifest_value)
         if manifest_path not in manifest_cache:
             manifest_cache[manifest_path] = manifest_reader(manifest_path)
-        manifest = manifest_cache[manifest_path]
-        manifest_items = object_list(object_dict(manifest).get("items"))
-        if manifest is None or item_index < 0 or item_index >= len(manifest_items):
-            states[item_id] = "season_policy_provenance_missing"
+        manifest = object_dict(manifest_cache[manifest_path])
+        manifest_items = object_list(manifest.get("items"))
+        if not 0 <= item_index < len(manifest_items):
             continue
-        policy = object_dict(object_dict(manifest_items[item_index]).get("resolved_policy"))
-        if not policy:
-            states[item_id] = "season_policy_provenance_missing"
+        manifest_item = object_dict(manifest_items[item_index])
+        if object_dict(manifest_item.get("resolved_policy")):
+            run_items[int(row["library_item_id"])] = (manifest, manifest_item)
+    return run_items
+
+
+def _approved_staged_items(
+        connection: DBClient,
+        config: MediaforceConfig,
+        items: list[FolderItem],
+        *,
+        load_calibration_state_fn: LoadCalibrationStateFn,
+) -> tuple[list[FolderItem], Counter[str]]:
+    """The files automatic publishing would accept, and how many others wait under each code.
+
+    A file is accepted when the approval governing it now is the approval its run was queued under.
+    """
+    load = cached_calibration_loader(load_calibration_state_fn)
+    run_items = staged_run_items(connection, {int_value(item.get("library_item_id")) for item in items})
+    waiting: Counter[str] = Counter()
+    approved: list[FolderItem] = []
+    for item in items:
+        run_item = run_items.get(int_value(item.get("library_item_id")))
+        if run_item is None:
+            waiting["season_policy_provenance_missing"] += 1
             continue
-        approved_at_run = bool(object_dict(object_dict(manifest.get("selection")).get("production_approval_contract")))
-        matches_current = bool(accepted_policy_hash) and _calibration_policy_hash({"policy": policy}) == accepted_policy_hash
-        states[item_id] = None if approved_at_run or matches_current else "season_policy_not_approved"
-    return states
+        manifest, manifest_item = run_item
+        approval = effective_production_approval(config, str(item.get("rel_path") or ""), load)
+        if production_approval_matches(approval, manifest, manifest_item):
+            approved.append(item)
+        else:
+            waiting["season_policy_not_approved"] += 1
+    return approved, waiting
 
 
 def _conflicted_rel_paths(config: MediaforceConfig, items: list[FolderItem]) -> set[str]:
@@ -3015,7 +2982,7 @@ def save_profile_action(
             )
         calibration_payload["accepted_at"] = now_iso()
         calibration_payload["accepted_draft_hash"] = current_draft_hash
-        calibration_payload["accepted_policy_hash"] = _calibration_policy_hash(calibration_payload)
+        calibration_payload["accepted_policy_hash"] = calibration_policy_hash(calibration_payload)
         calibration_payload["accepted_sample_job_id"] = str(calibration_payload.get("job_id") or "")
         accepted_sample_job_id = str(calibration_payload["accepted_sample_job_id"])
         source_scope = object_dict(quality_risk_contract.get("source_scope"))
@@ -3197,7 +3164,7 @@ def child_recovery_approval(
     gate = review_gate(calibration)
     if not gate.get("can_confirm_full"):
         raise HTTPException(status_code=409, detail=str(gate.get("message") or "Current approval is required."))
-    current = _production_approval_contract(calibration)
+    current = production_approval_contract(calibration)
     if current is None:
         raise HTTPException(status_code=409, detail="Current approval is required.")
     advice = object_dict(load_advice_state(config, prefix))

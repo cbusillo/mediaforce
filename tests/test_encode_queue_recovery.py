@@ -17,6 +17,7 @@ import threading
 import time
 import tomllib
 import unittest
+from collections import Counter
 from collections.abc import Collection, Iterator, Mapping
 from concurrent.futures import Future
 from contextlib import contextmanager
@@ -50,6 +51,10 @@ from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
 from mediaforce.web.runtime.size_exception import decide_size_exception
+from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
+from mediaforce.web.runtime.folder_tuning_advice import review_gate
+from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
+    production_approval_identity, production_approval_matches
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, \
     ProcessDeadlineEnforcementError, ScheduleWindowClosedError
@@ -216,7 +221,11 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "confirmed": True,
                 },
                 "resolved_policy": {"video": video_policy},
+                "resolved_operator_intent": {"request": {"compression_intent": "balanced"}},
             },
+            "job_id": "accepted-sample",
+            "accepted_sample_job_id": "accepted-sample",
+            "accepted_policy_hash": "accepted-policy",
             "accepted_at": web_app._now_iso(),
         }
 
@@ -2889,10 +2898,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
 
     def test_production_approval_contract_ignores_unrelated_policy_hash_change(self) -> None:
-        original = folder_actions_runtime._production_approval_contract(
+        original = production_approval_contract(
             self._accepted_calibration_contract(sample_job_id="sample-1", default_grain=8)
         )
-        unrelated_change = folder_actions_runtime._production_approval_contract(
+        unrelated_change = production_approval_contract(
             self._accepted_calibration_contract(sample_job_id="sample-2", default_grain=12)
         )
 
@@ -2903,19 +2912,19 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(original["operator_intent_hash"], unrelated_change["operator_intent_hash"])
 
     def test_final_size_requeue_requires_new_sample_and_changed_operator_contract(self) -> None:
-        original = folder_actions_runtime._production_approval_contract(
+        original = production_approval_contract(
             self._accepted_calibration_contract(sample_job_id="sample-1")
         )
-        new_sample_same_intent = folder_actions_runtime._production_approval_contract(
+        new_sample_same_intent = production_approval_contract(
             self._accepted_calibration_contract(sample_job_id="sample-2")
         )
-        same_sample_changed_intent = folder_actions_runtime._production_approval_contract(
+        same_sample_changed_intent = production_approval_contract(
             self._accepted_calibration_contract(
                 sample_job_id="sample-1",
                 compression_intent="perceptual_floor",
             )
         )
-        new_sample_changed_intent = folder_actions_runtime._production_approval_contract(
+        new_sample_changed_intent = production_approval_contract(
             self._accepted_calibration_contract(
                 sample_job_id="sample-2",
                 compression_intent="perceptual_floor",
@@ -2942,7 +2951,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
 
     def test_final_size_requeue_fails_closed_without_valid_previous_contract(self) -> None:
-        current = folder_actions_runtime._production_approval_contract(
+        current = production_approval_contract(
             self._accepted_calibration_contract(
                 sample_job_id="sample-2",
                 compression_intent="perceptual_floor",
@@ -10101,7 +10110,7 @@ raise SystemExit(0)
             "review_media_ready": True,
             "accepted_at": "2026-03-28T19:10:00+00:00",
             "accepted_draft_hash": "older-hash",
-            "accepted_policy_hash": folder_actions_runtime._calibration_policy_hash(
+            "accepted_policy_hash": calibration_policy_hash(
                 {"policy": {"video": {"target_vmaf": 90.0}}}
             ),
             "accepted_sample_job_id": "sample-2",
@@ -23903,7 +23912,7 @@ raise SystemExit(0)
             "sample_result": {"cadence_evidence_id": "ev1_current"},
             "accepted_at": "2026-07-12T00:00:00+00:00",
             "accepted_draft_hash": "draft-1",
-            "accepted_policy_hash": folder_actions_runtime._calibration_policy_hash({"policy": policy}),
+            "accepted_policy_hash": calibration_policy_hash({"policy": policy}),
             "accepted_sample_job_id": "sample-1",
             "draft_hash": "draft-1",
         }
@@ -24336,7 +24345,7 @@ raise SystemExit(0)
                 return execution.PromotionResult(promoted_paths=[Path("/library/tv/show/Season 01/Show - S01E01.mkv")], held=[])
 
         self_test = self
-        result = folder_actions_runtime.promote_folder_outputs_action(
+        result = self._promote_with_every_file_approved(
             self.config,
             "tv/show/Season 01/Show - S01E01.mkv",
             load_folder_staged_items_fn=_OneValidatedItem(),
@@ -24392,7 +24401,7 @@ raise SystemExit(0)
                 promoted_rel_paths.extend(str(manifest["items"][index]["rel_path"]) for index in indexes)
                 return execution.PromotionResult(promoted_paths=[folder / "ready.mkv"], held=[])
 
-        result = folder_actions_runtime.promote_folder_outputs_action(
+        result = self._promote_with_every_file_approved(
             self.config,
             "tv/show/Season 01/Show - S01E01.mkv",
             load_folder_staged_items_fn=_ValidatedItems(),
@@ -24440,7 +24449,7 @@ raise SystemExit(0)
                     held=[execution.HeldFile("tv/show/a.avi", "Waiting for room", waiting=True)],
                 )
 
-        result = folder_actions_runtime.promote_folder_outputs_action(
+        result = self._promote_with_every_file_approved(
             self.config,
             "tv/show/Season 01/Show - S01E01.mkv",
             load_folder_staged_items_fn=_ValidatedItem(),
@@ -24482,7 +24491,7 @@ raise SystemExit(0)
                 unsafe = execution.HeldFile("tv/show/last.avi", "Check this file now", waiting=False, unsafe=True)
                 return execution.PromotionResult(promoted_paths=[Path("/library/tv/show/a.mkv")], held=[*failed, unsafe])
 
-        result = folder_actions_runtime.promote_folder_outputs_action(
+        result = self._promote_with_every_file_approved(
             self.config,
             "tv/show/Season 01/Show - S01E01.mkv",
             load_folder_staged_items_fn=_ValidatedItem(),
@@ -24787,7 +24796,7 @@ raise SystemExit(0)
                 "mediaforce.web.app.build_manifest_item",
                 side_effect=lambda row, _config: {"library_item_id": row["id"]},
         ):
-            result = folder_actions_runtime.promote_folder_outputs_action(
+            result = self._promote_with_every_file_approved(
                 self.config,
                 "other/Foo.mkv",
                 load_folder_staged_items_fn=web_app._load_folder_staged_items,
@@ -25263,7 +25272,7 @@ raise SystemExit(0)
         queue_config = self._complete_queue_config()
         calibration = self._accepted_calibration_contract(sample_job_id="remake-sample")
         old_manifest = self._write_manifest("old-remake.json", [])
-        approval = folder_actions_runtime._production_approval_contract(calibration)
+        approval = production_approval_contract(calibration)
         old_manifest.write_text(json.dumps({"selection": {"queue_mode": "season_override",
             "media_scope": {"prefix": "tv/show/Season 1"}}, "items": [{}]}))
         with open_db(self.config.paths.db_path) as connection:
@@ -25329,7 +25338,7 @@ raise SystemExit(0)
     def test_queue_saved_remake_rechecks_approval_inside_admission(self) -> None:
         queue_config = self._complete_queue_config()
         calibration = self._accepted_calibration_contract(sample_job_id="saved-sample")
-        approval = folder_actions_runtime._production_approval_contract(calibration)
+        approval = production_approval_contract(calibration)
         with open_db(self.config.paths.db_path) as connection:
             ids = list(self._insert_show_episodes(connection, "One.mkv", "Unselected.mkv").values())
         jobs: list[dict[str, Any]] = []
@@ -25350,7 +25359,7 @@ raise SystemExit(0)
 
         queue_config = self._complete_queue_config()
         old = self._accepted_calibration_contract(sample_job_id="saved-sample")
-        approval = folder_actions_runtime._production_approval_contract(old)
+        approval = production_approval_contract(old)
         manifest = self._write_manifest("completed-remake.json", [])
         manifest.write_text(json.dumps({"selection": {"queue_mode": "season_override",
             "media_scope": {"prefix": "tv/show/Season 1"}}, "items": [{}]}))
@@ -25558,7 +25567,7 @@ raise SystemExit(0)
         """Episodes 1 and 2 ran under the approved contract and missed final size; Episode 3 never ran."""
         queue_config = self._complete_queue_config()
         calibration = self._accepted_calibration_contract(sample_job_id="sample-original")
-        contract = folder_actions_runtime._production_approval_contract(calibration)
+        contract = production_approval_contract(calibration)
         with open_db(self.config.paths.db_path) as connection:
             item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv", "Episode 3.mkv")
             manifest_path = self._write_manifest("manifest-final-size-recorded.json", [])
@@ -25763,6 +25772,78 @@ raise SystemExit(0)
                 update(library_items).where(library_items.c.id == item_id).values(cadence_summary_json=cleared_summary)
             )
 
+    def _current_approval(self, sample_job_id: str) -> dict[str, Any]:
+        calibration = self._accepted_calibration_contract(sample_job_id=sample_job_id)
+        # Lifecycle holds are a separate rule; keep them out of the way of the approval being tested.
+        calibration["policy"]["planning"] = {"series_lifecycle_mode": "off", "season_acquisition_hold_days": 0}
+        calibration["accepted_policy_hash"] = calibration_policy_hash(calibration)
+        return calibration
+
+    def _queue_show_with_approvals(
+            self, approvals: dict[str, dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, int], list[dict[str, Any]]]:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = {
+                rel_path: self._insert_library_item(
+                    connection, self._create_source_file(rel_path.replace("/", "-")), status="discovered",
+                    rel_path=rel_path,
+                )
+                for rel_path in ("tv/show/Season 1/One.mkv", "tv/show/Season 2/Two.mkv")
+            }
+        saved_jobs: list[dict[str, Any]] = []
+        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
+            result = folder_actions_runtime.queue_folder_encode_action(
+                queue_config,
+                "tv/show",
+                "",
+                False,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=lambda _config, prefix: approvals.get(prefix),
+                review_gate=review_gate,
+                upsert_override=self._noop_upsert_override,
+                load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
+                save_encode_job=lambda _connection, job: saved_jobs.append(dict(job)),
+            )
+        return result, item_ids, saved_jobs
+
+    def test_show_run_leaves_out_a_season_with_its_own_approval_and_publish_accepts_the_rest(self) -> None:
+        # Same settings as the show, approved on the season's own sample: publishing would never accept a
+        # file made under the show's approval, so the show run leaves that season out and says why.
+        approvals = {
+            "tv/show": self._current_approval("show-sample"),
+            "tv/show/Season 1": self._current_approval("season-sample"),
+        }
+        result, item_ids, saved_jobs = self._queue_show_with_approvals(approvals)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["queued_library_item_ids"], [item_ids["tv/show/Season 2/Two.mkv"]])
+        self.assertEqual(
+            [(file["library_item_id"], file["code"]) for file in result["left_out"]],
+            [(item_ids["tv/show/Season 1/One.mkv"], "nearer_approval")],
+        )
+        self.assertIn("Season 1 has its own approved settings", result["left_out"][0]["reason"])
+        manifest = json.loads(Path(saved_jobs[0]["manifest_path"]).read_text())
+        for item in manifest["items"]:
+            approval = effective_production_approval(
+                self.config, str(item["rel_path"]), lambda _config, prefix: approvals.get(prefix),
+            )
+            self.assertTrue(production_approval_matches(approval, manifest, item))
+
+    def test_show_run_refuses_an_approval_too_old_to_record_what_it_approved(self) -> None:
+        legacy = self._current_approval("legacy-sample")
+        del legacy["accepted_policy_hash"]
+
+        result, _item_ids, saved_jobs = self._queue_show_with_approvals({"tv/show": legacy})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "approval_needs_fresh_sample")
+        self.assertIn("Make a fresh sample", result["message"])
+        self.assertEqual(saved_jobs, [])
+
     def test_paused_background_work_still_admits_files_whose_evidence_is_current(self) -> None:
         queue_config = self._complete_queue_config()
         with open_db(self.config.paths.db_path) as connection:
@@ -25813,7 +25894,7 @@ raise SystemExit(0)
 
         results = production_holds_runtime.join_cleared_held_files(
             lambda: open_db(self.config.paths.db_path),
-            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
+            current_approval=lambda _prefix: production_approval_identity(calibration),
             queue_held_files=lambda group: self._queue_show_folder(
                 queue_config,
                 joined_jobs,
@@ -25843,7 +25924,7 @@ raise SystemExit(0)
 
         results = production_holds_runtime.join_cleared_held_files(
             lambda: open_db(self.config.paths.db_path),
-            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
+            current_approval=lambda _prefix: production_approval_identity(calibration),
             queue_held_files=lambda group: self._queue_show_folder(
                 queue_config,
                 joined_jobs,
@@ -25880,7 +25961,7 @@ raise SystemExit(0)
 
         results = production_holds_runtime.join_cleared_held_files(
             lambda: open_db(self.config.paths.db_path),
-            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
+            current_approval=lambda _prefix: production_approval_identity(calibration),
             queue_held_files=lambda group: self._queue_show_folder(
                 queue_config,
                 joined_jobs,
@@ -25920,7 +26001,7 @@ raise SystemExit(0)
 
         production_holds_runtime.join_cleared_held_files(
             lambda: open_db(self.config.paths.db_path),
-            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
+            current_approval=lambda _prefix: production_approval_identity(calibration),
             queue_held_files=lambda _group: {"ok": False, "code": "refused", "message": "No longer eligible."},
             now_iso=web_app._now_iso,
         )
@@ -25957,12 +26038,12 @@ raise SystemExit(0)
             queue_config,
             "tv/show",
             now_iso=web_app._now_iso(),
-            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
+            current_approval=lambda _prefix: production_approval_identity(calibration),
         )
         joined_jobs: list[dict[str, Any]] = []
         production_holds_runtime.join_cleared_held_files(
             lambda: open_db(self.config.paths.db_path),
-            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
+            current_approval=lambda _prefix: production_approval_identity(calibration),
             queue_held_files=lambda group: self._queue_show_folder(
                 queue_config, joined_jobs, calibration=calibration, only_library_item_ids=group.library_item_ids,
             ),
@@ -26019,7 +26100,7 @@ raise SystemExit(0)
 
     def test_accepted_episode_no_run_held_joins_production_without_queueing_the_show_again(self) -> None:
         queue_config, item_ids, calibration = self._accepted_episode_never_held(save_run=True)
-        approval = production_holds_runtime.approval_identity(calibration, None)
+        approval = production_approval_identity(calibration)
 
         accepted = ambiguous_motion_runtime.accept_ambiguous_motion_action(
             queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: approval,
@@ -27168,6 +27249,7 @@ raise SystemExit(0)
                     {"library_item_id": blocked_item, "rel_path": "tv/show/recover-blocked.mkv"},
                     {"library_item_id": clear_item, "rel_path": "tv/show/recover-clear.mkv"},
                 ],
+                selection=self._queued_under_accepted_calibration(),
             )
             self._save_job(
                 connection,
@@ -27265,6 +27347,7 @@ raise SystemExit(0)
                     {"library_item_id": item_id, "staging_path": str(path)}
                     for item_id, path in zip(item_ids, staging)
                 ],
+                selection=self._queued_under_accepted_calibration(),
             )
             save_encode_job(connection, job(
                 "stopped-parent", job_kind="folder", parent_job_id=None, status="needs_attention", item_count=4,
@@ -27501,6 +27584,7 @@ raise SystemExit(0)
                     {"library_item_id": item_b, "staging_path": str(staging_b)},
                     {"library_item_id": item_c, "staging_path": str(self._staging_path("recover-active-c.mkv"))},
                 ],
+                selection=self._queued_under_accepted_calibration(),
             )
             now = web_app._now_iso()
             save_encode_job(
@@ -27711,7 +27795,7 @@ raise SystemExit(0)
 
     def test_queue_folder_encode_blocks_unchanged_final_size_recovery_contract(self) -> None:
         calibration = self._accepted_calibration_contract(sample_job_id="sample-original")
-        contract = folder_actions_runtime._production_approval_contract(calibration)
+        contract = production_approval_contract(calibration)
         self.assertIsNotNone(contract)
         manifest_path = self._write_manifest("manifest-final-size-unchanged.json", [{"library_item_id": 1}])
         manifest_path.write_text(json.dumps({
@@ -27774,7 +27858,7 @@ raise SystemExit(0)
 
     def test_queue_folder_encode_allows_fresh_changed_final_size_recovery_contract(self) -> None:
         failed_calibration = self._accepted_calibration_contract(sample_job_id="sample-original")
-        failed_contract = folder_actions_runtime._production_approval_contract(failed_calibration)
+        failed_contract = production_approval_contract(failed_calibration)
         self.assertIsNotNone(failed_contract)
         current_calibration = self._accepted_calibration_contract(
             sample_job_id="sample-recovery",
@@ -30730,11 +30814,32 @@ raise SystemExit(0)
             "confirmed": True,
         }
 
-    def _write_manifest(self, name: str, items: list[dict[str, object]]) -> Path:
+    @staticmethod
+    def _promote_with_every_file_approved(
+            config: MediaforceConfig, prefix: str, **kwargs: Any,
+    ) -> folder_actions_runtime.ActionPayload:
+        """Publish as if the approval governing every file is the one its run recorded."""
+        with patch.object(
+                folder_actions_runtime,
+                "_approved_staged_items",
+                side_effect=lambda _connection, _config, items, **_kwargs: (items, Counter()),
+        ):
+            return folder_actions_runtime.promote_folder_outputs_action(
+                config, prefix, load_calibration_state_fn=lambda *_args: None, **kwargs,
+            )
+
+    def _write_manifest(
+            self, name: str, items: list[dict[str, object]], *, selection: dict[str, object] | None = None,
+    ) -> Path:
         path = self.root / "runs" / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"items": items}))
+        path.write_text(json.dumps({"items": items, **({"selection": selection} if selection else {})}))
         return path
+
+    def _queued_under_accepted_calibration(self) -> dict[str, object]:
+        """The selection a run queued under the accepted calibration fixture records."""
+        calibration = object_dict(self._accepted_calibration_state(self.config, "tv/show"))
+        return {"production_approval_contract": production_approval_contract(calibration)}
 
     def _save_job(
             self,

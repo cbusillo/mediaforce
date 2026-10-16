@@ -202,7 +202,7 @@ from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_
 from mediaforce.web.runtime.size_exception import decide_size_exception
 from mediaforce.web.runtime.size_held import decide_size_held_file, staged_remake_records
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
-from mediaforce.web.runtime.folder_actions import production_approval_identity, _production_approval_contract
+from mediaforce.web.runtime.production_approval import production_approval_contract, production_approval_identity
 from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
@@ -2046,7 +2046,7 @@ def create_app(
         calibration = _load_calibration_state(config, prefix)
         if calibration is None or not _review_gate(calibration).get("can_confirm_full"):
             return None
-        return _production_approval_contract(object_dict(calibration))
+        return production_approval_contract(object_dict(calibration))
 
     def _decide_size_held_action(
             normalized_prefix: str, library_item_id: int | Collection[int], keep: bool,

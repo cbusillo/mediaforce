@@ -24,6 +24,7 @@ from mediaforce.library.staged_integrity import staged_integrity_report
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import automatic_publish as delivery
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
+from mediaforce.web.runtime.production_approval import production_approval_contract
 
 
 @pytest.fixture
@@ -607,6 +608,30 @@ def test_unapproved_draft_does_not_hide_accepted_parent(
     with patch("mediaforce.execution.probe_media", return_value=_probe()):
         delivery.publish_checked_files_once(config, load_calibration_state=load)
     assert _status(config, item_id) == "promoted"
+
+
+@pytest.mark.parametrize("season_approval", ["none", "own_sample", "too_old"])
+def test_a_show_run_file_publishes_only_while_the_show_approval_governs_it(
+    config: MediaforceConfig, season_approval: str
+) -> None:
+    item_id, item, _ = _stage(config, "tv/Show/Season 1/one.mkv")
+    show = {**_approval(), "sample_item": {"resolved_operator_intent": {"request": {"compression_intent": "balanced"}}}}
+    manifest_path = config.paths.project_root / f"manifest-{item_id}.json"
+    manifest_path.write_text(json.dumps({
+        "run_id": f"run-{item_id}",
+        "items": [item],
+        "selection": {"production_approval_contract": production_approval_contract(show)},
+    }))
+    season = {**show, "job_id": "season-sample", "accepted_sample_job_id": "season-sample"}
+    if season_approval == "too_old":
+        season.pop("accepted_policy_hash")
+    approvals = {"tv/Show": show, **({"tv/Show/Season 1": season} if season_approval != "none" else {})}
+
+    with patch("mediaforce.execution.probe_media", return_value=_probe()):
+        delivery.publish_checked_files_once(config, load_calibration_state=lambda _config, prefix: approvals.get(prefix))
+
+    # The season's own approval governs its files even when it is too old to check against.
+    assert (_status(config, item_id) == "promoted") == (season_approval == "none")
 
 
 def test_retained_rollback_is_counted_and_owner_cleanup_reaches_it(
