@@ -147,7 +147,7 @@ from mediaforce.web.routes import register_completed_routes, register_dashboard_
     register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
-from mediaforce.web.runtime.show_settings_runtime import use_show_settings
+from mediaforce.web.runtime.show_settings_runtime import prefixes_with_samples, use_show_settings
 from mediaforce.web.checked_output_preview import (
     InvalidByteRange,
     checked_output_media_type,
@@ -202,7 +202,8 @@ from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_
 from mediaforce.web.runtime.size_exception import decide_size_exception
 from mediaforce.web.runtime.size_held import decide_size_held_file, staged_remake_records
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
-from mediaforce.web.runtime.production_approval import production_approval_contract, production_approval_identity
+from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
+    production_approval_identity
 from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
@@ -2274,18 +2275,25 @@ def create_app(
         nonlocal config
 
         def show_has_approval(show_prefix: str) -> bool:
-            calibration = _load_calibration_state(config, show_prefix)
+            approval = effective_production_approval(config, show_prefix, _load_calibration_state)
             return (
-                calibration is not None
-                and bool(object_dict(calibration).get("accepted_policy_hash"))
-                and bool(_review_gate(calibration).get("can_confirm_full"))
+                approval is not None
+                and approval.prefix == show_prefix
+                and approval.current
+                and approval.contract is not None
             )
+
+        def season_sample_prefixes(season_prefix: str) -> list[str]:
+            with open_readonly_db(config.paths.db_path) as connection:
+                return prefixes_with_samples(
+                    connection, season_prefix, has_sample=lambda prefix: _calibration_file(config, prefix).exists(),
+                )
 
         result = use_show_settings(
             config,
             normalized_prefix,
             show_has_approval=show_has_approval,
-            season_has_tuning=lambda prefix: _calibration_file(config, prefix).exists(),
+            tuned_prefixes=season_sample_prefixes,
             clear_tuning=_clear_folder_tuning_action,
         )
         if result.get("changed"):

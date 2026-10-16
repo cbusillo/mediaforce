@@ -539,15 +539,18 @@ def upsert_runtime_folder_policy_override(path: Path, prefix: str, policy: dict[
     update_runtime_settings(path, _apply)
 
 
-def remove_runtime_folder_policy_override(path: Path, prefix: str) -> bool:
-    """Drop the saved override for exactly this prefix; True when one was removed."""
+def remove_runtime_folder_policy_overrides_within(path: Path, prefix: str) -> bool:
+    """Drop the saved overrides for this prefix and every folder or file inside it; True when any was removed."""
     normalized_prefix = prefix.strip("/")
     removed = False
 
     def _apply(runtime_settings: dict[str, Any]) -> dict[str, Any]:
         nonlocal removed
         overrides = _normalize_folder_policy_overrides(runtime_settings.get(FOLDER_POLICY_OVERRIDES_KEY))
-        kept = [item for item in overrides if str(item.get("path_prefix", "")).strip("/") != normalized_prefix]
+        kept = [
+            item for item in overrides
+            if not _path_prefix_matches(str(item.get("path_prefix", "")).strip("/"), normalized_prefix)
+        ]
         removed = len(kept) != len(overrides)
         runtime_settings[FOLDER_POLICY_OVERRIDES_KEY] = kept
         return runtime_settings
