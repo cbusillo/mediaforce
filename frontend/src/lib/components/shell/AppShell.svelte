@@ -4,12 +4,33 @@
 	import { fetchJson } from '$lib/api/client';
 	import type { DashboardScanJob } from '$lib/api/types';
 	import { catalogWarningNotice } from '$lib/season/experience';
-	import type { Snippet } from 'svelte';
+	import { onMount, type Snippet } from 'svelte';
 	import ThemeToggle from './ThemeToggle.svelte';
 
 	let { children }: { children: Snippet } = $props();
 	let scanJob = $state<DashboardScanJob | null>(null);
 	let scanRequest = 0;
+	let recoveryAlerts = $state<{ id: string; title: string; detail: string }[]>([]);
+
+	onMount(() => {
+		let stopped = false;
+		let timer: ReturnType<typeof setTimeout>;
+		async function refreshAlerts() {
+			try {
+				const payload = await fetchJson<{ alerts: typeof recoveryAlerts }>('/api/recovery-alerts');
+				if (!stopped) recoveryAlerts = payload.alerts;
+			} catch {
+				// Retain the last warning when a refresh fails.
+			} finally {
+				if (!stopped) timer = setTimeout(refreshAlerts, 30_000);
+			}
+		}
+		void refreshAlerts();
+		return () => {
+			stopped = true;
+			clearTimeout(timer);
+		};
+	});
 	const catalogWarning = $derived(catalogWarningNotice(scanJob));
 
 	const navigation = [
@@ -93,13 +114,22 @@
 		</div>
 	</header>
 	{#if catalogWarning}
-		<aside class="catalog-warning" role="alert" aria-live="polite">
+		<div class="catalog-warning" role="alert" aria-live="polite">
 			<div class="catalog-warning__inner">
 				<strong>{catalogWarning.title}</strong>
 				<span>{catalogWarning.detail}</span>
 			</div>
-		</aside>
+		</div>
 	{/if}
+
+	{#each recoveryAlerts as alert (alert.id)}
+		<div class="catalog-warning" role="alert" aria-live="polite">
+			<div class="catalog-warning__inner">
+				<strong>{alert.title}</strong>
+				<span>{alert.detail} <a href={resolve('/ops')}>View computers</a></span>
+			</div>
+		</div>
+	{/each}
 
 	<div class="app-content">
 		{@render children()}
@@ -226,7 +256,7 @@
 	}
 
 	.catalog-warning__inner strong {
-		white-space: nowrap;
+		overflow-wrap: anywhere;
 	}
 
 	@media (max-width: 680px) {

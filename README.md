@@ -714,6 +714,13 @@ processing is paused or the work window is closed; reconnecting storage does
 not unpause work. Clean connection failures retry with bounded backoff;
 missing mappings and failures that cannot be retried safely, including ambiguous
 timeouts, wait for user attention.
+Completed attempts whose share has not appeared yet retry too; a service restart
+retains backoff and incident state rather than discarding them. Remote Macs also
+receive background status checks and no-dialog storage recovery without waiting
+for queued work. The warning below the navigation names unavailable controller
+storage immediately and computers still unavailable after five minutes (or
+requiring attention). It stays visible until fresh checks succeed. This feature
+does not configure external notification delivery.
 Fresh checks must verify the expected mount path, share identity, and directory
 access before work starts. See [controller storage recovery](docs/development/macos-login-item.md#controller-storage-recovery)
 for the runtime contract and installed acceptance procedure.

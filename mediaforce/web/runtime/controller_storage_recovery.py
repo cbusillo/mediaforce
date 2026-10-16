@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
@@ -40,6 +40,11 @@ _ACTION_REQUIRED_FAILURES = frozenset({
     "mount_result_unknown",
     "mount_timeout",
     "unexpected_mount_path",
+})
+
+_RETRYABLE_FAILURES = frozenset({
+    "mount_absent", "mount_failed", "mount_helper_failed",
+    "path_unavailable", "probe_failed", "probe_timeout",
 })
 
 RecoveryStatus = Literal["checking", "retrying", "ready", "action_required"]
@@ -114,6 +119,13 @@ def process_controller_storage_recovery_once(
                 and prior.status != "action_required"
             ):
                 prior = None
+            if (
+                prior is not None
+                and prior.status == "action_required"
+                and prior.last_failure_kind in _RETRYABLE_FAILURES
+                and prior.reason == _stable_reason(prior.last_failure_kind)
+            ):
+                prior = replace(prior, status="retrying")
             if sys.platform != "darwin":
                 states_by_mount[str(root)] = _failed_state(
                     mount_point=root,
@@ -367,7 +379,10 @@ def _state_from_mount_result(
             attempted=True,
         )
     failure_kind = result.failure_kind or result.probe.failure_kind or "mount_failed"
-    action_required = result.action_required or failure_kind in _ACTION_REQUIRED_FAILURES
+    action_required = (
+        failure_kind in _ACTION_REQUIRED_FAILURES
+        or (result.action_required and failure_kind not in _RETRYABLE_FAILURES)
+    )
     return _failed_state(
         mount_point=mount.mount_point,
         requirement_signature=requirement_signature,
@@ -445,7 +460,7 @@ def _failed_state(
 ) -> ControllerStorageMountState:
     count = max(1, (previous.failure_count if previous else 0) + (1 if attempted else 0))
     timestamp = _format_utc(now)
-    delay = min(_INITIAL_RETRY_SECONDS * (2 ** max(0, count - 1)), _MAX_RETRY_SECONDS)
+    delay = min(_INITIAL_RETRY_SECONDS * (2 ** min(4, max(0, count - 1))), _MAX_RETRY_SECONDS)
     if status == "retrying":
         if attempted:
             next_retry_at = _format_utc(now + timedelta(seconds=delay))
@@ -462,7 +477,11 @@ def _failed_state(
         status=status,
         reason=reason,
         detail=detail,
-        last_failure_kind=failure_kind or (previous.last_failure_kind if previous else None),
+        last_failure_kind=(
+            previous.last_failure_kind
+            if previous and previous.status == "action_required"
+            else failure_kind or (previous.last_failure_kind if previous else None)
+        ),
         first_failure_at=(previous.first_failure_at if previous else None) or timestamp,
         last_check_at=timestamp,
         last_attempt_at=timestamp if attempted else (previous.last_attempt_at if previous else None),

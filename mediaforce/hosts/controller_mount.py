@@ -1,4 +1,5 @@
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -14,7 +15,9 @@ from pathlib import Path
 from typing import Iterator, Literal
 from urllib.parse import unquote
 
-from mediaforce.hosts.mount_runtime import ControllerSmbMount, remote_smb_mounts_for_paths
+from mediaforce.hosts.mount_runtime import (
+    ControllerSmbMount, controller_smb_mounts_from_output, remote_smb_mounts_for_paths,
+)
 
 
 AccessMode = Literal["read", "write"]
@@ -97,8 +100,16 @@ class ControllerMountResult:
 
 
 @contextmanager
-def controller_mount_lock(runtime_settings_path: Path) -> Iterator[bool]:
-    lock_path = runtime_settings_path.with_name("controller-smb-mount.lock")
+def controller_mount_lock(
+        runtime_settings_path: Path,
+        *,
+        host_key: str | None = None,
+) -> Iterator[bool]:
+    lock_name = (
+        f"host-smb-mount-{hashlib.sha256(host_key.encode()).hexdigest()}.lock"
+        if host_key is not None else "controller-smb-mount.lock"
+    )
+    lock_path = runtime_settings_path.with_name(lock_name)
     try:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     except OSError:
@@ -203,6 +214,15 @@ def _probe_controller_volume(
     observed_source, filesystem = _mounted_identity_at(mount_output, mount_point)
     occupied = path_present == "1"
     if observed_source is None:
+        if expected_mount is not None and any(
+            same_smb_share(candidate.source, expected_mount.source, resolve_server=resolve_server)
+            for candidate in controller_smb_mounts_from_output(mount_output)
+            if candidate.mount_point != mount_point
+        ):
+            return _failed_probe(
+                mount_point, "unexpected_mount_path",
+                "The required SMB share is connected at another volume path; inspect it before reconnecting.",
+            )
         return ControllerMountProbe(
             False, False, mount_point, occupied=occupied,
             failure_kind="mount_path_occupied" if occupied else "mount_absent",
@@ -243,7 +263,7 @@ def mount_controller_smb_no_ui(
     )
     if before.mounted and before.accessible:
         return ControllerMountResult(True, False, None, None, before)
-    if before.failure_kind == "invalid_mapping":
+    if before.failure_kind in {"invalid_mapping", "unexpected_mount_path"}:
         return ControllerMountResult(False, True, before.failure_kind, before.detail, before)
     if before.occupied or before.failure_kind in {"probe_timeout", "probe_failed"}:
         return ControllerMountResult(False, before.occupied, before.failure_kind, before.detail, before)
@@ -288,7 +308,10 @@ def mount_controller_smb_no_ui(
     )
     return ControllerMountResult(
         after.mounted and after.accessible,
-        not (after.mounted and after.accessible),
+        after.failure_kind in {
+            "invalid_mapping", "mount_identity_mismatch", "mount_path_occupied",
+            "unexpected_mount_path",
+        },
         after.failure_kind,
         after.detail,
         after,
