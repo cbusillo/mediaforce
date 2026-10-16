@@ -155,3 +155,17 @@ def test_cleanup_cannot_race_a_runtime_switch(config: MediaforceConfig) -> None:
         assert retained.exists()
     _sweep(config)
     assert not retained.exists()
+
+
+def test_failed_attempts_cannot_age_out_the_active_rollback(config: MediaforceConfig) -> None:
+    from mediaforce.ops.runtime_install import retain_deploy_stage
+
+    support = config.paths.db_path.parent
+    active = _work_folder(support / "deployments", "active-rollback", age_days=60)
+    retain_deploy_stage(support, active)
+    _work_folder(support / "deployments", "newer-attempt", age_days=1)
+    _work_folder(support / "deployments", "latest-attempt", age_days=0)
+
+    _sweep(config)
+
+    assert (active / "before.sqlite").exists()

@@ -28,6 +28,7 @@ class LoginItemError(RuntimeError):
 class LoginItemPaths:
     project_root: Path
     home: Path
+    config_path: Path | None = None
 
     @property
     def program(self) -> Path:
@@ -51,9 +52,12 @@ class LoginItemPaths:
 
 
 def render_login_item_plist(paths: LoginItemPaths) -> bytes:
+    arguments = [str(paths.program), "--no-reload"]
+    if paths.config_path is not None:
+        arguments.extend(["--config", str(paths.config_path)])
     payload = {
         "Label": LOGIN_ITEM_LABEL,
-        "ProgramArguments": [str(paths.program), "--no-reload"],
+        "ProgramArguments": arguments,
         "WorkingDirectory": str(paths.project_root),
         "EnvironmentVariables": {"PATH": _login_item_path(paths.home)},
         "RunAtLoad": True,
@@ -71,7 +75,7 @@ def install_login_item(paths: LoginItemPaths) -> str:
     try:
         require_release_directory(paths.project_root, paths.home)
     except RuntimeProtectionError as exc:
-        raise LoginItemError(str(exc)) from exc
+        raise LoginItemError(f"{exc}; use scripts/deploy-controller.sh (legacy recovery: release-flow.md)") from exc
     _require_program(paths.program)
     paths.plist.parent.mkdir(parents=True, exist_ok=True)
     paths.log_dir.mkdir(parents=True, exist_ok=True)
@@ -175,16 +179,22 @@ def run_login_item_command(
     except RuntimeProtectionError:
         root = runtime_directory(home) / "current"
     plist = LoginItemPaths(project_root=root, home=home).plist
+    config_path = None
     if plist.exists():
         try:
             installed = plistlib.loads(plist.read_bytes())
             root = Path(installed["WorkingDirectory"])
             if not root.is_absolute():
                 raise ValueError("working directory is not absolute")
-        except (OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException) as exc:
+            arguments = installed.get("ProgramArguments", [])
+            if "--config" in arguments:
+                config_path = Path(arguments[arguments.index("--config") + 1])
+                if not config_path.is_absolute():
+                    raise ValueError("configuration path is not absolute")
+        except (OSError, ValueError, KeyError, IndexError, TypeError, plistlib.InvalidFileException) as exc:
             print(f"login item: cannot identify installed runtime: {exc}")
             return 1
-    paths = LoginItemPaths(project_root=root.resolve(), home=home)
+    paths = LoginItemPaths(project_root=root.resolve(), home=home, config_path=config_path)
     try:
         if action == "install":
             state = install_login_item(paths)

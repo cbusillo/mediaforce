@@ -19,7 +19,7 @@ from mediaforce.encoding.quality import (
 from mediaforce.hosts import DEFAULT_HOST_CAPABILITIES
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.remote import run_remote_command
-from mediaforce.ops.runtime_install import RuntimeProtectionError, paths_overlap, protected_runtime_roots, runtime_activity
+from mediaforce.ops.runtime_install import RuntimeProtectionError, paths_overlap, protected_runtime_roots, retained_deploy_stage, runtime_activity
 
 SECONDS_PER_DAY = 86400
 SECONDS_PER_MINUTE = 60
@@ -62,6 +62,7 @@ def _purge_due_transient_artifacts(config: MediaforceConfig) -> bool:
     staging_roots = _staging_roots_for_cleanup(config)
     support_dir = config.paths.db_path.parent
     try:
+        rollback_stage = retained_deploy_stage(support_dir)
         protected = (*protected_runtime_roots(support_dir), Path(__file__).resolve().parents[1])
     except RuntimeProtectionError as exc:
         LOGGER.warning("%s", exc)
@@ -107,7 +108,7 @@ def _purge_due_transient_artifacts(config: MediaforceConfig) -> bool:
     _prune_matching_files(config.paths.web_state_dir, "*.job.json", cutoff)
     _prune_run_manifests(config, cutoff)
     support_dir = config.paths.db_path.parent
-    _prune_deploy_backups(support_dir / "deployments", keep=_kept_deploy_backups(config))
+    _prune_deploy_backups(support_dir / "deployments", keep=_kept_deploy_backups(config), protected=rollback_stage)
     _prune_operation_evidence(
         support_dir / "operations",
         now - _operation_evidence_retention_days(config) * SECONDS_PER_DAY,
@@ -242,11 +243,12 @@ def _prune_matching_directories(
         shutil.rmtree(path, ignore_errors=True)
 
 
-def _prune_deploy_backups(root: Path, *, keep: int) -> None:
-    """Keep the newest deploy folders; only the latest database copy is a useful rollback."""
+def _prune_deploy_backups(root: Path, *, keep: int, protected: Path | None = None) -> None:
+    """Keep recent stages and the running release's rollback."""
     folders = sorted(_child_directories(root), key=_content_mtime, reverse=True)
     for folder in folders[keep:]:
-        shutil.rmtree(folder, ignore_errors=True)
+        if protected is None or folder.resolve() != protected.resolve():
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 def _prune_operation_evidence(root: Path, cutoff: float) -> None:

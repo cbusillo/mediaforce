@@ -29,10 +29,15 @@ gate, refuses a dirty previous runtime, and prepares the candidate before
 stopping the service. It rechecks the gate, stops the login item, verifies port
 8777 closes, takes an online SQLite backup and runs `pragma quick_check`, then
 switches the plist atomically and starts the candidate. Startup runs migrations.
-After the API health check succeeds it resumes the encode queue. Preparation or
-preflight failure leaves the existing service alone. A failure after stopping
-leaves the service disabled for reconciliation; it does not start older code
-against a possibly migrated database. Existing dashboard gates retain their
+After the API health check succeeds it protects that stage's rollback and
+resumes the encode queue. Preparation failure leaves the existing service alone
+and creates no stage. If the backup fails after the port is verified closed,
+it restores the unchanged previous login item. Uncertain listener custody or
+a candidate startup failure leaves the service disabled for reconciliation;
+it never starts older code against a possibly migrated database. A lost resume
+response leaves the healthy candidate running; inspect the dashboard before
+retrying a request with an uncertain outcome. Startup permits three minutes by
+default; use `--startup-timeout` for a migration expected to take longer. Existing dashboard gates retain their
 current scope; the work-count endpoint below is not an idle gate.
 
 ### Next deploy: switch from the legacy worktree
@@ -42,13 +47,19 @@ They are not part of source implementation or PR review.
 
 1. Use a clean `main` checkout containing this script. Fetch `origin/main` and
    resolve the exact reviewed commit with `git rev-parse origin/main`. Record
-   that full SHA as the target; do not select a task branch.
+   that full SHA as the target; do not select a task branch. The candidate
+   explicitly fetches that SHA, including when the local checkout is behind the
+   fetched remote. Use the same config as the installed controller: for an
+   alternate config, pass `--config /persistent/path/config.toml`; deployment
+   derives its database, lock and registry from that config and preserves the
+   option in the new launch item. Keep custom config outside development trees.
 2. Pause the queue with `POST /api/encode-queue/pause`. Wait for dashboard
    encode, sample and full-run counts to reach zero. Preserve queued jobs,
    runtime settings and all retained outputs. Check the existing runtime is
    clean; do not move, delete or unlock it.
 3. Choose a fresh stage under
-   `~/Library/Application Support/mediaforce/deployments/main-<sha>-<date>/`.
+   `~/Library/Application Support/mediaforce/deployments/main-<sha>-<date>/`
+   (or `deployments/` beside the configured database for a custom config).
    Run from the clean checkout, substituting the full reviewed SHA and a fresh
    stage name:
 
@@ -69,7 +80,7 @@ They are not part of source implementation or PR review.
 ### Rollback and cleanup ownership
 
 Before changing the plist, deploy records both old and new runtime paths in
-`runtime/protected-roots.json`. Registration is cumulative: active and rollback
+`runtime/protected-roots.json` beside the configured database. Registration is cumulative: active and rollback
 roots remain protected across later deploys. The hourly cleanup refuses an
 entire sweep when any configured cleanup tree overlaps the runtime install
 root, a registered runtime/rollback path, or the executing source tree. An
@@ -79,6 +90,12 @@ installed runtimes, the registry, locked legacy runtimes and retained rollback
 material alone. These guards cover Mediaforce's supported retention cleanup,
 not arbitrary filesystem deletion or another repository's cleanup program.
 The September disappearance's actor remains unknown.
+
+Before the first switch-over, new-code `service enable` and `restart` refuse
+the legacy worktree. An approved legacy restart uses `launchctl kickstart -k`
+on the existing `gui/<uid>/com.mediaforce.web` item; when unloaded, enable and
+bootstrap its saved plist instead. This preserves the legacy target without
+regenerating an install in a development tree.
 
 For rollback, first stop the service with `mediaforce service disable` (or the
 raw `launchctl` recovery in the login-item doc). Verify port 8777 is closed.
@@ -91,8 +108,10 @@ service installation correctly refuses. Verify its exact saved commit, API and
 queue before resuming work. No runtime directory is deleted during rollback.
 
 The hourly cleanup keeps the newest `state.cleanup.kept_deploy_backups` stage
-folders (two by default). Retain a stage outside that cleanup tree when its
-backup is still needed for a longer-lived rollback. Removing old releases or
+folders (two by default), plus the running release's rollback stage named in
+`runtime/rollback-stage.txt`. Failed preparation does not consume a retention
+slot. Retain a stage outside that cleanup tree when its backup is needed after
+a later successful release replaces that pointer. Removing old releases or
 releasing legacy protection requires a separate, verified retirement after no
 service, job or rollback depends on them.
 

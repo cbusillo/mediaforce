@@ -44,11 +44,11 @@ def protected_runtime_roots(support_dir: Path) -> tuple[Path, ...]:
     return (runtime.resolve(), *(Path(value).resolve() for value in values))
 
 
-def register_runtime_roots(home: Path, *roots: Path) -> None:
+def register_runtime_roots(home: Path, *roots: Path, support_dir: Path | None = None) -> None:
     from mediaforce.ops.login_item import _atomic_write
 
-    runtime = runtime_directory(home)
-    existing = protected_runtime_roots(runtime.parent)
+    runtime = (support_dir or runtime_directory(home).parent) / "runtime"
+    existing = (*protected_runtime_roots(runtime.parent), runtime_directory(home))
     runtime.mkdir(parents=True, exist_ok=True)
     values = sorted({str(root.resolve()) for root in (*existing, *roots)})
     _atomic_write(runtime / "protected-roots.json", json.dumps(values, indent=2).encode())
@@ -73,3 +73,24 @@ def runtime_activity(support_dir: Path, *, cleanup: bool = False) -> Iterator[bo
             yield True
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def retained_deploy_stage(support_dir: Path) -> Path | None:
+    try:
+        value = (support_dir / "runtime/rollback-stage.txt").read_text()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RuntimeProtectionError("cannot read rollback stage; cleanup refused") from exc
+    stage = Path(value)
+    if not stage.is_absolute() or stage.parent != (support_dir / "deployments").resolve():
+        raise RuntimeProtectionError("invalid rollback stage; cleanup refused")
+    return stage
+
+
+def retain_deploy_stage(support_dir: Path, stage: Path) -> None:
+    from mediaforce.ops.login_item import _atomic_write
+
+    runtime = support_dir / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    _atomic_write(runtime / "rollback-stage.txt", str(stage).encode())

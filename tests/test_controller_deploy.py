@@ -83,19 +83,26 @@ def test_service_commands_from_worktree_address_installed_release(tmp_path: Path
     home = tmp_path / "home"
     candidate = runtime_install.runtime_directory(home) / "releases/candidate"
     _independent_clone(candidate)
-    paths = login_item.LoginItemPaths(candidate, home)
+    config_path = tmp_path / "persistent/config.toml"
+    paths = login_item.LoginItemPaths(candidate, home, config_path=config_path)
     paths.plist.parent.mkdir(parents=True)
     paths.plist.write_bytes(login_item.render_login_item_plist(paths))
     with patch.object(login_item, "enable_login_item", return_value="unchanged") as enable:
         assert login_item.run_login_item_command("restart", project_root=tmp_path / "worktrees/task", home=home) == 0
     assert enable.call_args.args[0].project_root == candidate
+    assert enable.call_args.args[0].config_path == config_path
 
 
-def test_database_backup_preserves_rows_and_refuses_overwrite(tmp_path: Path) -> None:
+@pytest.mark.parametrize("journal_mode", ["delete", "wal"])
+def test_database_backup_preserves_rows_and_refuses_overwrite(tmp_path: Path, journal_mode: str) -> None:
     source, backup = tmp_path / "state.sqlite", tmp_path / "before.sqlite"
-    with sqlite3.connect(source) as connection:
-        connection.execute("create table jobs (id integer, state text)")
-        connection.execute("insert into jobs values (1, 'queued')")
+    connection = sqlite3.connect(source)
+    connection.execute(f"pragma journal_mode={journal_mode}")
+    connection.execute("create table jobs (id integer, state text)")
+    connection.execute("insert into jobs values (1, 'queued')")
+    connection.commit()
+    connection.close()
+    assert not Path(f"{source}-wal").exists() and not Path(f"{source}-shm").exists()
     controller_deploy.backup_database(source, backup)
     with sqlite3.connect(backup) as connection:
         assert connection.execute("select * from jobs").fetchall() == [(1, "queued")]
@@ -113,13 +120,15 @@ def test_deploy_refuses_unpaused_or_running_work(paused: bool, encodes: int, sam
         controller_deploy.require_paused_idle_dashboard(dashboard)
 
 
-@pytest.mark.parametrize("healthy", [True, False])
-def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, healthy: bool) -> None:
+@pytest.mark.parametrize("outcome", ["healthy", "unhealthy", "slow", "resume-lost", "backup-failed", "prepare-failed"])
+def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, outcome: str) -> None:
+    from http.client import RemoteDisconnected
     from urllib.error import URLError
 
     home, old = tmp_path / "home", tmp_path / "worktrees/legacy"
     candidate = runtime_install.runtime_directory(home) / "releases/candidate"
-    stage = runtime_install.runtime_directory(home).parent / "deployments/fixture-stage"
+    database = tmp_path / "configured-state/library.sqlite3"
+    stage = database.parent / "deployments/fixture-stage"
     old.mkdir(parents=True)
     (old / "retained-output").write_text("keep")
     _independent_clone(candidate)
@@ -127,7 +136,6 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, hea
     paths.plist.parent.mkdir(parents=True)
     original = login_item.render_login_item_plist(paths)
     paths.plist.write_bytes(original)
-    database = runtime_install.runtime_directory(home).parent / "library.sqlite3"
     database.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(database) as connection:
         connection.execute("create table jobs (id integer)")
@@ -136,14 +144,20 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, hea
         "encode_queue": {"state": {"is_paused": True}, "running_count": 0},
         "calibration_queue": {"sample": {"running_count": 0}, "full": {"running_count": 0}},
     }
-    resumed: list[bool] = []
+    resume_requests: list[bool] = []
     service_running = True
+    clock = [0.0]
 
     def api(_base_url: str, route: str, *, post: bool = False) -> dict:
-        if route == "/api/dashboard/scan-job" and not healthy:
-            raise URLError("candidate unavailable")
+        if route == "/api/dashboard/scan-job":
+            if outcome == "unhealthy":
+                raise URLError("candidate unavailable")
+            if outcome == "slow" and clock[0] < 60:
+                raise RemoteDisconnected("migration still running")
         if post:
-            resumed.append(True)
+            resume_requests.append(True)
+            if outcome == "resume-lost":
+                raise RemoteDisconnected("response lost")
         return dashboard
 
     def switch(target_paths: login_item.LoginItemPaths) -> str:
@@ -156,26 +170,58 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, hea
         nonlocal service_running
         service_running = False
 
+    def restore_service(*_args: object) -> None:
+        nonlocal service_running
+        service_running = True
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    def git(command: list[str], *, cwd: Path | None = None) -> str:
+        assert cwd == old
+        return {"status": "", "rev-parse": "previous-sha"}[command[1]]
+
+    actual_backup = controller_deploy.backup_database
+    def backup(source: Path, destination: Path) -> None:
+        if outcome == "backup-failed":
+            raise OSError("backup volume unavailable")
+        actual_backup(source, destination)
+
     with patch.object(controller_deploy, "_api", side_effect=api), patch.object(
-        controller_deploy, "_run", side_effect=["", "previous-sha"]
-    ), patch.object(controller_deploy, "prepare_release", return_value=candidate), patch.object(
+        controller_deploy, "_run", side_effect=git
+    ), patch.object(controller_deploy, "prepare_release", return_value=candidate,
+                    side_effect=RuntimeError("preparation failed") if outcome == "prepare-failed" else None), patch.object(
         controller_deploy, "disable_login_item", side_effect=stop_service
     ), patch.object(controller_deploy, "enable_login_item", side_effect=switch), patch.object(
-        controller_deploy.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", b"")
-    ), patch.object(controller_deploy.time, "sleep"):
-        if healthy:
-            controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture")
+        controller_deploy, "backup_database", side_effect=backup
+    ), patch.object(controller_deploy, "_bootstrap", side_effect=restore_service), patch.object(
+        controller_deploy, "_run_command", return_value=subprocess.CompletedProcess([], 0, "", "")
+    ), patch.object(controller_deploy, "_launch_domain", return_value="gui/fixture"), patch.object(
+        controller_deploy, "_launch_target", return_value="gui/fixture/service"
+    ), patch.object(controller_deploy.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", b"")), patch.object(
+        controller_deploy.time, "sleep", side_effect=sleep
+    ), patch.object(controller_deploy.time, "monotonic", side_effect=lambda: clock[0]):
+        if outcome in {"healthy", "slow"}:
+            controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture", database=database, startup_timeout=90)
         else:
-            with pytest.raises(RuntimeError):
-                controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture")
-    assert service_running is healthy
-    assert resumed == ([True] if healthy else [])
+            with pytest.raises((RuntimeError, OSError)):
+                controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture", database=database, startup_timeout=90)
+    assert service_running is (outcome != "unhealthy")
+    healthy_candidate = outcome in {"healthy", "slow", "resume-lost"}
+    assert resume_requests == ([True] if healthy_candidate else [])
     assert (old / "retained-output").read_text() == "keep"
+    if outcome == "prepare-failed":
+        assert not stage.exists()
+        return
     assert (stage / "launch-item.before.plist").read_bytes() == original
+    if outcome == "backup-failed":
+        assert paths.plist.read_bytes() == original
+        return
     with sqlite3.connect(stage / "before.sqlite") as connection:
         assert connection.execute("select * from jobs").fetchall() == [(42,)]
     roots = runtime_install.protected_runtime_roots(database.parent)
     assert old in roots and candidate in roots
+    assert runtime_install.retained_deploy_stage(database.parent) == (stage if healthy_candidate else None)
 
 
 @pytest.mark.parametrize("shared_metadata", ["commondir", "objects/info/alternates"])
