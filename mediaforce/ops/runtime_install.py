@@ -1,0 +1,51 @@
+"""Controller installation paths shared by deploy, launchd and retention."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+
+class RuntimeProtectionError(RuntimeError):
+    pass
+
+
+def runtime_directory(home: Path) -> Path:
+    return home.resolve() / "Library" / "Application Support" / "mediaforce" / "runtime"
+
+
+def require_release_directory(project_root: Path, home: Path) -> None:
+    releases = runtime_directory(home) / "releases"
+    root = project_root.absolute()
+    if root.parent != releases.absolute() or root.resolve() != root:
+        raise RuntimeProtectionError(f"controller runtime must be a real directory directly under {releases}")
+    if (root / ".git").is_symlink() or not (root / ".git").is_dir() or (root / ".git" / "commondir").exists() or (root / ".git/objects/info/alternates").exists():
+        raise RuntimeProtectionError("controller runtime must be an independent clone, not a development worktree")
+
+
+def protected_runtime_roots(support_dir: Path) -> tuple[Path, ...]:
+    runtime = support_dir / "runtime"
+    registry = runtime / "protected-roots.json"
+    try:
+        values = json.loads(registry.read_text())
+    except FileNotFoundError:
+        values = []
+    except (OSError, ValueError) as exc:
+        raise RuntimeProtectionError("cannot read runtime protection registry; cleanup refused") from exc
+    if not isinstance(values, list) or any(not isinstance(value, str) or not Path(value).is_absolute() for value in values):
+        raise RuntimeProtectionError("invalid runtime protection registry; cleanup refused")
+    return (runtime.resolve(), *(Path(value).resolve() for value in values))
+
+
+def register_runtime_roots(home: Path, *roots: Path) -> None:
+    from mediaforce.ops.login_item import _atomic_write
+
+    runtime = runtime_directory(home)
+    existing = protected_runtime_roots(runtime.parent)
+    runtime.mkdir(parents=True, exist_ok=True)
+    values = sorted({str(root.resolve()) for root in (*existing, *roots)})
+    _atomic_write(runtime / "protected-roots.json", json.dumps(values, indent=2).encode())
+
+
+def paths_overlap(left: Path, right: Path) -> bool:
+    left, right = left.resolve(), right.resolve()
+    return left.is_relative_to(right) or right.is_relative_to(left)

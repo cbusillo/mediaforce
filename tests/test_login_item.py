@@ -8,14 +8,16 @@ from unittest.mock import Mock, patch
 from mediaforce.ops.login_item import LOGIN_ITEM_LABEL, LoginItemError, LoginItemPaths, disable_login_item, \
     enable_login_item, install_login_item, login_item_status, render_login_item_plist, rotate_login_item_logs, \
     run_login_item_command, uninstall_login_item
+from mediaforce.ops.runtime_install import runtime_directory
 
 
 class LoginItemTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
-        self.project_root = self.root / "repo"
         self.home = self.root / "home"
+        self.project_root = runtime_directory(self.home) / "releases" / "candidate"
+        (self.project_root / ".git").mkdir(parents=True)
         self.program = self.project_root / ".venv" / "bin" / "mediaforce-web"
         self.program.parent.mkdir(parents=True)
         self.program.write_text("#!/bin/sh\n")

@@ -64,7 +64,7 @@ to qualify storage recovery.
 
 ## Commands
 
-Run these from the Mediaforce checkout:
+Run these from a Mediaforce checkout; they address the installed controller:
 
 ```bash
 uv run mediaforce service install
@@ -87,7 +87,7 @@ also removes the plist. All operations are idempotent.
 The generated plist:
 
 - executes `.venv/bin/mediaforce-web --no-reload` directly;
-- uses the checkout as its working directory;
+- uses a dedicated independent clone under `runtime/releases/` as its working directory;
 - reads the normal repo-local `.env` through the web entrypoint;
 - carries the existing runtime's `.env` into a new runtime checkout with mode
   `0600`, and refuses the checkout switch when neither location has one;
@@ -95,6 +95,12 @@ The generated plist:
 - restarts through launchd's `KeepAlive` behavior with a 30-second throttle;
 - writes durable logs to `~/Library/Logs/mediaforce/web.log` and
   `~/Library/Logs/mediaforce/web.err.log`.
+
+New installs and switches refuse development worktree paths. Use the
+[staged deploy](release-flow.md#next-deploy-switch-from-the-legacy-worktree)
+to prepare and switch a controller release. Status and disable still address
+an existing legacy installation. A missing environment is reported as unavailable;
+recovery uses the retained release or deployment backup, not a disposable checkout.
 
 The service manager rotates either log to a single `.1` file when it exceeds
 16 MiB before enabling or restarting the item.
@@ -141,5 +147,6 @@ launchctl bootout "gui/$(id -u)/com.mediaforce.web"
 launchctl disable "gui/$(id -u)/com.mediaforce.web"
 ```
 
-After restoring the checkout and `.venv`, run `uv sync` followed by
-`uv run mediaforce service enable` to regenerate and reload the item.
+Restore the retained independent release and its environment before enabling
+the service, or follow the [deploy rollback](release-flow.md#rollback-and-cleanup-ownership)
+procedure to restore a legacy runtime from its saved plist.

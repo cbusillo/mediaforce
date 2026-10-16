@@ -10,31 +10,90 @@ possible future replacement, not a gate on deploys today.
 
 ## Staged deploy
 
-Each deploy gets its own folder under
-`~/Library/Application Support/mediaforce/deployments/<branch>-<sha>-<date>/`,
-holding a `deploy.sh` copied from the previous one with its target and comments
-changed. The script:
+Use the maintained `scripts/deploy-controller.sh`, from a clean checkout of
+reviewed `main`. Do not copy an old machine-local deploy script: those scripts
+update a development worktree in place.
 
-1. refuses to run unless the encode queue is paused and no encode, sample or
-   full run is running (pause with `POST /api/encode-queue/pause`; queued work
-   survives the restart);
-2. refuses a dirty runtime checkout;
-3. stops the login item and waits for port 8777 to close;
-4. takes an online SQLite backup to `before.sqlite` and checks it with
-   `pragma quick_check`;
-5. checks out the target commit detached, runs
-   `uv sync --active --locked --inexact --no-install-project --no-dev`, and
-   replaces `frontend/build` with a prebuilt `frontend-build/` staged beside the
-   script (built from a clean worktree at the same commit), keeping the old one
-   as `frontend-build.before/`;
-6. starts the login item (retrying once), waits for the API, and resumes the
-   queue.
+The controller installs into
+`~/Library/Application Support/mediaforce/runtime/releases/<full-sha>-<attempt>/`.
+Each release is an independent Git clone with its own environment and freshly
+built frontend. A fresh attempt folder lets the same commit be retried without
+overwriting a retained candidate; it has no Git alternates or worktree registration pointing back
+to a development checkout. Launchd's program and working directory name that
+release directly. Service commands run from a development checkout address the
+installed controller rather than changing it to the caller's checkout.
 
-Database migrations run when the service starts. The script's header names the
-rollback: the previous commit and, when a migration ran, restoring
-`before.sqlite` with the service stopped. The hourly cleanup keeps the newest
-`state.cleanup.kept_deploy_backups` deploy folders (two by default), so the
-running build and its rollback stay on disk.
+The deploy script serializes deploys, checks the existing paused/idle dashboard
+gate, refuses a dirty previous runtime, and prepares the candidate before
+stopping the service. It rechecks the gate, stops the login item, verifies port
+8777 closes, takes an online SQLite backup and runs `pragma quick_check`, then
+switches the plist atomically and starts the candidate. Startup runs migrations.
+After the API health check succeeds it resumes the encode queue. Preparation or
+preflight failure leaves the existing service alone. A failure after stopping
+leaves the service disabled for reconciliation; it does not start older code
+against a possibly migrated database. Existing dashboard gates retain their
+current scope; the work-count endpoint below is not an idle gate.
+
+### Next deploy: switch from the legacy worktree
+
+These steps belong to the next authorized deploy, after this change is merged.
+They are not part of source implementation or PR review.
+
+1. Use a clean `main` checkout containing this script. Fetch `origin/main` and
+   resolve the exact reviewed commit with `git rev-parse origin/main`. Record
+   that full SHA as the target; do not select a task branch.
+2. Pause the queue with `POST /api/encode-queue/pause`. Wait for dashboard
+   encode, sample and full-run counts to reach zero. Preserve queued jobs,
+   runtime settings and all retained outputs. Check the existing runtime is
+   clean; do not move, delete or unlock it.
+3. Choose a fresh stage under
+   `~/Library/Application Support/mediaforce/deployments/main-<sha>-<date>/`.
+   Run from the clean checkout, substituting the full reviewed SHA and a fresh
+   stage name:
+
+   ```bash
+   scripts/deploy-controller.sh --target <full-sha> --stage "$HOME/Library/Application Support/mediaforce/deployments/main-<sha>-<date>"
+   ```
+
+4. The stage retains `launch-item.before.plist`, `previous-commit.txt`,
+   `candidate.txt` and `before.sqlite`. The new runtime retains the existing
+   credential file with mode `0600` through the service install path; never
+   print its contents. Database/settings remain at their existing support paths.
+5. Verify `uv run mediaforce service status`, the installed plist's program and
+   working directory, the dashboard and durable logs. Both launch paths must
+   point into the candidate named in `candidate.txt`, and queued work must
+   remain present. Keep the legacy runtime and its worktree lock as rollback;
+   this deploy never removes or changes its source/environment.
+
+### Rollback and cleanup ownership
+
+Before changing the plist, deploy records both old and new runtime paths in
+`runtime/protected-roots.json`. Registration is cumulative: active and rollback
+roots remain protected across later deploys. The hourly cleanup refuses an
+entire sweep when any configured cleanup tree overlaps the runtime install
+root, a registered runtime/rollback path, or the executing source tree. An
+unreadable registry also refuses cleanup. It never prunes `runtime/` releases.
+Routine development cleanup owns development worktrees only; it must leave
+installed runtimes, the registry, locked legacy runtimes and retained rollback
+material alone. These guards cover Mediaforce's supported retention cleanup,
+not arbitrary filesystem deletion or another repository's cleanup program.
+The September disappearance's actor remains unknown.
+
+For rollback, first stop the service with `mediaforce service disable` (or the
+raw `launchctl` recovery in the login-item doc). Verify port 8777 is closed.
+If startup reached migrations, restore this stage's verified `before.sqlite`
+with the service stopped and remove the database's stale `-wal`/`-shm` files.
+Restore `launch-item.before.plist` atomically to the launch-item path, then use
+`launchctl enable` and `launchctl bootstrap` for that exact saved plist. Do not
+regenerate it with new code: the old rollback may be a legacy worktree that new
+service installation correctly refuses. Verify its exact saved commit, API and
+queue before resuming work. No runtime directory is deleted during rollback.
+
+The hourly cleanup keeps the newest `state.cleanup.kept_deploy_backups` stage
+folders (two by default). Retain a stage outside that cleanup tree when its
+backup is still needed for a longer-lived rollback. Removing old releases or
+releasing legacy protection requires a separate, verified retirement after no
+service, job or rollback depends on them.
 
 ## Work evidence
 

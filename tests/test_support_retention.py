@@ -21,7 +21,7 @@ def config(tmp_path: Path) -> Iterator[MediaforceConfig]:
             "media": {"staging_root": str(tmp_path / "staging"), "source_roots": {}},
         },
         paths=ConfigPaths(
-            project_root=tmp_path,
+            project_root=tmp_path / "repo",
             config_path=tmp_path / "config.toml",
             db_path=support / "library.sqlite3",
             run_manifest_dir=support / "runs",
@@ -107,3 +107,39 @@ def test_missing_support_folders_are_fine(config: MediaforceConfig) -> None:
     _sweep(config)
 
     assert not (config.paths.db_path.parent / "deployments").exists()
+
+
+@pytest.mark.parametrize("location", ["deployments", "operations", "web", "runs", "review", "staging"])
+def test_cleanup_refuses_registered_runtime_and_rollback(config: MediaforceConfig, location: str) -> None:
+    import json
+
+    candidates = {
+        "deployments": config.paths.db_path.parent / "deployments",
+        "operations": config.paths.db_path.parent / "operations",
+        "web": config.paths.web_state_dir,
+        "runs": config.paths.run_manifest_dir,
+        "review": config.paths.review_dir,
+        "staging": config.staging_root,
+    }
+    active = _work_folder(candidates[location], "retained-runtime", age_days=60)
+    registry = config.paths.db_path.parent / "runtime/protected-roots.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(json.dumps([str(active)]))
+    _work_folder(config.paths.db_path.parent / "deployments", "new", age_days=1)
+    _work_folder(config.paths.db_path.parent / "deployments", "previous", age_days=2)
+
+    _sweep(config)
+
+    assert (active / "before.sqlite").exists()
+    assert not (config.paths.web_state_dir / ".cleanup-stamp").exists()
+
+
+def test_cleanup_refuses_unreadable_runtime_ownership(config: MediaforceConfig) -> None:
+    registry = config.paths.db_path.parent / "runtime/protected-roots.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("broken registry")
+    retained = _work_folder(config.paths.db_path.parent / "operations", "old", age_days=60)
+
+    _sweep(config)
+
+    assert retained.exists()

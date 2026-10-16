@@ -19,6 +19,7 @@ from mediaforce.encoding.quality import (
 from mediaforce.hosts import DEFAULT_HOST_CAPABILITIES
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.remote import run_remote_command
+from mediaforce.ops.runtime_install import RuntimeProtectionError, paths_overlap, protected_runtime_roots
 
 SECONDS_PER_DAY = 86400
 SECONDS_PER_MINUTE = 60
@@ -50,6 +51,21 @@ def purge_transient_artifacts(config: MediaforceConfig, *, force: bool = False) 
     if not force and not _cleanup_is_due(config):
         return False
 
+    staging_roots = _staging_roots_for_cleanup(config)
+    support_dir = config.paths.db_path.parent
+    try:
+        protected = (*protected_runtime_roots(support_dir), Path(__file__).resolve().parents[1])
+    except RuntimeProtectionError as exc:
+        LOGGER.warning("%s", exc)
+        return False
+    cleanup_roots = (
+        config.paths.review_dir, config.paths.web_state_dir, config.paths.run_manifest_dir,
+        support_dir / "deployments", support_dir / "operations", *staging_roots,
+    )
+    if any(paths_overlap(cleanup, runtime) for cleanup in cleanup_roots for runtime in protected):
+        LOGGER.warning("Cleanup refused: a cleanup path overlaps a protected controller runtime")
+        return False
+
     retention_days = _retention_days(config)
     if retention_days <= 0:
         _write_cleanup_stamp(config)
@@ -60,7 +76,7 @@ def purge_transient_artifacts(config: MediaforceConfig, *, force: bool = False) 
     temp_cutoff = max(cutoff, now - _orphan_temp_retention_seconds(config))
     process_snapshot = _cleanup_process_snapshot(config)
     _prune_children(config.paths.review_dir, cutoff)
-    for staging_root in _staging_roots_for_cleanup(config):
+    for staging_root in staging_roots:
         root_verified = not _root_requires_unverified_process_check(
             staging_root, process_snapshot
         )
