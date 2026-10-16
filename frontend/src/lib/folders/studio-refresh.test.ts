@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { studioRefreshPlan } from './studio-refresh';
+import type { StagedIntegrityPayload } from '$lib/api/types';
+
+import { stagedIntegrityPollTracker, studioRefreshPlan } from './studio-refresh';
 
 describe('studioRefreshPlan', () => {
 	it('navigates to the surviving title after an exact movie file is replaced', () => {
@@ -30,5 +32,32 @@ describe('studioRefreshPlan', () => {
 			prefix: 'movies/2101 (2014)',
 			navigate: false
 		});
+	});
+});
+
+describe('stagedIntegrityPollTracker', () => {
+	const polled = (counts: StagedIntegrityPayload['counts']): StagedIntegrityPayload => ({
+		scope: {} as StagedIntegrityPayload['scope'],
+		counts,
+		blocker_count: 0,
+		blockers: [],
+		database_truncated: false,
+		discovery: { requested: false, truncated: false, entries_scanned: 0 }
+	});
+
+	it('does not count a repeat poll as a change after a full read found more', () => {
+		const tracker = stagedIntegrityPollTracker();
+		tracker.reset(polled({ tracked: 39 }));
+
+		expect(tracker.changed(polled({ tracked: 39 }))).toBe(false);
+		expect(tracker.changed(polled({ tracked: 39 }))).toBe(false);
+	});
+
+	it('reports a poll whose staged files changed, once', () => {
+		const tracker = stagedIntegrityPollTracker();
+		tracker.reset(polled({ tracked: 39 }));
+
+		expect(tracker.changed(polled({ tracked: 40 }))).toBe(true);
+		expect(tracker.changed(polled({ tracked: 40 }))).toBe(false);
 	});
 });

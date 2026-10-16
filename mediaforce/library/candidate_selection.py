@@ -3,7 +3,7 @@ from collections import Counter, defaultdict
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from sqlalchemy import or_, outerjoin, select
@@ -200,6 +200,14 @@ class OlderSeasonOverrideSelection:
         }
 
 
+def _candidate_query_prefix(scope: MediaScope) -> str | None:
+    """The rows a scope's decisions depend on: its own, or its whole show for a TV season or episode."""
+    if scope.domain in {"other", "movie"} or scope.kind == "tv_series":
+        return scope.prefix
+    parts = PurePosixPath(scope.prefix).parts
+    return "/".join(parts[:2]) if len(parts) >= 2 else None
+
+
 def project_candidates(
         connection: DBClient,
         config: MediaforceConfig,
@@ -219,14 +227,15 @@ def project_candidates(
         library_types=library_types,
     )
     # A TV season or episode needs its whole show loaded to know which season is current; a movie,
-    # an Other group, or a whole show needs only its own rows.
+    # an Other group, or a whole show needs only its own rows. Only a whole TV library loads everything.
+    query_prefixes = [_candidate_query_prefix(scope) for scope in resolved_scopes]
     query_scopes = (
-        resolved_scopes
-        if resolved_scopes
-        and all(
-            scope.domain in {"other", "movie"} or scope.kind == "tv_series"
-            for scope in resolved_scopes
+        resolve_media_scopes(
+            connection,
+            sorted({prefix for prefix in query_prefixes if prefix is not None}),
+            library_types=library_types,
         )
+        if resolved_scopes and None not in query_prefixes
         else []
     )
     rows = _load_rows(connection, scopes=query_scopes)

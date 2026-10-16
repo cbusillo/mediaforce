@@ -82,6 +82,36 @@ class LibraryLifecycleTests(unittest.TestCase):
         self.assertFalse(by_season[27].eligible)
         self.assertEqual([reason.code for reason in by_season[27].hold_reasons], ["current_season"])
 
+    def test_a_season_or_episode_loads_only_its_show_and_still_finds_the_current_season(self) -> None:
+        from unittest.mock import patch
+
+        from mediaforce.library import candidate_selection
+
+        config = self._config()
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(connection, "tv/Big Brother/Season 26/Episode 01.mkv", age_days=100)
+            self._insert_item(connection, "tv/Big Brother/Season 27/Episode 01.mkv", age_days=100)
+            self._insert_item(connection, "tv/Other Show/Season 1/Episode 01.mkv", age_days=100)
+            self._insert_series_metadata(connection, "tv/Big Brother", status="Returning Series", in_production=True)
+            loaded: list[str] = []
+            load_rows = candidate_selection._load_rows
+
+            def recording_load_rows(*args, **kwargs):
+                rows = load_rows(*args, **kwargs)
+                loaded.extend(str(row["rel_path"]) for row in rows)
+                return rows
+
+            with patch.object(candidate_selection, "_load_rows", side_effect=recording_load_rows):
+                season = project_candidates(connection, config, prefixes=["tv/Big Brother/Season 27"], now=NOW)
+                episode = project_candidates(
+                    connection, config, prefixes=["tv/Big Brother/Season 27/Episode 01.mkv"], now=NOW,
+                )
+
+        self.assertFalse(any(rel_path.startswith("tv/Other Show/") for rel_path in loaded))
+        for decisions in (season, episode):
+            current = [decision for decision in decisions if decision.season and decision.season.season_number == 27]
+            self.assertEqual([reason.code for reason in current[0].hold_reasons], ["current_season"])
+
     def test_exact_episode_scope_can_override_parent_season_holds(self) -> None:
         config = self._config()
         rel_path = "tv/Show/Season 1/Episode 01.mkv"
