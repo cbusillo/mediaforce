@@ -33,6 +33,7 @@ from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy import update
+from sqlalchemy import exc as sqlalchemy_exc
 
 from mediaforce import execution, quality, remote, review, state_cleanup
 from mediaforce.core import binaries, config as config_runtime
@@ -66,6 +67,7 @@ from mediaforce.encoding import quality as encoding_quality
 from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding import video_filters
+from mediaforce.encoding.runner import run_tracked_process
 from mediaforce.encoding.free_space import ReservePreflight, VolumeCapacity, encode_reserve_preflight
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence, reclassify_cadence_summary
 from mediaforce.encoding.duration_estimate import EncodeDurationSample, load_encode_duration_samples
@@ -22026,6 +22028,81 @@ raise SystemExit(0)
             job = load_encode_job(connection, "job-late-cancel")
         assert job is not None
         self.assertEqual(job["status"], "completed")
+
+    def test_run_encode_job_keeps_finished_encode_when_one_progress_write_finds_database_busy(self) -> None:
+        source_path = self._create_source_file("episode-busy-progress.mkv")
+        staging_path = self._staging_path("episode-busy-progress.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-busy-progress.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-busy-progress",
+                manifest_name="manifest-busy-progress.json",
+                host={"key": "remote", "label": "Remote", "mode": "ssh"},
+                status="running",
+                attempt_count=1,
+            )
+            connection.commit()
+
+        persist_progress = encode_runtime._persist_encode_job_progress
+        persist_attempts = 0
+
+        def persist_progress_busy_once(*args: Any, **kwargs: Any) -> None:
+            nonlocal persist_attempts
+            persist_attempts += 1
+            if persist_attempts == 1:
+                raise sqlalchemy_exc.OperationalError(
+                    "BEGIN IMMEDIATE", {}, sqlite3.OperationalError("database is locked")
+                )
+            persist_progress(*args, **kwargs)
+
+        def encode_through_runner(*_args: object, **kwargs: Any) -> list[object]:
+            child = (
+                "import pathlib, sys; "
+                "sys.stderr.write('progress=continue\\n'); sys.stderr.flush(); "
+                "sys.stderr.write('progress=end\\n'); sys.stderr.flush(); "
+                f"pathlib.Path({str(staging_path)!r}).write_text('encoded')"
+            )
+            run_tracked_process(
+                [sys.executable, "-c", child],
+                process_controller=kwargs["process_controller"],
+                progress_callback=kwargs["progress_callback"],
+                run_command=lambda _cmd: subprocess.CompletedProcess(_cmd, 0, "", ""),
+                update_ffmpeg_progress_state=lambda _state, line, **_kwargs: (
+                    {"progress_state": line.removeprefix("progress=")} if line.startswith("progress=") else None
+                ),
+                process_cancelled_error=ProcessCancelledError,
+                terminate_on_progress_failure=False,
+            )
+            return []
+
+        deps = web_app._encode_queue_runtime_deps()
+        deps.load_config = Mock(return_value=self.config)
+        deps.ensure_encode_host_ready = Mock(return_value=False)
+        deps.encode_job_progress_write_interval_seconds = 0.0
+        deps.encode_manifest_items = Mock(side_effect=encode_through_runner)
+
+        with patch.object(encode_runtime, "_persist_encode_job_progress", side_effect=persist_progress_busy_once):
+            encode_runtime.run_encode_job(
+                config_path=self.config.paths.config_path,
+                job_id="job-busy-progress",
+                process_controller=ManagedProcessController(),
+                deps=deps,
+            )
+
+        with open_db(self.config.paths.db_path) as connection:
+            job = load_encode_job(connection, "job-busy-progress")
+        assert job is not None
+        self.assertEqual(job["status"], "completed")
+        self.assertIsNone(job["error"])
+        self.assertTrue(staging_path.exists())
+        self.assertEqual(persist_attempts, 2)
 
     def _run_job_ended_by_reclaim(self, job_id: str, *, reclaim_first: bool) -> tuple[dict[str, Any], int]:
         source_path = self._create_source_file(f"{job_id}.mkv")

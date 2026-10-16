@@ -199,6 +199,47 @@ class ScannerRuntimeTests(unittest.TestCase):
         self.assertEqual(stats.discovered, 2)
         self.assertEqual(writer_errors, [])
 
+    def test_unchanged_rescan_holds_no_write_lock_while_reading_the_next_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            media_root = project_root / "movies"
+            media_root.mkdir()
+            for name in ("first.mkv", "second.mkv", "third.mkv"):
+                (media_root / name).write_bytes(name.encode())
+            config = self._config(project_root, {"movies": media_root})
+            writer_errors: list[Exception] = []
+            read_count = 0
+
+            def fingerprint_with_concurrent_writer(file_path: Path, stat_result: os.stat_result) -> str:
+                nonlocal read_count
+                read_count += 1
+                if read_count > 1:
+                    try:
+                        with open_db(config.paths.db_path) as writer:
+                            writer.exec_driver_sql("PRAGMA busy_timeout=100")
+                            writer.exec_driver_sql("BEGIN IMMEDIATE")
+                            writer.exec_driver_sql("ROLLBACK")
+                    except Exception as exc:
+                        writer_errors.append(exc)
+                return content_version_fingerprint(file_path, stat_result)
+
+            try:
+                with open_db(config.paths.db_path) as connection:
+                    with patch("mediaforce.library.scanner.probe_media",
+                               return_value=_failed_probe_summary(RuntimeError("fixture probe"))):
+                        scan_library(connection, config)
+                    with patch(
+                        "mediaforce.library.scanner.content_version_fingerprint",
+                        side_effect=fingerprint_with_concurrent_writer,
+                    ), patch("mediaforce.library.scanner.probe_media") as probe_mock:
+                        stats = scan_library(connection, config)
+            finally:
+                reset_engine_cache()
+
+        probe_mock.assert_not_called()
+        self.assertEqual(stats.unchanged, 3)
+        self.assertEqual(writer_errors, [])
+
     def test_managed_scan_passes_controller_to_probe_without_changing_results(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
