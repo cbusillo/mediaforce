@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
@@ -80,6 +80,61 @@ class ControllerStorageRecoveryTest(TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
+
+    def test_completed_mount_without_visible_share_retries_after_restart(self) -> None:
+        absent = ControllerMountProbe(
+            False, False, self.mounts[0].mount_point, failure_kind="mount_absent",
+        )
+        result = ControllerMountResult(False, True, "mount_absent", None, absent)
+        with patch.object(recovery, "_utc_now", return_value=NOW), patch.object(
+            recovery, "probe_controller_mount", return_value=absent,
+        ), patch.object(recovery, "mount_controller_smb_no_ui", return_value=result):
+            recovery.process_controller_storage_recovery_once(self.config)
+            first = recovery.controller_storage_recovery_snapshot(self.config)["mounts"][0]
+            self.assertEqual(first["status"], "retrying")
+            retry_at = datetime.fromisoformat(first["next_retry_at"])
+            self.assertGreater(retry_at, NOW)
+        with patch.object(recovery, "_PROCESS_GENERATION", "restarted"), patch.object(
+            recovery, "_utc_now", return_value=retry_at,
+        ), patch.object(recovery, "probe_controller_mount", return_value=absent), patch.object(
+            recovery, "mount_controller_smb_no_ui", return_value=result,
+        ) as mount:
+            recovery.process_controller_storage_recovery_once(self.config)
+            self.assertEqual(mount.call_args_list[0].args[0].mount_point, self.mounts[0].mount_point)
+
+    def test_legacy_transient_action_required_resumes_but_ambiguous_result_stays_latched(self) -> None:
+        absent = ControllerMountProbe(False, False, self.mounts[0].mount_point, failure_kind="mount_absent")
+        state = recovery._failed_state(
+            mount_point=self.mounts[0].mount_point, requirement_signature="legacy",
+            previous=None, now=NOW - timedelta(days=2), status="action_required",
+            reason=recovery._stable_reason("mount_absent"), failure_kind="mount_absent", attempted=True,
+        )
+        recovery._save_snapshot(recovery.controller_storage_recovery_path(self.config), [state], NOW)
+        with patch.object(recovery, "_utc_now", return_value=NOW), patch.object(
+            recovery, "probe_controller_mount", return_value=absent,
+        ), patch.object(recovery, "mount_controller_smb_no_ui", return_value=ControllerMountResult(
+            False, False, "mount_failed", None, absent,
+        )) as mount:
+            recovery.process_controller_storage_recovery_once(self.config)
+            self.assertEqual(mount.call_args_list[0].args[0].mount_point, self.mounts[0].mount_point)
+
+    def test_legacy_probe_kind_does_not_erase_ambiguous_attempt_evidence(self) -> None:
+        absent = ControllerMountProbe(False, False, self.mounts[0].mount_point, failure_kind="mount_absent")
+        # Older versions could overwrite the kind with a later probe result while preserving
+        # the ambiguous attempt's reason. That record must never authorize another mount.
+        state = recovery._failed_state(
+            mount_point=self.mounts[0].mount_point, requirement_signature="legacy",
+            previous=None, now=NOW - timedelta(days=2), status="action_required",
+            reason=recovery._stable_reason("mount_timeout"), failure_kind="probe_timeout", attempted=False,
+        )
+        recovery._save_snapshot(recovery.controller_storage_recovery_path(self.config), [state], NOW)
+        with patch.object(recovery, "_utc_now", return_value=NOW), patch.object(
+            recovery, "probe_controller_mount", return_value=absent,
+        ), patch.object(recovery, "mount_controller_smb_no_ui", return_value=ControllerMountResult(
+            False, False, "mount_failed", None, absent,
+        )) as mount:
+            recovery.process_controller_storage_recovery_once(self.config)
+            self.assertFalse(any(call.args[0] == self.mounts[0] for call in mount.call_args_list))
 
     def test_process_probes_controller_and_mounted_remote_paths_only(self) -> None:
         def ready_probe(mount: ControllerSmbMount, required_paths: object) -> ControllerMountProbe:

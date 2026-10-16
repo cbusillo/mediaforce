@@ -215,6 +215,8 @@ from mediaforce.web.runtime.encode_runtime import release_host_cooldowns, sync_e
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle, run_supervised_worker_loop
+from mediaforce.web.runtime.host_recovery import process_host_recovery_once
+from mediaforce.web.runtime.recovery_alerts import recovery_alerts, record_recovery_alerts
 from mediaforce.web.runtime.controller_storage_recovery import (
     controller_storage_recovery_snapshot,
     process_controller_storage_recovery_once,
@@ -1130,6 +1132,10 @@ def create_app(
             "hosts": hosts,
             "controller_storage": controller_storage_recovery_snapshot(config),
         }
+
+    @app.get("/api/recovery-alerts")
+    def api_recovery_alerts() -> dict[str, Any]:
+        return {"alerts": recovery_alerts(config)}
 
     def _release_work_snapshot() -> ReleaseWorkSnapshot:
         return release_work_payload(config.paths.db_path)
@@ -4878,14 +4884,31 @@ def _acquire_background_worker_leadership(
 
 
 def _controller_storage_worker_loop(*, config_path: Path, stop_event: threading.Event) -> None:
+    def recover() -> None:
+        config = load_config(config_path)
+        try:
+            process_controller_storage_recovery_once(config, stop_event=stop_event)
+        finally:
+            record_recovery_alerts(config)
+
     run_supervised_worker_loop(
-        process_once_fn=lambda: process_controller_storage_recovery_once(
+        process_once_fn=recover,
+        poll_seconds=30.0,
+        stop_event=stop_event,
+        logger=LOGGER,
+        failure_message="Controller storage recovery pass failed; it will retry.",
+    )
+
+
+def _host_recovery_worker_loop(*, config_path: Path, stop_event: threading.Event) -> None:
+    run_supervised_worker_loop(
+        process_once_fn=lambda: process_host_recovery_once(
             load_config(config_path), stop_event=stop_event,
         ),
         poll_seconds=30.0,
         stop_event=stop_event,
         logger=LOGGER,
-        failure_message="Controller storage recovery pass failed; it will retry.",
+        failure_message="Computer recovery pass failed; it will retry.",
     )
 
 
@@ -4994,6 +5017,17 @@ def _start_controller_storage_worker(config: MediaforceConfig) -> SupervisedWork
     return SupervisedWorkerHandle(thread=thread, stop_event=stop_event)
 
 
+def _start_host_recovery_worker(config: MediaforceConfig) -> SupervisedWorkerHandle:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_host_recovery_worker_loop,
+        kwargs={"config_path": config.paths.config_path, "stop_event": stop_event},
+        name="host-recovery-worker",
+    )
+    thread.start()
+    return SupervisedWorkerHandle(thread=thread, stop_event=stop_event)
+
+
 def _start_background_workers(
         config: MediaforceConfig,
         *,
@@ -5007,6 +5041,7 @@ def _start_background_workers(
     handles: list[SupervisedWorkerHandle] = []
     try:
         handles.append(_start_controller_storage_worker(config))
+        handles.append(_start_host_recovery_worker(config))
         handles.append(_start_calibration_queue_worker(config))
         handles.append(_start_encode_queue_worker(config))
         handles.append(_start_catalog_refresh_worker(config))

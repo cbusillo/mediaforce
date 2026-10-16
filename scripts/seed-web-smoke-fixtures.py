@@ -12,7 +12,7 @@ import subprocess
 from typing import Any
 
 from mediaforce.core.binaries import ffmpeg_binary
-from mediaforce.core.config import load_config, update_runtime_settings
+from mediaforce.core.config import load_config, save_runtime_settings, update_runtime_settings
 from mediaforce.core.db import open_db
 from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
 from mediaforce.core.db_tables import (
@@ -39,6 +39,7 @@ from mediaforce.web.runtime.folder_tuning_advice import (
     calibration_policy_hash,
 )
 from mediaforce.web.runtime.catalog_signature import save_catalog_signature
+from mediaforce.web.runtime.host_recovery import host_recovery_path, host_recovery_snapshot
 
 FIXTURE_SCAN_ID = "web-smoke-fixtures"
 LEGACY_FIXTURE_SCAN_IDS = ("fixture-scan",)
@@ -1073,6 +1074,11 @@ def _write_stale_proposal_state(config: Any) -> None:
 
 
 def _clear_fixture_files(config: Any) -> None:
+    recovery = host_recovery_snapshot(config)
+    retained_hosts = {key: value for key, value in recovery["hosts"].items() if not key.startswith("web-smoke-")}
+    if retained_hosts != recovery["hosts"]:
+        recovery["hosts"] = retained_hosts
+        save_runtime_settings(host_recovery_path(config), recovery)
     for path in config.paths.web_state_dir.glob("scan-*.job.json"):
         path.unlink(missing_ok=True)
     for prefix in FIXTURE_PREFIXES:

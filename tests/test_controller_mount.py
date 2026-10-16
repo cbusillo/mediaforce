@@ -230,6 +230,19 @@ class ControllerMountTests(unittest.TestCase):
         )
         self.assertEqual(controller_mount._endpoint_address(("192.168.1.37", 445)), "192.168.1.37")
 
+    def test_share_mounted_at_suffixed_path_prevents_retry_and_new_mount(self) -> None:
+        misplaced = subprocess.CompletedProcess(
+            ["sh"], 0,
+            f"{self.mount.source} on /Volumes/media-1 (smbfs, nodev)\n"
+            "MEDIAFORCE_MOUNT_PATH_PRESENT=0\nMEDIAFORCE_ACCESS_BEGIN\n0\n0\n", "",
+        )
+        run = Mock(return_value=misplaced)
+        result = mount_controller_smb_no_ui(self.mount, self.required_paths, run_subprocess=run)
+        self.assertFalse(result.ok)
+        self.assertTrue(result.action_required)
+        self.assertEqual(result.failure_kind, "unexpected_mount_path")
+        self.assertEqual(run.call_count, 1)
+
     def test_probe_timeout_is_bounded(self) -> None:
         run = Mock(side_effect=subprocess.TimeoutExpired(["sh"], 4))
         result = probe_controller_mount(self.mount, self.required_paths, run_subprocess=run, timeout_seconds=4)
@@ -340,7 +353,7 @@ class ControllerMountTests(unittest.TestCase):
         result = mount_controller_smb_no_ui(self.mount, self.required_paths, run_subprocess=run)
 
         self.assertFalse(result.ok)
-        self.assertTrue(result.action_required)
+        self.assertFalse(result.action_required)
         self.assertEqual(result.failure_kind, "mount_absent")
         self.assertEqual(run.call_count, 3)
         self.assertNotIn("unmount", " ".join(run.call_args_list[1].args[0]).lower())

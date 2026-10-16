@@ -19200,6 +19200,7 @@ raise SystemExit(0)
     def test_start_background_workers_starts_all_workers_when_leader(self) -> None:
         lease = Mock(spec=WorkerLeadershipLease)
         storage_handle = Mock()
+        host_recovery_handle = Mock()
         calibration_handle = Mock()
         encode_handle = Mock()
         catalog_handle = Mock()
@@ -19213,6 +19214,9 @@ raise SystemExit(0)
                 "mediaforce.web.app._start_controller_storage_worker",
                 return_value=storage_handle,
         ) as start_storage, patch(
+                "mediaforce.web.app._start_host_recovery_worker",
+                return_value=host_recovery_handle,
+        ) as start_host_recovery, patch(
                 "mediaforce.web.app._start_catalog_refresh_worker",
                 return_value=catalog_handle,
         ) as start_catalog, patch("mediaforce.web.app._start_evidence_autostart_worker") as start_autostart:
@@ -19221,10 +19225,11 @@ raise SystemExit(0)
         self.assertIsNotNone(runtime)
         assert runtime is not None
         self.assertIs(runtime.lease, lease)
-        self.assertEqual(runtime.handles, (storage_handle, calibration_handle, encode_handle, catalog_handle))
+        self.assertEqual(runtime.handles, (storage_handle, host_recovery_handle, calibration_handle, encode_handle, catalog_handle))
         start_catalog.assert_called_once_with(self.config)
         start_autostart.assert_not_called()
         start_storage.assert_called_once_with(self.config)
+        start_host_recovery.assert_called_once_with(self.config)
         start_calibration.assert_called_once_with(self.config)
         start_encode.assert_called_once_with(self.config)
 
@@ -19235,7 +19240,7 @@ raise SystemExit(0)
                 "mediaforce.web.app._start_calibration_queue_worker",
         ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
                 "mediaforce.web.app._start_controller_storage_worker",
-        ), patch("mediaforce.web.app._start_catalog_refresh_worker"), patch(
+        ), patch("mediaforce.web.app._start_host_recovery_worker"), patch("mediaforce.web.app._start_catalog_refresh_worker"), patch(
                 "mediaforce.web.app._start_evidence_autostart_worker",
                 return_value=autostart_handle,
         ) as start_autostart:
@@ -19252,7 +19257,7 @@ raise SystemExit(0)
                 "mediaforce.web.app._start_calibration_queue_worker",
         ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
                 "mediaforce.web.app._start_controller_storage_worker",
-        ), patch("mediaforce.web.app._start_catalog_refresh_worker"), patch(
+        ), patch("mediaforce.web.app._start_host_recovery_worker"), patch("mediaforce.web.app._start_catalog_refresh_worker"), patch(
                 "mediaforce.web.app._start_supervised_worker",
                 return_value=sweep_handle,
         ) as start_supervised:
@@ -19276,6 +19281,11 @@ raise SystemExit(0)
                 "controller-storage",
                 web_app._start_controller_storage_worker,
                 "mediaforce.web.app._controller_storage_worker_loop",
+            ),
+            (
+                "host-recovery",
+                web_app._start_host_recovery_worker,
+                "mediaforce.web.app._host_recovery_worker_loop",
             ),
             (
                 "calibration",
@@ -19440,6 +19450,7 @@ raise SystemExit(0)
     def test_background_worker_start_failure_stops_workers_and_releases_lease(self) -> None:
         lease = Mock(spec=WorkerLeadershipLease)
         storage_handle = Mock()
+        host_recovery_handle = Mock()
         calibration_handle = Mock()
         with patch(
             "mediaforce.web.app._acquire_background_worker_leadership",
@@ -19453,6 +19464,9 @@ raise SystemExit(0)
         ), patch(
             "mediaforce.web.app._start_controller_storage_worker",
             return_value=storage_handle,
+        ), patch(
+            "mediaforce.web.app._start_host_recovery_worker",
+            return_value=host_recovery_handle,
         ):
             with self.assertRaisesRegex(RuntimeError, "worker start failed"):
                 web_app._start_background_workers(self.config)
@@ -19461,6 +19475,8 @@ raise SystemExit(0)
         calibration_handle.join.assert_called_once_with()
         storage_handle.stop.assert_called_once_with()
         storage_handle.join.assert_called_once_with()
+        host_recovery_handle.stop.assert_called_once_with()
+        host_recovery_handle.join.assert_called_once_with()
         lease.release.assert_called_once_with()
 
     def test_stop_encode_queue_action_sweeps_orphaned_processes_after_cancel(self) -> None:

@@ -17,7 +17,10 @@ jobs may start after storage readiness is verified.
 Learned SMB mappings remain in `controller-smb-mounts.json` beside runtime
 settings. Automatic connections use the system NetFS API with `UIOption=NoUI`;
 Mediaforce does not retrieve passwords or fall back to Finder dialogs. Clean
-connection failures retry with bounded backoff. An ambiguous timeout requires
+connection failures retry with bounded backoff. A completed helper result with a still-absent share is retryable, including older
+`action_required` records that describe only that transient failure. Backoff is
+persisted and capped at five minutes; restarts do not reset it.
+An ambiguous timeout requires
 user attention rather than another potentially overlapping mount request.
 The native helper reports its status code; a fresh check must confirm the exact
 expected mount path, saved SMB identity and required directory access. Merely finding a
@@ -40,6 +43,32 @@ checking its contents and ownership. If NetFS mounts at a suffixed path such as
 `/Volumes/media-1`, the expected-path check fails and leaves the mount intact.
 Inspect Finder for such a mount and eject it deliberately before restoring
 the expected path. Automatic recovery never unmounts volumes or removes folders.
+
+### Computer recovery and outage warnings
+
+A separate supervised worker under the same elected background owner checks
+remote computers independently of
+queued work, pause and work windows. Checks retry after 30 seconds, increasing
+to at most five minutes. `host-recovery.json` retains the outage start, last
+check/connection and next retry beside runtime settings. Missing mounted-media
+shares on macOS use the existing saved SMB mapping and native NetFS no-UI helper
+over batch SSH, with a fresh mounted-identity check and full host readiness check
+before the computer becomes usable. No Finder fallback runs in this worker.
+Explicit Prepare retains its existing Finder behavior and shares that computer's
+recovery process lock. Remote probes and connections cannot hold the controller
+readiness lock or delay its background checks. An interrupted/ambiguous remote mount is persisted before SSH
+and remains suppressed across service restarts until fresh readiness succeeds.
+
+`GET /api/recovery-alerts` reads current warnings without probing or mounting.
+The application shell polls it every 30 seconds and shows one warning per
+incident beneath navigation, linking to Activity's computers. Missing controller
+storage warns immediately, even with an empty queue. Remote computers warn after
+five minutes, or immediately when an ambiguous mount needs attention. New
+incidents and recovery are logged once, with the active notification IDs in
+`recovery-alerts.json`; a restart does not emit the same outage again. Recovered
+warnings disappear. These are in-app/log notifications; no email, chat or system
+notification destination is assumed. Checks do not unpause work, retry stopped
+jobs, unmount storage or change service/runtime locations.
 
 ### Installed acceptance
 
