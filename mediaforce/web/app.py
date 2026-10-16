@@ -2347,7 +2347,9 @@ def create_app(
     def _show_audio_preset_payload(connection: DBClient, normalized_prefix: str) -> dict[str, Any] | None:
         show_prefix = tv_show_prefix(config, normalized_prefix)
         genres = series_genres(connection, show_prefix) if show_prefix else ()
-        return show_audio_preset_payload(config, normalized_prefix, genres=genres)
+        approval = effective_production_approval(config, normalized_prefix, _load_calibration_state)
+        sample_policy = object_dict(approval.calibration.get("policy")) if approval and approval.current else None
+        return show_audio_preset_payload(config, normalized_prefix, genres=genres, sample_policy=sample_policy)
 
     def _audio_preset_payload(normalized_prefix: str) -> dict[str, Any] | None:
         with open_db(config.paths.db_path) as connection:
@@ -2380,7 +2382,10 @@ def create_app(
         _reset_folder_card_cache()
         return {
             "ok": True,
-            "message": f"{show_prefix.split('/', 1)[1]} now uses {preset.label} sound. Make a new sample to hear it.",
+            "message": (
+                f"{show_prefix.split('/', 1)[1]} now uses {preset.label} sound, approved seasons included. "
+                "Make a new sample to hear it first."
+            ),
             "audio_preset": _audio_preset_payload(normalized_prefix),
         }
 

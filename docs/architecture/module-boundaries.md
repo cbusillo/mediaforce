@@ -171,6 +171,9 @@ Guidance:
     - automatic publishing, manual publishing and the folder page accept a file
       only while its governing approval is current and has the contract its
       run recorded
+    - the owner's sound choice and planning (series lifecycle) stay outside
+      what a sample approves: approving and queueing apply the owner's
+      current ones over the sample's snapshot and keep the folder's planning
   - `folder_tuning_helpers.py`
   - `folder_tuning_advice.py`
   - `folder_tuning_runtime.py`

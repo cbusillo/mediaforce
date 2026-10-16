@@ -26018,8 +26018,6 @@ raise SystemExit(0)
 
     def _current_approval(self, sample_job_id: str) -> dict[str, Any]:
         calibration = self._accepted_calibration_contract(sample_job_id=sample_job_id)
-        # Lifecycle holds are a separate rule; keep them out of the way of the approval being tested.
-        calibration["policy"]["planning"] = {"series_lifecycle_mode": "off", "season_acquisition_hold_days": 0}
         calibration["accepted_policy_hash"] = calibration_policy_hash(calibration)
         return calibration
 
@@ -26027,6 +26025,11 @@ raise SystemExit(0)
             self, approvals: dict[str, dict[str, Any]],
     ) -> tuple[dict[str, Any], dict[str, int], list[dict[str, Any]]]:
         queue_config = self._complete_queue_config()
+        # Lifecycle holds are the owner's separate show setting; keep them out of the way of the approval tested.
+        queue_config.raw.setdefault("overrides", []).append({
+            "path_prefix": "tv/show",
+            "planning": {"series_lifecycle_mode": "off", "season_acquisition_hold_days": 0},
+        })
         with open_db(self.config.paths.db_path) as connection:
             item_ids = {
                 rel_path: self._insert_library_item(
