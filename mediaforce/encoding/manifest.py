@@ -29,6 +29,7 @@ from mediaforce.encoding.quality_search import QualitySearchPlan
 from mediaforce.encoding.staged_host import staged_job_for_host
 from mediaforce.encoding.staging import (
     HEADER_ONLY_OUTPUT_MAX_BYTES,
+    FinishedOutputNotVisibleError,
     StagedOutputHeldForReviewError,
     UnreadableEncodeOutputError,
     partial_output_path,
@@ -339,7 +340,7 @@ def encode_one_item(
         timestamp: Callable[[], str],
         record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
         run_encode_command: Callable[..., Any],
-        finalize_output_path: Callable[[Path, Path], None],
+        finalize_output_path: Callable[..., None],
         probe_media: Callable[[Path], Any],
         file_fingerprint: Callable[[Path, Any, float | None], str],
         encode_result_factory: Callable[..., Any],
@@ -776,7 +777,7 @@ def encode_one_item(
                 if (result.stderr or "").strip():
                     details = f"{details}\n{(result.stderr or '').strip()}".strip()
                 raise RuntimeError(details or "ffmpeg encode failed")
-            finalize_output_path(temp_output, staging_path)
+            finalize_output_path(temp_output, staging_path, host=host, encoder_stderr=str(result.stderr or ""))
             if stream_budget is None or stream_budget.total_target_bytes is None:
                 final_verification = None
                 break
@@ -1022,6 +1023,7 @@ def encode_one_item(
                 "quality_memory_plan": warm_start_plan.to_payload() if warm_start_plan is not None else None,
                 "quality_memory_policy_hash": quality_policy_hash,
                 "quality_search_run_id": quality_search_run_id,
+                **_encoder_log_tail_detail(exc),
             },
             exc,
             record_event,
@@ -1629,6 +1631,11 @@ def _final_size_miss_message(verification: FinalSizeVerification) -> str:
         f"target={verification.target_size_bytes}, lower={verification.lower_bound_bytes}, "
         f"upper={verification.upper_bound_bytes}."
     )
+
+
+def _encoder_log_tail_detail(exc: BaseException) -> dict[str, str]:
+    log_tail = exc.encoder_log_tail if isinstance(exc, FinishedOutputNotVisibleError) else ""
+    return {"encoder_log_tail": log_tail} if log_tail else {}
 
 
 def _failure_kind_for_exception(exc: BaseException, verification: FinalSizeVerification | None) -> str:

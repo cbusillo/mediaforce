@@ -1,9 +1,10 @@
-"""End an interrupted mounted encoder before its output can be reused."""
+"""Check a mounted encoder's output on its host: end an interrupted encoder before the output is
+reused, and read which output files the host itself sees."""
 
 import shlex
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -181,3 +182,19 @@ def end_remote_output_writers(
         current = _inventory(host, run_command)
     if any(pid in current and current[pid].identity == process.identity for pid, process in owned.items()) or _owned_processes(current, path) or _output_writers(host, path, run_command):
         raise RuntimeError("The remote encode is still ending; wait before making this file again.")
+
+
+def encode_host_file_sizes(
+        host: dict[str, Any], paths: Sequence[Path], *,
+        run_command: Callable[..., subprocess.CompletedProcess[str]] = run_remote_command,
+) -> dict[Path, int]:
+    """Sizes of the files among ``paths`` that exist on the encode host, as the host sees them."""
+    input_text = (
+        "set -- " + " ".join(shlex.quote(str(path)) for path in paths)
+        + '\nfor path; do if [ -f "$path" ]; then wc -c < "$path"; else echo -; fi; done'
+    )
+    result = run_command(host, ["sh", "-s"], input_text=input_text, timeout=10, wake_before_connect=False)
+    answers = result.stdout.split()
+    if result.returncode or len(answers) != len(paths):
+        raise RuntimeError(result.stderr.strip() or "The encode host could not list its output.")
+    return {path: int(answer) for path, answer in zip(paths, answers) if answer != "-"}

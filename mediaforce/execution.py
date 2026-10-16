@@ -2,6 +2,7 @@ import logging
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -18,6 +19,7 @@ from mediaforce.encoding.helpers import _build_streaming_remote_ffmpeg_command a
     resolve_item_source_path as resolve_item_source_path_impl, resolve_item_staging_path as resolve_item_staging_path_impl
 from mediaforce.encoding.manifest import describe_item_plan as describe_item_plan_impl, \
     encode_manifest_items as encode_manifest_items_impl, encode_one_item as encode_one_item_impl
+from mediaforce.encoding.remote_cleanup import encode_host_file_sizes
 from mediaforce.encoding.progress import _ffmpeg_command_with_progress as _ffmpeg_command_with_progress_impl, \
     _progress_float as _progress_float_impl, _progress_out_time_seconds as _progress_out_time_seconds_impl, \
     _progress_speed as _progress_speed_impl, _update_ffmpeg_progress_state as _update_ffmpeg_progress_state_impl
@@ -745,8 +747,30 @@ def _sample_fractions(sample_count: int) -> list[float]:
     return [0.2 + step * index for index in range(sample_count)]
 
 
-def _finalize_output_path(temp_output: Path, staging_path: Path) -> None:
-    return _finalize_output_path_impl(temp_output, staging_path)
+def _finalize_output_path(
+        temp_output: Path,
+        staging_path: Path,
+        *,
+        host: dict[str, Any] | None = None,
+        encoder_stderr: str = "",
+) -> None:
+    # Only a mounted host wrote straight to shared storage; a staged or streamed output arrived here by copy.
+    wrote_to_shared_storage = (
+            execution_mode_for_host(host) == "ssh"
+            and host_media_access_for_host(host) != "stream"
+            and staged_job_for_host(host) is None
+    )
+    host_output_sizes = (
+        partial(encode_host_file_sizes, object_dict(host), run_command=run_remote_command)
+        if wrote_to_shared_storage else None
+    )
+    return _finalize_output_path_impl(
+        temp_output,
+        staging_path,
+        host_output_sizes=host_output_sizes,
+        host_label=str(object_dict(host).get("label") or object_dict(host).get("key") or ""),
+        encoder_stderr=encoder_stderr,
+    )
 
 
 def _run_encode_command(

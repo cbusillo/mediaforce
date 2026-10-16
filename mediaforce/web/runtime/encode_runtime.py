@@ -57,8 +57,8 @@ from mediaforce.encoding.staged_host import StagedScratchError, host_scratch_roo
 from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.cadence import CadenceResolutionError
 from mediaforce.encoding.free_space import ReserveInputError
-from mediaforce.encoding.staging import StagedOutputHeldForReviewError, UnreadableEncodeOutputError, partial_output_path, \
-    safe_unlink
+from mediaforce.encoding.staging import FinishedOutputNotVisibleError, StagedOutputHeldForReviewError, \
+    UnreadableEncodeOutputError, partial_output_path, safe_unlink
 from mediaforce.encoding.remote_cleanup import end_remote_output_writers
 from mediaforce.encoding.dispatch_coordination import STANDALONE_CLI_ENCODE_ORIGINS, locked_encode_dispatch as _locked_encode_dispatch
 from mediaforce.encoding.helpers import resolve_item_staging_path
@@ -159,6 +159,8 @@ UNKNOWN_ENCODE_FAILURE_EXHAUSTED_MESSAGE = (
     "The error details are saved with this job."
 )
 UNKNOWN_FAILURE_DETAIL_MAX_CHARS = 4000
+# The encode host finished the file but this machine cannot see it on the shared storage (#906).
+OUTPUT_NOT_VISIBLE_FAILURE_KIND = "output_not_visible"
 REMOTE_QUALITY_TIMEOUT_RETRY_NOTE = "It will be tried again."
 REMOTE_QUALITY_TIMEOUT_EXHAUSTED_NOTE = "It kept running too long, so this file needs you."
 # Failures a retry cannot change: a measured result, a plan or evidence contract, or a finished
@@ -4411,6 +4413,7 @@ def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_pay
         REMOTE_QUALITY_TIMEOUT_FAILURE_KIND,
         "storage_io",
         "controller_database_busy",
+        OUTPUT_NOT_VISIBLE_FAILURE_KIND,
         "unknown",
     }:
         return True
@@ -4448,6 +4451,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         REMOTE_QUALITY_TIMEOUT_FAILURE_KIND: "a quality check that ran too long on a computer",
         "storage_io": "media storage read or write error",
         "controller_database_busy": "controller database contention",
+        OUTPUT_NOT_VISIBLE_FAILURE_KIND: "a finished file this machine could not see",
         "unknown": "an error Mediaforce does not recognise",
     }.get(failure_kind, "retryable failure")
     return f"retrying after {reason} at {retry_not_before}"
@@ -4693,6 +4697,8 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "containment_unproven"
     if isinstance(exc, UnreadableEncodeOutputError):
         return "unreadable_output"
+    if isinstance(exc, FinishedOutputNotVisibleError):
+        return OUTPUT_NOT_VISIBLE_FAILURE_KIND
     if isinstance(exc, StagedScratchError):
         return "host_scratch"
     if isinstance(exc, PermissionError):
