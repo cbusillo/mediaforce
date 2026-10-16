@@ -453,7 +453,7 @@ def _nearer_approval_left_out(
                 int(item.get("library_item_id") or 0),
                 rel_path,
                 NEARER_APPROVAL_CODE,
-                nearer_approval_reason(config, approval, rel_path),
+                nearer_approval_reason(approval, rel_path),
             ))
     return left_out
 

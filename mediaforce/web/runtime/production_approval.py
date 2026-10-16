@@ -23,7 +23,6 @@ from typing import Any
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.type_defs import int_value, object_dict
-from mediaforce.library.media_scopes import is_tv_season_prefix
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.production_holds import approval_identity
@@ -184,11 +183,9 @@ def approval_needs_fresh_sample_response() -> dict[str, Any]:
     }
 
 
-def nearer_approval_reason(config: MediaforceConfig, approval: EffectiveApproval, rel_path: str) -> str:
+def nearer_approval_reason(approval: EffectiveApproval, rel_path: str) -> str:
     """Why a run leaves out a file that a nearer approval governs."""
     if approval.prefix == str(rel_path or "").strip().strip("/"):
         return "It has its own approved settings. Start it on its own."
     name = PurePosixPath(approval.prefix).name
-    if is_tv_season_prefix(approval.prefix, library_types=config.library_type_map):
-        return f"{name} has its own approved settings. Start {name} on its own, or switch it to the show's settings."
     return f"{name} has its own approved settings. Start {name} on its own."
