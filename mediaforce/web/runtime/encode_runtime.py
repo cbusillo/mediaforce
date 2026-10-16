@@ -22,6 +22,7 @@ from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy import and_, or_
+from sqlalchemy.exc import OperationalError
 from fastapi import HTTPException
 
 from mediaforce.core.config import MediaforceConfig
@@ -4030,7 +4031,13 @@ def run_encode_job(
                     now_monotonic - last_progress_write) < deps.encode_job_progress_write_interval_seconds:
                 return
             last_progress_write = now_monotonic
-        _persist_encode_job_progress(config_path, job_id, progress, deps)
+        try:
+            _persist_encode_job_progress(config_path, job_id, progress, deps)
+        except OperationalError as exc:
+            if not is_database_busy_failure(str(exc)):
+                raise
+            # Progress only describes the encode; a write lock held elsewhere must not end or discard it.
+            deps.logger.warning("Skipped encode job progress update for %s: %s", job_id, exc.orig)
 
     heartbeat_stop = threading.Event()
     worker_id = str(job.get("worker_id") or _encode_job_worker_id())
