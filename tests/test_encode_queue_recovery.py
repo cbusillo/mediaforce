@@ -15717,6 +15717,129 @@ raise SystemExit(0)
             self.assertEqual(failed_details["encode_host_key"], "remote-b")
             self.assertIn("bad stdout", failed_details["error"])
 
+    def test_mounted_output_a_stale_share_view_hid_is_found_on_a_later_look(self) -> None:
+        temp_output = self.root / "staging" / "episode.partial.mkv"
+        staging_path = self.root / "staging" / "episode.mkv"
+        temp_output.parent.mkdir(parents=True, exist_ok=True)
+        mounted_host = {"key": "m1", "label": "M1 mini", "mode": "ssh", "media_access": "mounted"}
+
+        def share_catches_up(_delay: float) -> None:
+            staging_path.write_text("encoded")
+
+        with patch("mediaforce.encoding.staging.time.sleep", side_effect=share_catches_up), patch(
+                "mediaforce.execution.run_remote_command"
+        ) as remote_command:
+            execution._finalize_output_path(temp_output, staging_path, host=mounted_host, encoder_stderr="done")
+
+        self.assertEqual(staging_path.read_text(), "encoded")
+        remote_command.assert_not_called()
+
+    def test_output_the_mounted_host_has_but_this_machine_cannot_see_is_recognised_and_retried(self) -> None:
+        source_path = self._create_source_file("episode-unseen.mkv")
+        staging_path = self._staging_path("episode-unseen.mkv")
+        quality_result = QualitySearchResult(crf=28.0, metric="XPSNR", target=41.0, score=41.5, stdout="ok")
+        mounted_host = {"key": "m1", "host": "m1", "label": "M1 mini", "mode": "ssh", "media_access": "mounted"}
+        host_queries: list[str] = []
+
+        def host_sees_finished_file(_host: object, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            host_queries.append(str(kwargs.get("input_text") or ""))
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout=" 2400000\n-\n", stderr="")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            item = {
+                "library_item_id": item_id,
+                "resolved_policy": {"video": {"preset": 4, "encoder": "libsvtav1"}, "audio": {}, "subtitle": {}},
+                "rel_path": "tv/show/episode-unseen.mkv",
+                "staging_path": str(staging_path),
+                "duration_seconds": 1200.0,
+                "video_codec": "h264",
+                "width": 1920,
+                "height": 1080,
+                "source_path": str(source_path),
+                "source_fingerprint": "source-fingerprint",
+                "source_size_bytes": 1024,
+            }
+            with patch("mediaforce.execution.resolve_item_source_path", return_value=source_path), patch(
+                    "mediaforce.execution.resolve_item_staging_path", return_value=staging_path
+            ), patch("mediaforce.execution._search_quality", return_value=quality_result), patch(
+                "mediaforce.execution._select_streams", return_value={"audio_tracks": [], "subtitle_tracks": []}
+            ), patch("mediaforce.execution._build_ffmpeg_command",
+                     return_value=["ffmpeg", "-i", str(source_path), str(staging_path)]), patch(
+                "mediaforce.execution._run_encode_command",
+                return_value=subprocess.CompletedProcess(
+                    args=["ssh"], returncode=0, stdout="", stderr="video:2343kB muxing overhead: 0.1%",
+                ),
+            ), patch("mediaforce.execution.run_remote_command", side_effect=host_sees_finished_file), patch(
+                "mediaforce.encoding.staging.time.sleep"
+            ):
+                with self.assertRaises(Exception) as raised:
+                    execution.encode_one_item(
+                        connection,
+                        self.config,
+                        self.root / "runs" / "manifest-unseen.json",
+                        {"run_id": "run-unseen", "items": []},
+                        0,
+                        item,
+                        overwrite=False,
+                        host=mounted_host,
+                        encode_context={"origin": "queue", "encode_job_id": "job-unseen", "encode_worker_id": "w"},
+                    )
+            failed_details = json.loads(cast(str, self._item_event_rows(connection, item_id)[-1]["details_json"]))
+            manifest_path = self._write_manifest("manifest-unseen.json", [item])
+            self._save_job(
+                connection,
+                job_id="job-unseen",
+                manifest_name=manifest_path.name,
+                host=mounted_host,
+                status="running",
+                attempt_count=1,
+            )
+            job = load_encode_job(connection, "job-unseen")
+            assert job is not None
+            deps = web_app._encode_queue_runtime_deps()
+            with patch("mediaforce.web.runtime.encode_runtime.run_remote_command"), patch(
+                    "mediaforce.web.runtime.encode_runtime.end_remote_output_writers"
+            ):
+                encode_runtime.transition_encode_job_failure(
+                    connection,
+                    self.config,
+                    job,
+                    deps,
+                    failure_kind=encode_runtime._classify_encode_failure(raised.exception, job),
+                    error_message=encoding_quality.quality_error_message(raised.exception),
+                )
+            updated = load_encode_job(connection, "job-unseen")
+
+        assert updated is not None
+        self.assertNotEqual(updated["error"], encode_runtime.UNKNOWN_ENCODE_FAILURE_MESSAGE)
+        self.assertEqual(updated["last_failure_kind"], encode_runtime.OUTPUT_NOT_VISIBLE_FAILURE_KIND)
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertIn("M1 mini has the finished file but this machine cannot see it", str(updated["error"]))
+        self.assertEqual(len(host_queries), 1)
+        self.assertIn(shlex.quote(str(staging_path)), host_queries[0])
+        self.assertIn(f"{staging_path} (2400000 bytes there)", failed_details["error"])
+        self.assertIn("muxing overhead", failed_details["encoder_log_tail"])
+
+    def test_output_the_mounted_host_does_not_have_either_still_fails_as_missing(self) -> None:
+        temp_output = self.root / "staging" / "episode.partial.mkv"
+        staging_path = self.root / "staging" / "episode.mkv"
+        temp_output.parent.mkdir(parents=True, exist_ok=True)
+        mounted_host = {"key": "m1", "host": "m1", "label": "M1 mini", "mode": "ssh", "media_access": "mounted"}
+        host_has_nothing = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="-\n-\n", stderr="")
+
+        with patch("mediaforce.encoding.staging.time.sleep"), patch(
+                "mediaforce.execution.run_remote_command", return_value=host_has_nothing
+        ):
+            with self.assertRaisesRegex(FileNotFoundError, "Encoded output missing after ffmpeg completed") as raised:
+                execution._finalize_output_path(
+                    temp_output, staging_path, host=mounted_host, encoder_stderr="Conversion failed!",
+                )
+
+        self.assertIn("M1 mini does not have it either", str(raised.exception))
+        self.assertIn("Conversion failed!", str(raised.exception))
+        self.assertEqual(encode_runtime._classify_encode_failure(raised.exception, {"host": mounted_host}), "unknown")
+
     def test_encode_one_item_records_operator_cancellation_as_stopped(self) -> None:
         source_path = self._create_source_file("episode-encode-stopped.mkv")
         staging_path = self._staging_path("episode-encode-stopped.mkv")

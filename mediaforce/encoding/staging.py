@@ -3,7 +3,9 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import time
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -39,6 +41,11 @@ TRANSIENT_FILE_BUSY_RETRY_DELAY_SECONDS = 0.25
 PACKET_DURATION_STREAM_SELECTORS = ("v:0", "a:0")
 # Observed header-only stream outputs were 1,116 and 1,369 bytes (#620); no real encode is this small.
 HEADER_ONLY_OUTPUT_MAX_BYTES = 64 * 1024
+# A mounted share can trail the encode host's rename by a few seconds (#906): look again before asking the host.
+UNSEEN_OUTPUT_LOCAL_RECHECK_DELAYS_SECONDS = (0.5, 1.0, 2.0)
+# Once the encode host shows the file, give this machine's view of the share a little longer to catch up.
+UNSEEN_OUTPUT_HOST_CONFIRMED_DELAYS_SECONDS = (2.0, 4.0, 8.0)
+ENCODER_LOG_TAIL_MAX_CHARS = 2000
 
 
 class UnreadableEncodeOutputError(RuntimeError):
@@ -47,6 +54,14 @@ class UnreadableEncodeOutputError(RuntimeError):
 
 class StagedOutputHeldForReviewError(RuntimeError):
     """A finished output that could not be probed is kept on disk because it may be repairable."""
+
+
+class FinishedOutputNotVisibleError(RuntimeError):
+    """The encode host finished its output, but this machine's view of the shared storage does not show it."""
+
+    def __init__(self, message: str, *, encoder_log_tail: str = "") -> None:
+        super().__init__(message)
+        self.encoder_log_tail = encoder_log_tail
 
 
 class PromotionWaiting(RuntimeError):
@@ -89,16 +104,81 @@ def partial_output_path(staging_path: Path) -> Path:
     return staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
 
 
-def finalize_output_path(temp_output: Path, staging_path: Path) -> None:
-    def _finalize() -> None:
+def finalize_output_path(
+        temp_output: Path,
+        staging_path: Path,
+        *,
+        host_output_sizes: Callable[[Sequence[Path]], dict[Path, int]] | None = None,
+        host_label: str = "",
+        encoder_stderr: str = "",
+) -> None:
+    """Move the finished output into place, or explain why it is not where the encoder put it.
+
+    ``host_output_sizes`` reads the files the encode host itself sees; it is given only when the host
+    wrote the output to storage this machine mounts too, whose view of it can lag the host's.
+    """
+    if _finalize_visible_output(temp_output, staging_path):
+        return
+    log_tail = (encoder_stderr or "").strip()[-ENCODER_LOG_TAIL_MAX_CHARS:]
+    missing = f"Encoded output missing after ffmpeg completed: {temp_output}"
+    if host_output_sizes is None:
+        raise FileNotFoundError(_with_encoder_log_tail(missing, log_tail))
+    if _finalize_after_waits(temp_output, staging_path, UNSEEN_OUTPUT_LOCAL_RECHECK_DELAYS_SECONDS):
+        return
+    host_name = host_label or "that ran it"
+    try:
+        host_sizes: dict[Path, int] | None = host_output_sizes((staging_path, temp_output))
+        host_error = ""
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        host_sizes = None
+        host_error = str(exc).strip() or type(exc).__name__
+    if host_sizes is not None and not host_sizes:
+        raise FileNotFoundError(
+            _with_encoder_log_tail(f"{missing}. The encode host {host_name} does not have it either.", log_tail)
+        )
+    if _finalize_after_waits(temp_output, staging_path, UNSEEN_OUTPUT_HOST_CONFIRMED_DELAYS_SECONDS):
+        return
+    if host_sizes:
+        host_path, host_size = next(iter(host_sizes.items()))
+        message = (
+            f"The encode host {host_name} has the finished file but this machine cannot see it: "
+            f"{host_path} ({host_size} bytes there)."
+        )
+    else:
+        message = (
+            f"The encode host {host_name} reported the finished file but this machine cannot see it, "
+            f"and the host could not be asked ({host_error}): {staging_path}."
+        )
+    message = f"{message} It will be encoded again."
+    LOGGER.warning("%s Encoder log tail:\n%s", message, log_tail)
+    raise FinishedOutputNotVisibleError(message, encoder_log_tail=log_tail)
+
+
+def _finalize_visible_output(temp_output: Path, staging_path: Path) -> bool:
+    def _finalize() -> bool:
         if temp_output.exists():
             temp_output.replace(staging_path)
-            return
-        if staging_path.exists():
-            return
-        raise FileNotFoundError(f"Encoded output missing after ffmpeg completed: {temp_output}")
+            return True
+        return staging_path.exists()
 
-    _retry_transient_file_busy(_finalize)
+    return bool(_retry_transient_file_busy(_finalize))
+
+
+def _finalize_after_waits(temp_output: Path, staging_path: Path, delays: Sequence[float]) -> bool:
+    for delay in delays:
+        time.sleep(delay)
+        # Listing the folder makes an SMB client read it again instead of answering from its cache.
+        try:
+            os.listdir(staging_path.parent)
+        except OSError:
+            pass
+        if _finalize_visible_output(temp_output, staging_path):
+            return True
+    return False
+
+
+def _with_encoder_log_tail(message: str, log_tail: str) -> str:
+    return f"{message}\nEncoder log tail:\n{log_tail}" if log_tail else message
 
 
 def probe_packet_end_seconds(path: Path, stream_selector: str) -> float | None:
