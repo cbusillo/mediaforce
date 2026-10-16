@@ -84,6 +84,7 @@ from mediaforce.library.background_work import background_work_is_paused, ensure
 from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EvidenceQueueConflict, \
     cancel_evidence_queue, ensure_evidence_queue_state, evidence_queue_summary, pause_evidence_queue, \
     resume_evidence_queue, start_evidence_work
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import media_group_scope_for_rel_path, resolve_media_scope, resolve_media_scopes, \
     scope_rel_path_filter, series_context_for_prefix, tv_series_scope_for_rel_path
 from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
@@ -3634,6 +3635,7 @@ def _load_folder_staged_items(
         .join(staged_artifacts, staged_artifacts.c.library_item_id == library_items.c.id)
         .where(scope_rel_path_filter(library_items.c.rel_path, scope))
         .where(library_items.c.status.in_(tuple(sorted(statuses))))
+        .where(LIBRARY_ITEM_PRESENT)
         .where(staged_artifacts.c.staging_path.is_not(None))
         .where(staged_artifacts.c.promoted_at.is_(None))
         .order_by(library_items.c.rel_path.asc())

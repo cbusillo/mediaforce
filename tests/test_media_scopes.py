@@ -115,7 +115,7 @@ class MediaScopeTests(unittest.TestCase):
 
     def test_missing_exact_item_keeps_file_scope_identity(self) -> None:
         with open_db(self.db_path) as connection:
-            missing_id = self._insert_item(connection, "other/Offline.mkv", status="missing")
+            missing_id = self._insert_item(connection, "other/Offline.mkv", missing=True)
 
             scope = resolve_media_scope(connection, "other/Offline.mkv")
             rows = connection.execute(
@@ -127,7 +127,7 @@ class MediaScopeTests(unittest.TestCase):
 
     def test_active_folder_topology_supersedes_missing_exact_tombstone(self) -> None:
         with open_db(self.db_path) as connection:
-            missing_id = self._insert_item(connection, "other/Foo", status="missing")
+            missing_id = self._insert_item(connection, "other/Foo", missing=True)
             child_id = self._insert_item(connection, "other/Foo/Bar.mkv")
 
             scope = resolve_media_scope(connection, "other/Foo")
@@ -142,7 +142,7 @@ class MediaScopeTests(unittest.TestCase):
     def test_missing_descendant_does_not_override_active_exact_item(self) -> None:
         with open_db(self.db_path) as connection:
             exact_id = self._insert_item(connection, "other/Foo")
-            self._insert_item(connection, "other/Foo/Bar.mkv", status="missing")
+            self._insert_item(connection, "other/Foo/Bar.mkv", missing=True)
 
             scope = resolve_media_scope(connection, "other/Foo")
             rows = connection.execute(
@@ -225,7 +225,7 @@ class MediaScopeTests(unittest.TestCase):
             connection: DBClient,
             rel_path: str,
             *,
-            status: str = "discovered",
+            missing: bool = False,
             source_path: str | None = None,
     ) -> int:
         now = datetime.now(tz=UTC).isoformat(timespec="seconds")
@@ -243,7 +243,7 @@ class MediaScopeTests(unittest.TestCase):
                 fingerprint=f"fingerprint-{rel_path}",
                 audio_summary_json="[]",
                 subtitle_summary_json="[]",
-                status=status,
+                missing_since=now if missing else None,
                 last_scan_id="scan-1",
                 discovered_at=now,
                 last_seen_at=now,

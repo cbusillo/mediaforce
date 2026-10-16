@@ -9,6 +9,7 @@ from mediaforce.core.utils import timestamp
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 
 BACKGROUND_WORK_AREA = "catalog_evidence"
 EVIDENCE_BACKLOG_STATES = (
@@ -107,7 +108,7 @@ def summarize_evidence_inventory(connection: DBClient) -> dict[str, Any]:
                 library_items.c.id == library_item_evidence_state.c.library_item_id,
             )
         )
-        .where(library_items.c.status != "missing")
+        .where(LIBRARY_ITEM_PRESENT)
         .group_by(
             library_item_evidence_state.c.evidence_kind,
             library_item_evidence_state.c.state,
@@ -173,7 +174,7 @@ def list_evidence_backlog(
 
     conditions = [
         _evidence_backlog_condition(),
-        library_items.c.status != "missing",
+        LIBRARY_ITEM_PRESENT,
     ]
     if normalized_kind:
         conditions.append(library_item_evidence_state.c.evidence_kind == normalized_kind)

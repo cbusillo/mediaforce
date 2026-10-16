@@ -8051,7 +8051,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self._insert_library_item(
                 connection,
                 self._create_source_file("Season 8/gone.mkv"),
-                status="missing",
+                missing=True,
                 rel_path="tv/show/Season 8/gone.mkv",
             )
             self._save_show_job(connection, job_id="show-queued", prefix="tv/show", status="queued")
@@ -8075,7 +8075,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self._insert_library_item(
                 connection,
                 self._create_source_file("Season 9/gone.mkv"),
-                status="missing",
+                missing=True,
                 rel_path="tv/show/Season 9/gone.mkv",
             )
             self._save_show_job(connection, job_id="show-queued", prefix="tv/show", status="queued")
@@ -30765,6 +30765,7 @@ raise SystemExit(0)
             *,
             status: str = "planned",
             rel_path: str | None = None,
+            missing: bool = False,
     ) -> int:
         now = web_app._now_iso()
         normalized_rel_path = rel_path or f"tv/show/{source_path.name}"
@@ -30804,6 +30805,7 @@ raise SystemExit(0)
                 last_seen_at=now,
                 updated_at=now,
                 status=status,
+                missing_since=now if missing else None,
             )
         )
         return int(result.inserted_primary_key[0])

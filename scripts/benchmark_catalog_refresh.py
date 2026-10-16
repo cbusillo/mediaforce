@@ -20,6 +20,7 @@ from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.scanner import scan_library
 
 
@@ -296,7 +297,7 @@ def _current_catalog_count(config_path: Path) -> int:
                 connection.execute(
                     select(func.count())
                     .select_from(library_items)
-                    .where(library_items.c.status != "missing")
+                    .where(LIBRARY_ITEM_PRESENT)
                 ).scalar_one()
             )
     except (OSError, RuntimeError, TypeError, ValueError):

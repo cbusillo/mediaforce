@@ -16,6 +16,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, metadata_sync_state, plex_item_metadata, series_metadata
 from mediaforce.library.external_metadata import FetchJson, PlexClient, PlexPathMapping, ProviderHttpError, \
     TmdbClient, fetch_json, map_plex_part_path, tmdb_id_from_guids
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 
 
 @dataclass(slots=True)
@@ -162,7 +163,7 @@ def _sync_plex(
     shows = {show.rating_key: show for show in client.shows()}
     rows = connection.execute(
         select(library_items.c.id, library_items.c.source_path, library_items.c.rel_path)
-        .where(library_items.c.status != "missing")
+        .where(LIBRARY_ITEM_PRESENT)
     ).mappings().fetchall()
     rows_by_path = {_normalized_local_path(str(row["source_path"])): row for row in rows}
     rows_by_id = {int(row["id"]): row for row in rows}
