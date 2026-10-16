@@ -50,8 +50,8 @@ from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash,
 from mediaforce.web.runtime.production_holds import queue_mode, record_holds, release_holds
 from mediaforce.web.runtime.production_approval import NEARER_APPROVAL_CODE, approval_needs_fresh_sample_response, \
     cached_calibration_loader, effective_production_approval, governed_by, nearer_approval_reason, \
-    production_approval_contract, production_approval_identity, production_approval_matches, \
-    valid_production_approval_contract
+    policy_with_owner_settings, production_approval_contract, production_approval_identity, \
+    production_approval_matches, valid_production_approval_contract
 from mediaforce.web.runtime.left_out_files import LeftOutFile, cadence_left_out_files, drop_manifest_items, \
     left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response
 from mediaforce.web.runtime.encode_runtime import (
@@ -786,7 +786,9 @@ def queue_folder_encode_action(
                 status_code=400,
                 detail="Choose and confirm a compression goal before queueing production.",
             )
-        preflight_config = with_folder_policy_override(config, normalized_prefix, calibration_policy)
+        # The owner's current sound choice and lifecycle win over the sample's snapshot of them.
+        production_policy = policy_with_owner_settings(calibration_policy, config, normalized_prefix)
+        preflight_config = with_folder_policy_override(config, normalized_prefix, production_policy)
         left_out, target_size_refusal = _target_size_left_out(connection, preflight_config, normalized_prefix)
         if target_size_refusal is not None:
             return target_size_refusal
@@ -1257,7 +1259,7 @@ def queue_folder_encode_action(
             advice_state=advice_state, approval_contract=queued_contract,
         )
         saved_profile_path = config.paths.runtime_settings_path
-        upsert_override(saved_profile_path, normalized_prefix, calibration_policy)
+        upsert_override(saved_profile_path, normalized_prefix, production_policy)
         refreshed_config = load_config(config.paths.config_path)
         if manifest_path is None:
             manifest_path = write_manifest(connection, refreshed_config, manifest)
@@ -3062,7 +3064,7 @@ def save_profile_action(
     upsert_override(
         config.paths.runtime_settings_path,
         normalized_prefix,
-        calibration_payload["policy"],
+        policy_with_owner_settings(object_dict(calibration_payload.get("policy")), config, normalized_prefix),
     )
     if clear_pending_proposal is not None:
         clear_pending_proposal(config, normalized_prefix)
