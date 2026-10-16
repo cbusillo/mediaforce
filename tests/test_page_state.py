@@ -530,3 +530,79 @@ def test_library_cards_carry_the_page_state(config: MediaforceConfig, monkeypatc
         cards = web_app._list_library_detail_cards(config, connection)
 
     assert [(card.prefix, (card.page_state or {}).get("key")) for card in cards] == [(SEASON, "ready_to_make")]
+
+
+def _show_run(connection: DBClient, config: MediaforceConfig, files: list[str], failing_index: int,
+              error: str = "Final output size missed the approved target band: status=over_target, actual=2, "
+                           "target=1, lower=1, upper=1.") -> None:
+    """A show-wide run that stopped on one file and finished or never reached the others."""
+    manifest = config.paths.run_manifest_dir / "show-run.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({"items": [{"rel_path": rel_path} for rel_path in files]}))
+    _insert_encode_job(connection, "show-run", prefix=SHOW, status="needs_attention", kind="folder",
+                       manifest=manifest, error=error)
+    _insert_encode_job(connection, "part-failed", prefix=SHOW, status="needs_attention", kind="shard",
+                       parent="show-run", manifest=manifest, index=failing_index, error=error)
+
+
+def _promote(connection: DBClient, rel_path: str) -> None:
+    item_id = connection.execute(library_items.select().where(library_items.c.rel_path == rel_path)).mappings().one()["id"]
+    connection.execute(library_items.update().where(library_items.c.id == item_id).values(status="promoted"))
+    connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
+        promoted_at=AFTER_STOP))
+
+
+def _states(connection: DBClient, config: MediaforceConfig, prefixes: list[str],
+            calibrations: Mapping[str, dict[str, Any]]) -> dict[str, tuple[str, str]]:
+    """Each folder's workflow lane and page state key, on its page and on its card."""
+    states = {}
+    for prefix in prefixes:
+        workflow = build_folder_workflow_state(connection, prefix, library_types=config.library_type_map).to_payload()
+        page = folder_page_state(connection, config, prefix, workflow, _sources(calibrations))
+        card = card_page_states(connection, config, [(prefix, workflow)], _sources(calibrations))[prefix]
+        assert card == page
+        states[prefix] = (workflow["primary_lane"], page["key"])
+    return states
+
+
+def test_a_stopped_show_runs_kept_and_published_file_leaves_nothing_stopped(config: MediaforceConfig) -> None:
+    kept = f"{SEASON}/episode-1.mkv"
+    season_2 = f"{SHOW}/Season 2"
+    with open_db(config.paths.db_path) as connection:
+        _insert_item(connection, kept, status="encoded", staged=True)
+        _insert_item(connection, f"{SEASON}/episode-2.mkv")
+        _insert_item(connection, f"{season_2}/episode-1.mkv")
+        _show_run(connection, config, [kept, f"{SEASON}/episode-2.mkv", f"{season_2}/episode-1.mkv"], 0)
+        # The owner kept the file the run stopped on, and it was published.
+        _promote(connection, kept)
+        connection.commit()
+        states = _states(connection, config, [SHOW, SEASON, season_2, kept], {SHOW: _approved()})
+
+    assert states == {
+        SHOW: ("encode", "ready_to_make"),
+        SEASON: ("encode", "ready_to_make"),
+        season_2: ("encode", "ready_to_make"),
+        kept: ("complete", "finished"),
+    }
+
+
+def test_a_stopped_show_run_leaves_the_seasons_it_never_reached_ready(config: MediaforceConfig) -> None:
+    stopped = f"{SEASON}/episode-1.mkv"
+    season_2 = f"{SHOW}/Season 2"
+    with open_db(config.paths.db_path) as connection:
+        _insert_item(connection, stopped)
+        _insert_item(connection, f"{season_2}/episode-1.mkv")
+        _insert_item(connection, f"{SHOW}/Season 3/episode-1.mkv")
+        _show_run(connection, config, [stopped, f"{season_2}/episode-1.mkv"], 0)
+        connection.commit()
+        approved = _states(connection, config, [season_2, f"{SHOW}/Season 3"], {SHOW: _approved()})
+        unapproved = _states(connection, config, [season_2], {})
+        stopped_here = _states(connection, config, [SEASON, stopped], {SHOW: _approved()})
+        # What the season page read on main: the stopped show run, as if it were the season's own.
+        latest_run = load_latest_encode_job(connection, season_2)
+
+    assert approved == {season_2: ("encode", "ready_to_make"), f"{SHOW}/Season 3": ("encode", "ready_to_make")}
+    assert unapproved == {season_2: ("encode", "needs_test")}
+    # The file the run stopped on is still unresolved, so its season and the file say so.
+    assert stopped_here == {SEASON: ("attention", "needs_help"), stopped: ("attention", "needs_help")}
+    assert latest_run is not None and latest_run["job_id"] == "show-run"
