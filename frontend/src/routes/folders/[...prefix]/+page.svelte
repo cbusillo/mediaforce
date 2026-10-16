@@ -19,7 +19,7 @@
 		StagedIntegrityPayload
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
-	import { studioRefreshPlan } from '$lib/folders/studio-refresh';
+	import { stagedIntegrityPollTracker, studioRefreshPlan } from '$lib/folders/studio-refresh';
 	import { isSeriesPrefix } from '$lib/season/experience';
 	import SeasonExperience from '$lib/components/season/SeasonExperience.svelte';
 	import SeasonLibrary from '$lib/components/season/SeasonLibrary.svelte';
@@ -79,17 +79,7 @@
 		};
 	}
 
-	function integritySummaryKey(integrity: StagedIntegrityPayload | undefined): string {
-		if (!integrity) return '';
-		return JSON.stringify({
-			counts: integrity.counts,
-			blockerCount: integrity.blocker_count,
-			blockers: integrity.blockers,
-			databaseTruncated: integrity.database_truncated,
-			discovery: integrity.discovery,
-			promotionReadiness: integrity.promotion_readiness
-		});
-	}
+	const integrityPoll = stagedIntegrityPollTracker();
 
 	async function hydrateDirectory() {
 		const generation = ++hydrationGeneration;
@@ -158,6 +148,7 @@
 			if (generation !== hydrationGeneration || currentPrefix !== prefix) return;
 			folder = folderPayload;
 			status = { ...statusPayload, staged_integrity: integrityPayload };
+			integrityPoll.reset(statusPayload.staged_integrity);
 			hosts = hostsPayload;
 			dashboard = seriesContext.dashboardPayload;
 			foldersPayload = seriesContext.libraryPayload;
@@ -199,9 +190,7 @@
 			);
 			if (generation !== hydrationGeneration || currentPrefix !== prefix) return;
 			const finishedWork = status.polling_active && !nextStatus.polling_active;
-			const integrityChanged =
-				integritySummaryKey(status.staged_integrity) !==
-				integritySummaryKey(nextStatus.staged_integrity);
+			const integrityChanged = integrityPoll.changed(nextStatus.staged_integrity);
 			const previousIntegrity = status.staged_integrity;
 			const nextIntegrity = nextStatus.staged_integrity;
 			status = {

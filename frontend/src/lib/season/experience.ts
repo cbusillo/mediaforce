@@ -2168,7 +2168,11 @@ export function detailSeasonState(
 	const priorTestJobId = text(calibration.job_id);
 	const reviewGateStatus = text(reviewGate.status);
 	const exactEpisode = folder.media_scope?.match === 'exact_item';
-	const sampleTimestamp = jobTimestamp(sampleJob);
+	// A finished sample's job leaves the payload after an hour; the saved sample keeps its finish time.
+	const liveSampleTimestamp = jobTimestamp(sampleJob);
+	const sampleTimestamp = Number.isFinite(liveSampleTimestamp)
+		? liveSampleTimestamp
+		: Date.parse(text(calibration.sample_finished_at));
 	const encodeFailureTimestamp = jobTimestamp(encodeJob);
 	const sampleSupersedesEncodeFailure =
 		Number.isFinite(sampleTimestamp) &&
