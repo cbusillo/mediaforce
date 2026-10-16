@@ -45,6 +45,21 @@ def load_latest_overlapping_job(connection: DBClient, prefix: str) -> dict[str, 
     return _hydrate_job(row) if row is not None else None
 
 
+def load_latest_jobs_for_prefixes(connection: DBClient, prefixes: Sequence[str]) -> dict[str, dict[str, Any]]:
+    """Each folder's newest job, as `load_latest_job` reads it, for many folders at once."""
+    normalized_prefixes = tuple(dict.fromkeys(prefix.strip("/") for prefix in prefixes if prefix.strip("/")))
+    latest: dict[str, dict[str, Any]] = {}
+    for offset in range(0, len(normalized_prefixes), 500):
+        rows = connection.execute(
+            _calibration_job_select()
+            .where(calibration_jobs.c.prefix.in_(normalized_prefixes[offset:offset + 500]))
+            .order_by(calibration_jobs.c.prefix, calibration_jobs.c.created_at.desc(), _rowid_column().desc())
+        ).mappings().fetchall()
+        for row in rows:
+            latest.setdefault(str(row["prefix"]), _hydrate_job(row))
+    return latest
+
+
 def load_completed_sample_jobs_for_prefixes(
         connection: DBClient,
         prefixes: Sequence[str],

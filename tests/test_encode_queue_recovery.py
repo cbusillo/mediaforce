@@ -23442,7 +23442,7 @@ raise SystemExit(0)
 
             working = resync()
             badge = web_app._folder_needs_attention_badges(connection).get("tv/show")
-            working_state = workflow_state_runtime._load_encode_job_state(connection, scope).overlapping
+            working_state = workflow_state_runtime._load_encode_job_state(connection, scope).overlapping[:2]
 
             def complete(*indexes: int) -> None:
                 for index in indexes:
@@ -23452,10 +23452,10 @@ raise SystemExit(0)
 
             complete(2)
             queued_left = resync()
-            queued_left_state = workflow_state_runtime._load_encode_job_state(connection, scope).overlapping
+            queued_left_state = workflow_state_runtime._load_encode_job_state(connection, scope).overlapping[:2]
             complete(3, 4)
             ended = resync()
-            ended_state = workflow_state_runtime._load_encode_job_state(connection, scope).overlapping
+            ended_state = workflow_state_runtime._load_encode_job_state(connection, scope).overlapping[:2]
 
         labels = encode_runtime._UNFINISHED_REASON_LABELS
         self.assertEqual(working["status"], "running")

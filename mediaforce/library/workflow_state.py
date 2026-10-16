@@ -1,7 +1,7 @@
 import json
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping, NamedTuple
 
 from sqlalchemy import Select, or_, select
 
@@ -83,6 +83,13 @@ class EncodeEligibility:
     blocked: bool = False
 
 
+class ScopeJobLane(NamedTuple):
+    """The encode lane jobs give a scope, and the run that decided it."""
+    lane: WorkflowLane
+    detail: str
+    job_id: str
+
+
 @dataclass(frozen=True, slots=True)
 class ScopeJobStates:
     """The encode lane from every job touching a scope, and from only the jobs at or inside it.
@@ -90,8 +97,8 @@ class ScopeJobStates:
     A job over a wider scope, such as a whole show, cannot be working on a season whose files are all
     held or already finished, so for such a season only its own jobs count.
     """
-    overlapping: tuple[WorkflowLane, str] | None
-    own: tuple[WorkflowLane, str] | None
+    overlapping: ScopeJobLane | None
+    own: ScopeJobLane | None
 
 
 NO_SCOPE_JOBS = ScopeJobStates(overlapping=None, own=None)
@@ -135,6 +142,8 @@ class FolderWorkflowState:
     next_action: WorkflowNextAction
     blockers: list[str]
     items: tuple[ItemWorkflowState, ...]
+    # The encode run whose state set the lane, when a job did.
+    source_job_id: str | None = None
 
     def to_payload(self) -> WorkflowPayload:
         return {
@@ -149,6 +158,7 @@ class FolderWorkflowState:
             "state_counts": dict(self.state_counts),
             "next_action": self.next_action.to_payload(),
             "blockers": list(self.blockers),
+            "source_job_id": self.source_job_id,
         }
 
 
@@ -382,8 +392,8 @@ def _build_folder_state(
         or all(item.state == "missing" for item in items)
     )
     job_state = job_states.overlapping if wider_jobs_apply else job_states.own
-    job_lane = job_state[0] if job_state is not None else None
-    job_detail = job_state[1] if job_state is not None else None
+    job_lane = job_state.lane if job_state is not None else None
+    job_detail = job_state.detail if job_state is not None else None
     counts = {
         "items": len(items),
         "encode_candidates": state_counts.get("encode_candidate", 0),
@@ -415,6 +425,7 @@ def _build_folder_state(
         next_action=action,
         blockers=blockers,
         items=items,
+        source_job_id=job_state.job_id if job_state is not None and lane == job_state.lane else None,
     )
 
 
@@ -729,7 +740,7 @@ def _encode_job_workflow_state(
         *,
         counts_for_scope: Callable[[DBRow], bool] = lambda _row: True,
         attention_for_scope: Callable[[DBRow], DBRow | None] = lambda latest: latest,
-) -> tuple[WorkflowLane, str] | None:
+) -> ScopeJobLane | None:
     """The scope's encode lane, naming every reason its files are not finished.
 
     Any active job, including a folder's queued or running part, keeps the scope working. Whether
@@ -755,12 +766,12 @@ def _encode_job_workflow_state(
         owner_groups = [group for group in groups if group.get("needs_owner")]
         if owner_groups:
             detail = f"{detail} Needs you: {unfinished_breakdown_summary(owner_groups)}."
-        return "processing", detail
+        return ScopeJobLane("processing", detail, str(active["parent_job_id"] or active["job_id"]))
     if latest is not None and latest["status"] in ATTENTION_JOB_STATUSES:
         run = attention_for_scope(latest)
         if run is None:
             return None
         groups = unfinished_breakdown_groups(run["progress_json"])
         error = unfinished_breakdown_summary(groups) or str(run["error"] or "Encode job needs operator attention.")
-        return "attention", f"Encode job is {run['status']} for {run['prefix']}: {error}"
+        return ScopeJobLane("attention", f"Encode job is {run['status']} for {run['prefix']}: {error}", str(run["job_id"]))
     return None

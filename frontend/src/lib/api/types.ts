@@ -31,6 +31,56 @@ export interface WorkflowNextAction {
 	target_prefix: string;
 }
 
+/** What a folder page or library card leads with, decided by the server from its own records. */
+export type PageStateKey =
+	| 'needs_test'
+	| 'sample_waiting'
+	| 'making_test'
+	| 'ready_to_compare'
+	| 'ready_to_make'
+	| 'making_season'
+	| 'ready_to_check'
+	| 'finish_blocked'
+	| 'ready_to_finish'
+	| 'finished'
+	| 'needs_help';
+
+export type PageStateAction =
+	| 'make_sample'
+	| 'retry_sample'
+	| 'choose_size'
+	| 'review_sample'
+	| 'queue_encode'
+	| 'retry_encode'
+	| 'review_files'
+	| 'validate_outputs'
+	| 'promote_outputs';
+
+export type PageStateFailure =
+	| 'arithmetic_infeasible'
+	| 'bound_exhausted'
+	| 'quality_conflict'
+	| 'missing_clips'
+	| 'restarted'
+	| 'no_access'
+	| 'size_under_target'
+	| 'size_over_target'
+	| 'size_unverified'
+	| 'goal_too_small'
+	| 'stopped'
+	| 'unexplained'
+	| 'other';
+
+export interface PageStatePayload {
+	key: PageStateKey;
+	tone: 'quiet' | 'active' | 'ready' | 'success' | 'attention';
+	recovery_kind: 'test' | 'season' | 'files' | null;
+	primary_action: PageStateAction | null;
+	failure: PageStateFailure | null;
+	/** The job or saved sample that decided the state; its prefix may be a wider folder's. */
+	source_job: { id: string; kind: 'sample' | 'encode'; prefix: string; status: string } | null;
+}
+
 export interface FolderWorkflowState {
 	prefix: string;
 	state: string;
@@ -43,6 +93,7 @@ export interface FolderWorkflowState {
 	state_counts: Record<string, number>;
 	next_action: WorkflowNextAction;
 	blockers: string[];
+	source_job_id?: string | null;
 }
 
 export interface LifecycleHoldReason {
@@ -159,6 +210,7 @@ export interface FolderCard {
 	media_scope?: MediaScopePayload | null;
 	details_loading: boolean;
 	estimate_unavailable_count?: number;
+	page_state?: PageStatePayload | null;
 }
 
 export type MovieMemberRole = 'feature' | 'extra' | 'uncertain';
@@ -1853,6 +1905,7 @@ export interface FolderStatusPayload {
 	folder_scan_job: Record<string, unknown> | null;
 	workflow_state?: FolderWorkflowState | null;
 	staged_integrity?: StagedIntegrityPayload;
+	page_state?: PageStatePayload | null;
 }
 
 export interface AudioPresetOption {

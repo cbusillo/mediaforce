@@ -171,6 +171,18 @@ Guidance:
     - automatic publishing, manual publishing and the folder page accept a file
       only while its governing approval is current and has the contract its
       run recorded
+  - `page_state.py`
+    - the one `page_state` a folder page and its library card lead with: a
+      state key, tone, recovery kind, primary action, failure kind and the job
+      or saved sample that decided it, on `/api/folders/<prefix>/status` and on
+      each TV folder card
+    - decided from database rows and saved samples, never from the hour-long
+      sample notice: the workflow state's wider-run rules for encode work, the
+      page's own newest sample job and saved sample (never an overlapping
+      episode's or show's), and `production_approval` for whether an approval
+      governs; the module docstring states the precedence
+    - the frontend maps the key to wording instead of re-deciding precedence;
+      `season/experience.ts` still decides it until it switches over (#901)
   - `folder_tuning_helpers.py`
   - `folder_tuning_advice.py`
   - `folder_tuning_runtime.py`
