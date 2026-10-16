@@ -7,6 +7,7 @@
     "acceptanceGate": "docs/policies/acceptance-gate.md",
     "codingStandards": "docs/policies/coding-standards.md",
     "architecture": "docs/architecture/module-boundaries.md",
+    "releaseFlow": "docs/development/release-flow.md",
     "databaseTooling": "docs/development/database-tooling.md",
     "packageBuilds": "docs/development/package-builds.md",
     "workstationUi": "docs/style/workstation-ui.md",

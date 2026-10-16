@@ -19,6 +19,7 @@ from mediaforce.encoding.quality import (
 from mediaforce.hosts import DEFAULT_HOST_CAPABILITIES
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.remote import run_remote_command
+from mediaforce.ops.runtime_install import RuntimeProtectionError, paths_overlap, protected_runtime_roots, retained_deploy_stage, runtime_activity
 
 SECONDS_PER_DAY = 86400
 SECONDS_PER_MINUTE = 60
@@ -50,6 +51,30 @@ def purge_transient_artifacts(config: MediaforceConfig, *, force: bool = False) 
     if not force and not _cleanup_is_due(config):
         return False
 
+    with runtime_activity(config.paths.db_path.parent, cleanup=True) as acquired:
+        if not acquired:
+            LOGGER.warning("Cleanup refused: a controller deployment is active")
+            return False
+        return _purge_due_transient_artifacts(config)
+
+
+def _purge_due_transient_artifacts(config: MediaforceConfig) -> bool:
+    staging_roots = _staging_roots_for_cleanup(config)
+    support_dir = config.paths.db_path.parent
+    try:
+        rollback_stage = retained_deploy_stage(support_dir)
+        protected = (*protected_runtime_roots(support_dir), Path(__file__).resolve().parents[1])
+    except RuntimeProtectionError as exc:
+        LOGGER.warning("%s", exc)
+        return False
+    cleanup_roots = (
+        config.paths.review_dir, config.paths.web_state_dir, config.paths.run_manifest_dir,
+        support_dir / "deployments", support_dir / "operations", *staging_roots,
+    )
+    if any(paths_overlap(cleanup, runtime) for cleanup in cleanup_roots for runtime in protected):
+        LOGGER.warning("Cleanup refused: a cleanup path overlaps a protected controller runtime")
+        return False
+
     retention_days = _retention_days(config)
     if retention_days <= 0:
         _write_cleanup_stamp(config)
@@ -60,7 +85,7 @@ def purge_transient_artifacts(config: MediaforceConfig, *, force: bool = False) 
     temp_cutoff = max(cutoff, now - _orphan_temp_retention_seconds(config))
     process_snapshot = _cleanup_process_snapshot(config)
     _prune_children(config.paths.review_dir, cutoff)
-    for staging_root in _staging_roots_for_cleanup(config):
+    for staging_root in staging_roots:
         root_verified = not _root_requires_unverified_process_check(
             staging_root, process_snapshot
         )
@@ -83,7 +108,7 @@ def purge_transient_artifacts(config: MediaforceConfig, *, force: bool = False) 
     _prune_matching_files(config.paths.web_state_dir, "*.job.json", cutoff)
     _prune_run_manifests(config, cutoff)
     support_dir = config.paths.db_path.parent
-    _prune_deploy_backups(support_dir / "deployments", keep=_kept_deploy_backups(config))
+    _prune_deploy_backups(support_dir / "deployments", keep=_kept_deploy_backups(config), protected=rollback_stage)
     _prune_operation_evidence(
         support_dir / "operations",
         now - _operation_evidence_retention_days(config) * SECONDS_PER_DAY,
@@ -218,11 +243,12 @@ def _prune_matching_directories(
         shutil.rmtree(path, ignore_errors=True)
 
 
-def _prune_deploy_backups(root: Path, *, keep: int) -> None:
-    """Keep the newest deploy folders; only the latest database copy is a useful rollback."""
+def _prune_deploy_backups(root: Path, *, keep: int, protected: Path | None = None) -> None:
+    """Keep recent stages and the running release's rollback."""
     folders = sorted(_child_directories(root), key=_content_mtime, reverse=True)
     for folder in folders[keep:]:
-        shutil.rmtree(folder, ignore_errors=True)
+        if protected is None or folder.resolve() != protected.resolve():
+            shutil.rmtree(folder, ignore_errors=True)
 
 
 def _prune_operation_evidence(root: Path, cutoff: float) -> None:

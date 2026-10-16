@@ -9,6 +9,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from mediaforce.ops.runtime_install import RuntimeProtectionError, require_release_directory, runtime_directory
+
 
 LOGIN_ITEM_LABEL = "com.mediaforce.web"
 BOOTOUT_ACCEPTED_EXIT_CODES = frozenset({0, 3, 36, 113})
@@ -26,6 +28,7 @@ class LoginItemError(RuntimeError):
 class LoginItemPaths:
     project_root: Path
     home: Path
+    config_path: Path | None = None
 
     @property
     def program(self) -> Path:
@@ -49,9 +52,12 @@ class LoginItemPaths:
 
 
 def render_login_item_plist(paths: LoginItemPaths) -> bytes:
+    arguments = [str(paths.program), "--no-reload"]
+    if paths.config_path is not None:
+        arguments.extend(["--config", str(paths.config_path)])
     payload = {
         "Label": LOGIN_ITEM_LABEL,
-        "ProgramArguments": [str(paths.program), "--no-reload"],
+        "ProgramArguments": arguments,
         "WorkingDirectory": str(paths.project_root),
         "EnvironmentVariables": {"PATH": _login_item_path(paths.home)},
         "RunAtLoad": True,
@@ -66,6 +72,10 @@ def render_login_item_plist(paths: LoginItemPaths) -> bytes:
 
 def install_login_item(paths: LoginItemPaths) -> str:
     _require_supported_platform()
+    try:
+        require_release_directory(paths.project_root, paths.home)
+    except RuntimeProtectionError as exc:
+        raise LoginItemError(f"{exc}; use scripts/deploy-controller.sh (legacy recovery: release-flow.md)") from exc
     _require_program(paths.program)
     paths.plist.parent.mkdir(parents=True, exist_ok=True)
     paths.log_dir.mkdir(parents=True, exist_ok=True)
@@ -161,7 +171,30 @@ def run_login_item_command(
         stderr: bool = False,
         lines: int = 80,
 ) -> int:
-    paths = LoginItemPaths(project_root=project_root.expanduser().resolve(), home=(home or Path.home()).expanduser())
+    home = (home or Path.home()).expanduser()
+    # Service commands address the installed controller, regardless of the caller's checkout.
+    root = project_root.expanduser().resolve()
+    try:
+        require_release_directory(root, home)
+    except RuntimeProtectionError:
+        root = runtime_directory(home) / "current"
+    plist = LoginItemPaths(project_root=root, home=home).plist
+    config_path = None
+    if plist.exists():
+        try:
+            installed = plistlib.loads(plist.read_bytes())
+            root = Path(installed["WorkingDirectory"])
+            if not root.is_absolute():
+                raise ValueError("working directory is not absolute")
+            arguments = installed.get("ProgramArguments", [])
+            if "--config" in arguments:
+                config_path = Path(arguments[arguments.index("--config") + 1])
+                if not config_path.is_absolute():
+                    raise ValueError("configuration path is not absolute")
+        except (OSError, ValueError, KeyError, IndexError, TypeError, plistlib.InvalidFileException) as exc:
+            print(f"login item: cannot identify installed runtime: {exc}")
+            return 1
+    paths = LoginItemPaths(project_root=root.resolve(), home=home, config_path=config_path)
     try:
         if action == "install":
             state = install_login_item(paths)
