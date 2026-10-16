@@ -2725,11 +2725,13 @@ def _globally_backed_off_encode_hosts(
     }
 
 
-def release_host_cooldowns(connection: DBClient, host: Mapping[str, Any], *, updated_at: str) -> int:
+def release_host_cooldowns(connection: DBClient, host: Mapping[str, Any]) -> int:
     """A computer that just passed an explicit readiness check takes work again at once.
 
     Its cooldowns and failure streak on every job are cleared, so neither the jobs it failed nor the
     global host block keep it out until the cooldown would have run out. Returns how many jobs changed.
+    The jobs keep their `updated_at`: the computer changed, not the jobs, and an old failed job must not
+    read as newer than the job that later finished its files.
     """
     identity = dict(host)
     if not _host_identity_tokens(identity):
@@ -2755,7 +2757,6 @@ def release_host_cooldowns(connection: DBClient, host: Mapping[str, Any], *, upd
             .values(
                 host_cooldown_until=None,
                 last_host_json=json.dumps(persisted_encode_host_payload(last_host), sort_keys=True),
-                updated_at=updated_at,
             )
         )
         released += result.rowcount

@@ -118,7 +118,7 @@ def _retryable_terminal_encode_prefixes(*, connection_factory: Any) -> list[str]
         rows = connection.execute(
             select(encode_jobs.c.prefix, encode_jobs.c.status)
             .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
-            .order_by(encode_jobs.c.updated_at.desc(), literal_column("rowid").desc())
+            .order_by(encode_jobs.c.created_at.desc(), literal_column("rowid").desc())
         ).mappings().fetchall()
 
     latest_job_by_prefix: dict[str, str] = {}

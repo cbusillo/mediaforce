@@ -1074,7 +1074,7 @@ def create_app(
         # The computer's own key and address name it; the requested name may be a label another computer uses.
         identity = {name: host[name] for name in ("key", "host") if str(host.get(name) or "").strip()}
         with open_db(config.paths.db_path) as connection:
-            released = release_host_cooldowns(connection, identity, updated_at=_now_iso())
+            released = release_host_cooldowns(connection, identity)
         if released:
             LOGGER.info("Released %s encode job cooldown(s) for %s after a successful readiness check.", released, host_key)
 
