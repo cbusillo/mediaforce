@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -6,12 +7,14 @@ from unittest.mock import patch
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
-from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import library_items, staged_artifacts
 from mediaforce.execution import PromotionResult
 from mediaforce.library.candidate_selection import project_candidates, workflow_eligibility
 from mediaforce.library.other_library import load_other_library_payload, load_other_scope_payload, \
     other_group_scope_for_rel_path, other_scope_action_blocker
 from mediaforce.library.workflow_state import build_folder_workflow_state
+from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
+from mediaforce.web.runtime.production_approval import production_approval_contract
 from mediaforce.web.runtime.folder_actions import (
     promote_folder_outputs_action,
     queue_folder_encode_action,
@@ -229,7 +232,33 @@ class OtherWorkflowTests(unittest.TestCase):
         staging_path.parent.mkdir(parents=True, exist_ok=True)
         source_path.write_bytes(b"source")
         staging_path.write_bytes(b"staged")
+        policy = {"video": {"encoder": "libsvtav1"}}
+        approval: dict[str, object] = {
+            "mode": "sample",
+            "job_id": "delivery-sample",
+            "accepted_sample_job_id": "delivery-sample",
+            "accepted_at": "2026-07-14T00:00:00+00:00",
+            "policy": policy,
+            "sample_item": {"resolved_operator_intent": {"request": {"compression_intent": "balanced"}}},
+        }
+        approval["accepted_policy_hash"] = calibration_policy_hash(approval)
+        manifest_path = self.root / "runs" / "delivery.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps({
+            "items": [{"resolved_policy": policy}],
+            "selection": {"production_approval_contract": production_approval_contract(approval)},
+        }))
+        with open_db(config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, "other/Delivery/Clip.mp4")
+            connection.execute(staged_artifacts.insert().values(
+                library_item_id=item_id,
+                staging_path=str(staging_path),
+                manifest_path=str(manifest_path),
+                item_index=0,
+                updated_at="2026-07-14T00:00:00+00:00",
+            ))
         item = {
+            "library_item_id": item_id,
             "source_path": str(source_path),
             "rel_path": "other/Delivery/Clip.mp4",
             "staging_path": str(staging_path),
@@ -244,6 +273,7 @@ class OtherWorkflowTests(unittest.TestCase):
         promoted = promote_folder_outputs_action(
             config,
             "other/Delivery",
+            load_calibration_state_fn=lambda _config, prefix: approval if prefix == "other/Delivery" else None,
             load_folder_staged_items_fn=lambda *_args, **_kwargs: [item],
             promote_manifest_items_fn=lambda *_args, **_kwargs: PromotionResult([source_path.with_suffix(".mkv")], []),
         )

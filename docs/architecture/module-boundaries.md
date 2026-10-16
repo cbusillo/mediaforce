@@ -162,6 +162,15 @@ Guidance:
   - `encode_runtime.py`
   - `folder_state.py`
   - `folder_actions.py`
+  - `production_approval.py`
+    - the one rule for which sample approval governs a file: the nearest folder
+      holding an approval (the file, then its season, show and library)
+    - a run records the contract of the approval it was queued under; queueing
+      leaves out each file a nearer approval with a different contract governs,
+      and refuses an approval too old to record a contract
+    - automatic publishing, manual publishing and the folder page accept a file
+      only while its governing approval is current and has the contract its
+      run recorded
   - `folder_tuning_helpers.py`
   - `folder_tuning_advice.py`
   - `folder_tuning_runtime.py`

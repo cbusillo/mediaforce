@@ -47,7 +47,7 @@ from mediaforce.tuning.production_outcomes import (
     load_target_production_report,
     prepare_target_production_outcome,
 )
-from mediaforce.web.runtime.folder_actions import _production_approval_contract
+from mediaforce.web.runtime.production_approval import production_approval_contract
 
 
 def _admission(
@@ -83,7 +83,7 @@ def _admission(
                 "observation_id": row["observation_id"]
             }
         },
-        approval_contract=_production_approval_contract(calibration),
+        approval_contract=production_approval_contract(calibration),
     )
     assert "target_lineage" in manifest["items"][0]
     return manifest["items"][0], calibration, row, manifest
@@ -431,7 +431,7 @@ def test_admission_never_inherits_or_reuses_invalid_approval(
                     "observation_id": row["observation_id"]
                 }
             },
-            approval_contract=_production_approval_contract(calibration),
+            approval_contract=production_approval_contract(calibration),
         )
         assert all("target_lineage" not in candidate for candidate in manifest["items"])
 
@@ -660,7 +660,7 @@ def test_persisted_manifest_encode_validate_promote_retains_eligible_lineage(
         content_intent_stream_plan_id,
     )
     from mediaforce.tuning.size_goals import SizeGoalIntent
-    from mediaforce.web.runtime.folder_actions import _calibration_policy_hash
+    from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
     from test_content_intent_observations import ContentIntentObservationTests
     from test_target_size_production import TargetSizeProductionTests
 
@@ -736,7 +736,7 @@ def test_persisted_manifest_encode_validate_promote_retains_eligible_lineage(
             accepted_at=row["recorded_at"],
             accepted_draft_hash="approved-draft",
             accepted_sample_job_id=calibration["job_id"],
-            accepted_policy_hash=_calibration_policy_hash(calibration),
+            accepted_policy_hash=calibration_policy_hash(calibration),
         )
         manifest = {
             "run_id": "integration-run",
@@ -752,7 +752,7 @@ def test_persisted_manifest_encode_validate_promote_retains_eligible_lineage(
                     "observation_id": row["observation_id"]
                 }
             },
-            approval_contract=_production_approval_contract(calibration),
+            approval_contract=production_approval_contract(calibration),
         )
         assert "target_lineage" in item
         path = write_manifest(connection, config, manifest)

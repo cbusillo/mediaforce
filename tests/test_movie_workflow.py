@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,8 +30,25 @@ from mediaforce.web.runtime.folder_actions import _reset_stale_prefix_encoding_i
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action, queue_folder_encode_action, \
     validate_folder_outputs_action
 from mediaforce.web.runtime.folder_cards import list_folder_cards
+from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
+
+
+def _approval_at(prefix: str, calibration: dict[str, object]) -> Callable[[object, str], dict[str, object] | None]:
+    """An approved sample saved for exactly this folder, as the queue reads it."""
+    approved = {
+        **calibration,
+        "accepted_at": "2026-07-12T00:00:00+00:00",
+        "accepted_sample_job_id": "sample-job",
+        "accepted_policy_hash": calibration_policy_hash(calibration),
+    }
+    approved["sample_item"] = {
+        "resolved_policy": calibration["policy"],
+        **cast(dict[str, object], calibration.get("sample_item") or {}),
+        "resolved_operator_intent": {"request": {"compression_intent": "balanced"}},
+    }
+    return lambda _config, requested: approved if requested == prefix else None
 
 
 def _cadence_clears_every_item(*_args: object, library_item_ids: list[int], **_kwargs: object) -> CadenceQueuePartition:
@@ -1061,7 +1078,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 False,
                 now_iso=lambda: "2026-07-13T00:00:00+00:00",
                 load_job_state=lambda *_args: None,
-                load_calibration_state=lambda *_args: self._accepted_calibration(self.config),
+                load_calibration_state=_approval_at("films/Extras Only", self._accepted_calibration(self.config)),
                 review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
                 upsert_override=lambda *_args: persisted.append("persisted"),
                 load_active_encode_job_for_prefix_fn=lambda *_args: None,
@@ -1095,7 +1112,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 False,
                 now_iso=lambda: "2026-07-13T00:00:00+00:00",
                 load_job_state=lambda *_args: None,
-                load_calibration_state=lambda *_args: self._accepted_calibration(config),
+                load_calibration_state=_approval_at(prefix, self._accepted_calibration(config)),
                 review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
                 upsert_override=lambda *_args: persisted.append("persisted"),
                 load_active_encode_job_for_prefix_fn=lambda *_args: None,
@@ -1139,7 +1156,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 False,
                 now_iso=lambda: "2026-07-13T00:00:00+00:00",
                 load_job_state=lambda *_args: None,
-                load_calibration_state=lambda *_args: self._accepted_calibration(config),
+                load_calibration_state=_approval_at("films", self._accepted_calibration(config)),
                 review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
                 upsert_override=lambda *_args: None,
                 load_active_encode_job_for_prefix_fn=lambda *_args: None,
@@ -1192,7 +1209,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 False,
                 now_iso=lambda: "2026-07-13T00:00:00+00:00",
                 load_job_state=lambda *_args: None,
-                load_calibration_state=lambda *_args: {"policy": calibration_policy},
+                load_calibration_state=_approval_at(prefix, {"policy": calibration_policy}),
                 review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
                 upsert_override=lambda *_args: persisted.append("persisted"),
                 load_active_encode_job_for_prefix_fn=lambda *_args: None,
@@ -1232,7 +1249,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 False,
                 now_iso=lambda: "2026-07-13T00:00:00+00:00",
                 load_job_state=lambda *_args: None,
-                load_calibration_state=lambda *_args: {"policy": calibration_policy},
+                load_calibration_state=_approval_at(prefix, {"policy": calibration_policy}),
                 review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
                 upsert_override=lambda *_args: persisted.append("persisted"),
                 load_active_encode_job_for_prefix_fn=lambda *_args: None,
@@ -1404,7 +1421,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 False,
                 now_iso=lambda: "2026-07-13T00:00:00+00:00",
                 load_job_state=lambda *_args: None,
-                load_calibration_state=lambda *_args: self._accepted_calibration(self.config),
+                load_calibration_state=_approval_at("films/Example", self._accepted_calibration(self.config)),
                 review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
                 upsert_override=lambda *_args: None,
                 load_active_encode_job_for_prefix_fn=lambda *_args: active_job,
@@ -1452,7 +1469,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 False,
                 now_iso=lambda: "2026-07-13T00:00:00+00:00",
                 load_job_state=lambda *_args: None,
-                load_calibration_state=lambda *_args: self._accepted_calibration(self.config),
+                load_calibration_state=_approval_at("films/Example", self._accepted_calibration(self.config)),
                 review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
                 upsert_override=lambda *_args: None,
                 load_active_encode_job_for_prefix_fn=lambda *_args: None,
