@@ -99,7 +99,7 @@ def _decide(**facts: Any) -> dict[str, Any]:
     return decide_page_state(PageStateFacts(prefix=facts.pop("prefix", SEASON), **facts)).to_payload()
 
 
-# Each frontend detailSeasonState / librarySeasonState case, as facts and the state the server gives.
+# Each case the frontend's season page and library cards decided before #901, as facts and the server's state.
 PORTED_CASES: list[tuple[str, dict[str, Any], dict[str, Any]]] = [
     (
         "a newly discovered season is not ready to compress",
@@ -286,6 +286,33 @@ def test_a_sample_in_progress_leads_over_checking_finishing_and_finished(lane: s
     assert _decide(workflow=workflow, sample_job=_sample("completed"), calibration=_review_ready())["key"] == (
         "ready_to_compare"
     )
+
+
+@pytest.mark.parametrize(("error", "failure"), [
+    ("Final output size missed the approved target band: status=under_target, actual=1, target=2.", "size_under_target"),
+    ("Final output size missed the approved target band: status=over_target, actual=3, target=2.", "size_over_target"),
+    # A size miss leads over the fresh baseline that also failed, so the owner chooses a fresh goal.
+    (
+        "Final output size missed the approved target band: status=missing_target, target=None. "
+        "The fresh baseline search also failed: Failed to find a suitable crf for the quality target.",
+        "size_unverified",
+    ),
+    ("Failed to find a suitable crf for the quality target.", "goal_too_small"),
+    ("Permission denied: /media/tv/show/episode-1.mkv", "no_access"),
+    ("Stopped by the owner.", "stopped"),
+    ("ssh: connection reset", "other"),
+    (None, "unexplained"),
+    ("conflicts with the configured quality floor (target_band_violates_quality_floor)", "quality_conflict"),
+])
+def test_a_stopped_run_records_what_stopped_it(error: str | None, failure: str) -> None:
+    """The page words the stop from this kind alone, so a stale sample's error never replaces it."""
+    state = _decide(
+        workflow=_workflow("attention", "needs_attention", job_id="encode-old"),
+        encode_job=_encode("needs_attention", error),
+        sample_job=_sample("failed", finished_at=BEFORE_STOP, error="Failed to find a suitable crf."),
+    )
+
+    assert (state["recovery_kind"], state["failure"]) == ("season", failure)
 
 
 @pytest.mark.parametrize(("trace", "failure"), [

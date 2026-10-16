@@ -184,8 +184,9 @@ Guidance:
       page's own newest sample job and saved sample (never an overlapping
       episode's or show's), and `production_approval` for whether an approval
       governs; the module docstring states the precedence
-    - the frontend maps the key to wording instead of re-deciding precedence;
-      `season/experience.ts` still decides it until it switches over (#901)
+    - the frontend only words it (`frontend/src/lib/season/page-state.ts`):
+      one table from key, recovery kind, failure kind and episode or season
+      scope to label, detail and recovery action; it never orders jobs
   - `folder_tuning_helpers.py`
   - `folder_tuning_advice.py`
   - `folder_tuning_runtime.py`

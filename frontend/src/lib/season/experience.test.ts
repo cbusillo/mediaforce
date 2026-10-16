@@ -3,20 +3,17 @@ import { describe, expect, it } from 'vitest';
 import type {
 	DashboardScanJob,
 	DashboardScanWarning,
-	DashboardSummaryPayload,
 	EncodeQueueJob,
 	FolderCard,
 	FolderQualityMemoryPayload,
 	FolderPayload,
 	FolderStatusPayload,
-	FolderWorkflowState,
 	CompressionIntentOptionPayload,
 	OperatorIntentRequestPayload,
-	SizeGoalOptionPayload,
-	WorkflowLane
+	PageStatePayload,
+	SizeGoalOptionPayload
 } from '$lib/api/types';
 import {
-	activeSeasonCards,
 	waitingScopeName,
 	encodeWaitingReasons,
 	approvalGuardFromMessage,
@@ -33,7 +30,6 @@ import {
 	compareRiskSummary,
 	compressionIntentContract,
 	currentOperatorIntent,
-	detailSeasonState,
 	episodeLabel,
 	exactItemFilename,
 	exactReviewSizeFacts,
@@ -46,10 +42,8 @@ import {
 	isSeriesPrefix,
 	isSizeGoalSelectionConfirmed,
 	measuredFollowupRequest,
-	librarySeasonState,
 	normalizedSizePaceBytes,
 	overlappingCalibrationActivity,
-	plainFailureMessage,
 	qualityMemoryView,
 	resolvedTargetSummary,
 	reviewFeedbackIntent,
@@ -96,41 +90,7 @@ const card: FolderCard = {
 	details_loading: false
 };
 
-const dashboard = {
-	calibration_queue: {
-		sample: {
-			running: [],
-			queued: [],
-			pending_review: [],
-			running_count: 0,
-			queued_count: 0,
-			pending_review_count: 0
-		},
-		full: {
-			running: [],
-			queued: [],
-			pending_review: [],
-			running_count: 0,
-			queued_count: 0,
-			pending_review_count: 0
-		},
-		active_count: 0
-	},
-	encode_queue: {
-		running_count: 0,
-		queued_count: 0,
-		running: [],
-		queued: [],
-		state: { is_paused: false, stop_requested: false }
-	},
-	folders_preview: [],
-	library_colors: {},
-	scan_job: null,
-	catalog_empty: false,
-	folder_cache_key: '',
-	metric_support: { vmaf: true, xpsnr: true, ssim: true },
-	metric_status_copy: ''
-} satisfies DashboardSummaryPayload;
+const metricSupport = { vmaf: true, xpsnr: true, ssim: true };
 
 const status = {
 	prefix: card.prefix,
@@ -341,7 +301,7 @@ function folder(overrides: Partial<FolderPayload> = {}): FolderPayload {
 		prefix: card.prefix,
 		media_scope: status.media_scope,
 		pending: false,
-		metric_support: dashboard.metric_support,
+		metric_support: metricSupport,
 		metric_status_copy: '',
 		summary: {
 			prefix: card.prefix,
@@ -355,15 +315,6 @@ function folder(overrides: Partial<FolderPayload> = {}): FolderPayload {
 		},
 		...overrides
 	};
-}
-
-function browserReadyReviewPairs(): Array<Record<string, unknown>> {
-	return [
-		{
-			source_clip: { path: '/review/source.mp4', duration_seconds: 8, size_bytes: 100 },
-			preview_clip: { path: '/review/preview.mp4', duration_seconds: 8, size_bytes: 25 }
-		}
-	];
 }
 
 function qualityMemoryPayload(): FolderQualityMemoryPayload {
@@ -712,30 +663,6 @@ function compressionIntentOptions(): CompressionIntentOptionPayload[] {
 			confirmed: true
 		}
 	}));
-}
-
-function workflowState(
-	primaryLane: WorkflowLane,
-	state: string = primaryLane
-): FolderWorkflowState {
-	return {
-		prefix: card.prefix,
-		state,
-		primary_lane: primaryLane,
-		label: '',
-		tone: primaryLane === 'complete' ? 'success' : 'ready',
-		detail: '',
-		counts: {},
-		lane_counts: {},
-		state_counts: {},
-		next_action: {
-			kind: 'none',
-			label: '',
-			enabled: false,
-			target_prefix: card.prefix
-		},
-		blockers: []
-	};
 }
 
 describe('season experience translation', () => {
@@ -1269,453 +1196,6 @@ describe('season experience translation', () => {
 		expect(isSeriesPrefix('tv/Big Brother (US)/Season 19')).toBe(false);
 	});
 
-	it('does not call a newly discovered season ready to encode', () => {
-		expect(librarySeasonState(card, dashboard)).toMatchObject({
-			key: 'needs_test',
-			label: 'Needs sample'
-		});
-	});
-
-	it('distinguishes a waiting sample from a running sample', () => {
-		const queuedDashboard = {
-			...dashboard,
-			calibration_queue: {
-				...dashboard.calibration_queue,
-				sample: {
-					...dashboard.calibration_queue.sample,
-					queued: [{ job_id: 'sample-queued', prefix: card.prefix, status: 'queued' }],
-					queued_count: 1
-				}
-			}
-		} as DashboardSummaryPayload;
-		const runningDashboard = {
-			...dashboard,
-			calibration_queue: {
-				...dashboard.calibration_queue,
-				sample: {
-					...dashboard.calibration_queue.sample,
-					running: [{ job_id: 'sample-running', prefix: card.prefix, status: 'running' }],
-					running_count: 1
-				}
-			}
-		} as DashboardSummaryPayload;
-		const retryingDashboard = {
-			...dashboard,
-			calibration_queue: {
-				...dashboard.calibration_queue,
-				sample: {
-					...dashboard.calibration_queue.sample,
-					running: [{ job_id: 'sample-retrying', prefix: card.prefix, status: 'retry_backoff' }],
-					running_count: 1
-				}
-			}
-		} as DashboardSummaryPayload;
-
-		expect(librarySeasonState(card, queuedDashboard)).toMatchObject({
-			key: 'sample_waiting',
-			label: 'Sample waiting',
-			detail: 'This sample has not started. It is waiting for an available computer.'
-		});
-		expect(librarySeasonState(card, runningDashboard)).toMatchObject({
-			key: 'making_test',
-			label: 'Creating sample',
-			detail: 'One representative episode is being compressed into comparison clips now.'
-		});
-		expect(librarySeasonState(card, retryingDashboard)).toMatchObject({
-			key: 'sample_waiting',
-			label: 'Sample waiting',
-			detail: 'The last attempt stopped. Mediaforce will retry this sample shortly.',
-			tone: 'attention'
-		});
-	});
-
-	it('keeps a working season working while naming the files that need the owner', () => {
-		const working = {
-			...card,
-			workflow_state: { ...card.workflow_state, primary_lane: 'processing' },
-			review_badge_label: 'Needs attention',
-			review_badge_detail: '1 had trouble reading or writing media · 4 waiting for a scheduled time'
-		} as FolderCard;
-
-		expect(librarySeasonState(working, dashboard)).toMatchObject({
-			key: 'making_season',
-			label: 'Compressing · needs you',
-			detail: '1 had trouble reading or writing media · 4 waiting for a scheduled time'
-		});
-	});
-
-	it('keeps technical job nouns out of first-level sample copy', () => {
-		const states = [
-			librarySeasonState(card, dashboard),
-			detailSeasonState(folder(), status),
-			{
-				label: calibrationStageLabel({ job_id: 'sample-1', status: 'running' }),
-				detail: calibrationLivenessLabel({ job_id: 'sample-1', status: 'running' })
-			}
-		];
-		const firstLevelCopy = states.map((state) => `${state.label} ${state.detail}`).join(' ');
-
-		expect(firstLevelCopy).not.toMatch(/\b(calibration|candidate|worker|host|Mac|preview)\b/i);
-	});
-
-	it('keeps finishing states visible on the home screen', () => {
-		const finishingCard = { ...card, workflow_state: workflowState('promote') };
-		expect(librarySeasonState(finishingCard, dashboard)).toMatchObject({
-			key: 'ready_to_finish',
-			label: 'Ready to replace'
-		});
-		expect(activeSeasonCards([finishingCard], dashboard)).toHaveLength(1);
-	});
-
-	it.each([
-		['attention', 'needs_help'],
-		['blocked', 'needs_help'],
-		['encode', 'ready_to_make'],
-		['validate', 'ready_to_check'],
-		['promote', 'ready_to_finish'],
-		['processing', 'making_season'],
-		['mixed', 'ready_to_make'],
-		['complete', 'finished']
-	] as const)('shows the %s workflow before an older approved-test badge', (lane, expectedKey) => {
-		expect(
-			librarySeasonState(
-				{
-					...card,
-					review_badge_label: 'Approved draft',
-					workflow_state: workflowState(lane)
-				},
-				dashboard
-			)
-		).toMatchObject({ key: expectedKey });
-	});
-
-	it('uses review evidence over the generic folder state', () => {
-		expect(
-			detailSeasonState(
-				folder({
-					calibration: {
-						draft_hash: 'draft-1',
-						accepted_draft_hash: null,
-						browser_review_ready: true,
-						review_pairs: browserReadyReviewPairs()
-					},
-					workflow_state: {
-						prefix: card.prefix,
-						state: 'encode_candidates',
-						primary_lane: 'encode',
-						label: 'Ready to encode',
-						tone: 'ready',
-						detail: '',
-						counts: {},
-						lane_counts: {},
-						state_counts: {},
-						next_action: {
-							kind: 'queue_encode',
-							label: 'Queue encode',
-							enabled: true,
-							target_prefix: card.prefix
-						},
-						blockers: []
-					}
-				}),
-				status
-			)
-		).toMatchObject({ key: 'ready_to_compare', label: 'Ready to review' });
-	});
-
-	it('offers a fresh sample for review while a finished file is blocked', () => {
-		const blocked = {
-			...workflowState('blocked'),
-			blockers: ["A finished file didn't pass its check."]
-		};
-		const reviewReady = {
-			browser_review_ready: true,
-			review_pairs: browserReadyReviewPairs()
-		};
-
-		expect(
-			detailSeasonState(
-				folder({
-					calibration: { ...reviewReady, draft_hash: 'draft-2', accepted_draft_hash: 'draft-1' },
-					workflow_state: blocked
-				}),
-				status
-			)
-		).toMatchObject({ key: 'ready_to_compare', label: 'Ready to review' });
-		expect(
-			detailSeasonState(
-				folder({
-					calibration: { ...reviewReady, draft_hash: 'draft-1', accepted_draft_hash: 'draft-1' },
-					workflow_state: blocked
-				}),
-				status
-			)
-		).toMatchObject({ key: 'needs_help', label: 'Needs attention' });
-	});
-
-	it('shows an interrupted season before an older approved test', () => {
-		expect(
-			detailSeasonState(
-				folder({
-					calibration: {
-						draft_hash: 'draft-1',
-						accepted_draft_hash: 'draft-1',
-						browser_review_ready: true,
-						review_pairs: browserReadyReviewPairs()
-					},
-					encode_job: {
-						job_id: 'job-1',
-						prefix: card.prefix,
-						status: 'needs_attention',
-						error: 'Encode queue job was interrupted by a web process restart.'
-					}
-				}),
-				status
-			)
-		).toMatchObject({ key: 'needs_help', label: 'The season stopped' });
-	});
-
-	it('uses episode language when exact-item work stops', () => {
-		expect(
-			detailSeasonState(
-				folder({
-					media_scope: {
-						schema_version: 1,
-						prefix: `${card.prefix}/1e01-Pilot.mkv`,
-						root: 'tv',
-						domain: 'tv',
-						kind: 'media_file',
-						match: 'exact_item',
-						title: '1e01 Pilot',
-						subtitle: 'Constellation · Season 4',
-						scope_label: 'Episode'
-					},
-					encode_job: {
-						job_id: 'job-1',
-						prefix: `${card.prefix}/1e01-Pilot.mkv`,
-						status: 'needs_attention',
-						error: 'Final output size missed the approved target band.'
-					}
-				}),
-				status
-			)
-		).toMatchObject({
-			key: 'needs_help',
-			label: 'The episode stopped',
-			detail: 'Nothing was replaced. Try this episode again.'
-		});
-	});
-
-	it('shows a newer recovery test instead of stale encode attention', () => {
-		expect(
-			detailSeasonState(
-				folder({
-					calibration: {
-						job_id: 'sample-new',
-						draft_hash: 'draft-new',
-						accepted_draft_hash: null,
-						browser_review_ready: true,
-						review_pairs: browserReadyReviewPairs()
-					},
-					calibration_job: {
-						job_id: 'sample-new',
-						prefix: card.prefix,
-						status: 'completed',
-						finished_at: '2026-08-16T05:42:00+00:00'
-					},
-					review_gate: { status: 'needs_approval', can_confirm_full: false },
-					encode_job: {
-						job_id: 'encode-old',
-						prefix: card.prefix,
-						status: 'needs_attention',
-						finished_at: '2026-08-16T05:21:35+00:00',
-						error: 'Final output size missed the approved target band.'
-					}
-				}),
-				status
-			)
-		).toMatchObject({ key: 'ready_to_compare', label: 'Ready to review' });
-	});
-
-	it('orders a saved sample by its own finish time once its job leaves the payload', () => {
-		const stoppedEncode = {
-			job_id: 'encode-old',
-			prefix: card.prefix,
-			status: 'needs_attention',
-			finished_at: '2026-10-15T08:07:38+00:00',
-			updated_at: '2026-10-15T23:05:35+00:00',
-			error: 'Final output size missed the approved target band.'
-		};
-		const savedSample = (sampleFinishedAt: string) =>
-			folder({
-				calibration: {
-					job_id: 'sample-new',
-					draft_hash: 'draft-new',
-					accepted_draft_hash: null,
-					browser_review_ready: true,
-					review_pairs: browserReadyReviewPairs(),
-					sample_finished_at: sampleFinishedAt
-				},
-				calibration_job: null,
-				review_gate: { status: 'needs_approval', can_confirm_full: false },
-				encode_job: stoppedEncode,
-				workflow_state: workflowState('attention', 'needs_attention')
-			});
-
-		expect(
-			detailSeasonState(savedSample('2026-10-15T15:16:00+00:00'), {
-				...status,
-				calibration_job: null
-			})
-		).toMatchObject({ key: 'ready_to_compare', label: 'Ready to review' });
-		expect(
-			detailSeasonState(savedSample('2026-10-15T07:00:00+00:00'), {
-				...status,
-				calibration_job: null
-			})
-		).toMatchObject({ key: 'needs_help' });
-	});
-
-	it('recognizes a saved test that never produced comparison media', () => {
-		expect(
-			detailSeasonState(
-				folder({
-					calibration: {
-						job_id: 'sample-1',
-						mode: 'sample',
-						review_media_ready: false
-					}
-				}),
-				status
-			)
-		).toMatchObject({ key: 'needs_help', label: 'Sample needs retry' });
-	});
-
-	it('recognizes a measured test whose review clips are missing', () => {
-		expect(
-			detailSeasonState(
-				folder({
-					calibration: {
-						job_id: 'sample-1',
-						draft_hash: 'draft-1',
-						review_media_ready: false
-					},
-					review_gate: { status: 'missing_review_media', can_confirm_full: false }
-				}),
-				status
-			)
-		).toMatchObject({ key: 'needs_help', label: 'Sample needs retry' });
-	});
-
-	it('returns an approved sample to review when current evidence is rejected', () => {
-		expect(
-			detailSeasonState(
-				folder({
-					calibration: {
-						job_id: 'sample-1',
-						draft_hash: 'draft-1',
-						accepted_draft_hash: 'draft-1',
-						browser_review_ready: true,
-						review_pairs: browserReadyReviewPairs()
-					},
-					review_gate: { status: 'accepted', can_confirm_full: true },
-					quality_risk: {
-						operator_decision: { status: 'rejected' }
-					}
-				}),
-				status
-			)
-		).toMatchObject({ key: 'ready_to_compare', label: 'Ready to review' });
-	});
-
-	it('trusts an accepted review gate when non-policy draft metadata changed', () => {
-		expect(
-			detailSeasonState(
-				folder({
-					calibration: {
-						job_id: 'sample-1',
-						draft_hash: 'draft-with-refreshed-metadata',
-						accepted_draft_hash: 'original-draft',
-						browser_review_ready: true,
-						review_pairs: browserReadyReviewPairs()
-					},
-					review_gate: { status: 'accepted', can_confirm_full: true },
-					quality_risk: {
-						blocked: false,
-						operator_decision: { status: 'approved' }
-					}
-				}),
-				status
-			)
-		).toMatchObject({ key: 'ready_to_make', label: 'Sample approved' });
-	});
-
-	it('keeps an approved sample ready when only legacy review media remains', () => {
-		expect(
-			detailSeasonState(
-				folder({
-					calibration: {
-						job_id: 'sample-1',
-						draft_hash: 'draft-1',
-						accepted_draft_hash: 'draft-1',
-						review_media_ready: true,
-						compare_clips: [{ path: '/review/compare.mov' }]
-					},
-					review_gate: { status: 'accepted', can_confirm_full: true }
-				}),
-				status
-			)
-		).toMatchObject({ key: 'ready_to_make', label: 'Sample approved' });
-	});
-
-	it('requires a fresh sample when legacy approval no longer matches review media', () => {
-		expect(
-			detailSeasonState(
-				folder({
-					calibration: {
-						job_id: 'sample-1',
-						draft_hash: 'draft-1',
-						accepted_draft_hash: 'draft-1',
-						review_media_ready: false
-					},
-					review_gate: { status: 'missing_review_media', can_confirm_full: false }
-				}),
-				status
-			)
-		).toMatchObject({ key: 'needs_help', label: 'Sample needs retry' });
-	});
-
-	it.each([
-		['validate', 'ready_to_check'],
-		['promote', 'finish_blocked'],
-		['complete', 'finished']
-	] as const)('translates the %s delivery step', (lane, expectedKey) => {
-		expect(
-			detailSeasonState(folder({ workflow_state: workflowState(lane) }), status)
-		).toMatchObject({ key: expectedKey });
-	});
-
-	it('shows file check blockers ahead of sample setup without offering an encode retry', () => {
-		const workflow = {
-			...workflowState('blocked'),
-			blockers: ['A failed file check', 'A missing finished copy']
-		};
-		const detail = detailSeasonState(folder({ workflow_state: workflow }), status);
-		const library = librarySeasonState({ ...card, workflow_state: workflow }, dashboard);
-		expect(detail).toMatchObject({
-			key: 'needs_help',
-			recoveryKind: 'files',
-			detail: workflow.blockers.join(' ')
-		});
-		expect(library).toEqual(detail);
-	});
-
-	it('keeps season finishing blocked until the complete integrity inventory is loaded', () => {
-		expect(
-			detailSeasonState(folder({ workflow_state: workflowState('promote') }), status)
-		).toMatchObject({ key: 'finish_blocked', label: 'Checking the season' });
-	});
-
 	it('lets ready episodes finish while explaining the ones still waiting', () => {
 		const integrity = seasonPromotionIntegrity(promotionStatus({ blockerCount: 2 }));
 
@@ -1735,12 +1215,6 @@ describe('season experience translation', () => {
 				nextAction: 'It will be compressed later. Nothing else waits for it.'
 			}
 		]);
-		expect(
-			detailSeasonState(
-				folder({ workflow_state: workflowState('promote') }),
-				promotionStatus({ blockerCount: 2 })
-			)
-		).toMatchObject({ key: 'ready_to_finish' });
 	});
 
 	it('keeps finish unavailable when no file is ready yet', () => {
@@ -1765,9 +1239,6 @@ describe('season experience translation', () => {
 			unresolvedCount: 0,
 			totalCount: 8
 		});
-		expect(
-			detailSeasonState(folder({ workflow_state: workflowState('promote') }), promotionStatus())
-		).toMatchObject({ key: 'ready_to_finish', label: 'Ready to replace' });
 	});
 
 	it('enables exact-item finishing without season-wide promotion applicability', () => {
@@ -1843,52 +1314,6 @@ describe('season experience translation', () => {
 			canFinish: false,
 			error: 'Mediaforce could not load the staged-file inventory.'
 		});
-	});
-
-	it('shows real active work before the generic folder state', () => {
-		expect(
-			detailSeasonState(
-				folder({
-					encode_job: {
-						job_id: 'job-1',
-						prefix: card.prefix,
-						status: 'running',
-						progress: { percent_complete: 42 }
-					}
-				}),
-				status
-			)
-		).toMatchObject({ key: 'making_season', label: 'Compressing the season' });
-	});
-
-	it('does not call a held season working because its show has a job', () => {
-		const showJob = {
-			job_id: 'show-job',
-			prefix: 'tv/Big Brother (US)',
-			status: 'running',
-			progress: { percent_complete: 42 }
-		};
-		const held = detailSeasonState(
-			folder({ encode_job: showJob, workflow_state: workflowState('none', 'held') }),
-			status
-		);
-		expect(held.key).not.toBe('making_season');
-
-		expect(
-			detailSeasonState(
-				folder({ encode_job: showJob, workflow_state: workflowState('processing') }),
-				status
-			)
-		).toMatchObject({ key: 'making_season', label: 'Compressing the season' });
-		expect(
-			detailSeasonState(
-				folder({
-					encode_job: { ...showJob, prefix: card.prefix },
-					workflow_state: workflowState('none', 'held')
-				}),
-				status
-			)
-		).toMatchObject({ key: 'making_season' });
 	});
 
 	it('uses the API-resolved runtime-normalized goal instead of rebuilding it from flat policy', () => {
@@ -2122,23 +1547,48 @@ describe('season experience translation', () => {
 			error: floorError,
 			finished_at: '2026-07-26T04:21:50+00:00'
 		};
-		expect(targetConstraintSummary(folder({ encode_job: stoppedEncode }))).toMatchObject({
+		const stoppedOnSize = (failure: PageStatePayload['failure']): FolderStatusPayload => ({
+			...status,
+			page_state: {
+				key: 'needs_help',
+				tone: 'attention',
+				recovery_kind: 'season',
+				primary_action: 'choose_size',
+				failure,
+				source_job: {
+					id: stoppedEncode.job_id,
+					kind: 'encode',
+					prefix: stoppedEncode.prefix,
+					status: stoppedEncode.status
+				}
+			}
+		});
+		expect(
+			targetConstraintSummary(
+				folder({ encode_job: stoppedEncode }),
+				stoppedOnSize('quality_conflict')
+			)
+		).toMatchObject({
 			kind: 'quality_conflict',
 			recoveryLabel: 'Choose a roomier goal',
 			detail: expect.stringMatching(/could not reach 225 MB.*about 523 MB.*Retrying would stop/)
 		});
+		// The page leads with something else, such as a newer sample, so the stopped run is not the question.
 		expect(
-			targetConstraintSummary(
-				folder({
-					encode_job: stoppedEncode,
-					calibration_job: { status: 'completed', finished_at: '2026-08-01T00:00:00+00:00' }
-				})
-			)
+			targetConstraintSummary(folder({ encode_job: stoppedEncode }), {
+				...status,
+				page_state: {
+					key: 'ready_to_compare',
+					tone: 'ready',
+					recovery_kind: null,
+					primary_action: 'review_sample',
+					failure: null,
+					source_job: null
+				}
+			})
 		).toBeNull();
 		expect(
-			targetConstraintSummary(
-				folder({ encode_job: { ...stoppedEncode, error: 'ssh: connection reset' } })
-			)
+			targetConstraintSummary(folder({ encode_job: stoppedEncode }), stoppedOnSize('no_access'))
 		).toBeNull();
 
 		expect(
@@ -2182,14 +1632,6 @@ describe('season experience translation', () => {
 			detail: expect.stringContaining('219 MB with Picture appearance score 90.8')
 		});
 		expect(targetConstraintSummary(failed)?.detail).toContain('selected candidate may change');
-		expect(
-			detailSeasonState(failed, {
-				...status,
-				calibration_job: null,
-				calibration_status: 'idle',
-				workflow_state: undefined
-			})
-		).toMatchObject({ key: 'needs_help', recoveryKind: 'test' });
 		const intent = withCompressionIntent(currentOperatorIntent(failed)!, {
 			schema_version: 1,
 			level: 'perceptual_floor',
@@ -2215,70 +1657,9 @@ describe('season experience translation', () => {
 
 		expect(targetConstraintSummary(failedFolder, status)).toMatchObject({
 			kind: 'bound_exhausted',
-			title: 'The sample reached a configured limit.'
+			title: 'The sample reached a configured limit.',
+			detail: expect.stringContaining('Retrying that saved sample would repeat the same limit')
 		});
-		expect(plainFailureMessage(failedFolder, status)).toContain(
-			'Retrying that saved sample would repeat the same limit'
-		);
-	});
-
-	it('explains that a final size-band miss needs a fresh goal', () => {
-		const failedFolder = folder({
-			encode_job: {
-				job_id: 'final-size-miss',
-				prefix: card.prefix,
-				status: 'needs_attention',
-				error:
-					'Final output size missed the approved target band: status=under_target, actual=112263931, target=153560889, lower=145882845, upper=161238933.'
-			}
-		});
-
-		expect(plainFailureMessage(failedFolder, status)).toBe(
-			'The finished file was smaller than the approved range. Choose a fresh size or quality preference and create another sample.'
-		);
-	});
-
-	it('keeps final-size recovery primary when the fresh baseline also fails', () => {
-		const failedFolder = folder({
-			encode_job: {
-				job_id: 'final-size-and-baseline-miss',
-				prefix: card.prefix,
-				status: 'needs_attention',
-				error:
-					'Final output size missed the approved target band: status=missing_target, actual=112263931, target=None, lower=None, upper=None. The fresh baseline search also failed: Failed to find a suitable crf for the quality target.'
-			}
-		});
-
-		expect(plainFailureMessage(failedFolder, status)).toBe(
-			'Mediaforce could not verify the finished file against the approved size range. Choose a fresh size or quality preference and create another sample.'
-		);
-	});
-
-	it('prefers a newer encode failure over stale sample failure copy', () => {
-		const failedFolder = folder({
-			encode_job: {
-				job_id: 'newer-final-size-miss',
-				prefix: card.prefix,
-				status: 'needs_attention',
-				finished_at: '2026-08-16T12:00:00Z',
-				error:
-					'Final output size missed the approved target band: status=under_target, actual=112263931, target=153560889, lower=145882845, upper=161238933.'
-			}
-		});
-		const staleSampleStatus: FolderStatusPayload = {
-			...status,
-			retryable_sample_job: {
-				job_id: 'older-sample-failure',
-				prefix: card.prefix,
-				status: 'failed',
-				finished_at: '2026-08-16T10:00:00Z',
-				error: 'Failed to find a suitable crf for the quality target.'
-			}
-		};
-
-		expect(plainFailureMessage(failedFolder, staleSampleStatus)).toBe(
-			'The finished file was smaller than the approved range. Choose a fresh size or quality preference and create another sample.'
-		);
 	});
 
 	it('preserves typed size intent while recording structured review feedback', () => {

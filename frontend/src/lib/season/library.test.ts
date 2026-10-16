@@ -1,13 +1,20 @@
 import { libraryCopy } from '$lib/library-copy';
 import { describe, expect, it } from 'vitest';
 
-import type { FolderCard, LifecycleState, SeasonLifecycleState } from '$lib/api/types';
+import type {
+	DashboardSummaryPayload,
+	EncodeQueueJob,
+	FolderCard,
+	LifecycleState,
+	SeasonLifecycleState
+} from '$lib/api/types';
 
 import {
 	applySeriesLifecycle,
 	buildShowCards,
 	compareSeasonCards,
 	filterShowCards,
+	libraryJobsPollTracker,
 	mergeFolderPayloads,
 	olderSeasonLibraryAction,
 	savingsPercent,
@@ -387,5 +394,87 @@ describe('season library grouping', () => {
 			overriddenSeasonCount: 0,
 			overriddenEpisodeCount: 0
 		});
+	});
+});
+
+describe('library jobs poll', () => {
+	function lane(
+		running: Array<Record<string, unknown>> = [],
+		queued: Array<Record<string, unknown>> = []
+	) {
+		return {
+			running,
+			queued,
+			pending_review: [],
+			recent_failed: [],
+			running_count: running.length,
+			queued_count: queued.length,
+			pending_review_count: 0
+		};
+	}
+
+	function jobs({
+		sample = lane(),
+		encodeRunning = []
+	}: {
+		sample?: ReturnType<typeof lane>;
+		encodeRunning?: DashboardSummaryPayload['encode_queue']['running'];
+	} = {}): DashboardSummaryPayload {
+		return {
+			calibration_queue: { sample, full: lane(), active_count: 0 },
+			encode_queue: {
+				running_count: encodeRunning.length,
+				queued_count: 0,
+				running: encodeRunning,
+				queued: [],
+				state: { is_paused: false, stop_requested: false }
+			},
+			folders_preview: [],
+			library_colors: {},
+			scan_job: null,
+			catalog_empty: false,
+			folder_cache_key: '',
+			metric_support: { vmaf: true, xpsnr: true, ssim: true },
+			metric_status_copy: ''
+		} as DashboardSummaryPayload;
+	}
+
+	const queued = { job_id: 'sample-1', prefix: 'tv/Show/Season 1', status: 'queued' };
+
+	it('reads the cards again when a job starts, changes status or finishes', () => {
+		const poll = libraryJobsPollTracker();
+		poll.reset(jobs());
+
+		expect(poll.changed(jobs({ sample: lane([], [queued]) }))).toBe(true);
+		expect(poll.changed(jobs({ sample: lane([{ ...queued, status: 'running' }]) }))).toBe(true);
+		expect(poll.changed(jobs())).toBe(true);
+		expect(
+			poll.changed(
+				jobs({
+					encodeRunning: [
+						{ job_id: 'encode-1', prefix: 'tv/Show', status: 'running' } as EncodeQueueJob
+					]
+				})
+			)
+		).toBe(true);
+	});
+
+	it('does not read the cards again while nothing changed', () => {
+		const poll = libraryJobsPollTracker();
+		const running = jobs({ sample: lane([{ ...queued, status: 'running', progress: 10 }]) });
+		poll.reset(running);
+
+		expect(poll.changed(running)).toBe(false);
+		// Progress alone does not change any card's state.
+		expect(
+			poll.changed(jobs({ sample: lane([{ ...queued, status: 'running', progress: 60 }]) }))
+		).toBe(false);
+	});
+
+	it('takes the first poll as the baseline when the first read failed', () => {
+		const poll = libraryJobsPollTracker();
+
+		expect(poll.changed(jobs())).toBe(false);
+		expect(poll.changed(jobs())).toBe(false);
 	});
 });
