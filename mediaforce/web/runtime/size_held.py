@@ -32,8 +32,8 @@ from mediaforce.web.runtime.encode_runtime import (
     remove_stale_staging_path, staged_output_cleanup_blocker, staged_output_cleanup_target,
 )
 from mediaforce.web.runtime.ambiguous_motion import _legacy_queue_mode
-from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, _staged_policy_states, \
-    staged_requeue_size_blocker
+from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, staged_requeue_size_blocker, \
+    staged_run_items
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
 
 logger = logging.getLogger(__name__)
@@ -247,7 +247,7 @@ def staged_remake_details(
         prefix: str,
         *,
         current_approval: CurrentApprovalFn,
-        policy_states: Mapping[int, str | None] | None = None,
+        settings_history: Collection[int] | None = None,
         manifest_reader: ManifestReader = read_manifest,
 ) -> dict[str, Any] | None:
     """Offer recovery only for a size-only failure or missing settings history.
@@ -264,11 +264,11 @@ def staged_remake_details(
     validation = _stored_validation(row)
     held = staged_validation_outcome(row["validation_json"]) == "size_held"
     final_size = _missed_only_final_size(validation)
-    missing_policy = validation.get("passed") is True and (
-        policy_states if policy_states is not None else _staged_policy_states(
-            connection, {int(row["library_item_id"])}, accepted_policy_hash="", manifest_reader=manifest_reader,
-        )
-    ).get(int(row["library_item_id"])) == "season_policy_provenance_missing"
+    item_id = int(row["library_item_id"])
+    missing_policy = validation.get("passed") is True and item_id not in (
+        settings_history if settings_history is not None
+        else staged_run_items(connection, {item_id}, manifest_reader=manifest_reader)
+    )
     if not (held or final_size or missing_policy or intent):
         return None
     run_prefix, _mode, context_available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
@@ -361,9 +361,9 @@ def staged_remake_records(
         .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
         .where(staged_artifacts.c.library_item_id.in_(ids))
     ).mappings()}
-    policy_states = _staged_policy_states(connection, {
+    settings_history = staged_run_items(connection, {
         item_id for item_id, row in rows.items() if _stored_validation(row).get("passed") is True
-    }, accepted_policy_hash="", manifest_reader=manifest_reader)
+    }, manifest_reader=manifest_reader)
     approvals: dict[str, dict[str, Any] | None] = {}
 
     def approval_for_scope(scope: str) -> dict[str, Any] | None:
@@ -375,7 +375,7 @@ def staged_remake_records(
         record_id = record.get("item_id")
         row = rows.get(record_id) if isinstance(record_id, int) else None
         recovery = staged_remake_details(connection, row, prefix,
-                                        current_approval=approval_for_scope, policy_states=policy_states,
+                                        current_approval=approval_for_scope, settings_history=settings_history,
                                         manifest_reader=manifest_reader)
         if recovery is not None:
             record["remake"] = {key: recovery[key] for key in ("reason", "blocked_reason")}

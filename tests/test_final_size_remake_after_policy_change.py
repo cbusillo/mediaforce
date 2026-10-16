@@ -5,6 +5,7 @@ from pathlib import Path
 
 from mediaforce.core.audio_presets import SPEECH_STEREO
 from mediaforce.web.runtime import folder_actions
+from mediaforce.web.runtime.production_approval import production_approval_contract
 
 REQUEST = {
     "schema_version": 2,
@@ -15,7 +16,7 @@ REQUEST = {
 
 def _approval(*, sample_job_id: str, audio_preset: str | None = None) -> folder_actions.ActionPayload | None:
     audio = {"preset": audio_preset} if audio_preset else {}
-    return folder_actions._production_approval_contract({
+    return production_approval_contract({
         "accepted_sample_job_id": sample_job_id,
         "accepted_policy_hash": f"policy-{sample_job_id}-{audio_preset}",
         "policy": {"audio": audio},

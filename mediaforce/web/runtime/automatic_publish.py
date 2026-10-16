@@ -2,9 +2,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 from sqlalchemy import insert, or_, select, update
 
@@ -18,16 +16,17 @@ from mediaforce.encoding.delivery_lock import delivery_lock
 from mediaforce.encoding.staging import PromotionRestoreError, PromotionWaiting
 from mediaforce.execution import promote_one_item, validate_one_item
 from mediaforce.library.staged_integrity import staged_integrity_report
-from mediaforce.web.runtime.folder_actions import (
-    current_production_approval_matches,
-    production_action_blocker,
+from mediaforce.web.runtime.folder_actions import production_action_blocker
+from mediaforce.web.runtime.production_approval import (
+    LoadCalibrationState,
+    effective_production_approval,
+    production_approval_matches,
 )
 
 
 LOGGER = logging.getLogger(__name__)
 UNKNOWN_FAILURE_RETRY_LIMIT = 3
 PUBLISH_RETRY_DELAY_SECONDS = 30
-LoadCalibrationState = Callable[[MediaforceConfig, str], dict[str, Any] | None]
 
 
 def publish_checked_files_once(
@@ -264,25 +263,9 @@ def _publish_file(
             "The saved work no longer matches this file. Make it again with the current settings.",
         )
         return
-    prefixes = [
-        rel_path,
-        *(
-            parent.as_posix()
-            for parent in Path(rel_path).parents
-            if parent.as_posix() != "."
-        ),
-    ]
-    calibration = next(
-        (
-            state
-            for prefix in prefixes
-            if (state := load_calibration_state(config, prefix))
-            and state.get("accepted_policy_hash")
-        ),
-        None,
-    )
     reasons = []
-    if not current_production_approval_matches(calibration, manifest, item):
+    approval = effective_production_approval(config, rel_path, load_calibration_state)
+    if not production_approval_matches(approval, manifest, item):
         reasons.append(
             "This file needs a current matching sample approval before it can be published."
         )
@@ -358,16 +341,8 @@ def _publish_file(
     connection.commit()
     if stop_event is not None and stop_event.is_set():
         return
-    calibration = next(
-        (
-            state
-            for prefix in prefixes
-            if (state := load_calibration_state(config, prefix))
-            and state.get("accepted_policy_hash")
-        ),
-        None,
-    )
-    if not current_production_approval_matches(calibration, manifest, item):
+    approval = effective_production_approval(config, rel_path, load_calibration_state)
+    if not production_approval_matches(approval, manifest, item):
         _record_wait(
             connection,
             item_id,

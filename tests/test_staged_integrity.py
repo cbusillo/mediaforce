@@ -1,4 +1,3 @@
-import hashlib
 import json
 import tempfile
 import shlex
@@ -25,6 +24,9 @@ from mediaforce.library.staged_integrity import (
 from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK, FINAL_SIZE_GOAL_CHECK, partial_output_path
 from mediaforce.execution import PromotionResult
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action
+from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
+from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
+    production_approval_matches
 from mediaforce.web.runtime import folder_actions, size_held
 from mediaforce.web.runtime.size_held import decide_size_held_file, staged_remake_records
 
@@ -1593,7 +1595,7 @@ class StagedIntegrityTests(unittest.TestCase):
         result = promote_folder_outputs_action(
             self.config,
             "tv/Show/Season 1",
-            load_calibration_state_fn=lambda _config, _prefix: {"accepted_policy_hash": self._policy_hash(policy)},
+            load_calibration_state_fn=lambda _config, _prefix: self._approval(policy),
             load_folder_staged_items_fn=lambda *_args, **_kwargs: [self._manifest_item(stage, "tv/Show/Season 1/One.mkv")],
             promote_manifest_items_fn=promoted,
         )
@@ -1628,7 +1630,7 @@ class StagedIntegrityTests(unittest.TestCase):
         result = promote_folder_outputs_action(
             self.config,
             "tv/Show/Season 1",
-            load_calibration_state_fn=lambda _config, _prefix: {"accepted_policy_hash": self._policy_hash(policy)},
+            load_calibration_state_fn=lambda _config, _prefix: self._approval(policy),
             load_folder_staged_items_fn=lambda *_args, **_kwargs: [
                 self._manifest_item(first_stage, "tv/Show/Season 1/One.mkv"),
                 self._manifest_item(second_stage, "tv/Show/Season 1/Two.mkv"),
@@ -1694,18 +1696,24 @@ class StagedIntegrityTests(unittest.TestCase):
     def test_tv_season_publishes_only_files_made_under_an_approved_policy(self) -> None:
         approved_policy = {"video": {"encoder": "libsvtav1", "target_vmaf": 93}}
         other_policy = {"video": {"encoder": "libsvtav1", "target_vmaf": 91}}
+        approval = self._approval(approved_policy)
+        earlier = production_approval_contract(self._approval(other_policy, sample_job_id="earlier-sample"))
         unapproved_manifest = self._write_policy_manifest("unapproved.json", [approved_policy, other_policy])
-        approved_run_manifest = self._write_policy_manifest(
-            "approved-run.json",
-            [other_policy],
-            selection={"production_approval_contract": {"schema_version": 1, "policy_hash": "earlier"}},
+        earlier_run_manifest = self._write_policy_manifest(
+            "earlier-run.json", [other_policy], selection={"production_approval_contract": earlier},
+        )
+        current_run_manifest = self._write_policy_manifest(
+            "current-run.json",
+            [approved_policy],
+            selection={"production_approval_contract": production_approval_contract(approval)},
         )
         stages = {}
         with open_db(self.config.paths.db_path) as connection:
             for name, manifest_path, index in (
                     ("One", unapproved_manifest, 0),
                     ("Two", unapproved_manifest, 1),
-                    ("Three", approved_run_manifest, 0),
+                    ("Three", earlier_run_manifest, 0),
+                    ("Four", current_run_manifest, 0),
             ):
                 rel_path = f"tv/Show/Season 1/{name}.mkv"
                 item_id = self._insert_item(connection, rel_path, status="validated")
@@ -1719,13 +1727,11 @@ class StagedIntegrityTests(unittest.TestCase):
                     item_index=index,
                 )
 
-        promoted = Mock(return_value=PromotionResult(promoted_paths=[Path("one"), Path("three")], held=[]))
+        promoted = Mock(return_value=PromotionResult(promoted_paths=[Path("one"), Path("four")], held=[]))
         result = promote_folder_outputs_action(
             self.config,
             "tv/Show/Season 1",
-            load_calibration_state_fn=lambda _config, _prefix: {
-                "accepted_policy_hash": self._policy_hash(approved_policy),
-            },
+            load_calibration_state_fn=lambda _config, prefix: approval if prefix == "tv/Show/Season 1" else None,
             load_folder_staged_items_fn=lambda *_args, **_kwargs: [
                 self._manifest_item(stage, rel_path) for rel_path, stage in stages.items()
             ],
@@ -1734,11 +1740,49 @@ class StagedIntegrityTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         published = [item["rel_path"] for item in promoted.call_args.args[2]["items"]]
-        self.assertEqual(published, ["tv/Show/Season 1/One.mkv", "tv/Show/Season 1/Three.mkv"])
+        # A run queued under an earlier approval waits, like automatic publishing, even though it recorded one.
+        self.assertEqual(published, ["tv/Show/Season 1/One.mkv", "tv/Show/Season 1/Four.mkv"])
         self.assertIn(
-            {"code": "season_policy_not_approved", "count": 1, "next_action": "approve_matching_policy_or_recreate_outputs"},
+            {"code": "season_policy_not_approved", "count": 2, "next_action": "approve_matching_policy_or_recreate_outputs"},
             result["waiting"],
         )
+
+    def test_manual_and_automatic_publish_agree_on_which_approval_governs_a_file(self) -> None:
+        """A show run's episode waits once its season holds its own approval, on both publishing paths."""
+        policy = {"video": {"encoder": "libsvtav1", "target_vmaf": 93}}
+        show_approval = self._approval(policy, sample_job_id="show-sample")
+        season_approval = self._approval(policy, sample_job_id="season-sample")
+        manifest_path = self._write_policy_manifest(
+            "show-run.json", [policy], selection={"production_approval_contract": production_approval_contract(show_approval)},
+        )
+        rel_path = "tv/Show/Season 1/One.mkv"
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, rel_path, status="validated")
+            stage = self._write_stage(rel_path, b"one")
+            self._insert_artifact(connection, item_id, stage, passed=True, manifest_path=manifest_path, item_index=0)
+        manifest = json.loads(manifest_path.read_text())
+
+        for season_has_approval in (False, True):
+            approvals = {"tv/Show": show_approval, **({"tv/Show/Season 1": season_approval} if season_has_approval else {})}
+
+            def load(_config: MediaforceConfig, prefix: str, approvals: dict[str, Any] = approvals) -> Any:
+                return approvals.get(prefix)
+
+            promoted = Mock(return_value=PromotionResult(promoted_paths=[Path("one")], held=[]))
+            manual = promote_folder_outputs_action(
+                self.config,
+                "tv/Show/Season 1",
+                load_calibration_state_fn=load,
+                load_folder_staged_items_fn=lambda *_args, **_kwargs: [self._manifest_item(stage, rel_path)],
+                promote_manifest_items_fn=promoted,
+            )
+            automatic = production_approval_matches(
+                effective_production_approval(self.config, rel_path, load), manifest, manifest["items"][0],
+            )
+            with self.subTest(season_has_approval=season_has_approval):
+                self.assertEqual(promoted.called, not season_has_approval)
+                self.assertEqual(automatic, not season_has_approval)
+                self.assertEqual(manual["promoted_count"] > 0, automatic)
 
     def test_tv_season_accepts_matching_policy_from_show_approval(self) -> None:
         policy = {"video": {"encoder": "libsvtav1", "target_vmaf": 93}}
@@ -1777,7 +1821,7 @@ class StagedIntegrityTests(unittest.TestCase):
             self.config,
             "tv/Show/Season 1",
             load_calibration_state_fn=lambda _config, prefix: (
-                {"accepted_policy_hash": self._policy_hash(policy)}
+                self._approval(policy)
                 if prefix == "tv/Show"
                 else None
             ),
@@ -1792,19 +1836,22 @@ class StagedIntegrityTests(unittest.TestCase):
         promoted.assert_called_once()
 
     def test_movie_and_exact_file_scopes_remain_item_granular(self) -> None:
+        policy = {"video": {"encoder": "libsvtav1", "target_vmaf": 93}}
+        manifest_path = self._write_policy_manifest("items.json", [policy, policy])
         with open_db(self.config.paths.db_path) as connection:
             movie_id = self._insert_item(connection, "movies/Film.mkv", status="validated")
             other_id = self._insert_item(connection, "other/Loose.mkv", status="validated")
             movie_stage = self._write_stage("movies/Film.mkv", b"movie")
             other_stage = self._write_stage("other/Loose.mkv", b"other")
-            self._insert_artifact(connection, movie_id, movie_stage, passed=True)
-            self._insert_artifact(connection, other_id, other_stage, passed=True)
+            self._insert_artifact(connection, movie_id, movie_stage, passed=True, manifest_path=manifest_path, item_index=0)
+            self._insert_artifact(connection, other_id, other_stage, passed=True, manifest_path=manifest_path, item_index=1)
 
         for item_prefix, item_stage in (("movies/Film.mkv", movie_stage), ("other/Loose.mkv", other_stage)):
             promoted = Mock(return_value=PromotionResult(promoted_paths=[Path("promoted")], held=[]))
             result = promote_folder_outputs_action(
                 self.config,
                 item_prefix,
+                load_calibration_state_fn=lambda _config, _prefix: self._approval(policy),
                 load_folder_staged_items_fn=lambda *_args, item_stage=item_stage, item_prefix=item_prefix, **_kwargs: [
                     self._manifest_item(item_stage, item_prefix),
                 ],
@@ -1961,6 +2008,14 @@ class StagedIntegrityTests(unittest.TestCase):
         return manifest_path
 
     @staticmethod
-    def _policy_hash(policy: dict[str, object]) -> str:
-        encoded = json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
-        return hashlib.sha256(encoded).hexdigest()[:16]
+    def _approval(policy: dict[str, object], *, sample_job_id: str = "sample-job") -> dict[str, Any]:
+        calibration: dict[str, Any] = {
+            "mode": "sample",
+            "job_id": sample_job_id,
+            "accepted_sample_job_id": sample_job_id,
+            "accepted_at": "2026-10-01T12:00:00+00:00",
+            "policy": policy,
+            "sample_item": {"resolved_operator_intent": {"request": {"compression_intent": "balanced"}}},
+        }
+        calibration["accepted_policy_hash"] = calibration_policy_hash(calibration)
+        return calibration

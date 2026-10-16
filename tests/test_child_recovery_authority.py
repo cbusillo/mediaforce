@@ -13,6 +13,7 @@ from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items
 from mediaforce.encoding.cadence import analyze_cadence
 from mediaforce.web.runtime import folder_actions
+from mediaforce.web.runtime.production_approval import production_approval_contract
 
 
 def test_recovery_approval_is_the_current_contract_behind_show_gates() -> None:
@@ -20,7 +21,7 @@ def test_recovery_approval_is_the_current_contract_behind_show_gates() -> None:
     calibration = {"accepted_sample_job_id": "sample", "accepted_policy_hash": "policy", "sample_item": {
         "resolved_operator_intent": {"request": {"compression_intent": "balanced"}},
     }}
-    contract = folder_actions._production_approval_contract(calibration)
+    contract = production_approval_contract(calibration)
     kwargs = dict(load_calibration_state=lambda *_: calibration,
                   review_gate=lambda _: {"can_confirm_full": True}, load_advice_state=lambda *_: {})
     with patch.object(folder_actions, "production_action_blocker", return_value=None), \
