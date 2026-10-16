@@ -21,7 +21,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from mediaforce.core.audio_presets import AUDIO_PRESETS, PRESET_AUDIO_KEYS, apply_audio_preset, audio_preset_values
+from mediaforce.core.audio_presets import AUDIO_PRESETS, PRESET_AUDIO_KEYS, apply_audio_preset, audio_preset_values, \
+    owner_sound_keys
 from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import (
     FileIntegrityError,
@@ -30,6 +31,7 @@ from mediaforce.core.file_integrity import (
     rename_exchange,
     rename_exclusive,
 )
+from mediaforce.core.type_defs import object_dict
 from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.library.library_settings import configured_library_definitions, library_definition_map, \
     library_production_supported
@@ -293,6 +295,19 @@ class MediaforceConfig:
         policy, _ = self.resolve_policy_with_target_provenance(rel_path)
         return policy
 
+    def has_sound_choice(self, rel_path: str) -> bool:
+        """True when a sound choice applies here: the TV library's default or a folder override's."""
+        normalized_rel_path = rel_path.strip("/")
+        library = self.library_definition_map.get(normalized_rel_path.split("/", 1)[0])
+        if library and library.get("type") == "tv":
+            if str(object_dict(library.get("policy")).get("audio_preset") or "") in AUDIO_PRESETS:
+                return True
+        return any(
+            object_dict(override.get("audio")).get("preset")
+            and _path_prefix_matches(normalized_rel_path, str(override.get("path_prefix", "")).strip("/"))
+            for override in self.overrides
+        )
+
     def resolve_policy_with_target_provenance(self, rel_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
         policy = {
             "video": copy.deepcopy(self.video),
@@ -518,6 +533,11 @@ def update_runtime_settings(path: Path, updater: Callable[[dict[str, Any]], dict
 
 
 def upsert_runtime_folder_policy_override(path: Path, prefix: str, policy: dict[str, Any]) -> None:
+    """Replace a folder's saved override.
+
+    A policy without planning keeps the planning saved there, and sound-choice keys the folder saved
+    stay unless the policy sets them, so the owner's settings survive saving a sample's.
+    """
     override_payload = _build_folder_policy_override(prefix, policy)
     normalized_prefix = prefix.strip("/")
 
@@ -527,6 +547,17 @@ def upsert_runtime_folder_policy_override(path: Path, prefix: str, policy: dict[
         replaced = False
         for existing in overrides:
             if str(existing.get("path_prefix", "")).strip("/") == normalized_prefix:
+                saved_planning = existing.get("planning")
+                if "planning" not in override_payload and isinstance(saved_planning, dict) and saved_planning:
+                    override_payload["planning"] = copy.deepcopy(saved_planning)
+                saved_audio = object_dict(existing.get("audio"))
+                owned_sound = {
+                    key: copy.deepcopy(value)
+                    for key, value in saved_audio.items()
+                    if key in owner_sound_keys(saved_audio) and key not in object_dict(override_payload.get("audio"))
+                }
+                if owned_sound:
+                    override_payload["audio"] = {**object_dict(override_payload.get("audio")), **owned_sound}
                 updated_overrides.append(override_payload)
                 replaced = True
                 continue
@@ -617,8 +648,9 @@ def set_runtime_folder_audio_preset(
 ) -> None:
     """Apply a sound choice to a show and to every saved override inside it.
 
-    Saved season approvals carry a full audio snapshot that would otherwise
-    shadow the show's choice, so they change with it and need a new sample.
+    Saved season overrides can carry an older audio snapshot that would
+    otherwise shadow the show's choice, so they change with it. Their sample
+    approvals stay valid: production uses the owner's current sound choice.
     """
     values, removed_keys = audio_preset_values(preset_key, base_audio)
     normalized_prefix = prefix.strip("/")

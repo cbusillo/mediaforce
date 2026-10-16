@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -32,16 +32,20 @@ def show_audio_preset_payload(
         prefix: str,
         *,
         genres: Sequence[str] = (),
+        sample_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    """The show's sound choice; with the approved sample's policy, also whether it was made with another one."""
     show_prefix = tv_show_prefix(config, prefix)
     if show_prefix is None:
         return None
-    current = str(object_dict(config.resolve_policy(prefix).get("audio")).get("preset") or "")
+    current = _preset_key(config.resolve_policy(prefix))
     library_default = _library_default_preset(config, show_prefix)
     source = _preset_source(config, prefix, show_prefix, library_default)
     return {
         "show_prefix": show_prefix,
-        "current": current if current in AUDIO_PRESETS else KEEP_SURROUND,
+        "current": current,
+        # Production uses the current choice; the approval stays valid, but its clips used the older sound.
+        "sound_changed_since_sample": sample_policy is not None and _preset_key(sample_policy) != current,
         "source": source,
         "library_default": library_default,
         "options": [preset.to_payload() for preset in AUDIO_PRESETS.values()],
@@ -98,6 +102,11 @@ def _preset_source(
         if within_show and applies and object_dict(override.get("audio")).get("preset"):
             return "show"
     return "library" if library_default else "default"
+
+
+def _preset_key(policy: Mapping[str, Any]) -> str:
+    preset = str(object_dict(policy.get("audio")).get("preset") or "")
+    return preset if preset in AUDIO_PRESETS else KEEP_SURROUND
 
 
 def _library_default_preset(config: MediaforceConfig, show_prefix: str) -> str | None:

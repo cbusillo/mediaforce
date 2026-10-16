@@ -31,11 +31,19 @@ library default would add.
 
 `set_runtime_folder_audio_preset` writes the preset's audio values into the
 show's folder override, and into the audio section of every saved override
-inside the show. Approving a sample saves a season's whole policy, audio
-included, so without that rewrite an approved season would keep its old sound.
-A changed choice changes those seasons' policy hash, so they need a new sample
-before production uses it. The sound check (`sample-sound-check.md`) gates
-that sample.
+inside the show, so an older saved override never shadows the new choice.
+
+The sound choice is an owner setting, like the series lifecycle mode, not part
+of what a sample approves. A sample's calibration keeps a snapshot of the
+whole policy, but approving it or making the season applies only what the
+sample owns (`policy_with_owner_settings` in `production_approval.py`): the
+owner's current sound choice replaces the snapshot's, and the folder's saved
+planning is kept. A changed choice therefore leaves the approval, its policy
+hash and its contract unchanged, so production uses the new sound and its
+files still publish. The sound check (`sample-sound-check.md`) only advises
+review of a sample; it never gates publishing. The folder payload's
+`audio_preset.sound_changed_since_sample` says when the approved sample was
+made with another choice, for an owner who wants to hear the new sound first.
 
 The audio policy gains two keys, only where a choice is made:
 
