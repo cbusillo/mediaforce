@@ -15,6 +15,7 @@ from mediaforce.library.background_work import list_evidence_backlog, load_backg
 from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EVIDENCE_QUEUE_ACTIVE_STATUSES, \
     evidence_queue_summary, runnable_evidence_work_count
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps, run_evidence_queue_until_blocked
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.metadata_sync import metadata_configuration_status
 
 LOGGER = logging.getLogger(__name__)
@@ -203,7 +204,7 @@ def _catalog_root_rows(connection: DBClient, config: MediaforceConfig) -> list[d
                 library_items.c.media_root,
                 func.count().label("item_count"),
             )
-            .where(library_items.c.status != "missing")
+            .where(LIBRARY_ITEM_PRESENT)
             .group_by(library_items.c.media_root)
         ).mappings()
     }

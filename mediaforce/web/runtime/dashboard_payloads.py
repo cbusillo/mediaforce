@@ -9,6 +9,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import library_items
 from mediaforce.encoding.encode_queue import summarize_encode_queue
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import MediaScopeConflict, resolve_media_scope
 from mediaforce.library.movie_library import adapt_movie_workflow_payload, load_movie_scope_payload
 from mediaforce.library.staged_integrity import staged_integrity_report_for_scope
@@ -44,7 +45,7 @@ def dashboard_summary_payload(
                 connection.execute(
                     select(func.count())
                     .select_from(library_items)
-                    .where(library_items.c.status != "missing")
+                    .where(LIBRARY_ITEM_PRESENT)
                 ).scalar_one()
             ) == 0
         calibration_queue = list_queue_summary(connection)

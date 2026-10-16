@@ -13,6 +13,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, staged_artifacts
 from mediaforce.library.candidate_selection import CandidateDecision, project_candidates, \
     scope_lifecycle_payload_from_decisions, workflow_eligibility
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, resolve_media_scopes
 from mediaforce.library.workflow_state import build_folder_workflow_states_for_scopes
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES
@@ -188,7 +189,7 @@ def preview_folder_cards(
                 staged_artifacts.c.library_item_id == library_items.c.id,
             )
         )
-        .where(library_items.c.status != "missing")
+        .where(LIBRARY_ITEM_PRESENT)
         .order_by(library_items.c.rel_path)
     ).mappings().fetchall()
     grouped: dict[str, FolderCard] = {}
@@ -279,7 +280,7 @@ def list_library_structure_cards(
         library_items.c.rel_path,
         library_items.c.size_bytes,
         library_items.c.status,
-    ).where(library_items.c.status != "missing")
+    ).where(LIBRARY_ITEM_PRESENT)
     if config is None:
         query = query.where(library_items.c.rel_path.startswith("tv/", autoescape=True))
     else:
@@ -378,7 +379,7 @@ def list_folder_cards(
                 staged_artifacts.c.library_item_id == library_items.c.id,
             )
         )
-        .where(library_items.c.status != "missing")
+        .where(LIBRARY_ITEM_PRESENT)
     )
     if rel_path_root:
         query = query.where(library_items.c.rel_path.startswith(rel_path_root, autoescape=True))
@@ -696,6 +697,7 @@ def _load_savings_history(
             )
         )
         .where(library_items.c.status.in_(("encoded", "validated", "promoted")))
+        .where(LIBRARY_ITEM_PRESENT)
         .where(staged_artifacts.c.source_size_bytes.is_not(None))
         .where(staged_artifacts.c.bytes_saved.is_not(None))
     ).mappings().fetchall()

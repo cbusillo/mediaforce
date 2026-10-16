@@ -17,6 +17,7 @@ from mediaforce.encoding.encode_queue import load_active_encode_jobs_for_prefix
 from mediaforce.encoding.delivery_lock import delivery_lock
 from mediaforce.encoding.staging import PromotionRestoreError, PromotionWaiting
 from mediaforce.execution import promote_one_item, validate_one_item
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_is_missing
 from mediaforce.library.staged_integrity import staged_integrity_report
 from mediaforce.web.runtime.folder_actions import (
     current_production_approval_matches,
@@ -47,6 +48,7 @@ def publish_checked_files_once(
                 )
                 .where(staged_artifacts.c.promoted_at.is_(None))
                 .where(library_items.c.status.in_(("encoded", "validated")))
+                .where(LIBRARY_ITEM_PRESENT)
                 .where(
                     or_(
                         staged_artifacts.c.encode_origin.is_(None),
@@ -182,7 +184,7 @@ def _publish_file(
         or stage["encode_origin"] in {"calibration", "cli-review"}
     ):
         return
-    if source["status"] not in {"encoded", "validated"}:
+    if source["status"] not in {"encoded", "validated"} or library_item_is_missing(source):
         return
     validation = object_dict(json.loads(stage["validation_json"] or "{}"))
     if object_dict(validation.get("automatic_publish")).get("state") in {

@@ -13,6 +13,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, staged_artifacts
 from mediaforce.core.type_defs import mapping_dict, object_dict
 from mediaforce.library.candidate_selection import CandidateDecision, project_candidates, workflow_eligibility
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.other_profiles import (
     OTHER_FOLDER_SCOPE_MAX_ITEMS,
@@ -54,7 +55,7 @@ def load_other_library_payload(
         for row in connection.execute(
             select(library_items)
             .where(library_items.c.media_root.in_(tuple(library_by_root)))
-            .where(library_items.c.status != "missing")
+            .where(LIBRARY_ITEM_PRESENT)
             .order_by(library_items.c.rel_path.asc())
             .limit(OTHER_LIBRARY_CATALOG_MAX_ITEMS + 1)
         ).mappings().fetchall()
@@ -115,7 +116,7 @@ def load_other_library_payload(
             member_count, total_size_bytes = connection.execute(
                 select(func.count(), func.coalesce(func.sum(library_items.c.size_bytes), 0))
                 .select_from(library_items)
-                .where(library_items.c.status != "missing")
+                .where(LIBRARY_ITEM_PRESENT)
                 .where(scope_rel_path_filter(library_items.c.rel_path, scopes[prefix]))
             ).one()
         work_units.append(_work_unit_payload(
@@ -162,7 +163,7 @@ def load_other_scope_payload(
     member_count, total_size_bytes = connection.execute(
             select(func.count(), func.coalesce(func.sum(library_items.c.size_bytes), 0))
             .select_from(library_items)
-            .where(library_items.c.status != "missing")
+            .where(LIBRARY_ITEM_PRESENT)
             .where(scope_rel_path_filter(library_items.c.rel_path, scope))
         ).one()
     member_count = int(member_count)
@@ -377,7 +378,7 @@ def _other_member_query(scope: MediaScope) -> Any:
                 staged_artifacts.c.library_item_id == library_items.c.id,
             )
         )
-        .where(library_items.c.status != "missing")
+        .where(LIBRARY_ITEM_PRESENT)
         .where(scope_rel_path_filter(library_items.c.rel_path, scope))
         .order_by(library_items.c.rel_path.asc())
     )

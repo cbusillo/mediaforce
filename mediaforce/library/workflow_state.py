@@ -12,6 +12,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, encode_run_manifest_rel_paths, \
     unfinished_breakdown_groups, unfinished_breakdown_summary
+from mediaforce.library.item_presence import library_item_is_missing
 from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, normalize_scope_prefix, \
     path_matches_scope, resolve_media_scope, resolve_media_scopes, scope_rel_path_filter, scopes_overlap
 from mediaforce.library.remake_intents import remake_intent
@@ -252,7 +253,7 @@ def derive_item_workflow_state(
     lane: WorkflowLane
     blocker: str | None = None
 
-    if status == "missing":
+    if library_item_is_missing(row):
         state = "missing"
         lane = "none"
     elif status == "promoted" or promoted_at is not None:
@@ -324,6 +325,7 @@ def _item_rows_query() -> Select[Any]:
             library_items.c.id.label("item_id"),
             library_items.c.rel_path,
             library_items.c.status,
+            library_items.c.missing_since,
             staged_artifacts.c.library_item_id.label("staged_library_item_id"),
             staged_artifacts.c.staging_path,
             staged_artifacts.c.validated_at,

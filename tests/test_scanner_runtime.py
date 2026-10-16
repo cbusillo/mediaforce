@@ -621,7 +621,9 @@ class ScannerRuntimeTests(unittest.TestCase):
                 reset_engine_cache()
 
         self.assertEqual(rows["kept.mkv"]["status"], "discovered")
-        self.assertEqual(rows["removed.mkv"]["status"], "missing")
+        self.assertIsNotNone(rows["removed.mkv"]["missing_since"])
+        self.assertIsNone(rows["kept.mkv"]["missing_since"])
+        self.assertIsNone(rows["preserved.mkv"]["missing_since"])
         self.assertEqual(rows["preserved.mkv"]["status"], "discovered")
         self.assertEqual(stats.missing, 1)
         self.assertEqual([warning.library_key for warning in stats.warnings], ["archive"])
@@ -757,7 +759,7 @@ class ScannerRuntimeTests(unittest.TestCase):
             finally:
                 reset_engine_cache()
 
-        self.assertEqual(row["status"], "missing")
+        self.assertIsNotNone(row["missing_since"])
         self.assertEqual(stats.missing, 1)
         self.assertEqual(stats.warnings, [])
 

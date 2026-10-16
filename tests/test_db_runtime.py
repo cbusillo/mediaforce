@@ -58,7 +58,7 @@ from mediaforce.web.runtime_lock import (
 )
 from mediaforce.web import runtime_lock as runtime_lock_module
 
-CURRENT_DB_REVISION = "20261012_0024"
+CURRENT_DB_REVISION = "20261015_0025"
 
 
 def _fixture_database_custody(db_path: Path) -> DatabaseFileCustody:
@@ -7084,6 +7084,51 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertIn("content_version_fingerprint", columns)
+
+    def test_open_db_moves_missing_status_to_presence_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            with open_db(db_path):
+                pass
+            reset_engine_cache()
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                raw_connection.execute("ALTER TABLE library_items DROP COLUMN missing_since")
+                for name, status, updated_at in (
+                        ("gone.mkv", "missing", "2026-10-01T08:00:00+00:00"),
+                        ("kept.mkv", "encoded", "2026-10-02T08:00:00+00:00"),
+                ):
+                    raw_connection.execute(
+                        """
+                        INSERT INTO library_items (
+                            source_path, rel_path, media_root, parent_dir, file_name, container,
+                            size_bytes, mtime_ns, fingerprint, audio_summary_json, subtitle_summary_json,
+                            status, last_scan_id, discovered_at, last_seen_at, updated_at
+                        ) VALUES (?, ?, 'tv', 'tv/Show', ?, '.mkv', 1, 1, ?, '[]', '[]', ?, 'scan', ?, ?, ?)
+                        """,
+                        (f"/media/{name}", f"tv/Show/{name}", name, name, status, updated_at, updated_at, updated_at),
+                    )
+                raw_connection.execute("UPDATE alembic_version SET version_num = ?", ("20261012_0024",))
+                raw_connection.commit()
+            finally:
+                raw_connection.close()
+
+            with open_db(db_path) as connection:
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
+                rows = {
+                    row["file_name"]: row
+                    for row in connection.execute(
+                        select(library_items.c.file_name, library_items.c.status, library_items.c.missing_since,
+                               library_items.c.updated_at)
+                    ).mappings()
+                }
+
+            self.assertEqual(version, CURRENT_DB_REVISION)
+            self.assertEqual(rows["gone.mkv"]["status"], "discovered")
+            self.assertEqual(rows["gone.mkv"]["missing_since"], rows["gone.mkv"]["updated_at"])
+            self.assertEqual(rows["kept.mkv"]["status"], "encoded")
+            self.assertIsNone(rows["kept.mkv"]["missing_since"])
 
     def test_open_db_adds_metadata_sync_state_to_previous_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

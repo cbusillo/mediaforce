@@ -7,6 +7,7 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_item_evidence_state, library_items
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection
 from mediaforce.library.evidence_queue import EvidenceQueueConflict, queue_decision_evidence_work
@@ -310,7 +311,7 @@ def cadence_queue_partition(
                     EVIDENCE_STATE_ANALYSIS_REQUIRED,
                     EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
                 )),
-                library_items.c.status != "missing",
+                LIBRARY_ITEM_PRESENT,
             )
         ).mappings().fetchall()
     ) if partition.evidence_required_item_ids else []

@@ -9,6 +9,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.type_defs import mapping_dict, object_dict
+from mediaforce.library.item_presence import library_item_is_missing
 from mediaforce.library.media_scopes import resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 
@@ -49,7 +50,7 @@ def inspect_prefix(connection: DBClient, config: MediaforceConfig, prefix: str) 
 
     for row in rows:
         total_size += int(row["size_bytes"])
-        statuses[str(row["status"])] += 1
+        statuses["missing" if library_item_is_missing(row) else str(row["status"])] += 1
         video_codecs[str(row["video_codec"] or "unknown")] += 1
         for audio in json.loads(row["audio_summary_json"]):
             audio_codecs[f"{audio.get('codec_name')}:{audio.get('channels')}"] += 1

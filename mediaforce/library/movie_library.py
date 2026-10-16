@@ -15,6 +15,7 @@ from mediaforce.core.db_tables import library_items, plex_item_metadata, staged_
 from mediaforce.core.type_defs import int_value, mapping_dict, object_dict
 from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.library.candidate_selection import CandidateDecision, project_candidates, workflow_eligibility
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import resolve_media_scope, resolve_media_scopes, scope_rel_path_filter
 from mediaforce.library.movie_workflow import MovieMembership, classify_movie_path, movie_item_included
 from mediaforce.library.planner import build_manifest_item
@@ -276,7 +277,7 @@ def load_movie_library_payload(
             )
         )
         .where(library_items.c.media_root.in_(tuple(library_by_root)))
-        .where(library_items.c.status != "missing")
+        .where(LIBRARY_ITEM_PRESENT)
     )
     if prefixes:
         scopes = resolve_media_scopes(

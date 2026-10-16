@@ -16,6 +16,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import run_manifests
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES
 from mediaforce.library.workflow_state import derive_item_workflow_state
 from mediaforce.core.type_defs import object_dict
@@ -131,6 +132,7 @@ def select_candidates(
         )
         .select_from(joined_tables)
         .where(library_items.c.status.in_(statuses))
+        .where(LIBRARY_ITEM_PRESENT)
     )
     if prefixes:
         scopes = resolve_media_scopes(connection, prefixes, library_types=config.library_type_map)

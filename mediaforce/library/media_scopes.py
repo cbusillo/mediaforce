@@ -6,6 +6,7 @@ from sqlalchemy import and_, exists, literal, or_, select, true, union_all
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 
 ScopeDomain = Literal["tv", "movie", "other"]
 ScopeKind = Literal[
@@ -200,16 +201,16 @@ def resolve_media_scopes(
         return []
     unique_prefixes = list(dict.fromkeys(normalized_prefixes))
     nonempty_prefixes = [prefix for prefix in unique_prefixes if prefix]
-    exact_statuses: dict[str, list[str]] = {prefix: [] for prefix in nonempty_prefixes}
+    exact_presence: dict[str, list[bool]] = {prefix: [] for prefix in nonempty_prefixes}
     for prefix_batch in _chunks(nonempty_prefixes, 200):
         exact_rows = connection.execute(
-            select(library_items.c.rel_path, library_items.c.status)
+            select(library_items.c.rel_path, LIBRARY_ITEM_PRESENT.label("present"))
             .where(library_items.c.rel_path.in_(prefix_batch))
         ).fetchall()
-        for rel_path, status in exact_rows:
-            exact_statuses[str(rel_path)].append(str(status or ""))
+        for rel_path, present in exact_rows:
+            exact_presence[str(rel_path)].append(bool(present))
     active_descendant_prefixes: set[str] = set()
-    exact_prefixes = [prefix for prefix, statuses in exact_statuses.items() if statuses]
+    exact_prefixes = [prefix for prefix, presence in exact_presence.items() if presence]
     for prefix_batch in _chunks(exact_prefixes, 200):
         prefix_queries = [select(literal(prefix).label("prefix")) for prefix in prefix_batch]
         prefix_table = union_all(*prefix_queries).cte("scope_prefixes")
@@ -219,7 +220,7 @@ def resolve_media_scopes(
                 select(prefix_table.c.prefix).where(
                     exists(
                         select(library_items.c.id).where(
-                            library_items.c.status != "missing",
+                            LIBRARY_ITEM_PRESENT,
                             scope_descendant_filter(library_items.c.rel_path, prefix_table.c.prefix),
                         )
                     )
@@ -228,8 +229,8 @@ def resolve_media_scopes(
         )
     scopes_by_prefix: dict[str, MediaScope] = {}
     for prefix in unique_prefixes:
-        exact_rows = exact_statuses.get(prefix, [])
-        active_exact_count = sum(status != "missing" for status in exact_rows)
+        exact_rows = exact_presence.get(prefix, [])
+        active_exact_count = sum(exact_rows)
         active_descendant_match = prefix in active_descendant_prefixes
         if active_exact_count > 1:
             raise MediaScopeConflict(

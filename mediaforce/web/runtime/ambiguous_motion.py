@@ -26,6 +26,7 @@ from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, accept_cadence_as
     cadence_measurement_complete, reclassify_cadence_summary
 from mediaforce.library.evidence_state import sync_library_item_evidence_state
 from mediaforce.encoding.encode_queue import list_encode_runs_for_prefix
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.web.runtime.left_out_files import LeftOutFile
@@ -67,7 +68,7 @@ def ambiguous_motion_files(
         select(library_items)
         .where(
             library_items.c.cadence_summary_json.is_not(None),
-            library_items.c.status != "missing",
+            LIBRARY_ITEM_PRESENT,
             scope_rel_path_filter(library_items.c.rel_path, scope),
         )
         .order_by(library_items.c.rel_path)

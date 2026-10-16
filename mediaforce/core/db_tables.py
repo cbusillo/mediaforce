@@ -69,6 +69,7 @@ library_items = Table(
     Column("content_version_changed_at", Text),
     Column("content_version_fingerprint", Text),
     Column("status", Text, nullable=False, server_default="discovered"),
+    Column("missing_since", Text),
     Column("priority_score", REAL, nullable=False, server_default="0"),
     Column("recommendation", Text),
     Column("recommendation_reason", Text),

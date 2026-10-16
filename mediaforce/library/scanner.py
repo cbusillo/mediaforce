@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from sqlalchemy import and_, case
+from sqlalchemy import and_
 from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import not_
@@ -20,6 +20,7 @@ from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.library.evidence_state import sync_library_item_evidence_states
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_is_missing
 from mediaforce.library.media_scopes import logical_library_rel_path, path_matches_scope
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.probe import probe_media
@@ -196,14 +197,10 @@ def _execute_scan_library(
                             stat_result=stat_result,
                             duration_seconds=float_value(row.get("duration_seconds")),
                         ),
-                        content_version_changed_at=case(
-                            (library_items.c.status == "missing", started_at),
-                            else_=library_items.c.content_version_changed_at,
-                        ),
                         content_version_fingerprint=(
                             content_fingerprint or row.get("content_version_fingerprint")
                         ),
-                        status=case((library_items.c.status == "missing", "discovered"), else_=library_items.c.status),
+                        missing_since=None,
                     )
                 )
                 if not row.get("content_version_fingerprint") and content_fingerprint:
@@ -320,12 +317,15 @@ def _execute_scan_library(
                     started_at if content_changed else row.get("content_version_changed_at")
                 )
                 values["content_version_fingerprint"] = content_fingerprint or previous_content_fingerprint
+                # A file that comes back as different content starts over, as a new file does.
+                returned_as_new_content = content_changed and library_item_is_missing(row)
                 connection.execute(
                     update(library_items)
                     .where(library_items.c.source_path == source_path)
                     .values(
                         **{key: value for key, value in values.items() if key not in {"source_path", "discovered_at"}},
-                        status=case((library_items.c.status == "missing", "discovered"), else_=library_items.c.status),
+                        **({"status": "discovered"} if returned_as_new_content else {}),
+                        missing_since=None,
                     )
                 )
                 stats.reprobed += 1
@@ -491,8 +491,6 @@ def _content_version_changed(
         size_bytes: int,
         content_fingerprint: str | None,
 ) -> bool:
-    if str(row["status"] or "") == "missing":
-        return True
     if int(row["size_bytes"] or 0) != size_bytes:
         return True
     previous_content_fingerprint = str(row.get("content_version_fingerprint") or "") or None
@@ -574,7 +572,7 @@ def _active_item_count(connection: DBClient, root_name: str) -> int:
             .select_from(library_items)
             .where(
                 library_items.c.media_root == root_name,
-                library_items.c.status != "missing",
+                LIBRARY_ITEM_PRESENT,
             )
         ).scalar_one()
     )
@@ -647,7 +645,7 @@ def _reconcile_missing_items(
 ) -> int:
     _throw_if_scan_cancelled(process_controller)
     missing_count = 0
-    removed_root_filter = library_items.c.status != "missing"
+    removed_root_filter = LIBRARY_ITEM_PRESENT
     if configured_roots:
         removed_root_filter = and_(
             removed_root_filter,
@@ -663,7 +661,7 @@ def _reconcile_missing_items(
     for root_name in sorted(reconcilable_roots):
         _throw_if_scan_cancelled(process_controller)
         stale_filter = and_(
-            library_items.c.status != "missing",
+            LIBRARY_ITEM_PRESENT,
             library_items.c.media_root == root_name,
         )
         seen_paths = seen_paths_by_root.get(root_name, set())
@@ -693,7 +691,7 @@ def _mark_items_missing(
     cursor = connection.execute(
         update(library_items)
         .where(stale_filter)
-        .values(status="missing", updated_at=updated_at)
+        .values(missing_since=updated_at, updated_at=updated_at)
     )
     _throw_if_scan_cancelled(process_controller)
     return int_value(cursor.rowcount) if cursor.rowcount != -1 else 0

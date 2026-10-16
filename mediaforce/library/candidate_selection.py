@@ -12,6 +12,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata, staged_artifacts
 from mediaforce.core.type_defs import object_dict
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.library_settings import normalize_library_policy, normalize_library_type
 from mediaforce.library.media_scopes import (
     MediaScope,
@@ -879,7 +880,7 @@ def _load_rows(
             plex_item_metadata.c.observed_at.label("plex_observed_at"),
         )
         .select_from(joined)
-        .where(library_items.c.status != "missing")
+        .where(LIBRARY_ITEM_PRESENT)
     )
     if scopes:
         query = query.where(

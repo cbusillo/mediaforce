@@ -274,6 +274,9 @@ Guidance:
     period before forcing process exit while the runtime lease is still held,
     because Python cannot kill a thread blocked inside filesystem calls on an
     unavailable media mount
+- `item_presence.py`
+  - whether a catalog file is on disk (`missing_since`), kept apart from its
+    workflow `status`; readers exclude missing files through it
 - `evidence_state.py`
   - rebuildable per-item/per-kind projection of canonical cadence and
     fingerprint JSON

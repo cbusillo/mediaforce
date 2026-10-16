@@ -3,8 +3,11 @@ import json
 import tempfile
 import tomllib
 import unittest
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Iterator
+from unittest.mock import patch
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
@@ -17,12 +20,13 @@ from mediaforce.library.candidate_selection import (
     season_identity,
 )
 from mediaforce.library.representatives import load_representative_selection
+from mediaforce.library.scanner import _failed_probe_summary, scan_library
 from mediaforce.library.run_manifests import build_run_manifest, create_folder_manifest, select_encode_candidates
 from mediaforce.library.workflow_state import EncodeEligibility, build_folder_workflow_state, \
     build_folder_workflow_states, derive_item_workflow_state
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
 from mediaforce.web.routes.folders import _request_flag
-from mediaforce.web.runtime.folder_cards import list_folder_cards
+from mediaforce.web.runtime.folder_cards import FolderCard, list_folder_cards
 
 
 NOW = datetime(2026, 7, 12, 12, 0, tzinfo=UTC)
@@ -228,6 +232,151 @@ class LibraryLifecycleTests(unittest.TestCase):
             decisions = project_candidates(connection, config, prefixes=["tv/Show"], now=NOW)
 
         self.assertEqual([reason.code for reason in decisions[0].hold_reasons], ["recent_acquisition"])
+
+    def test_a_file_that_goes_missing_and_returns_unchanged_keeps_its_stage(self) -> None:
+        config = self._config()
+        season = "tv/Show/Season 1"
+        with open_db(config.paths.db_path) as connection, self._scan_clock() as scan_at:
+            item_ids = self._scan_staged_season(connection, config, scan_at, season)
+            before = self._library_rows(connection)
+            gone = [self.root / "source" / season / f"{stage}.mkv" for stage in ("encoded", "validated", "promoted")]
+            for path in gone:
+                path.rename(path.with_suffix(".away"))
+
+            scan_at[0] = NOW - timedelta(days=2)
+            scan_library(connection, config)
+            while_missing = self._library_rows(connection)
+            missing_candidates = select_encode_candidates(connection, config, prefixes=["tv"], limit=None, now=NOW)
+            missing_decisions = project_candidates(connection, config, prefixes=["tv"], now=NOW)
+            missing_workflow = build_folder_workflow_state(connection, season)
+            missing_cards = self._season_cards(connection, config)
+
+            for path in gone:
+                path.with_suffix(".away").rename(path)
+            scan_at[0] = NOW - timedelta(days=1)
+            scan_library(connection, config)
+            after = self._library_rows(connection)
+            candidates = select_encode_candidates(connection, config, prefixes=["tv"], limit=None, now=NOW)
+            decisions = {decision.item_id: decision for decision in project_candidates(
+                connection, config, prefixes=["tv"], now=NOW,
+            )}
+
+        returned = [item_ids[stage] for stage in ("encoded", "validated", "promoted")]
+        for item_id in returned:
+            self.assertIsNotNone(while_missing[item_id]["missing_since"])
+        # Missing files stay out of the candidates and decisions, and the season shows them as missing.
+        self.assertEqual([row["item_id"] for row in missing_candidates], [item_ids["waiting"]])
+        self.assertEqual({decision.item_id for decision in missing_decisions}, {item_ids["waiting"]})
+        self.assertEqual(missing_workflow.counts["items"], 4)
+        self.assertEqual(missing_workflow.counts["ready_to_validate"], 0)
+        self.assertEqual(missing_workflow.counts["ready_to_promote"], 0)
+        self.assertEqual([(card.item_count, card.statuses) for card in missing_cards], [(1, {"discovered": 1})])
+
+        for stage in ("encoded", "validated", "promoted"):
+            item_id = item_ids[stage]
+            with self.subTest(stage=stage):
+                self.assertIsNone(after[item_id]["missing_since"])
+                self.assertEqual(after[item_id]["status"], stage)
+                self.assertEqual(
+                    after[item_id]["content_version_changed_at"], before[item_id]["content_version_changed_at"],
+                )
+                self.assertNotEqual(decisions[item_id].workflow_lane, "encode")
+        self.assertEqual([row["item_id"] for row in candidates], [item_ids["waiting"]])
+        self.assertEqual(decisions[item_ids["waiting"]].hold_reasons, ())
+
+    def test_a_file_that_returns_with_different_content_is_a_replacement(self) -> None:
+        config = self._config()
+        season = "tv/Show/Season 1"
+        with open_db(config.paths.db_path) as connection, self._scan_clock() as scan_at:
+            item_ids = self._scan_staged_season(connection, config, scan_at, season)
+            published = self.root / "source" / season / "promoted.mkv"
+            published.rename(published.with_suffix(".away"))
+            scan_at[0] = NOW - timedelta(days=2)
+            scan_library(connection, config)
+
+            published.with_suffix(".away").unlink()
+            published.write_bytes(b"a different recording of this episode")
+            returned_at = NOW - timedelta(days=1)
+            scan_at[0] = returned_at
+            scan_library(connection, config)
+            after = self._library_rows(connection)
+            decisions = {decision.item_id: decision for decision in project_candidates(
+                connection, config, prefixes=["tv"], now=NOW,
+            )}
+
+        replaced = after[item_ids["promoted"]]
+        self.assertIsNone(replaced["missing_since"])
+        self.assertEqual(replaced["status"], "discovered")
+        self.assertEqual(replaced["content_version_changed_at"], returned_at.isoformat(timespec="seconds"))
+        self.assertEqual(
+            [reason.code for reason in decisions[item_ids["waiting"]].hold_reasons], ["recent_acquisition"],
+        )
+
+    @contextmanager
+    def _scan_clock(self) -> Iterator[list[datetime]]:
+        """Scans stamp the time held in the returned list, so each scan can happen on a chosen day."""
+        scan_at = [NOW - timedelta(days=100)]
+        with (
+            patch("mediaforce.library.scanner.timestamp", side_effect=lambda: scan_at[0].isoformat(timespec="seconds")),
+            patch(
+                "mediaforce.library.scanner.probe_media",
+                return_value=_failed_probe_summary(RuntimeError("fixture probe")),
+            ),
+        ):
+            yield scan_at
+
+    def _scan_staged_season(
+            self, connection: DBClient, config: MediaforceConfig, scan_at: list[datetime], season: str,
+    ) -> dict[str, int]:
+        """A long-held, ended season with a file at each finished stage and one still waiting to encode."""
+        season_dir = self.root / "source" / season
+        season_dir.mkdir(parents=True)
+        stages = ("encoded", "validated", "promoted", "waiting")
+        for stage in stages:
+            (season_dir / f"{stage}.mkv").write_bytes(f"{stage} episode".encode())
+        scan_library(connection, config)
+        item_ids = {
+            Path(str(row["rel_path"])).stem: int(row["id"])
+            for row in connection.execute(library_items.select()).mappings()
+        }
+        stage_at = (scan_at[0] + timedelta(days=10)).isoformat(timespec="seconds")
+        for stage in stages:
+            item_id = item_ids[stage]
+            self._insert_plex_metadata(connection, item_id, added_at=scan_at[0], season_index=1)
+            if stage == "waiting":
+                continue
+            connection.execute(
+                library_items.update().where(library_items.c.id == item_id).values(status=stage)
+            )
+            connection.execute(staged_artifacts.insert().values(
+                library_item_id=item_id,
+                staging_path=str(self.root / "staging" / f"{stage}.mkv"),
+                promoted_at=stage_at if stage == "promoted" else None,
+                updated_at=stage_at,
+            ))
+        self._insert_series_metadata(connection, "tv/Show", status="Ended", in_production=False)
+        connection.commit()
+        return item_ids
+
+    @staticmethod
+    def _season_cards(connection: DBClient, config: MediaforceConfig) -> list[FolderCard]:
+        return list_folder_cards(
+            connection,
+            config=config,
+            minimum_recommended_savings_bytes=None,
+            folder_group=lambda _path: ("tv/Show/Season 1", "Season 1", "Show", "Season"),
+            age_days=lambda _path: 0.0,
+            estimate_savings_bytes=lambda **_kwargs: 123,
+            review_badge_for_prefix=lambda _prefix: {"label": None, "tone": None, "detail": None},
+            rel_path_root="tv/",
+        )
+
+    @staticmethod
+    def _library_rows(connection: DBClient) -> dict[int, dict[str, object]]:
+        return {
+            int(row["id"]): dict(row)
+            for row in connection.execute(library_items.select()).mappings()
+        }
 
     def test_publishing_a_compressed_copy_does_not_restart_the_acquisition_hold(self) -> None:
         config = self._config()
@@ -648,9 +797,10 @@ class LibraryLifecycleTests(unittest.TestCase):
         state = derive_item_workflow_state(row, encode_eligible=False, policy_blocker="Recent season")
         self.assertEqual(state.state, "blocked")
         self.assertTrue(state.blocker)
-        for status, expected in (("encoding", "encoding"), ("promoted", "complete"), ("missing", "missing")):
+        for status, expected in (("encoding", "encoding"), ("promoted", "complete")):
             with self.subTest(status=status):
                 self.assertEqual(derive_item_workflow_state({**row, "status": status}).state, expected)
+        self.assertEqual(derive_item_workflow_state({**row, "missing_since": NOW.isoformat()}).state, "missing")
         size_held = derive_item_workflow_state({
             **row,
             "validation_json": json.dumps({

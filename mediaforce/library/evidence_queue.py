@@ -18,6 +18,7 @@ from mediaforce.library.evidence_acquisition import DEFAULT_UNCERTAINTY_FRONTIER
     FingerprintAcquisitionPlan, load_fingerprint_acquisition_items, plan_fingerprint_acquisition
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EvidenceKind
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
 
 DEFAULT_EVIDENCE_QUEUE_NAME = "evidence"
@@ -283,7 +284,7 @@ def queue_decision_evidence_work(
                     EVIDENCE_STATE_ANALYSIS_REQUIRED,
                     EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
                 )),
-                library_items.c.status != "missing",
+                LIBRARY_ITEM_PRESENT,
                 scope_rel_path_filter(library_items.c.rel_path, scope),
             )
             .order_by(library_item_evidence_state.c.library_item_id)
@@ -1032,7 +1033,7 @@ def _evidence_work_candidates(
                 EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
             )),
             library_item_evidence_state.c.evidence_kind.in_(tuple(evidence_kinds)),
-            library_items.c.status != "missing",
+            LIBRARY_ITEM_PRESENT,
             scope_rel_path_filter(library_items.c.rel_path, scope),
         )
         .order_by(

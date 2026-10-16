@@ -50,8 +50,12 @@ Activity evidence is the newest of:
 2. `library_items.content_version_changed_at`
 3. `library_items.discovered_at`
 
-The scanner records `content_version_changed_at` on first discovery, when a
-missing source returns, and when the source fingerprint changes. Promotion also
+The scanner records `content_version_changed_at` on first discovery and when
+the source size or fingerprint changes, including when a missing source returns
+as different content. A file that goes missing keeps its workflow stage:
+`missing_since` records its absence apart from `status`, and a return with the
+same size and fingerprint only clears it, so an encoded, checked, or published
+file is not encoded again or held as newly added. Promotion also
 records the source-version change. A change recorded at or before the file's
 own `promoted_at` is Mediaforce's compressed copy or concerns a file that copy
 replaced, so it does not refresh the guard; only a later change does. Replacement detection uses a bounded content
