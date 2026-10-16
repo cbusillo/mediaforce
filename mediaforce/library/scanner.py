@@ -28,7 +28,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_list
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint, timestamp
 
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mp4", ".ts"}
-SCAN_COMMIT_INTERVAL = 25
+SCAN_PROGRESS_INTERVAL = 25
 MASS_DISAPPEARANCE_MIN_ITEMS = 25
 MASS_DISAPPEARANCE_MAX_REMAINING_PERCENT = 20
 
@@ -131,7 +131,7 @@ def _execute_scan_library(
 ) -> ScanStats:
     seen_paths_by_root: dict[str, set[str]] = {}
     reconcilable_roots: set[str] = set()
-    pending_writes = 0
+    files_since_progress = 0
     full_scan = not normalized_prefixes and limit is None
 
     for root_name, root_path in scan_source_roots.items():
@@ -219,20 +219,20 @@ def _execute_scan_library(
                         updated_at=started_at,
                     )
                 stats.unchanged += 1
-                pending_writes = _flush_scan_progress(
+                files_since_progress = _flush_scan_progress(
                     connection,
                     scan_id,
                     stats,
-                    pending_writes + 1,
+                    files_since_progress + 1,
                     process_controller=process_controller,
                 )
                 continue
 
-            pending_writes = _commit_scan_progress_before_probe(
+            files_since_progress = _commit_scan_progress_before_probe(
                 connection,
                 scan_id,
                 stats,
-                pending_writes,
+                files_since_progress,
                 process_controller=process_controller,
             )
             try:
@@ -340,11 +340,11 @@ def _execute_scan_library(
                 reset_attempt_state=True,
                 updated_at=started_at,
             )
-            pending_writes = _flush_scan_progress(
+            files_since_progress = _flush_scan_progress(
                 connection,
                 scan_id,
                 stats,
-                pending_writes + 1,
+                files_since_progress + 1,
                 process_controller=process_controller,
             )
 
@@ -385,11 +385,11 @@ def _execute_scan_library(
             updated_at=started_at,
             process_controller=process_controller,
         )
-        pending_writes = _flush_scan_progress(
+        files_since_progress = _flush_scan_progress(
             connection,
             scan_id,
             stats,
-            pending_writes + 1,
+            files_since_progress + 1,
             process_controller=process_controller,
         )
 
@@ -397,7 +397,7 @@ def _execute_scan_library(
         connection,
         scan_id,
         stats,
-        pending_writes,
+        files_since_progress,
         force=True,
         process_controller=process_controller,
     )
@@ -466,17 +466,17 @@ def _commit_scan_progress_before_probe(
         connection: DBClient,
         scan_id: str,
         stats: ScanStats,
-        pending_writes: int,
+        files_since_progress: int,
         *,
         process_controller: ManagedProcessController | None = None,
 ) -> int:
     _throw_if_scan_cancelled(process_controller)
-    if pending_writes:
+    if files_since_progress:
         return _flush_scan_progress(
             connection,
             scan_id,
             stats,
-            pending_writes,
+            files_since_progress,
             force=True,
             process_controller=process_controller,
         )
@@ -520,27 +520,29 @@ def _flush_scan_progress(
         connection: DBClient,
         scan_id: str,
         stats: ScanStats,
-        pending_writes: int,
+        files_since_progress: int,
         *,
         force: bool = False,
         process_controller: ManagedProcessController | None = None,
 ) -> int:
     _throw_if_scan_cancelled(process_controller)
-    if not force and pending_writes < SCAN_COMMIT_INTERVAL:
-        return pending_writes
-    connection.execute(
-        update(scan_runs)
-        .where(scan_runs.c.scan_id == scan_id)
-        .values(
-            last_progress_at=timestamp(),
-            file_count=stats.total_seen,
-            reprobed_count=stats.reprobed + stats.discovered,
-            unchanged_count=stats.unchanged,
+    if force or files_since_progress >= SCAN_PROGRESS_INTERVAL:
+        connection.execute(
+            update(scan_runs)
+            .where(scan_runs.c.scan_id == scan_id)
+            .values(
+                last_progress_at=timestamp(),
+                file_count=stats.total_seen,
+                reprobed_count=stats.reprobed + stats.discovered,
+                unchanged_count=stats.unchanged,
+            )
         )
-    )
+        files_since_progress = 0
+    # Commit every file's writes before the next file's stat and reads: those can stall on a network share, and
+    # a write lock held across them starves encode progress writes past the busy timeout.
     connection.commit()
     _throw_if_scan_cancelled(process_controller)
-    return 0
+    return files_since_progress
 
 
 def _failed_probe_summary(_error: Exception) -> ProbeSummary:
