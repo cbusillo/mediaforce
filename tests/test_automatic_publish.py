@@ -400,6 +400,7 @@ def test_app_supervises_automatic_delivery_with_its_leadership(config: Mediaforc
         patch.object(web_app, "_start_calibration_queue_worker"),
         patch.object(web_app, "_start_encode_queue_worker"),
         patch.object(web_app, "_start_controller_storage_worker"),
+        patch.object(web_app, "_start_host_recovery_worker"),
         patch.object(web_app, "_start_catalog_refresh_worker"),
         patch.object(web_app, "_start_supervised_worker") as start,
     ):

@@ -380,6 +380,7 @@ const endpointChecks = [
   ["Other library structure", "/api/dashboard/library/other"],
   ["Other library details", "/api/dashboard/library/other/details"],
   ["Host status", "/api/hosts?compact=1"],
+  ["Recovery warnings", "/api/recovery-alerts"],
   ["Settings initial payload", "/api/settings?include_archive_cleanup=0"],
   ["Completed payload", "/api/completed"],
   ["Operator catalog and evidence work", "/api/operator-work"],
@@ -969,6 +970,7 @@ async function checkActivityQueueFirst(page, label, expectQueueRows = false) {
     const queuePanel = main?.querySelector(":scope > .panel");
     const queueHeading = queuePanel?.querySelector(".panel__header h3");
     const queueRect = queuePanel?.getBoundingClientRect();
+    const contentTop = document.querySelector(".app-content")?.getBoundingClientRect().top ?? 0;
     const workstationRect = workstation?.getBoundingClientRect();
     const mainChildren = Array.from(main?.children ?? []);
     const queuePanelIndex = queuePanel ? mainChildren.indexOf(queuePanel) : -1;
@@ -993,7 +995,7 @@ async function checkActivityQueueFirst(page, label, expectQueueRows = false) {
         Boolean(queueRect) &&
         Boolean(workstationRect) &&
         queueRect.width / workstationRect.width >= 0.7,
-      queueStartsNearTop: Boolean(queueRect) && queueRect.top < 180,
+      queueStartsNearTop: Boolean(queueRect) && queueRect.top - contentTop < 180,
       visibleContentBeforeQueue:
         queuePanelIndex >= 0
           ? mainChildren.slice(0, queuePanelIndex).flatMap((element) => {
@@ -4002,6 +4004,42 @@ async function captureReviewFixtures(baseUrl, folderRoutes) {
   );
 }
 
+async function checkRecoveryAlerts(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  try {
+    for (const viewport of [{ width: 1440, height: 1000 }, NARROW_VIEWPORT]) {
+      const page = await browser.newPage({ viewport });
+      page.setDefaultTimeout(timeoutMs);
+      await page.clock.install();
+      let alerts = [
+        { id: "storage:fixture", title: "Controller storage unavailable: /Volumes/media", detail: "The share is not mounted. Mediaforce is retrying automatically." },
+        { id: "host:fixture", title: "Bedroom computer is unavailable", detail: "Check this computer's network and storage. Mediaforce will keep checking." },
+      ];
+      await page.route("**/api/recovery-alerts", (route) => route.fulfill({ json: { alerts } }));
+      await page.goto(baseUrl, { waitUntil: "networkidle" });
+      await expect(page.getByRole("alert").filter({ hasText: alerts[0].title })).toBeVisible();
+      await page.getByRole("link", { name: "View computers" }).first().click();
+      await page.waitForURL("**/ops");
+      await expect(page.getByRole("alert").filter({ hasText: alerts[1].title })).toBeVisible();
+      await page.clock.fastForward(31_000);
+      await expect(page.getByRole("link", { name: "View computers" })).toHaveCount(alerts.length);
+      await checkActivityQueueFirst(page, "Activity with recovery warnings");
+      if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) {
+        throw new Error("Recovery warning overflows the page");
+      }
+      const screenshotDir = path.join(rootDir, "scratch/ui-checks");
+      await mkdir(screenshotDir, { recursive: true });
+      await page.screenshot({ path: path.join(screenshotDir, `recovery-alerts-${viewport.width}.png`) });
+      alerts = [];
+      await page.clock.fastForward(31_000);
+      await expect(page.getByRole("link", { name: "View computers" })).toHaveCount(0);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   let managedServer = null;
@@ -4049,6 +4087,7 @@ async function main() {
       ]);
     }
     await checkEndpoints(targetUrl, args.endpointTimeoutMs);
+    await checkRecoveryAlerts(targetUrl, args.routeTimeoutMs);
     await checkRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
     if (folderRoutes.length) {
       await checkPlainQualityCopy(targetUrl, args.routeTimeoutMs);
