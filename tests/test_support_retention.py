@@ -143,3 +143,15 @@ def test_cleanup_refuses_unreadable_runtime_ownership(config: MediaforceConfig) 
     _sweep(config)
 
     assert retained.exists()
+
+
+def test_cleanup_cannot_race_a_runtime_switch(config: MediaforceConfig) -> None:
+    from mediaforce.ops.runtime_install import runtime_activity
+
+    retained = _work_folder(config.paths.db_path.parent / "operations", "old", age_days=60)
+    with runtime_activity(config.paths.db_path.parent) as acquired:
+        assert acquired
+        _sweep(config)
+        assert retained.exists()
+    _sweep(config)
+    assert not retained.exists()

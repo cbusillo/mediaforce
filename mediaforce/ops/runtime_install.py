@@ -1,7 +1,10 @@
 """Controller installation paths shared by deploy, launchd and retention."""
 from __future__ import annotations
 
+import fcntl
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -18,7 +21,12 @@ def require_release_directory(project_root: Path, home: Path) -> None:
     root = project_root.absolute()
     if root.parent != releases.absolute() or root.resolve() != root:
         raise RuntimeProtectionError(f"controller runtime must be a real directory directly under {releases}")
-    if (root / ".git").is_symlink() or not (root / ".git").is_dir() or (root / ".git" / "commondir").exists() or (root / ".git/objects/info/alternates").exists():
+    if (
+        (root / ".git").is_symlink()
+        or not (root / ".git").is_dir()
+        or (root / ".git/commondir").exists()
+        or (root / ".git/objects/info/alternates").exists()
+    ):
         raise RuntimeProtectionError("controller runtime must be an independent clone, not a development worktree")
 
 
@@ -49,3 +57,19 @@ def register_runtime_roots(home: Path, *roots: Path) -> None:
 def paths_overlap(left: Path, right: Path) -> bool:
     left, right = left.resolve(), right.resolve()
     return left.is_relative_to(right) or right.is_relative_to(left)
+
+
+@contextmanager
+def runtime_activity(support_dir: Path, *, cleanup: bool = False) -> Iterator[bool]:
+    runtime = support_dir / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    with (runtime / "deploy.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, (fcntl.LOCK_SH if cleanup else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)

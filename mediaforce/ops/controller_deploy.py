@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import sqlite3
@@ -17,13 +16,21 @@ from mediaforce.ops.login_item import (
     LoginItemPaths, _atomic_write, disable_login_item, enable_login_item,
 )
 from mediaforce.ops.runtime_install import (
-    register_runtime_roots, require_release_directory, runtime_directory,
+    register_runtime_roots, require_release_directory, runtime_activity, runtime_directory,
 )
 
 
 def _run(command: list[str], *, cwd: Path | None = None) -> str:
     environment = os.environ.copy()
     environment.pop("VIRTUAL_ENV", None)
+    if command[0] == "uv":
+        if cwd is None:
+            raise ValueError("dependency setup requires an explicit release directory")
+        environment["UV_PROJECT_ENVIRONMENT"] = str(cwd / ".venv")
+        environment.pop("UV_PROJECT", None)
+        environment.pop("UV_WORKING_DIR", None)
+    if command[0] == "git":
+        environment = {key: value for key, value in environment.items() if not key.startswith("GIT_")}
     return subprocess.run(command, cwd=cwd, env=environment, check=True, text=True, capture_output=True).stdout.strip()
 
 
@@ -54,7 +61,7 @@ def prepare_release(source: Path, target: str, home: Path) -> Path:
     _run(["git", "clone", "--no-local", "--no-checkout", str(source), str(root)])
     require_release_directory(root, home)
     _run(["git", "checkout", "--detach", sha], cwd=root)
-    _run(["uv", "sync", "--locked", "--no-dev"], cwd=root)
+    _run(["uv", "sync", "--project", str(root), "--locked", "--no-dev"], cwd=root)
     if not (root / ".venv/bin/mediaforce-web").is_file() or not (root / "frontend/build/index.html").is_file():
         raise RuntimeError("prepared runtime lacks its entrypoint or frontend build")
     return root
@@ -71,10 +78,9 @@ def backup_database(database: Path, destination: Path) -> None:
 
 
 def deploy(source: Path, target: str, stage: Path, home: Path, base_url: str) -> None:
-    runtime = runtime_directory(home)
-    runtime.mkdir(parents=True, exist_ok=True)
-    with (runtime / "deploy.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with runtime_activity(runtime_directory(home).parent) as acquired:
+        if not acquired:
+            raise RuntimeError("cleanup or another deploy is active; retry after it finishes")
         _deploy(source, target, stage, home, base_url)
 
 

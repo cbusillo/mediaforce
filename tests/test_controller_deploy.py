@@ -1,5 +1,6 @@
 import plistlib
 import sqlite3
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -155,7 +156,6 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, hea
         nonlocal service_running
         service_running = False
 
-    import subprocess
     with patch.object(controller_deploy, "_api", side_effect=api), patch.object(
         controller_deploy, "_run", side_effect=["", "previous-sha"]
     ), patch.object(controller_deploy, "prepare_release", return_value=candidate), patch.object(
@@ -198,3 +198,26 @@ def test_first_service_install_can_use_prepared_independent_release(tmp_path: Pa
         assert login_item.run_login_item_command("install", project_root=candidate, home=home) == 0
     plist = login_item.LoginItemPaths(candidate, home).plist
     assert Path(plistlib.loads(plist.read_bytes())["WorkingDirectory"]) == candidate
+
+
+@pytest.mark.parametrize("tool", ["git", "uv"])
+def test_release_commands_cannot_inherit_disposable_project_targets(tmp_path: Path, tool: str) -> None:
+    candidate, disposable = tmp_path / "candidate", tmp_path / "worktree"
+    environment = {
+        "PATH": "/fixture/bin", "VIRTUAL_ENV": str(disposable / ".venv"),
+        "UV_PROJECT_ENVIRONMENT": str(disposable / ".venv"), "UV_PROJECT": str(disposable),
+        "UV_WORKING_DIR": str(disposable), "GIT_DIR": str(disposable / ".git"),
+        "GIT_WORK_TREE": str(disposable),
+    }
+    with patch.dict(controller_deploy.os.environ, environment, clear=True), patch.object(
+        controller_deploy.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "ok", "")
+    ) as run:
+        controller_deploy._run([tool, "fixture-command"], cwd=candidate)
+    invoked_environment = run.call_args.kwargs["env"]
+    assert run.call_args.kwargs["cwd"] == candidate
+    assert "VIRTUAL_ENV" not in invoked_environment
+    if tool == "uv":
+        assert Path(invoked_environment["UV_PROJECT_ENVIRONMENT"]).parent == candidate
+        assert "UV_PROJECT" not in invoked_environment and "UV_WORKING_DIR" not in invoked_environment
+    else:
+        assert not any(key.startswith("GIT_") for key in invoked_environment)
