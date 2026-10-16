@@ -1,3 +1,4 @@
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from typing import Any
 
@@ -186,7 +187,9 @@ def folder_status_payload(
         load_retryable_sample_job_state: Any,
         load_scan_status: Any,
         load_active_encode_job_for_prefix: Any,
+        page_state: Callable[[DBClient, str, Mapping[str, Any], Mapping[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """The folder's live status; `page_state` decides what the page leads with from the same reads."""
     with open_db(config.paths.db_path) as connection:
         media_scope = resolve_media_scope(
             connection,
@@ -241,6 +244,11 @@ def folder_status_payload(
                     library=library,
                     members=list(movie_context.get("members") or []),
                 ) or workflow_state
+        folder_page_state = (
+            page_state(connection, normalized_prefix, workflow_state, staged_integrity)
+            if page_state is not None
+            else None
+        )
     polling_active = bool(
         (exact_calibration_job and exact_calibration_job.get("status") in {"queued", "starting", "running"})
         or (
@@ -265,6 +273,7 @@ def folder_status_payload(
         "folder_scan_job": folder_scan_job,
         "workflow_state": workflow_state,
         "staged_integrity": staged_integrity,
+        "page_state": folder_page_state,
     }
 
 

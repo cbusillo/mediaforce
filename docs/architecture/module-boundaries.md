@@ -174,6 +174,19 @@ Guidance:
     - the owner's sound choice and planning (series lifecycle) stay outside
       what a sample approves: approving and queueing apply the owner's
       current ones over the sample's snapshot and keep the folder's planning
+  - `page_state.py`
+    - the one `page_state` a folder page and its library card lead with: a
+      state key, tone, recovery kind, primary action, failure kind and the job
+      or saved sample that decided it, on `/api/folders/<prefix>/status` and on
+      each TV folder card
+    - decided from database rows and saved samples, never from the hour-long
+      sample notice: the workflow state's wider-run rules for encode work, the
+      page's own newest sample job and saved sample (never an overlapping
+      episode's or show's), and `production_approval` for whether an approval
+      governs; the module docstring states the precedence
+    - the frontend only words it (`frontend/src/lib/season/page-state.ts`):
+      one table from key, recovery kind, failure kind and episode or season
+      scope to label, detail and recovery action; it never orders jobs
   - `folder_tuning_helpers.py`
   - `folder_tuning_advice.py`
   - `folder_tuning_runtime.py`

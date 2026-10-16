@@ -2,16 +2,19 @@
 	import { onMount } from 'svelte';
 
 	import { fetchJson } from '$lib/api/client';
-	import { initialDashboard, initialFoldersPayload } from '$lib/api/placeholders';
+	import { initialFoldersPayload } from '$lib/api/placeholders';
 	import type {
 		DashboardFoldersPayload,
 		DashboardSummaryPayload,
 		LifecycleState
 	} from '$lib/api/types';
-	import { applySeriesLifecycle, mergeFolderPayloads } from '$lib/season/library';
+	import {
+		applySeriesLifecycle,
+		libraryJobsPollTracker,
+		mergeFolderPayloads
+	} from '$lib/season/library';
 	import SeasonLibrary from './SeasonLibrary.svelte';
 
-	let dashboard = $state<DashboardSummaryPayload>(initialDashboard);
 	let structurePayload = $state<DashboardFoldersPayload>(initialFoldersPayload);
 	let detailsPayload = $state<DashboardFoldersPayload>(initialFoldersPayload);
 	let foldersPayload = $state<DashboardFoldersPayload>(initialFoldersPayload);
@@ -20,6 +23,8 @@
 	let structurePending = $state(true);
 	let detailsPending = $state(true);
 	let disposed = false;
+	let detailsRefreshing = false;
+	const jobsPoll = libraryJobsPollTracker();
 	const loadError = $derived(
 		!foldersPayload.folders.length && !structurePending && !detailsPending
 			? structureLoadError || detailsLoadError
@@ -29,14 +34,14 @@
 	onMount(() => {
 		disposed = false;
 		let refreshTimer: number | undefined;
-
-		void hydrateDashboard().then(() => {
-			if (disposed) return;
-			refreshTimer = window.setInterval(() => void refreshDashboard(), 7000);
+		void readJobs().then((dashboard) => {
+			if (dashboard) jobsPoll.reset(dashboard);
 		});
-		void hydrateStructure().finally(() => {
-			if (!disposed) void hydrateDetails();
-		});
+		void hydrateStructure()
+			.finally(() => (disposed ? undefined : hydrateDetails()))
+			.finally(() => {
+				if (!disposed) refreshTimer = window.setInterval(() => void refreshOnJobChange(), 7000);
+			});
 
 		return () => {
 			disposed = true;
@@ -44,31 +49,24 @@
 		};
 	});
 
-	async function hydrateDashboard() {
+	async function readJobs(): Promise<DashboardSummaryPayload | null> {
 		try {
-			const dashboardPayload = await fetchJson<DashboardSummaryPayload>(
-				'/api/dashboard?preview_limit=0'
-			);
-			if (disposed) return;
-			dashboard = { ...dashboardPayload, folders_preview: foldersPayload.folders };
+			return await fetchJson<DashboardSummaryPayload>('/api/dashboard?preview_limit=0');
 		} catch {
-			// Library structure is independently useful when live queue status is unavailable.
-		} finally {
-			if (!disposed) {
-				syncFolders();
-			}
+			// The cards stay as last read when the job summary is briefly unavailable.
+			return null;
 		}
 	}
 
-	async function refreshDashboard() {
+	/** Each card shows its server state, so read the cards again only when a job changed. */
+	async function refreshOnJobChange() {
+		const dashboard = await readJobs();
+		if (disposed || !dashboard || !jobsPoll.changed(dashboard) || detailsRefreshing) return;
+		detailsRefreshing = true;
 		try {
-			const dashboardPayload = await fetchJson<DashboardSummaryPayload>(
-				'/api/dashboard?preview_limit=0'
-			);
-			if (disposed) return;
-			dashboard = { ...dashboardPayload, folders_preview: foldersPayload.folders };
-		} catch {
-			// Keep the last useful view when a background refresh briefly fails.
+			await hydrateDetails();
+		} finally {
+			detailsRefreshing = false;
 		}
 	}
 
@@ -116,12 +114,10 @@
 	function syncFolders() {
 		if (structurePending) return;
 		foldersPayload = mergeFolderPayloads(structurePayload, detailsPayload);
-		dashboard = { ...dashboard, folders_preview: foldersPayload.folders };
 	}
 </script>
 
 <SeasonLibrary
-	{dashboard}
 	{foldersPayload}
 	foldersPending={structurePending}
 	{detailsPending}

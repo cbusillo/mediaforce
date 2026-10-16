@@ -1,19 +1,17 @@
 import { resolveMetricLabel } from '$lib/folders/studio';
-import { libraryCopy } from '$lib/library-copy';
 import type {
 	CalibrationJobPayload,
 	CalibrationScopeActivityPayload,
 	CalibrationTargetContract,
 	DashboardScanJob,
-	DashboardSummaryPayload,
 	EncodeQueueJob,
 	EncodeUnfinishedGroup,
-	FolderCard,
 	FolderPayload,
 	FolderStatusPayload,
 	CompressionIntentOptionPayload,
 	CompressionIntentRequestPayload,
 	OperatorIntentRequestPayload,
+	PageStatePayload,
 	QualityRiskPayload,
 	QualityRiskTag,
 	SizeGoalMode,
@@ -23,30 +21,7 @@ import type {
 } from '$lib/api/types';
 import { folderRoutePath } from '$lib/folder-display';
 import { formatFileSize as formatOperatorFileSize } from '$lib/format';
-import { reviewAvailability } from '$lib/review/availability';
-
-export type HumanSeasonStateKey =
-	| 'needs_test'
-	| 'sample_waiting'
-	| 'making_test'
-	| 'ready_to_compare'
-	| 'ready_to_make'
-	| 'making_season'
-	| 'ready_to_check'
-	| 'finish_blocked'
-	| 'ready_to_finish'
-	| 'finished'
-	| 'needs_help';
-
-export type HumanSeasonTone = 'quiet' | 'active' | 'ready' | 'success' | 'attention';
-
-export interface HumanSeasonState {
-	key: HumanSeasonStateKey;
-	label: string;
-	detail: string;
-	tone: HumanSeasonTone;
-	recoveryKind?: 'test' | 'season' | 'files';
-}
+import type { HumanSeasonTone } from './page-state';
 
 export interface SeasonPromotionIntegrityBlocker {
 	code: string;
@@ -438,7 +413,6 @@ export const REVIEW_CONCERNS: readonly ReviewConcern[] = [
 ];
 
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'running', 'starting', 'retry_backoff', 'stopping']);
-const FAILURE_JOB_STATUSES = new Set(['failed', 'stopped', 'needs_attention']);
 
 export function catalogWarningNotice(
 	scanJob: DashboardScanJob | null
@@ -677,61 +651,12 @@ export function compareRiskSummary(folder: FolderPayload): CompareRiskSummary | 
 	};
 }
 
-function booleanValue(value: unknown): boolean {
-	return value === true;
-}
-
 function jobStatus(job: unknown): string {
 	return text(record(job).status).toLowerCase();
 }
 
 function isActiveJob(job: unknown): boolean {
 	return ACTIVE_JOB_STATUSES.has(jobStatus(job));
-}
-
-function isWaitingJob(job: unknown): boolean {
-	return ['queued', 'retry_backoff'].includes(jobStatus(job));
-}
-
-function isRunningJob(job: unknown): boolean {
-	return isActiveJob(job) && !isWaitingJob(job);
-}
-
-function isFailedJob(job: unknown): boolean {
-	return FAILURE_JOB_STATUSES.has(jobStatus(job));
-}
-
-function jobTimestamp(job: unknown): number {
-	const payload = record(job);
-	return Date.parse(
-		text(payload.finished_at) ||
-			text(payload.last_failure_at) ||
-			text(payload.updated_at) ||
-			text(payload.started_at) ||
-			text(payload.created_at)
-	);
-}
-
-function matchesPrefix(job: Record<string, unknown>, prefix: string): boolean {
-	return text(job.prefix) === prefix;
-}
-
-function dashboardJobs(dashboard: DashboardSummaryPayload, kind: 'sample' | 'encode') {
-	if (kind === 'sample') {
-		const lane = dashboard.calibration_queue.sample;
-		return {
-			running: records(lane.running),
-			queued: records(lane.queued),
-			ready: records(lane.pending_review),
-			recent: records(lane.recent_failed)
-		};
-	}
-	return {
-		running: dashboard.encode_queue.running.map(record),
-		queued: dashboard.encode_queue.queued.map(record),
-		ready: [] as Array<Record<string, unknown>>,
-		recent: (dashboard.encode_queue.recent ?? []).map(record)
-	};
 }
 
 export function seasonIdentity(prefix: string): SeasonIdentity {
@@ -1652,21 +1577,21 @@ export function targetConstraintSummary(
 			recoveryLabel: 'Choose a roomier goal'
 		};
 	}
-	return encodeTargetConstraint(folder, sampleJob);
+	return encodeTargetConstraint(folder, status?.page_state);
 }
 
 // A full encode can hit the minimum picture quality after its sample passed. Retrying repeats the
-// same result, so it needs the same "choose a roomier goal" path as a failed sample.
+// same result, so it needs the same "choose a roomier goal" path as a failed sample. The server's page
+// state says whether that stopped run is what the page leads with.
 function encodeTargetConstraint(
 	folder: FolderPayload,
-	sampleJob: Record<string, unknown>
+	pageState: PageStatePayload | null | undefined
 ): TargetConstraintSummary | null {
-	const encodeJob = folder.encode_job;
-	const error = text(record(encodeJob).error);
-	if (!isFailedJob(encodeJob) || !error.includes('target_band_violates_quality_floor')) {
+	if (pageState?.recovery_kind !== 'season' || pageState.failure !== 'quality_conflict')
 		return null;
-	}
-	if (jobTimestamp(sampleJob) > jobTimestamp(encodeJob)) return null;
+	const encodeJob = folder.encode_job;
+	const error =
+		encodeJob && encodeJob.job_id === pageState.source_job?.id ? text(encodeJob.error) : '';
 	const targetMb = Math.round(numberValue(error.match(/target=(\d+) bytes/)?.[1]) / 1_000_000);
 	const reachableMb = Math.round(
 		numberValue(error.match(/best_reachable=(\d+) bytes/)?.[1]) / 1_000_000
@@ -1941,169 +1866,6 @@ export function approvalGuardFromMessage(
 	return null;
 }
 
-/** A working season still says so when some of its files already need the owner. */
-function libraryCompressingState(card: FolderCard): HumanSeasonState {
-	const needsYou = text(card.review_badge_label).toLowerCase().includes('attention');
-	return {
-		key: 'making_season',
-		label: needsYou ? 'Compressing · needs you' : 'Compressing the season',
-		detail:
-			(needsYou && text(card.review_badge_detail)) ||
-			'The smaller episodes are being compressed now.',
-		tone: 'active'
-	};
-}
-
-export function librarySeasonState(
-	card: FolderCard,
-	dashboard: DashboardSummaryPayload
-): HumanSeasonState {
-	const sampleJobs = dashboardJobs(dashboard, 'sample');
-	const encodeJobs = dashboardJobs(dashboard, 'encode');
-	if (
-		[...encodeJobs.running, ...encodeJobs.queued].some((job) => matchesPrefix(job, card.prefix))
-	) {
-		return libraryCompressingState(card);
-	}
-	if (sampleJobs.running.some((job) => matchesPrefix(job, card.prefix) && isRunningJob(job))) {
-		return {
-			key: 'making_test',
-			label: 'Creating sample',
-			detail: 'One representative episode is being compressed into comparison clips now.',
-			tone: 'active'
-		};
-	}
-	const waitingSampleJob = [...sampleJobs.running, ...sampleJobs.queued].find(
-		(job) => matchesPrefix(job, card.prefix) && isWaitingJob(job)
-	);
-	if (waitingSampleJob) {
-		const retrying = jobStatus(waitingSampleJob) === 'retry_backoff';
-		return {
-			key: 'sample_waiting',
-			label: 'Sample waiting',
-			detail: retrying
-				? 'The last attempt stopped. Mediaforce will retry this sample shortly.'
-				: 'This sample has not started. It is waiting for an available computer.',
-			tone: retrying ? 'attention' : 'quiet'
-		};
-	}
-	if (sampleJobs.ready.some((job) => matchesPrefix(job, card.prefix))) {
-		return {
-			key: 'ready_to_compare',
-			label: 'Ready to review',
-			detail: 'Compare the original and the sample.',
-			tone: 'ready'
-		};
-	}
-
-	const promoted = numberValue(card.statuses.promoted);
-	if (
-		card.workflow_state?.primary_lane === 'complete' ||
-		(card.item_count > 0 && promoted >= card.item_count)
-	) {
-		return {
-			key: 'finished',
-			label: 'Finished',
-			detail: 'Every episode is in place.',
-			tone: 'success'
-		};
-	}
-	if (card.workflow_state?.primary_lane === 'attention') {
-		return {
-			key: 'needs_help',
-			label: 'Needs a little help',
-			detail: 'Open the season for one clear recovery step.',
-			tone: 'attention',
-			recoveryKind: 'season'
-		};
-	}
-	if (card.workflow_state?.primary_lane === 'blocked') {
-		return {
-			key: 'needs_help',
-			label: 'Needs attention',
-			detail: card.workflow_state.blockers.join(' ') || card.workflow_state.detail,
-			tone: 'attention',
-			recoveryKind: 'files'
-		};
-	}
-	if (card.workflow_state?.primary_lane === 'encode') {
-		return {
-			key: 'ready_to_make',
-			label: 'Ready to compress',
-			detail: 'The season has an approved setup and can be compressed.',
-			tone: 'ready'
-		};
-	}
-	if (card.workflow_state?.primary_lane === 'validate') {
-		return {
-			key: 'ready_to_check',
-			label: 'Ready to check',
-			detail: 'The new episodes are ready for a safety check.',
-			tone: 'ready'
-		};
-	}
-	if (card.workflow_state?.primary_lane === 'promote') {
-		return {
-			key: 'ready_to_finish',
-			label: 'Ready to replace',
-			detail: 'The smaller episodes passed their checks.',
-			tone: 'ready'
-		};
-	}
-	if (card.workflow_state?.primary_lane === 'processing') {
-		return libraryCompressingState(card);
-	}
-	if (card.workflow_state?.primary_lane === 'mixed') {
-		return {
-			key: 'ready_to_make',
-			label: libraryCopy.ready,
-			detail: 'This season has more than one step ready in Studio.',
-			tone: 'ready'
-		};
-	}
-
-	const badge = text(card.review_badge_label).toLowerCase();
-	if (badge.includes('ready to review')) {
-		return {
-			key: 'ready_to_compare',
-			label: 'Ready to review',
-			detail: 'Compare the original and the sample.',
-			tone: 'ready'
-		};
-	}
-	if (badge.includes('approved')) {
-		return {
-			key: 'ready_to_make',
-			label: 'Sample approved',
-			detail: 'The rest of the season can be compressed.',
-			tone: 'ready'
-		};
-	}
-	if (badge.includes('validate')) {
-		return {
-			key: 'ready_to_check',
-			label: 'Ready to check',
-			detail: 'The new episodes are ready for a safety check.',
-			tone: 'ready'
-		};
-	}
-	if (badge.includes('rerun') || badge.includes('attention')) {
-		return {
-			key: 'needs_help',
-			label: 'Needs a little help',
-			detail: 'Open the season for one clear recovery step.',
-			tone: 'attention',
-			recoveryKind: badge.includes('rerun') ? 'test' : 'season'
-		};
-	}
-	return {
-		key: 'needs_test',
-		label: 'Needs sample',
-		detail: 'Choose a size, then compare one sample first.',
-		tone: 'quiet'
-	};
-}
-
 export interface WaitingReasons {
 	needsYou: EncodeUnfinishedGroup[];
 	waiting: EncodeUnfinishedGroup[];
@@ -2134,224 +1896,6 @@ export function waitingScopeName(jobPrefix: string): string {
 	return identity.showPrefix === jobPrefix.replace(/\/+$/, '')
 		? `all of ${identity.show}`
 		: `${identity.show} ${identity.season}`;
-}
-
-/**
- * A job over a wider scope, such as the whole show, is not working on a season whose episodes are all
- * held or finished; the server's workflow state already says which.
- */
-function jobOwnsScope(
-	job: EncodeQueueJob | null | undefined,
-	prefix: string,
-	workflowState: string | undefined
-): boolean {
-	if (!job) return false;
-	const jobPrefix = job.prefix.replace(/\/+$/, '');
-	const wider = jobPrefix !== prefix && (jobPrefix === '' || prefix.startsWith(`${jobPrefix}/`));
-	return !wider || (workflowState !== 'held' && workflowState !== 'complete');
-}
-
-export function detailSeasonState(
-	folder: FolderPayload,
-	status: FolderStatusPayload
-): HumanSeasonState {
-	const workflow = status.workflow_state ?? folder.workflow_state;
-	const encodeJob = jobOwnsScope(folder.encode_job, folder.prefix, workflow?.state)
-		? folder.encode_job
-		: null;
-	const sampleJob = status.calibration_job ?? folder.calibration_job;
-	const retryableSample = status.retryable_sample_job;
-	const calibration = record(folder.calibration);
-	const reviewGate = record(folder.review_gate);
-	const draftHash = text(calibration.draft_hash);
-	const acceptedHash = text(calibration.accepted_draft_hash);
-	const priorTestJobId = text(calibration.job_id);
-	const reviewGateStatus = text(reviewGate.status);
-	const exactEpisode = folder.media_scope?.match === 'exact_item';
-	// A finished sample's job leaves the payload after an hour; the saved sample keeps its finish time.
-	const liveSampleTimestamp = jobTimestamp(sampleJob);
-	const sampleTimestamp = Number.isFinite(liveSampleTimestamp)
-		? liveSampleTimestamp
-		: Date.parse(text(calibration.sample_finished_at));
-	const encodeFailureTimestamp = jobTimestamp(encodeJob);
-	const sampleSupersedesEncodeFailure =
-		Number.isFinite(sampleTimestamp) &&
-		Number.isFinite(encodeFailureTimestamp) &&
-		sampleTimestamp > encodeFailureTimestamp &&
-		(isActiveJob(sampleJob) ||
-			reviewGateStatus === 'needs_approval' ||
-			(draftHash && draftHash !== acceptedHash));
-
-	if (isActiveJob(encodeJob) || workflow?.primary_lane === 'processing') {
-		return {
-			key: 'making_season',
-			label: exactEpisode ? 'Compressing the episode' : 'Compressing the season',
-			detail: exactEpisode
-				? 'The smaller episode is being compressed now.'
-				: 'The smaller episodes are being compressed now.',
-			tone: 'active'
-		};
-	}
-	if (
-		(isFailedJob(encodeJob) || workflow?.primary_lane === 'attention') &&
-		!sampleSupersedesEncodeFailure
-	) {
-		return {
-			key: 'needs_help',
-			label: exactEpisode ? 'The episode stopped' : 'The season stopped',
-			detail: exactEpisode
-				? 'Nothing was replaced. Try this episode again.'
-				: 'Completed episodes are safe. Try the unfinished work again.',
-			tone: 'attention',
-			recoveryKind: 'season'
-		};
-	}
-	// A blocked file is remade only after a fresh sample is approved, so an
-	// unapproved sample ready for review comes first; the held file's question
-	// stays on screen below it.
-	const freshSampleAwaitsReview =
-		Boolean(draftHash) &&
-		draftHash !== acceptedHash &&
-		!isActiveJob(sampleJob) &&
-		reviewAvailability(folder).isBrowserReady;
-	if (workflow?.primary_lane === 'blocked' && !freshSampleAwaitsReview) {
-		return {
-			key: 'needs_help',
-			label: 'Needs attention',
-			detail: workflow.blockers.join(' ') || workflow.detail,
-			tone: 'attention',
-			recoveryKind: 'files'
-		};
-	}
-	if (workflow?.primary_lane === 'validate') {
-		return {
-			key: 'ready_to_check',
-			label: 'Ready to check',
-			detail: exactEpisode
-				? 'The new episode is ready for a safety check.'
-				: 'The new episodes are ready for a safety check.',
-			tone: 'ready'
-		};
-	}
-	if (workflow?.primary_lane === 'promote') {
-		const integrity = seasonPromotionIntegrity(status);
-		if (!integrity.canFinish) {
-			return {
-				key: 'finish_blocked',
-				label: integrity.available
-					? exactEpisode
-						? 'Episode not ready'
-						: 'Season not ready'
-					: exactEpisode
-						? 'Checking the episode'
-						: 'Checking the season',
-				detail: integrity.available
-					? exactEpisode
-						? 'The episode must be accounted for before its file is replaced.'
-						: 'Each episode is checked separately. Files that are not ready stay untouched.'
-					: exactEpisode
-						? 'Mediaforce is confirming the episode before enabling finish.'
-						: 'Mediaforce is confirming every episode before enabling finish.',
-				tone: 'attention'
-			};
-		}
-		return {
-			key: 'ready_to_finish',
-			label: 'Ready to replace',
-			detail: exactEpisode
-				? 'The smaller episode passed its checks.'
-				: 'The smaller episodes passed their checks.',
-			tone: 'ready'
-		};
-	}
-	if (workflow?.primary_lane === 'complete' || workflow?.state === 'complete') {
-		return {
-			key: 'finished',
-			label: 'Finished',
-			detail: exactEpisode ? 'The episode is in place.' : 'Every episode is in place.',
-			tone: 'success'
-		};
-	}
-	if (isWaitingJob(sampleJob) || status.calibration_status === 'queued') {
-		const retrying = jobStatus(sampleJob) === 'retry_backoff';
-		return {
-			key: 'sample_waiting',
-			label: 'Sample waiting',
-			detail: retrying
-				? 'The last attempt stopped. Mediaforce will retry this sample shortly.'
-				: 'This sample has not started. It is waiting for an available computer.',
-			tone: retrying ? 'attention' : 'quiet'
-		};
-	}
-	if (isRunningJob(sampleJob) || status.calibration_status === 'running') {
-		return {
-			key: 'making_test',
-			label: 'Creating sample',
-			detail: exactEpisode
-				? 'This episode is being compressed into comparison clips now.'
-				: 'One representative episode is being compressed into comparison clips now.',
-			tone: 'active'
-		};
-	}
-	if (retryableSample || isFailedJob(sampleJob) || folder.failed_target_size_search) {
-		return {
-			key: 'needs_help',
-			label: 'Sample needs retry',
-			detail: 'Nothing was replaced. You can retry the same sample.',
-			tone: 'attention',
-			recoveryKind: 'test'
-		};
-	}
-	const review = reviewAvailability(folder);
-	const reviewReady = review.isBrowserReady;
-	const currentRisk = qualityRisk(folder);
-	const currentRiskStatus = text(record(currentRisk?.operator_decision).status).toLowerCase();
-	const currentRiskBlocksApproval =
-		Boolean(currentRisk?.blocked) ||
-		['rejected', 'needs_operator_review'].includes(currentRiskStatus);
-	const currentDraftIsApproved =
-		!currentRiskBlocksApproval &&
-		reviewGateStatus !== 'missing_review_media' &&
-		(booleanValue(reviewGate.can_confirm_full) || (draftHash && draftHash === acceptedHash));
-	if (currentDraftIsApproved) {
-		return {
-			key: 'ready_to_make',
-			label: 'Sample approved',
-			detail: exactEpisode
-				? 'This episode can be compressed.'
-				: 'The rest of the season can be compressed.',
-			tone: 'ready'
-		};
-	}
-	if (
-		review.recovery ||
-		reviewGateStatus === 'missing_review_media' ||
-		(priorTestJobId && !draftHash && !reviewReady)
-	) {
-		return {
-			key: 'needs_help',
-			label: 'Sample needs retry',
-			detail:
-				review.recovery?.detail ??
-				'The previous sample ended before its comparison clips were ready.',
-			tone: 'attention',
-			recoveryKind: 'test'
-		};
-	}
-	if (reviewReady && draftHash && !currentDraftIsApproved) {
-		return {
-			key: 'ready_to_compare',
-			label: 'Ready to review',
-			detail: 'Compare the original and the sample.',
-			tone: 'ready'
-		};
-	}
-	return {
-		key: 'needs_test',
-		label: 'Needs sample',
-		detail: 'Choose a size, then compare one sample first.',
-		tone: 'quiet'
-	};
 }
 
 export function predictedEpisodeSize(folder: FolderPayload): number {
@@ -2461,95 +2005,4 @@ export function approvalStartPlan(input: {
 		);
 	}
 	return null;
-}
-
-export function plainFailureMessage(folder: FolderPayload, status: FolderStatusPayload): string {
-	const targetConstraint = targetConstraintSummary(folder, status);
-	if (targetConstraint) return targetConstraint.detail;
-	const retryable = record(status.retryable_sample_job);
-	const sampleJob = record(status.calibration_job ?? folder.calibration_job);
-	const encodeJob = record(folder.encode_job);
-	const calibration = record(folder.calibration);
-	const reviewGate = record(folder.review_gate);
-	const retryableError = text(retryable.error);
-	const sampleError = retryableError || text(sampleJob.error);
-	const encodeError = text(encodeJob.error);
-	const sampleErrorJob = retryableError ? retryable : sampleJob;
-	const sampleTimestamp = jobTimestamp(sampleErrorJob);
-	const encodeTimestamp = jobTimestamp(encodeJob);
-	const sampleErrorIsNewer =
-		Boolean(sampleError) &&
-		(!encodeError ||
-			(Number.isFinite(sampleTimestamp) &&
-				Number.isFinite(encodeTimestamp) &&
-				sampleTimestamp > encodeTimestamp));
-	const raw = sampleErrorIsNewer ? sampleError : encodeError || sampleError;
-	const normalized = raw.toLowerCase();
-	if (
-		(!encodeError || sampleErrorIsNewer) &&
-		(text(reviewGate.status) === 'missing_review_media' ||
-			(text(calibration.job_id) && !text(calibration.draft_hash)))
-	) {
-		return 'The previous sample ended before its comparison clips were ready. Nothing was replaced.';
-	}
-	if (!raw) return 'The work stopped before it finished. Your completed files are still safe.';
-	if (normalized.includes('restart') || normalized.includes('interrupted')) {
-		return 'The work stopped when Mediaforce restarted. Your completed files are still safe.';
-	}
-	if (normalized.includes('permission') || normalized.includes('denied')) {
-		return 'The selected computer could not reach one of the files. Check its connection, then try again.';
-	}
-	if (normalized.includes('final output size missed the approved target band')) {
-		if (normalized.includes('status=under_target')) {
-			return 'The finished file was smaller than the approved range. Choose a fresh size or quality preference and create another sample.';
-		}
-		if (normalized.includes('status=over_target')) {
-			return 'The finished file was larger than the approved range. Choose a fresh size or quality preference and create another sample.';
-		}
-		return 'Mediaforce could not verify the finished file against the approved size range. Choose a fresh size or quality preference and create another sample.';
-	}
-	if (normalized.includes('suitable crf') || normalized.includes('quality target')) {
-		return 'That size goal was too small for this episode. Try a roomier goal.';
-	}
-	if (normalized.includes('stopped')) {
-		return 'The work was stopped before it finished. Nothing was replaced.';
-	}
-	return 'The work stopped before it finished. Nothing was replaced, and you can try again.';
-}
-
-export function activeSeasonCards(
-	cards: FolderCard[],
-	dashboard: DashboardSummaryPayload
-): Array<{ card: FolderCard; state: HumanSeasonState }> {
-	return cards
-		.map((card) => ({ card, state: librarySeasonState(card, dashboard) }))
-		.filter(({ state }) =>
-			[
-				'sample_waiting',
-				'making_test',
-				'ready_to_compare',
-				'ready_to_make',
-				'making_season',
-				'ready_to_check',
-				'finish_blocked',
-				'ready_to_finish',
-				'needs_help'
-			].includes(state.key)
-		)
-		.sort((left, right) => {
-			const order: Record<HumanSeasonStateKey, number> = {
-				making_test: 0,
-				making_season: 1,
-				sample_waiting: 2,
-				ready_to_compare: 3,
-				needs_help: 4,
-				finish_blocked: 5,
-				ready_to_make: 6,
-				ready_to_check: 7,
-				ready_to_finish: 8,
-				finished: 9,
-				needs_test: 10
-			};
-			return order[left.state.key] - order[right.state.key];
-		});
 }

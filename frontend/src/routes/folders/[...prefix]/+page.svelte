@@ -3,7 +3,6 @@
 	import { resolve } from '$app/paths';
 	import { fetchJson } from '$lib/api/client';
 	import {
-		initialDashboard,
 		initialFolderPayload,
 		initialFoldersPayload,
 		initialFolderStatusPayload,
@@ -12,7 +11,6 @@
 	} from '$lib/api/placeholders';
 	import type {
 		DashboardFoldersPayload,
-		DashboardSummaryPayload,
 		FolderPayload,
 		FolderStatusPayload,
 		HostsPayload,
@@ -30,7 +28,6 @@
 	const mode = $derived(data.mode);
 	const prefix = $derived(data.prefix);
 
-	let dashboard = $state<DashboardSummaryPayload>(initialDashboard);
 	let foldersPayload = $state<DashboardFoldersPayload>(initialFoldersPayload);
 	let folder = $state<FolderPayload>(initialFolderPayload(''));
 	let status = $state<FolderStatusPayload>(initialFolderStatusPayload(''));
@@ -86,12 +83,9 @@
 		foldersPending = true;
 		loadError = null;
 		try {
-			const [dashboardPayload, foldersPayloadResult] = await Promise.all([
-				fetchJson<DashboardSummaryPayload>('/api/dashboard?preview_limit=0'),
-				fetchJson<DashboardFoldersPayload>('/api/dashboard/folders')
-			]);
+			const foldersPayloadResult =
+				await fetchJson<DashboardFoldersPayload>('/api/dashboard/folders');
 			if (generation !== hydrationGeneration) return;
-			dashboard = dashboardPayload;
 			foldersPayload = foldersPayloadResult;
 		} catch (error) {
 			if (generation === hydrationGeneration) {
@@ -112,19 +106,10 @@
 		try {
 			const needsSeriesContext = isSeriesPrefix(currentPrefix);
 			const seriesContextPromise = needsSeriesContext
-				? Promise.all([
-						fetchJson<DashboardSummaryPayload>('/api/dashboard?preview_limit=0'),
-						fetchJson<DashboardFoldersPayload>('/api/dashboard/library/details')
-					]).then(([dashboardPayload, libraryPayload]) => ({
-						dashboardPayload,
-						libraryPayload,
-						error: ''
-					}))
-				: Promise.resolve({
-						dashboardPayload: initialDashboard,
-						libraryPayload: initialFoldersPayload,
-						error: ''
-					});
+				? fetchJson<DashboardFoldersPayload>('/api/dashboard/library/details').then(
+						(libraryPayload) => ({ libraryPayload, error: '' })
+					)
+				: Promise.resolve({ libraryPayload: initialFoldersPayload, error: '' });
 			const [folderPayload, statusPayload, integrityPayload, hostsPayload, seriesContext] =
 				await Promise.all([
 					fetchJson<FolderPayload>(`/api/folders/${encodedPrefix}`),
@@ -137,7 +122,6 @@
 					),
 					fetchJson<HostsPayload>('/api/hosts?compact=1').catch(() => initialHosts),
 					seriesContextPromise.catch((error) => ({
-						dashboardPayload: initialDashboard,
 						libraryPayload: initialFoldersPayload,
 						error:
 							error instanceof Error
@@ -150,7 +134,6 @@
 			status = { ...statusPayload, staged_integrity: integrityPayload };
 			integrityPoll.reset(statusPayload.staged_integrity);
 			hosts = hostsPayload;
-			dashboard = seriesContext.dashboardPayload;
 			foldersPayload = seriesContext.libraryPayload;
 			seriesContextError = seriesContext.error;
 		} catch (error) {
@@ -226,7 +209,6 @@
 			folder = initialFolderPayload(currentPrefix);
 			status = initialFolderStatusPayload(currentPrefix);
 			hosts = initialHosts;
-			dashboard = initialDashboard;
 			foldersPayload = initialFoldersPayload;
 			void hydrateStudio(currentPrefix);
 			const refreshTimer = window.setInterval(() => {
@@ -237,7 +219,6 @@
 				hydrationGeneration += 1;
 			};
 		} else {
-			dashboard = initialDashboard;
 			foldersPayload = initialFoldersPayload;
 			void hydrateDirectory();
 		}
@@ -302,7 +283,6 @@
 			{folder}
 			{status}
 			{hosts}
-			{dashboard}
 			{foldersPayload}
 			{folderPending}
 			loadError={loadError ?? undefined}
@@ -311,7 +291,7 @@
 		/>
 	{/if}
 {:else}
-	<SeasonLibrary {dashboard} {foldersPayload} {foldersPending} loadError={loadError ?? undefined} />
+	<SeasonLibrary {foldersPayload} {foldersPending} loadError={loadError ?? undefined} />
 {/if}
 
 <style>

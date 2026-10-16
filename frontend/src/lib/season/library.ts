@@ -1,6 +1,7 @@
 import { libraryCopy } from '$lib/library-copy';
 import type {
 	DashboardFoldersPayload,
+	DashboardSummaryPayload,
 	FolderCard,
 	LifecycleState,
 	SeasonLifecycleState
@@ -39,8 +40,8 @@ export function seasonHoldLabel(season: SeasonLifecycleState | null | undefined)
 	return `${season.held_candidate_count} held`;
 }
 
-// Season states that only say no work has started; a hold explains them better.
-const STATES_A_HOLD_EXPLAINS = new Set(['needs_test', 'ready_to_make']);
+// Season states that only say no work has started, or no state at all; a hold explains them better.
+const STATES_A_HOLD_EXPLAINS = new Set(['needs_test', 'ready_to_make', 'unavailable']);
 
 /**
  * A held season's badge, unless the season has its own work or problem to show, such as a sample or
@@ -85,6 +86,58 @@ function normalizeLibraryTone(tone: string): TvLibraryStateGroup['tone'] {
 	if (tone === 'active') return 'active';
 	if (tone === 'wait') return 'wait';
 	return 'idle';
+}
+
+function jobsKey(lanes: Record<string, unknown[] | undefined>): string {
+	return Object.entries(lanes)
+		.flatMap(([lane, jobs]) =>
+			(jobs ?? []).map((job) => {
+				const row = (job ?? {}) as { job_id?: unknown; status?: unknown };
+				return `${lane}:${String(row.job_id ?? '')}:${String(row.status ?? '')}`;
+			})
+		)
+		.sort()
+		.join('|');
+}
+
+/** The sample and compression jobs, with their statuses, that a library card's state can follow. */
+export function libraryJobsKey(dashboard: DashboardSummaryPayload): string {
+	const calibration = dashboard.calibration_queue;
+	const encode = dashboard.encode_queue;
+	return jobsKey({
+		sampleRunning: calibration.sample.running,
+		sampleQueued: calibration.sample.queued,
+		sampleReview: calibration.sample.pending_review,
+		sampleFailed: calibration.sample.recent_failed,
+		fullRunning: calibration.full.running,
+		fullQueued: calibration.full.queued,
+		fullReview: calibration.full.pending_review,
+		fullFailed: calibration.full.recent_failed,
+		encodeRunning: encode.running,
+		encodeQueued: encode.queued,
+		encodeRecent: encode.recent
+	});
+}
+
+/**
+ * Reports when the library's cards need reading again: the cheap job summary is polled, and the card
+ * list, whose server state each card shows, is read again only when a job starts, stops or changes status.
+ */
+export function libraryJobsPollTracker() {
+	let lastKey: string | null = null;
+	return {
+		/** Records the job summary the cards were read with. */
+		reset(dashboard: DashboardSummaryPayload) {
+			lastKey = libraryJobsKey(dashboard);
+		},
+		/** Records a poll and reports whether its jobs differ from the previous read. */
+		changed(dashboard: DashboardSummaryPayload): boolean {
+			const key = libraryJobsKey(dashboard);
+			const changed = lastKey !== null && key !== lastKey;
+			lastKey = key;
+			return changed;
+		}
+	};
 }
 
 export function mergeFolderPayloads(

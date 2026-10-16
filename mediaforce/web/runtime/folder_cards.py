@@ -47,6 +47,7 @@ class FolderCard:
     media_scope: dict[str, object] | None = None
     details_loading: bool = False
     estimate_unavailable_count: int = 0
+    page_state: dict[str, object] | None = None
 
 
 @dataclass(slots=True)
@@ -625,6 +626,7 @@ def _copy_folder_card(card: FolderCard, *, include_review_badges: bool = True) -
         media_scope=deepcopy(card.media_scope),
         details_loading=card.details_loading,
         estimate_unavailable_count=card.estimate_unavailable_count,
+        page_state=deepcopy(card.page_state),
     )
 
 

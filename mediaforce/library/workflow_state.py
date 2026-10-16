@@ -1,7 +1,7 @@
 import json
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping, NamedTuple
 
 from sqlalchemy import Select, literal_column, or_, select
 
@@ -83,6 +83,13 @@ class EncodeEligibility:
     blocked: bool = False
 
 
+class ScopeJobLane(NamedTuple):
+    """The encode lane jobs give a scope, and the run that decided it."""
+    lane: WorkflowLane
+    detail: str
+    job_id: str
+
+
 @dataclass(frozen=True, slots=True)
 class ScopeJobStates:
     """The encode lane from every job touching a scope, and from only the jobs at or inside it.
@@ -90,8 +97,8 @@ class ScopeJobStates:
     A job over a wider scope, such as a whole show, cannot be working on a season whose files are all
     held or already finished, so for such a season only its own jobs count.
     """
-    overlapping: tuple[WorkflowLane, str] | None
-    own: tuple[WorkflowLane, str] | None
+    overlapping: ScopeJobLane | None
+    own: ScopeJobLane | None
 
 
 NO_SCOPE_JOBS = ScopeJobStates(overlapping=None, own=None)
@@ -135,6 +142,8 @@ class FolderWorkflowState:
     next_action: WorkflowNextAction
     blockers: list[str]
     items: tuple[ItemWorkflowState, ...]
+    # The encode run whose state set the lane, when a job did.
+    source_job_id: str | None = None
 
     def to_payload(self) -> WorkflowPayload:
         return {
@@ -149,6 +158,7 @@ class FolderWorkflowState:
             "state_counts": dict(self.state_counts),
             "next_action": self.next_action.to_payload(),
             "blockers": list(self.blockers),
+            "source_job_id": self.source_job_id,
         }
 
 
@@ -164,7 +174,7 @@ def build_folder_workflow_state(
         _derive_item_workflow_state(row, candidate_eligibility)
         for row in _load_item_rows(connection, scope)
     )
-    job_states = _load_encode_job_state(connection, scope)
+    job_states = _load_encode_job_state(connection, scope, settled_paths=_settled_paths(item_states))
     return _build_folder_state(scope.prefix, item_states, job_states=job_states)
 
 
@@ -196,13 +206,11 @@ def build_folder_workflow_states_for_scopes(
         return {}
     rows = _load_item_rows_for_scopes(connection, scopes)
     rows_by_prefix = _group_item_rows_by_scope(scopes, rows)
-    job_states = _load_encode_job_states(connection, scopes)
+    states_by_row = {id(row): _derive_item_workflow_state(row, candidate_eligibility) for row in rows}
+    job_states = _load_encode_job_states(connection, scopes, settled_paths=_settled_paths(states_by_row.values()))
     result: dict[str, FolderWorkflowState] = {}
     for scope in scopes:
-        item_states = tuple(
-            _derive_item_workflow_state(row, candidate_eligibility)
-            for row in rows_by_prefix[scope.prefix]
-        )
+        item_states = tuple(states_by_row[id(row)] for row in rows_by_prefix[scope.prefix])
         result[scope.prefix] = _build_folder_state(
             scope.prefix,
             item_states,
@@ -382,8 +390,8 @@ def _build_folder_state(
         or all(item.state == "missing" for item in items)
     )
     job_state = job_states.overlapping if wider_jobs_apply else job_states.own
-    job_lane = job_state[0] if job_state is not None else None
-    job_detail = job_state[1] if job_state is not None else None
+    job_lane = job_state.lane if job_state is not None else None
+    job_detail = job_state.detail if job_state is not None else None
     counts = {
         "items": len(items),
         "encode_candidates": state_counts.get("encode_candidate", 0),
@@ -415,6 +423,7 @@ def _build_folder_state(
         next_action=action,
         blockers=blockers,
         items=items,
+        source_job_id=job_state.job_id if job_state is not None and lane == job_state.lane else None,
     )
 
 
@@ -552,16 +561,32 @@ def _mixed_next_action(prefix: str, lane: WorkflowLane) -> WorkflowNextAction:
     return WorkflowNextAction("review_scope", "Review scope", True, prefix)
 
 
-def _load_encode_job_state(connection: DBClient, scope: MediaScope) -> ScopeJobStates:
+def _settled_paths(items: Iterable[ItemWorkflowState]) -> frozenset[str]:
+    """Files no run's problem can still be about: published, or gone from disk."""
+    return frozenset(item.rel_path for item in items if item.state in {"complete", "missing"})
+
+
+def _load_encode_job_state(
+        connection: DBClient,
+        scope: MediaScope,
+        *,
+        settled_paths: frozenset[str] = frozenset(),
+) -> ScopeJobStates:
     rows = _workflow_encode_job_rows(connection)
     return _scope_job_states(
         scope,
         [row for row in rows if scopes_overlap(scope, str(row["prefix"] or ""))],
         _manifest_files_lookup(),
+        settled_paths,
     )
 
 
-def _load_encode_job_states(connection: DBClient, scopes: list[MediaScope]) -> dict[str, ScopeJobStates]:
+def _load_encode_job_states(
+        connection: DBClient,
+        scopes: list[MediaScope],
+        *,
+        settled_paths: frozenset[str] = frozenset(),
+) -> dict[str, ScopeJobStates]:
     rows = _workflow_encode_job_rows(connection)
     part_files = _manifest_files_lookup()
     scoped_rows = [(row, media_scope_from_prefix(str(row["prefix"] or ""), match="descendants")) for row in rows]
@@ -570,6 +595,7 @@ def _load_encode_job_states(connection: DBClient, scopes: list[MediaScope]) -> d
             scope,
             [row for row, job_scope in scoped_rows if scopes_overlap(scope, job_scope)],
             part_files,
+            settled_paths,
         )
         for scope in scopes
     }
@@ -607,15 +633,19 @@ def _scope_job_states(
         scope: MediaScope,
         overlapping_rows: list[DBRow],
         part_files: Callable[[DBRow], tuple[str, ...]],
+        settled_paths: frozenset[str] = frozenset(),
 ) -> ScopeJobStates:
     own_rows = [row for row in overlapping_rows if not _job_is_wider(scope, str(row["prefix"] or ""))]
     return ScopeJobStates(
         overlapping=_encode_job_workflow_state(
             overlapping_rows,
             counts_for_scope=_wider_run_filter(scope, overlapping_rows, part_files),
-            attention_for_scope=_wider_run_attention(scope, overlapping_rows, part_files),
+            attention_for_scope=_wider_run_attention(scope, overlapping_rows, part_files, settled_paths),
         ),
-        own=_encode_job_workflow_state(own_rows),
+        own=_encode_job_workflow_state(
+            own_rows,
+            attention_for_scope=_wider_run_attention(scope, own_rows, part_files, settled_paths),
+        ),
     )
 
 
@@ -659,19 +689,21 @@ def _wider_run_attention(
         scope: MediaScope,
         overlapping_rows: list[DBRow],
         part_files: Callable[[DBRow], tuple[str, ...]],
+        settled_paths: frozenset[str] = frozenset(),
 ) -> Callable[[DBRow], DBRow | None]:
     """Which run's problem the scope shows, given the newest run, which needs attention.
 
     A run over a whole show needs attention for a season only while one of the season's files still
     has a problem in it. Each file takes its own newest part across runs, as on the Episodes list, so
     a newer run that encoded the file settles an older run's problem with it, and a newer run that
-    never reached the file leaves that problem showing. When any part in question cannot be traced to
-    its files, the newest run speaks for the scope, as before.
+    never reached the file leaves that problem showing. A file since published or gone from disk,
+    such as one the owner kept, has no problem left. A run's own scope keeps a problem that no file
+    accounts for. When any part in question cannot be traced to its files, the newest run speaks for
+    the scope, as before.
     """
 
     def attention_run(latest: DBRow) -> DBRow | None:
-        if not _job_is_wider(scope, str(latest["prefix"] or "")):
-            return latest
+        wider = _job_is_wider(scope, str(latest["prefix"] or ""))
         runs = [row for row in overlapping_rows if row["job_kind"] in DISPLAY_ENCODE_JOB_KINDS]
         # Runs older than the oldest one that needs attention cannot bring a problem back.
         oldest = max(index for index, run in enumerate(runs) if run["status"] in ATTENTION_JOB_STATUSES)
@@ -686,7 +718,13 @@ def _wider_run_attention(
                 for rel_path in files:
                     if path_matches_scope(rel_path, scope):
                         newest_by_file.setdefault(rel_path, (str(part["status"]), run))
-        return next((run for status, run in newest_by_file.values() if status in ATTENTION_JOB_STATUSES), None)
+        problems = {
+            rel_path: run for rel_path, (status, run) in newest_by_file.items() if status in ATTENTION_JOB_STATUSES
+        }
+        open_problem = next((run for rel_path, run in problems.items() if rel_path not in settled_paths), None)
+        if not wider and not problems:
+            return latest
+        return open_problem
 
     return attention_run
 
@@ -729,7 +767,7 @@ def _encode_job_workflow_state(
         *,
         counts_for_scope: Callable[[DBRow], bool] = lambda _row: True,
         attention_for_scope: Callable[[DBRow], DBRow | None] = lambda latest: latest,
-) -> tuple[WorkflowLane, str] | None:
+) -> ScopeJobLane | None:
     """The scope's encode lane, naming every reason its files are not finished.
 
     Any active job, including a folder's queued or running part, keeps the scope working. Whether
@@ -755,12 +793,12 @@ def _encode_job_workflow_state(
         owner_groups = [group for group in groups if group.get("needs_owner")]
         if owner_groups:
             detail = f"{detail} Needs you: {unfinished_breakdown_summary(owner_groups)}."
-        return "processing", detail
+        return ScopeJobLane("processing", detail, str(active["parent_job_id"] or active["job_id"]))
     if latest is not None and latest["status"] in ATTENTION_JOB_STATUSES:
         run = attention_for_scope(latest)
         if run is None:
             return None
         groups = unfinished_breakdown_groups(run["progress_json"])
         error = unfinished_breakdown_summary(groups) or str(run["error"] or "Encode job needs operator attention.")
-        return "attention", f"Encode job is {run['status']} for {run['prefix']}: {error}"
+        return ScopeJobLane("attention", f"Encode job is {run['status']} for {run['prefix']}: {error}", str(run["job_id"]))
     return None

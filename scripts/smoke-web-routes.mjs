@@ -1976,7 +1976,8 @@ async function checkLibraryStructureWithoutDashboard(
       }),
       expectedMarker,
     );
-    if (!state.hasMarker || state.stillOpening || !state.dashboardBlocked) {
+    // The library no longer reads the dashboard summary; a stalled one must still never hold it.
+    if (!state.hasMarker || state.stillOpening) {
       throw new Error(
         `Library structure waited for dashboard hydration: ${JSON.stringify(state)}`,
       );
@@ -2276,6 +2277,24 @@ async function checkUnderTargetSampleRecovery(baseUrl, timeoutMs) {
       payload.calibration_status = confirmed ? "queued" : "idle";
       payload.retryable_sample_job = null;
       payload.workflow_state = null;
+      // The server's page state for a sample that stopped on its size goal, then for the fresh one.
+      payload.page_state = confirmed
+        ? {
+            key: "sample_waiting",
+            tone: "quiet",
+            recovery_kind: null,
+            primary_action: null,
+            failure: null,
+            source_job: null,
+          }
+        : {
+            key: "needs_help",
+            tone: "attention",
+            recovery_kind: "test",
+            primary_action: "choose_size",
+            failure: "bound_exhausted",
+            source_job: null,
+          };
       if (pathname === prefix) {
         originalIntent = payload.resolved_operator_intent.request;
         payload.calibration = null;

@@ -479,6 +479,30 @@ def calibration_job_belongs_to_current_process(job: dict[str, Any]) -> bool:
     return numeric_pid is not None and numeric_pid == os.getpid()
 
 
+SAMPLE_TARGET_SIZE_FAILURES = frozenset({"infeasible", "bound_exhausted", "quality_conflict"})
+# An older search recorded reaching a configured bound as "infeasible"; these reasons mean a bound.
+_LEGACY_BOUND_EXHAUSTION_REASONS = frozenset({
+    "smallest_quality_safe_candidate_over_target_band",
+    "largest_quality_safe_candidate_under_target_band",
+    "target_lower_bound_exceeds_source_relative_cap",
+    "source_relative_cap_consumed_by_non_video_budget",
+})
+
+
+def sample_target_size_failure(job: dict[str, Any] | None) -> str | None:
+    """How a stopped sample's size search ended, when the size goal itself stopped it."""
+    payload = object_dict(job)
+    if str(payload.get("status") or "") not in {"failed", "stopped"}:
+        return None
+    result = object_dict(payload.get("result"))
+    trace = object_dict(result.get("target_size_trace"))
+    target_status = str(result.get("target_size_status") or trace.get("status") or "").strip().lower()
+    selection_reason = str(trace.get("selection_reason") or "").strip().lower()
+    if target_status == "infeasible" and selection_reason in _LEGACY_BOUND_EXHAUSTION_REASONS:
+        target_status = "bound_exhausted"
+    return target_status if target_status in SAMPLE_TARGET_SIZE_FAILURES else None
+
+
 def retryable_saved_sample_job(job: dict[str, Any]) -> bool:
     status = str(job.get("status") or "").strip()
     if status not in {"failed", "stopped"}:
@@ -486,10 +510,7 @@ def retryable_saved_sample_job(job: dict[str, Any]) -> bool:
     mode = str(job.get("mode") or job.get("lane") or "sample").strip()
     if mode != "sample":
         return False
-    result = object_dict(job.get("result"))
-    trace = object_dict(result.get("target_size_trace"))
-    target_status = str(result.get("target_size_status") or trace.get("status") or "").strip().lower()
-    if target_status in {"infeasible", "bound_exhausted", "quality_conflict"}:
+    if sample_target_size_failure(job) is not None:
         return False
     action = str(job.get("action") or "").strip()
     return action in {"baseline", "ai_tune"}

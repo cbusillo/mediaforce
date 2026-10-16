@@ -43,6 +43,7 @@ from mediaforce.tuning.compression_intent import CompressionEvidenceRef, authori
 from mediaforce.tuning.content_intent_observations import record_visual_content_intent_observation
 from mediaforce.tuning.calibration_jobs import resolve_pending_review_job
 from mediaforce.tuning.size_goals import operator_intent_from_policy
+from mediaforce.web.runtime.job_runtime import sample_target_size_failure
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
 from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_queue_partition, \
     cadence_safety_partition, older_season_cadence_payload
@@ -3079,6 +3080,12 @@ def save_profile_action(
     }
 
 
+def quality_risk_blocks_production(contract: ActionPayload) -> bool:
+    """True when measured review facts or the owner's rejected review stop production under an approval."""
+    operator_status = str(object_dict(contract.get("operator_decision")).get("status") or "").strip().lower()
+    return _quality_risk_blocking_reason(contract) is not None or operator_status == "rejected"
+
+
 def _quality_risk_blocking_reason(contract: ActionPayload) -> str | None:
     gates = object_dict(contract.get("deterministic_gates"))
     if not bool(gates.get("blocked")):
@@ -3098,20 +3105,8 @@ def _failed_target_size_job_blocking_reason(
         calibration: ActionPayload,
 ) -> str | None:
     job_payload = object_dict(job)
-    if str(job_payload.get("status") or "") not in {"failed", "stopped"}:
-        return None
-    result = object_dict(job_payload.get("result"))
-    trace = object_dict(result.get("target_size_trace"))
-    target_status = str(result.get("target_size_status") or trace.get("status") or "").strip().lower()
-    selection_reason = str(trace.get("selection_reason") or "").strip().lower()
-    if target_status == "infeasible" and selection_reason in {
-        "smallest_quality_safe_candidate_over_target_band",
-        "largest_quality_safe_candidate_under_target_band",
-        "target_lower_bound_exceeds_source_relative_cap",
-        "source_relative_cap_consumed_by_non_video_budget",
-    }:
-        target_status = "bound_exhausted"
-    if target_status not in {"infeasible", "bound_exhausted", "quality_conflict"}:
+    target_status = sample_target_size_failure(job_payload)
+    if target_status is None:
         return None
     accepted_at = _parse_state_timestamp(calibration.get("accepted_at"))
     failed_at = _parse_state_timestamp(

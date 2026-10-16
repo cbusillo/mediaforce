@@ -6,17 +6,16 @@
 	import type {
 		AudioPresetPayload,
 		DashboardFoldersPayload,
-		DashboardSummaryPayload,
 		FolderCard,
 		LifecycleState
 	} from '$lib/api/types';
 	import {
 		folderHref,
 		formatFileSize,
-		librarySeasonState,
 		seasonIdentity,
 		seasonNumberLabel
 	} from '$lib/season/experience';
+	import { cardStateWording } from '$lib/season/page-state';
 	import {
 		buildShowCards,
 		compareSeasonCards,
@@ -44,7 +43,6 @@
 	type LifecycleMode = 'auto' | 'on' | 'off';
 
 	let {
-		dashboard,
 		foldersPayload,
 		foldersPending = false,
 		detailsPending = false,
@@ -52,7 +50,6 @@
 		detailsError = '',
 		onLifecycleSaved = () => undefined
 	}: {
-		dashboard: DashboardSummaryPayload;
 		foldersPayload: DashboardFoldersPayload;
 		foldersPending?: boolean;
 		detailsPending?: boolean;
@@ -222,9 +219,7 @@
 	}
 
 	function showLibraryStateGroup(showPrefix: string) {
-		const states = (groupedSeasons.get(showPrefix) ?? []).map((season) =>
-			librarySeasonState(season, dashboard)
-		);
+		const states = (groupedSeasons.get(showPrefix) ?? []).map((season) => cardStateWording(season));
 		return tvLibraryStateGroup(states);
 	}
 
@@ -669,7 +664,7 @@
 						{/if}
 
 						{#each selectedSeasonPreview as season, previewIndex (season.prefix)}
-							{@const state = librarySeasonState(season, dashboard)}
+							{@const state = cardStateWording(season)}
 							{@const seasonName = seasonIdentity(season.prefix).season}
 							{@const seasonLifecycle = season.lifecycle?.seasons?.[0]}
 							{@const holdLabel = seasonStateHoldLabel(seasonLifecycle, state)}
@@ -711,7 +706,7 @@
 									>
 										<StateBadge tone="wait" label={holdLabel} compact />
 									</span>
-								{:else if state.key !== 'needs_test'}
+								{:else if state.key !== 'needs_test' && state.key !== 'unavailable'}
 									<span class="season-state">
 										<StateBadge tone={normalizeTone(state.tone)} label={state.label} compact />
 									</span>

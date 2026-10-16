@@ -17,7 +17,6 @@
 	import type {
 		CompressionIntentLevel,
 		DashboardFoldersPayload,
-		DashboardSummaryPayload,
 		FolderPayload,
 		FolderStatusPayload,
 		HostsPayload,
@@ -46,7 +45,6 @@
 		compareRiskSummary,
 		compressionIntentContract,
 		currentOperatorIntent,
-		detailSeasonState,
 		encodeWaitingReasons,
 		waitingScopeName,
 		episodeLabel,
@@ -60,10 +58,8 @@
 		goalRequest,
 		isSizeGoalSelectionConfirmed,
 		isSeriesPrefix,
-		librarySeasonState,
 		measuredFollowupRequest,
 		overlappingCalibrationActivity,
-		plainFailureMessage,
 		predictedEpisodeSize,
 		qualityMemoryView,
 		resolvedTargetSummary,
@@ -94,6 +90,7 @@
 		type ReviewSizeAdjustmentDirection,
 		type SizeGoal
 	} from '$lib/season/experience';
+	import { cardStateWording, pageStateWording, plainFailureMessage } from '$lib/season/page-state';
 	import {
 		applySeriesLifecycle,
 		compareSeasonCards,
@@ -152,7 +149,6 @@
 		folder,
 		status,
 		hosts,
-		dashboard,
 		foldersPayload,
 		folderPending = false,
 		loadError,
@@ -162,7 +158,6 @@
 		folder: FolderPayload;
 		status: FolderStatusPayload;
 		hosts: HostsPayload;
-		dashboard: DashboardSummaryPayload;
 		foldersPayload: DashboardFoldersPayload;
 		folderPending?: boolean;
 		loadError?: string;
@@ -270,7 +265,6 @@
 						: 'Season remains protected'
 					: 'Compress the season'
 	);
-	const humanState = $derived(detailSeasonState(folder, status));
 	const waitingReasons = $derived(encodeWaitingReasons(folder.encode_job));
 	// A show-wide job can back a season page; say so rather than presenting its counts as the season's.
 	const waitingReasonsScope = $derived(
@@ -279,6 +273,13 @@
 			: ''
 	);
 	const promotionIntegrity = $derived(seasonPromotionIntegrity(status));
+	const humanState = $derived(
+		pageStateWording(status.page_state, {
+			exactEpisode: isExactItemScope,
+			workflow: status.workflow_state ?? folder.workflow_state,
+			integrity: promotionIntegrity
+		})
+	);
 	const episodeOptions = $derived(seasonEpisodeOptions(status));
 	const selectedEpisode = $derived(
 		episodeOptions.find((option) => option.href === selectedEpisodeHref) ?? null
@@ -1050,7 +1051,7 @@
 	}
 
 	async function recoverSeason() {
-		if (recoveryNeedsFreshGoal) {
+		if (recoveryNeedsFreshGoal || status.page_state?.primary_action === 'choose_size') {
 			await chooseDifferentSize();
 			return;
 		}
@@ -1696,7 +1697,7 @@
 					</div>
 					<div class="series-season-index__rows">
 						{#each seriesSeasonCards as season (season.prefix)}
-							{@const state = librarySeasonState(season, dashboard)}
+							{@const state = cardStateWording(season)}
 							{@const seasonName = seasonIdentity(season.prefix).season}
 							{@const holdLabel = seasonRowHoldLabel(season.lifecycle?.seasons?.[0], state)}
 							<a
@@ -1711,6 +1712,8 @@
 								<span>{formatFileSize(season.total_size_bytes)}</span>
 								{#if holdLabel}
 									<StateBadge tone="wait" label={holdLabel} compact />
+								{:else if state.key === 'unavailable'}
+									<span></span>
 								{:else}
 									<StateBadge tone={seasonBadgeTone(state.tone)} label={state.label} compact />
 								{/if}
@@ -3234,7 +3237,7 @@
 					{targetConstraint?.detail ||
 						(humanState.recoveryKind === 'files'
 							? humanState.detail
-							: plainFailureMessage(folder, status))}
+							: plainFailureMessage(humanState.failure))}
 				</p>
 				<WaitingReasons
 					anchorId="season-decisions"
@@ -3321,11 +3324,7 @@
 									? 'Choose size and settings'
 									: recoveryNeedsAdjustment
 										? 'Review retry'
-										: humanState.recoveryKind === 'test'
-											? 'Retry sample'
-											: isExactItemScope
-												? 'Retry this episode'
-												: 'Retry unfinished episodes')}
+										: humanState.actionLabel)}
 						</button>
 						{#if humanState.recoveryKind === 'test' && !targetConstraint}
 							<button class="secondary-button" type="button" onclick={chooseDifferentSize}>
@@ -3342,6 +3341,11 @@
 				{#if humanState.recoveryKind === 'files' && promotionIntegrity.available}
 					<SeasonIntegrityPanel integrity={promotionIntegrity} tone="blocked" />
 				{/if}
+			</section>
+		{:else}
+			<section class="help-room" role="status">
+				<h1>{humanState.label}.</h1>
+				<p class="lede">{humanState.detail}</p>
 			</section>
 		{/if}
 
@@ -3578,7 +3582,7 @@
 				{#if humanState.key === 'needs_help'}
 					<p class="detail-error">
 						<strong>Recorded outcome</strong>
-						<span>{targetConstraint?.detail || plainFailureMessage(folder, status)}</span>
+						<span>{targetConstraint?.detail || plainFailureMessage(humanState.failure)}</span>
 					</p>
 				{/if}
 			</div>

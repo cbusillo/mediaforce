@@ -184,6 +184,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_
 from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem, production_action_blocker, \
     tv_promotion_readiness_payload
 from mediaforce.web.runtime.folder_cards import list_folder_cards
+from mediaforce.web.runtime.page_state import PageStateSources, card_page_states, folder_page_state
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     restore_staged_artifact as runtime_restore_staged_artifact, \
@@ -921,6 +922,14 @@ def create_app(
             load_retryable_sample_job_state=_load_retryable_sample_job_state,
             load_scan_status=_load_scan_status,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
+            page_state=lambda connection, prefix, workflow, staged_integrity: folder_page_state(
+                connection,
+                config,
+                prefix,
+                workflow,
+                _page_state_sources(),
+                staged_integrity=staged_integrity,
+            ),
         )
 
     def _folder_staged_integrity_payload(
@@ -3000,7 +3009,7 @@ def _list_library_structure_cards(config: MediaforceConfig, connection: DBClient
             calibration_job_badges=calibration_job_badges,
         ),
     )
-    return _attach_media_scopes(connection, config, cards)
+    return _attach_page_states(connection, config, _attach_media_scopes(connection, config, cards))
 
 
 def _list_library_detail_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
@@ -3050,7 +3059,7 @@ def _list_folder_cards(
         review_badge_for_prefix=review_badge_for_prefix,
         candidate_decisions=candidate_decisions,
     )
-    return _attach_media_scopes(connection, config, cards)
+    return _attach_page_states(connection, config, _attach_media_scopes(connection, config, cards))
 
 
 def _list_series_folder_cards(
@@ -3126,7 +3135,7 @@ def _folder_cards_for_group(
         include_lifecycle=include_lifecycle,
         include_workflow_states=include_workflow_states,
     )
-    return _attach_media_scopes(connection, config, cards)
+    return _attach_page_states(connection, config, _attach_media_scopes(connection, config, cards))
 
 
 def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
@@ -3146,7 +3155,35 @@ def _preview_folder_cards(config: MediaforceConfig, connection: DBClient) -> lis
             calibration_job_badges=calibration_job_badges,
         ),
     )
-    return _attach_media_scopes(connection, config, cards)
+    return _attach_page_states(connection, config, _attach_media_scopes(connection, config, cards))
+
+
+def _page_state_sources() -> PageStateSources:
+    return PageStateSources(load_calibration_state=_load_calibration_state, load_advice_state=_load_advice_state)
+
+
+def _attach_page_states(
+        connection: DBClient,
+        config: MediaforceConfig,
+        cards: list[FolderCard],
+) -> list[FolderCard]:
+    """Give each TV card with a workflow state the page state its folder page leads with."""
+    tv_cards = [
+        card
+        for card in cards
+        if card.workflow_state is not None and (card.media_scope or {}).get("domain") == "tv"
+    ]
+    if not tv_cards:
+        return cards
+    states = card_page_states(
+        connection,
+        config,
+        [(card.prefix, card.workflow_state) for card in tv_cards],
+        _page_state_sources(),
+    )
+    for card in tv_cards:
+        card.page_state = states.get(card.prefix)
+    return cards
 
 
 def _attach_media_scopes(
