@@ -3850,7 +3850,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             before = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
 
             released = encode_runtime.release_host_cooldowns(
-                connection, {"key": "remote-a", "label": "Remote A"}, updated_at=web_app._now_iso(),
+                connection, {"key": "remote-a", "label": "Remote A"},
             )
             after = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
             first = load_encode_job(connection, "job-episode-ready-a-0")
@@ -3884,13 +3884,74 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             with patch.object(connection, "execute", side_effect=execute_with_fresh_failure):
                 released = encode_runtime.release_host_cooldowns(
-                    connection, {"key": "remote-a"}, updated_at=web_app._now_iso(),
+                    connection, {"key": "remote-a"},
                 )
             job = load_encode_job(connection, "job-episode-ready-race")
 
         self.assertEqual(released, 0)
         assert job is not None
         self.assertEqual(job["host_cooldown_until"], "2999-01-01T00:00:00+00:00")
+
+    def _season_run(self, connection: DBClient, job_id: str, prefix: str, *, status: str, at: datetime) -> None:
+        stamp = at.isoformat(timespec="seconds")
+        save_encode_job(
+            connection,
+            {
+                "job_id": job_id,
+                "prefix": prefix,
+                "job_kind": "folder",
+                "parent_job_id": None,
+                "status": status,
+                "manifest_path": str(self.root / "runs" / f"{job_id}.json"),
+                "item_count": 1,
+                "saved_profile_path": None,
+                "host": {},
+                "last_host": {"key": "remote-a", "label": "Remote A"},
+                "notes": "",
+                "bypass_schedule": False,
+                "attempt_count": 1,
+                "process_pid": None,
+                "error": "Remote A could not connect the media share." if status != "completed" else None,
+                "leased_at": None,
+                "lease_expires_at": None,
+                "heartbeat_at": None,
+                "worker_id": None,
+                "retry_not_before": None,
+                "waiting_reason": None,
+                "terminal_reason": "host_configuration" if status != "completed" else None,
+                "last_failure_kind": "host_configuration" if status != "completed" else None,
+                "last_failure_at": stamp if status != "completed" else None,
+                "host_cooldown_until": "2999-01-01T00:00:00+00:00" if status != "completed" else None,
+                "created_at": stamp,
+                "started_at": stamp,
+                "finished_at": stamp,
+                "updated_at": stamp,
+            },
+        )
+
+    def test_releasing_a_computer_leaves_the_later_finished_run_newest(self) -> None:
+        prefix = "tv/show/Season 9"
+        now = datetime.now(tz=UTC)
+        with open_db(self.config.paths.db_path) as connection:
+            source = self._create_source_file("Season 9/episode-1.mkv")
+            item_id = self._insert_library_item(
+                connection, source, status="encoded", rel_path=f"{prefix}/episode-1.mkv",
+            )
+            self._insert_staged_artifact(connection, item_id, self._staging_path("Season 9/episode-1.mkv"))
+            self._season_run(connection, "job-season-failed", prefix, status="needs_attention", at=now - timedelta(hours=2))
+            self._season_run(connection, "job-season-finished", prefix, status="completed", at=now - timedelta(hours=1))
+
+            released = encode_runtime.release_host_cooldowns(connection, {"key": "remote-a"})
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, prefix)
+
+        self.assertEqual(released, 1)
+        self.assertEqual(workflow.state, "ready_to_validate")
+        self.assertNotIn(
+            prefix,
+            queue_actions_runtime._retryable_terminal_encode_prefixes(
+                connection_factory=lambda: open_db(self.config.paths.db_path)
+            ),
+        )
 
     def test_cleanup_on_a_share_that_stopped_answering_is_deferred_not_crashed(self) -> None:
         staging_path = self._staging_path("episode-dead-mount.mkv")
@@ -26018,8 +26079,6 @@ raise SystemExit(0)
 
     def _current_approval(self, sample_job_id: str) -> dict[str, Any]:
         calibration = self._accepted_calibration_contract(sample_job_id=sample_job_id)
-        # Lifecycle holds are a separate rule; keep them out of the way of the approval being tested.
-        calibration["policy"]["planning"] = {"series_lifecycle_mode": "off", "season_acquisition_hold_days": 0}
         calibration["accepted_policy_hash"] = calibration_policy_hash(calibration)
         return calibration
 
@@ -26027,6 +26086,11 @@ raise SystemExit(0)
             self, approvals: dict[str, dict[str, Any]],
     ) -> tuple[dict[str, Any], dict[str, int], list[dict[str, Any]]]:
         queue_config = self._complete_queue_config()
+        # Lifecycle holds are the owner's separate show setting; keep them out of the way of the approval tested.
+        queue_config.raw.setdefault("overrides", []).append({
+            "path_prefix": "tv/show",
+            "planning": {"series_lifecycle_mode": "off", "season_acquisition_hold_days": 0},
+        })
         with open_db(self.config.paths.db_path) as connection:
             item_ids = {
                 rel_path: self._insert_library_item(

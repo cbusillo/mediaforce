@@ -13,13 +13,20 @@ folder page alike:
 
 Queueing and publishing both ask `governed_by`, so a run never records a contract that publishing
 would reject for one of its files.
+
+An approval governs the settings its sample tested: video, subtitles and the audio its tuning may
+change. The show's sound choice and planning, including the series lifecycle mode, stay the owner's:
+the sample records them but production uses the owner's current ones (`policy_with_owner_settings`).
+Changing them leaves the approval and its contract as they are, so finished files still publish.
 """
 
+import copy
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
+from mediaforce.core.audio_presets import PRESET_AUDIO_KEYS, owner_sound_keys
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.type_defs import int_value, object_dict
@@ -164,6 +171,29 @@ def production_approval_matches(
     policy = object_dict(item.get("resolved_policy"))
     accepted_hash = str(approval.calibration.get("accepted_policy_hash") or "")
     return bool(policy) and calibration_policy_hash({"policy": policy}) == accepted_hash
+
+
+def policy_with_owner_settings(
+        sample_policy: Mapping[str, Any],
+        config: MediaforceConfig,
+        prefix: str,
+) -> dict[str, Any]:
+    """The part of an approved sample's policy that the sample owns, to apply over this folder's settings.
+
+    Planning and the sound-choice audio keys are left out. Applied as the folder's top override, the
+    owner's current sound and lifecycle still come through from the folder, show and library below
+    it; saved, it leaves the folder's own sound and planning as they were and inherits the rest.
+    """
+    sample_audio = object_dict(sample_policy.get("audio"))
+    # Under a sound choice every preset key is the owner's, even where the sample saw none.
+    owner_keys = owner_sound_keys(sample_audio) | (
+        frozenset(PRESET_AUDIO_KEYS) if config.has_sound_choice(prefix) else frozenset()
+    )
+    audio = {key: value for key, value in sample_audio.items() if key not in owner_keys}
+    policy = {section: values for section, values in sample_policy.items() if section not in {"planning", "audio"}}
+    if audio:
+        policy["audio"] = audio
+    return copy.deepcopy(policy)
 
 
 def production_approval_identity(calibration: Mapping[str, Any]) -> str:

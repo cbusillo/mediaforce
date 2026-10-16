@@ -171,6 +171,9 @@ Guidance:
     - automatic publishing, manual publishing and the folder page accept a file
       only while its governing approval is current and has the contract its
       run recorded
+    - the owner's sound choice and planning (series lifecycle) stay outside
+      what a sample approves: approving and queueing apply the owner's
+      current ones over the sample's snapshot and keep the folder's planning
   - `page_state.py`
     - the one `page_state` a folder page and its library card lead with: a
       state key, tone, recovery kind, primary action, failure kind and the job

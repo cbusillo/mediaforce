@@ -1921,6 +1921,7 @@ export interface AudioPresetPayload {
 	library_default: string | null;
 	options: AudioPresetOption[];
 	suggestion?: AudioPresetSuggestion | null;
+	sound_changed_since_sample?: boolean;
 }
 
 export interface AudioPresetSuggestion {

@@ -3,7 +3,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Mapping, NamedTuple
 
-from sqlalchemy import Select, or_, select
+from sqlalchemy import Select, literal_column, or_, select
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db import DBRow
@@ -731,7 +731,7 @@ def _workflow_encode_job_rows(connection: DBClient) -> list[DBRow]:
             encode_jobs.c.manifest_indexes_json,
         )
         .where(encode_jobs.c.status.in_(JOB_STATUSES_FOR_WORKFLOW))
-        .order_by(encode_jobs.c.updated_at.desc(), encode_jobs.c.created_at.desc())
+        .order_by(encode_jobs.c.created_at.desc(), literal_column("rowid").desc())
     ).mappings().fetchall())
 
 
