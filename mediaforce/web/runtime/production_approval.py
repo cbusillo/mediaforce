@@ -12,7 +12,9 @@ folder page alike:
   the one the run recorded. A changed or re-sampled approval means the file is made again.
 
 Queueing and publishing both ask `governed_by`, so a run never records a contract that publishing
-would reject for one of its files.
+would reject for one of its files. Production actions find their approval with
+`production_calibration`, so a season the page shows as following its show's approval queues
+under it.
 
 An approval governs the settings its sample tested: video, subtitles and the audio its tuning may
 change. The show's sound choice and planning, including the series lifecycle mode, stay the owner's:
@@ -86,6 +88,25 @@ def effective_production_approval(
             payload = object_dict(calibration)
             return EffectiveApproval(prefix, payload, production_approval_contract(payload))
     return None
+
+
+def production_calibration(
+        config: MediaforceConfig,
+        prefix: str,
+        load_calibration_state: LoadCalibrationState,
+) -> tuple[str, dict[str, Any] | None]:
+    """The saved sample a production action here runs under, and the folder it was saved at.
+
+    That is the nearest folder at or above the scope holding any saved sample, approved or not, so a
+    season following its show queues under the show's approval, while a sample still awaiting review
+    keeps blocking, as its page leads with reviewing it. The caller's review gate judges the sample.
+    """
+    # A whole-library scope has no folder path, so only its own saved sample can govern it.
+    for candidate in approval_prefixes(prefix) or [prefix]:
+        calibration = load_calibration_state(config, candidate)
+        if calibration is not None:
+            return candidate, calibration
+    return prefix, None
 
 
 def cached_calibration_loader(load_calibration_state: LoadCalibrationState) -> LoadCalibrationState:

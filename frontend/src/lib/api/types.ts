@@ -130,6 +130,7 @@ export interface LifecycleState {
 	current_season_number?: number | null;
 	candidate_count: number;
 	eligible_candidate_count: number;
+	eligible_size_bytes?: number;
 	held_candidate_count: number;
 	hold_reason_counts?: Record<string, number>;
 	ranking_added_at?: string | null;

@@ -205,7 +205,7 @@ from mediaforce.web.runtime.size_exception import decide_size_exception
 from mediaforce.web.runtime.size_held import decide_size_held_file, staged_remake_records
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
-    production_approval_identity
+    production_approval_identity, production_calibration
 from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
@@ -1949,7 +1949,7 @@ def create_app(
         )
 
     def _held_files_current_approval(prefix: str) -> str | None:
-        calibration = _load_calibration_state(config, prefix)
+        _approval_prefix, calibration = production_calibration(config, prefix, _load_calibration_state)
         if calibration is None or not _review_gate(calibration).get("can_confirm_full"):
             return None
         return production_approval_identity(object_dict(calibration))
@@ -2068,7 +2068,7 @@ def create_app(
         )
 
     def _remake_current_approval(prefix: str) -> ActionPayload | None:
-        calibration = _load_calibration_state(config, prefix)
+        _approval_prefix, calibration = production_calibration(config, prefix, _load_calibration_state)
         if calibration is None or not _review_gate(calibration).get("can_confirm_full"):
             return None
         return production_approval_contract(object_dict(calibration))

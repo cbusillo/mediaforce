@@ -7,6 +7,7 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db_tables import calibration_jobs, encode_jobs
 from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, load_queue_state, save_queue_state
+from mediaforce.web.runtime.production_approval import production_calibration
 
 
 RETRYABLE_TERMINAL_ENCODE_JOB_STATUSES = ("needs_attention", "failed", "stopped")
@@ -148,7 +149,7 @@ def _retry_failed_encode_prefixes(
     review_blocked_prefixes: list[str] = []
     blocked: list[dict[str, str]] = []
     for prefix in terminal_prefixes:
-        calibration = load_calibration_state(config, prefix)
+        _approval_prefix, calibration = production_calibration(config, prefix, load_calibration_state)
         gate = review_gate(calibration)
         if not bool(gate.get("can_confirm_full")):
             review_blocked_prefixes.append(prefix)

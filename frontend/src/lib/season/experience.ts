@@ -2006,3 +2006,24 @@ export function approvalStartPlan(input: {
 	}
 	return null;
 }
+
+export interface ProductionScope {
+	episodeCount: number;
+	currentSizeBytes: number;
+}
+
+/**
+ * What compressing this scope makes, from the selection queueing uses, so a season leaves out the
+ * episodes already published. A show keeps its whole size, which its page labels as such; one
+ * episode is itself.
+ */
+export function productionScope(folder: FolderPayload): ProductionScope {
+	const wholeSize = folder.summary?.total_size_bytes ?? 0;
+	if (folder.media_scope?.match === 'exact_item') {
+		return { episodeCount: folder.summary?.item_count ?? 0, currentSizeBytes: wholeSize };
+	}
+	const episodeCount =
+		folder.lifecycle?.eligible_candidate_count ?? folder.encode_candidate_count ?? 0;
+	if (isSeriesPrefix(folder.prefix)) return { episodeCount, currentSizeBytes: wholeSize };
+	return { episodeCount, currentSizeBytes: folder.lifecycle?.eligible_size_bytes ?? wholeSize };
+}

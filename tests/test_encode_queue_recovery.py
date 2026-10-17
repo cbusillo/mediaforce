@@ -41,6 +41,7 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.encoding.streams import opus_audio_filter
 from mediaforce.library.background_work import set_background_work_paused
+from mediaforce.library.candidate_selection import scope_lifecycle_payload
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import content_intent_boundary_observations
 from mediaforce.core.db_tables import encode_jobs
@@ -26167,6 +26168,108 @@ raise SystemExit(0)
         self.assertEqual(result["code"], "approval_needs_fresh_sample")
         self.assertIn("Make a fresh sample", result["message"])
         self.assertEqual(saved_jobs, [])
+
+    def _queue_season_following_its_show(
+            self, season_sample: dict[str, Any] | None = None, saved_jobs: list[dict[str, Any]] | None = None,
+    ) -> SimpleNamespace:
+        """Season 1 has no sample of its own, so the show's approval governs it, as its page shows.
+
+        Returns the queue result with what the season page said beforehand.
+        """
+        approvals = {"tv/show": self._current_approval("show-sample")}
+        if season_sample is not None:
+            approvals["tv/show/Season 1"] = season_sample
+        queue_config = self._complete_queue_config()
+        queue_config.raw.setdefault("overrides", []).append({
+            "path_prefix": "tv/show",
+            "planning": {"series_lifecycle_mode": "off", "season_acquisition_hold_days": 0},
+        })
+        episodes = {"One.mkv": "discovered", "Published.mkv": "promoted", "Three.mkv": "discovered"}
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = {
+                name: self._insert_library_item(
+                    connection, self._create_source_file(f"Season 1-{name}"), status=status,
+                    rel_path=f"tv/show/Season 1/{name}",
+                )
+                for name, status in episodes.items()
+            }
+            for size_bytes, item_id in enumerate(item_ids.values(), start=1):
+                connection.execute(
+                    update(library_items).where(library_items.c.id == item_id).values(size_bytes=size_bytes * 1_000)
+                )
+            lifecycle = scope_lifecycle_payload(connection, queue_config, "tv/show/Season 1")
+        saved_jobs = [] if saved_jobs is None else saved_jobs
+        saved_override_prefixes: list[str] = []
+        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
+            result = folder_actions_runtime.queue_folder_encode_action(
+                queue_config,
+                "tv/show/Season 1",
+                "",
+                False,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=lambda _config, prefix: approvals.get(prefix),
+                review_gate=review_gate,
+                upsert_override=lambda _path, prefix, _policy: saved_override_prefixes.append(prefix),
+                load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
+                save_encode_job=lambda _connection, job: saved_jobs.append(dict(job)),
+            )
+        return SimpleNamespace(
+            approvals=approvals, item_ids=item_ids, lifecycle=lifecycle, result=result, saved_jobs=saved_jobs,
+            saved_override_prefixes=saved_override_prefixes,
+        )
+
+    def test_a_season_following_its_show_approval_queues_its_unpublished_episodes_under_it(self) -> None:
+        queued = self._queue_season_following_its_show()
+        approvals, item_ids, result = queued.approvals, queued.item_ids, queued.result
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            sorted(result["queued_library_item_ids"]), sorted([item_ids["One.mkv"], item_ids["Three.mkv"]]),
+        )
+        self.assertEqual(result["left_out"], [])
+        manifest = json.loads(Path(queued.saved_jobs[0]["manifest_path"]).read_text())
+        self.assertEqual(
+            manifest["selection"]["production_approval_contract"], production_approval_contract(approvals["tv/show"]),
+        )
+        self.assertEqual(manifest["selection"]["production_approval_prefix"], "tv/show")
+        # The settings are saved where they were approved, so the season gains none of its own.
+        self.assertEqual(queued.saved_override_prefixes, ["tv/show"])
+        for item in manifest["items"]:
+            approval = effective_production_approval(
+                self.config, str(item["rel_path"]), lambda _config, prefix: approvals.get(prefix),
+            )
+            self.assertTrue(production_approval_matches(approval, manifest, item))
+
+    def test_a_season_sample_still_awaiting_review_keeps_blocking_under_an_approved_show(self) -> None:
+        # The page leads with reviewing the season's own sample, so queueing must not fall through to the show.
+        pending = self._current_approval("season-sample")
+        for field in ("accepted_at", "accepted_sample_job_id", "accepted_policy_hash"):
+            del pending[field]
+        pending["review_media_ready"] = True
+        saved_jobs: list[dict[str, Any]] = []
+
+        with self.assertRaises(HTTPException) as refused:
+            self._queue_season_following_its_show(season_sample=pending, saved_jobs=saved_jobs)
+
+        self.assertEqual(refused.exception.status_code, 400)
+        self.assertEqual(refused.exception.detail, review_gate(pending)["message"])
+        self.assertEqual(saved_jobs, [])
+
+    def test_a_season_page_counts_the_episodes_and_size_its_queue_selects(self) -> None:
+        queued = self._queue_season_following_its_show()
+        self.assertTrue(queued.result["ok"], queued.result)
+        queued_ids = queued.result["queued_library_item_ids"]
+
+        with open_db(self.config.paths.db_path) as connection:
+            queued_size = sum(connection.execute(
+                select(library_items.c.size_bytes).where(library_items.c.id.in_(queued_ids))
+            ).scalars())
+
+        self.assertEqual(queued.lifecycle["eligible_candidate_count"], len(queued_ids))
+        self.assertEqual(queued.lifecycle["eligible_size_bytes"], queued_size)
 
     def test_paused_background_work_still_admits_files_whose_evidence_is_current(self) -> None:
         queue_config = self._complete_queue_config()
