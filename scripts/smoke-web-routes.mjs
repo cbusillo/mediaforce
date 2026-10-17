@@ -2384,6 +2384,7 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
       let waitingCount = 10;
       let paused = false;
       let queuedShow = false;
+      let mixedFleet = false;
       await page.route(/\/api\/dashboard(?:\?.*)?$/, async (route) => {
         const response = await route.fetch();
         const payload = await response.json();
@@ -2421,17 +2422,25 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
           host.schedule_profile_label = "Night";
           host.active_encode_count = 0;
         }
+        if (mixedFleet && payload.hosts.length) {
+          payload.hosts[0].schedule_open = true;
+          payload.hosts[0].active_encode_count = payload.hosts[0].max_parallel_encodes;
+        }
         await route.fulfill({ response, json: payload });
       });
-      for (waitingCount of [10, 1, 0]) {
+      for (waitingCount of [10, 1, 0, undefined]) {
         await openRoute(page, baseUrl, "/ops", timeoutMs);
         const details = page.locator(".system-details");
         const toggle = details.locator("summary");
+        // Reachability is not work readiness: all these computers are outside their windows.
+        await expect(toggle).toContainText("connected");
+        await expect(toggle).not.toContainText("ready");
         await toggle.focus();
         await page.keyboard.press("Enter");
         const schedule = page.locator(".schedule-list");
         await schedule.waitFor({ state: "visible", timeout: timeoutMs });
-        const expectedCount = `${waitingCount} ${waitingCount === 1 ? "file" : "files"} waiting for a work window`;
+        const fileCount = waitingCount ?? 0;
+        const expectedCount = `${fileCount} ${fileCount === 1 ? "file" : "files"} waiting for a work window`;
         await expect(schedule).toContainText(expectedCount, {
           timeout: timeoutMs,
         });
@@ -2482,6 +2491,19 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
         await page.keyboard.press("Enter");
         await schedule.waitFor({ state: "hidden", timeout: timeoutMs });
       }
+      mixedFleet = true;
+      await openRoute(page, baseUrl, "/ops", timeoutMs);
+      const computers = page.locator(".system-details");
+      await expect(computers.locator("summary")).toContainText("connected");
+      await expect(computers.locator("summary")).not.toContainText("ready");
+      await computers.locator("summary").click();
+      await expect(computers.locator(".host-row").filter({ hasText: "Working" })).toHaveCount(1);
+      await expect(computers.locator(".host-row").filter({ hasText: "Off schedule" })).not.toHaveCount(0);
+      await computers.scrollIntoViewIfNeeded();
+      const screenshots = path.join(rootDir, "scratch/ui-checks");
+      await mkdir(screenshots, { recursive: true });
+      await page.screenshot({ path: path.join(screenshots, `computer-connections-${width}.png`) });
+      mixedFleet = false;
       waitingCount = 10;
       for (queuedShow of [false, true]) {
         await openRoute(page, baseUrl, "/ops", timeoutMs);

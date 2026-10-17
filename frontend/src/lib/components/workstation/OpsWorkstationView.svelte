@@ -67,8 +67,8 @@
 	const encodeWorkCount = $derived(
 		(encodeQueue?.running_count ?? 0) + (encodeQueue?.queued_count ?? 0)
 	);
-	const readyHosts = $derived(hosts?.hosts.filter((host) => host.available).length ?? 0);
-	const fleetHasReadyCapacity = $derived(readyHosts > 0);
+	const connectedHosts = $derived(hosts?.hosts.filter((host) => host.available).length ?? 0);
+	const fleetHasConnectedHost = $derived(connectedHosts > 0);
 	const notableScheduleHosts = $derived(
 		(hosts?.hosts ?? [])
 			.map((host) => ({
@@ -591,8 +591,8 @@
 					<span class="system-details__state">
 						<StateBadge
 							compact
-							tone={readyHosts > 0 ? 'ready' : 'wait'}
-							label={`${readyHosts.toLocaleString('en-US')} ready`}
+							tone={connectedHosts > 0 ? 'ready' : 'wait'}
+							label={`${connectedHosts.toLocaleString('en-US')} connected`}
 						/>
 						<span>Open</span>
 					</span>
@@ -600,8 +600,8 @@
 				<div class="system-details__content">
 					<WorkstationPanel
 						eyebrow="Computers"
-						title="Available computers"
-						meta={`${readyHosts.toLocaleString('en-US')}/${hosts?.hosts.length ?? 0}`}
+						title="Connection status"
+						meta={`${connectedHosts.toLocaleString('en-US')}/${hosts?.hosts.length ?? 0}`}
 					>
 						<div class="host-list">
 							{#each hosts?.hosts ?? [] as host (host.key)}
@@ -609,11 +609,11 @@
 									hostSchedulePresentation(host, encodeQueue),
 									[host.key, host.host ?? '', host.label]
 								)}
-								<div class="host-row host-row--{hostTone(host, fleetHasReadyCapacity, dashboard)}">
+								<div class="host-row host-row--{hostTone(host, fleetHasConnectedHost, dashboard)}">
 									<div class="host-row__head">
 										<StateBadge
 											compact
-											tone={hostTone(host, fleetHasReadyCapacity, dashboard)}
+											tone={hostTone(host, fleetHasConnectedHost, dashboard)}
 											label={hostStateCopy(host, dashboard)}
 										/>
 										<strong>{host.label}</strong>
