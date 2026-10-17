@@ -25,6 +25,16 @@ Mediaforce's SQLite schema.
    `mediaforce/core/db_migration_scripts/versions/`.
 4. Refresh introspection after migration changes.
 
+## Reading the live database
+
+- Read live state through the running service's API, for example
+  `/api/dashboard?preview_limit=0` and `/api/hosts?compact=1`.
+- For an ad-hoc SQLite read, `mode=ro` fails with "unable to open database
+  file" when no `library.sqlite3-shm` file exists and the reader cannot create
+  one, such as a sandboxed shell.
+- Use `immutable=1` only when no `library.sqlite3-wal` file exists. It ignores
+  the WAL and returns stale rows.
+
 ## Workflow expectations
 
 - When the SQLite schema changes, update `mediaforce/core/db_tables.py` and add
