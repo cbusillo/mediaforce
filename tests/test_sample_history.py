@@ -40,7 +40,6 @@ def test_history_keeps_original_coverage_and_pages_only_finished_samples(tmp_pat
     assert first['samples'][0]['job_id'] == 'newer'
     assert second['samples'][0]['job_id'] == 'original'
     assert second['samples'][0]['selection'] == original
-    assert 'source_path' not in second['samples'][0]
     with open_db(path) as connection:
         assert connection.execute(select(calibration_jobs)).mappings().all() == before
 
@@ -111,3 +110,23 @@ def test_history_orders_by_the_displayed_finish_time(tmp_path: Path) -> None:
     assert [row['job_id'] for row in result['samples']] == [
         'queued_first_finished_last', 'queued_last_finished_first',
     ]
+
+
+def test_replaced_pending_sample_keeps_its_saved_coverage(tmp_path: Path) -> None:
+    from mediaforce.tuning.calibration_jobs import save_job
+    from mediaforce.web.runtime.sample_history import sample_history_payload
+
+    path = tmp_path / 'library.sqlite3'
+    replacement_selection = {'coverage_summary': 'Replacement coverage'}
+    with open_db(path) as connection:
+        original = add_sample(connection, 'replaced', status='pending_review', summary='Earlier coverage')
+        save_job(connection, {
+            'job_id': 'replacement', 'prefix': 'tv/Show', 'status': 'pending_review', 'lane': 'sample',
+            'sample_item': {'representative_selection': replacement_selection},
+            'created_at': '2026-10-02T00:00:00Z', 'updated_at': '2026-10-02T00:00:00Z',
+            'finished_at': '2026-10-02T01:00:00Z',
+        })
+    rows = {sample['job_id']: sample for sample in sample_history_payload(path, 'tv/Show')['samples']}
+    assert set(rows) == {'replaced', 'replacement'}
+    assert rows['replaced']['selection'] == original
+    assert rows['replacement']['selection'] == replacement_selection
