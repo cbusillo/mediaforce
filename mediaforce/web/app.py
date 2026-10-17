@@ -210,6 +210,7 @@ from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_acti
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
 from mediaforce.web.runtime.episode_progress import folder_episodes_payload
+from mediaforce.web.runtime.sample_history import sample_history_payload
 from mediaforce.web.runtime.encode_runtime import release_host_cooldowns, sync_encode_job_parent, \
     sweep_stopped_remote_encodes
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
@@ -2409,6 +2410,9 @@ def create_app(
         folder_status_payload=_folder_status_payload,
         folder_staged_integrity_payload=_folder_staged_integrity_payload,
         folder_episodes_payload=lambda prefix: folder_episodes_payload(config, prefix),
+        folder_sample_history_payload=lambda prefix, offset, limit: sample_history_payload(
+            config.paths.db_path, prefix, offset, limit,
+        ),
         folder_content_payload=_folder_content_payload,
         checked_output_preview_payload=lambda prefix: _checked_output_preview_payload(
             config,

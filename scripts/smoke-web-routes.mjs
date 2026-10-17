@@ -4040,6 +4040,63 @@ async function checkRecoveryAlerts(baseUrl, timeoutMs) {
   }
 }
 
+async function checkSampleHistory(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  try {
+    for (const viewport of [{ width: 1440, height: 1000 }, NARROW_VIEWPORT]) {
+      const page = await browser.newPage({ viewport });
+      page.setDefaultTimeout(timeoutMs);
+      const summary = "Tested 1 of 100 files. Not yet tested: Season 10, HEVC (H.265) video.";
+      const samples = Array.from({ length: 11 }, (_, index) => ({
+        job_id: `historical-${index}`,
+        finished_at: "2026-10-06T17:29:00Z",
+        file_name: `Historical episode ${index + 1}.mkv`,
+        selection: index === 10 ? {} : { coverage_summary: summary },
+      }));
+      let fail = true;
+      let reads = 0;
+      await page.route("**/api/folders/**/sample-history?*", async (route) => {
+        reads += 1;
+        if (route.request().method() !== "GET") throw new Error("History attempted a write");
+        if (fail) return route.fulfill({ status: 503, json: { message: "Unavailable" } });
+        const offset = Number(new URL(route.request().url()).searchParams.get("offset"));
+        await route.fulfill({ json: { offset, limit: 10, total: samples.length, samples: samples.slice(offset, offset + 10) } });
+      });
+      await page.goto(`${baseUrl}/folders/tv/Approved%20Show/Season%201`, { waitUntil: "networkidle" });
+      await expect(page.locator("summary").filter({ hasText: /^Details/ })).toBeVisible();
+      if (reads !== 0) throw new Error("History loaded before the disclosure opened");
+      await page.locator("summary").filter({ hasText: /^Details/ }).click();
+      const history = page.locator("details").filter({ has: page.locator("summary", { hasText: /^Past samples$/ }) }).last();
+      await history.locator("summary").focus();
+      await page.keyboard.press("Enter");
+      await expect(history.getByRole("alert")).toBeVisible();
+      fail = false;
+      await history.getByRole("button", { name: "Try again", exact: true }).click();
+      await expect(history.getByRole("listitem")).toHaveCount(10);
+      await expect(history.getByText(summary, { exact: true })).toHaveCount(10);
+      await expect(history.getByRole("button", { name: "Newer samples" })).toBeDisabled();
+      await history.getByRole("button", { name: "Older samples" }).click();
+      await expect(history.getByRole("listitem")).toHaveCount(1);
+      await expect(history.getByText(samples[10].file_name, { exact: true })).toBeVisible();
+      await expect(history.getByRole("button", { name: "Older samples" })).toBeDisabled();
+      await history.getByRole("button", { name: "Newer samples" }).click();
+      await expect(history.getByRole("listitem")).toHaveCount(10);
+      await history.scrollIntoViewIfNeeded();
+      if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) {
+        throw new Error("Sample history overflows the page");
+      }
+      const screenshotDir = path.join(rootDir, "scratch/ui-checks");
+      await mkdir(screenshotDir, { recursive: true });
+      await page.screenshot({ path: path.join(screenshotDir, `sample-history-${viewport.width}.png`) });
+      await page.goto(`${baseUrl}/folders/tv/Review%20Ready/Season%201/Episode%2001.mkv`, { waitUntil: "networkidle" });
+      await expect(page.locator("summary", { hasText: /^Past samples$/ })).toHaveCount(0);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   let managedServer = null;
@@ -4090,6 +4147,7 @@ async function main() {
     await checkRecoveryAlerts(targetUrl, args.routeTimeoutMs);
     await checkRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
     if (folderRoutes.length) {
+      await checkSampleHistory(targetUrl, args.routeTimeoutMs);
       await checkPlainQualityCopy(targetUrl, args.routeTimeoutMs);
       await checkTargetDefaultEvidence(targetUrl, args.routeTimeoutMs);
       await checkLibraryModeLayout(targetUrl, args.routeTimeoutMs);
