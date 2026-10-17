@@ -1,4 +1,5 @@
 <script lang="ts">
+	import SampleHistory from './SampleHistory.svelte';
 	import { resolveMetricLabel } from '$lib/folders/studio';
 	import { libraryCopy } from '$lib/library-copy';
 	import { goto } from '$app/navigation';
@@ -3587,6 +3588,11 @@
 				{/if}
 			</div>
 		</details>
+		{#if !isExactItemScope}
+			{#key folder.prefix}
+				<SampleHistory prefix={folder.prefix} />
+			{/key}
+		{/if}
 	</main>
 
 	<footer class="experience-footer">

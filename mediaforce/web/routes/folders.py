@@ -51,6 +51,7 @@ def register_folder_routes(
         decide_size_held_action: Callable[[str, int | Collection[int], bool], dict[str, Any]] | None = None,
         folder_episodes_payload: Callable[[str], dict[str, Any]] | None = None,
         use_show_settings_action: Callable[[str], dict[str, Any]] | None = None,
+        folder_sample_history_payload: Callable[[str, int, int], dict[str, Any]] | None = None,
 ) -> None:
     staged_integrity_payload = folder_staged_integrity_payload or (lambda _prefix, _offset, _limit: {})
     preview_payload = checked_output_preview_payload or (
@@ -93,6 +94,13 @@ def register_folder_routes(
         if payload is None:
             return JSONResponse({"ok": False, "message": "A sound choice applies only to TV shows."}, status_code=404)
         return JSONResponse({"ok": True, "audio_preset": payload})
+
+    if folder_sample_history_payload is not None:
+        history_payload = folder_sample_history_payload
+
+        @app.get("/api/folders/{prefix:path}/sample-history")
+        def api_folder_sample_history(prefix: str, offset: int = 0, limit: int = 10) -> JSONResponse:
+            return JSONResponse(history_payload(prefix.strip("/"), offset, limit), headers={"Cache-Control": "no-store"})
 
     @app.get("/api/folders/{prefix:path}")
     def api_folder(prefix: str) -> JSONResponse:
