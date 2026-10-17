@@ -217,6 +217,7 @@ from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail a
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle, run_supervised_worker_loop
 from mediaforce.web.runtime.host_recovery import process_host_recovery_once
+from mediaforce.web.runtime.host_status import refresh_current_machine_host_statuses
 from mediaforce.web.runtime.recovery_alerts import recovery_alerts, record_recovery_alerts
 from mediaforce.web.runtime.controller_storage_recovery import (
     controller_storage_recovery_snapshot,
@@ -4887,16 +4888,18 @@ def _acquire_background_worker_leadership(
     return None
 
 
-def _controller_storage_worker_loop(*, config_path: Path, stop_event: threading.Event) -> None:
-    def recover() -> None:
-        config = load_config(config_path)
-        try:
-            process_controller_storage_recovery_once(config, stop_event=stop_event)
-        finally:
-            record_recovery_alerts(config)
+def _controller_storage_pass(config_path: Path, stop_event: threading.Event) -> None:
+    config = load_config(config_path)
+    try:
+        process_controller_storage_recovery_once(config, stop_event=stop_event)
+        refresh_current_machine_host_statuses(config)
+    finally:
+        record_recovery_alerts(config)
 
+
+def _controller_storage_worker_loop(*, config_path: Path, stop_event: threading.Event) -> None:
     run_supervised_worker_loop(
-        process_once_fn=recover,
+        process_once_fn=lambda: _controller_storage_pass(config_path, stop_event),
         poll_seconds=30.0,
         stop_event=stop_event,
         logger=LOGGER,

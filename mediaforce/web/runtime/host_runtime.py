@@ -15,6 +15,7 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
+from mediaforce.web.runtime.host_recovery import host_recovery_snapshot
 from mediaforce.remote import HostReadinessError, HostStatus, collect_host_statuses, host_status_targets_current_machine, \
     normalize_host_media_access, recover_remote_host_mounts, remote_mount_recovery_supported, \
     run_host_lifecycle_command
@@ -58,6 +59,7 @@ def host_runtime_rows(
     running_jobs = _running_encode_jobs_for_hosts(connection, format_eta_seconds=format_eta_seconds)
     running_counts = running_encode_counts_by_host(connection)
     profiles = encode_queue_schedule_profiles(config)
+    recovery = host_recovery_snapshot(config)["hosts"]
     rows: list[dict[str, Any]] = []
     current_time = now or datetime.now(UTC)
     for status in statuses:
@@ -150,6 +152,10 @@ def host_runtime_rows(
             }
             if storage_recovery_available:
                 status_payload["message"] = "Storage will reconnect when work starts"
+            needs_action = object_dict(recovery.get(status.key))
+            if not status.available and needs_action.get("status") == "action_required" and needs_action.get("reason"):
+                # Background reconnects stopped for something only someone at that computer can do.
+                status_payload["message"] = active_reason = str(needs_action["reason"])
         controller_issue = controller_storage_admission_issue(config, host_config)
         if controller_issue:
             queue_active = False
