@@ -365,6 +365,11 @@ show progress only for a bounded measurable stage, and label historical ETA as
 an estimate. Users must not need to scroll past old evidence to learn
 whether work is still running.
 
+Activity's collapsed computer disclosure counts **connected** computers, not
+computers ready to start work. Check all-off-window and mixed busy/off-window
+fleets, including zero or absent file-window counts, on desktop and at 390px;
+the detailed rows retain their Working and Off schedule states.
+
 In Activity's System details, the schedule panel distinguishes the queue-wide
 schedule from computer windows. Its waiting count includes queued episodes in
 shows that need attention and counts files rather than show rows. It excludes
