@@ -11,6 +11,7 @@ from mediaforce.remote import (
     probe_host_status, recover_remote_host_mounts_no_ui,
     remote_mount_recovery_supported,
 )
+from mediaforce.web.runtime.host_status import publish_host_status
 
 _INITIAL_RETRY_SECONDS = 30
 _MAX_RETRY_SECONDS = 300
@@ -34,6 +35,7 @@ def host_recovery_snapshot(config: MediaforceConfig) -> dict[str, Any]:
                     or not isinstance(state.get("failure_count"), int)
                     or state["failure_count"] < 0
                     or not isinstance(state.get("mount_uncertain"), bool)
+                    or not isinstance(state.get("retry_paused", False), bool)
                     or not isinstance(state.get("label"), str)
                     or not isinstance(state.get("reason"), (str, type(None)))
                     or (state.get("status") != "ready" and _parse_time(state.get("first_failure_at")) is None)
@@ -68,6 +70,7 @@ def process_host_recovery_once(
             if retry_at and timedelta(0) < retry_at - now <= timedelta(seconds=_MAX_RETRY_SECONDS):
                 continue
             status = probe_host_status(config, host)
+            publish_host_status(config, status)
             count = min(int(previous.get("failure_count") or 0) + 1, 1000)
             state = {
                 "label": status.label,
@@ -81,6 +84,7 @@ def process_host_recovery_once(
                     _INITIAL_RETRY_SECONDS * 2 ** min(count - 1, 4), _MAX_RETRY_SECONDS,
                 ))).isoformat(),
                 "mount_uncertain": previous.get("mount_uncertain", False),
+                "retry_paused": False,
             }
             if status.available:
                 state["mount_uncertain"] = False
@@ -89,19 +93,31 @@ def process_host_recovery_once(
                 state["reason"] = snapshot.get("state_error") or (
                     previous.get("reason") if previous.get("status") == "action_required" else None
                 ) or "An earlier storage request has no confirmed result. Reconnect storage on this computer, then use Prepare."
+            elif remote_mount_recovery_supported(config, host, status) and previous.get("retry_paused"):
+                # Only someone at that computer can fix this; keep asking, and keep checking often so
+                # the warning clears soon after Prepare or a manual connection.
+                state.update(
+                    status="action_required", reason=previous.get("reason"), retry_paused=True,
+                    next_retry_at=(now + timedelta(seconds=_INITIAL_RETRY_SECONDS)).isoformat(),
+                )
             elif remote_mount_recovery_supported(config, host, status):
                 # Persist before SSH: transport loss can leave a remote mount request running.
                 state["mount_uncertain"] = True
                 state["last_attempt_at"] = now.isoformat()
                 hosts[key] = state
                 save_runtime_settings(host_recovery_path(config), snapshot)
-                uncertain = recover_remote_host_mounts_no_ui(config, host, status)
-                state["mount_uncertain"] = uncertain
-                if uncertain:
+                result = recover_remote_host_mounts_no_ui(config, host, status)
+                state["mount_uncertain"] = result.uncertain
+                if result.uncertain:
                     state["status"] = "action_required"
                     state["reason"] = "Storage could not be connected safely. Check this computer's mounted shares, then use Prepare."
+                elif result.action:
+                    state.update(status="action_required", reason=result.action, retry_paused=not result.retry)
+                    if not result.retry:
+                        state["next_retry_at"] = (now + timedelta(seconds=_INITIAL_RETRY_SECONDS)).isoformat()
                 else:
                     refreshed = probe_host_status(config, host)
+                    publish_host_status(config, refreshed)
                     if refreshed.available:
                         state.update(status="ready", reason=None, first_failure_at=None, failure_count=0)
             hosts[key] = state

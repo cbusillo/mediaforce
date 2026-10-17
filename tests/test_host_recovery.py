@@ -1,17 +1,22 @@
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
-import subprocess
 import threading
+from typing import Any
 from unittest.mock import patch
+
+from fastapi.routing import APIRoute
 
 import pytest
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, load_runtime_settings, save_runtime_settings
-from mediaforce.hosts.controller_mount import ControllerMountProbe, ControllerMountResult
-from mediaforce.hosts.mount_runtime import ControllerSmbMount, save_controller_smb_mounts, controller_smb_mounts_path
-from mediaforce import remote
+from mediaforce.hosts.controller_mount import ControllerMountProbe
+from mediaforce.hosts.mount_runtime import ControllerSmbMount, NoUiMountResult, save_controller_smb_mounts, \
+    controller_smb_mounts_path
 from mediaforce.remote import HostStatus
-from mediaforce.web.runtime import host_recovery as recovery, recovery_alerts as alerts
+from mediaforce.web import app as web_app
+from mediaforce.web.runtime import host_recovery as recovery, host_status, recovery_alerts as alerts
 
 NOW = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
 
@@ -42,7 +47,7 @@ def status(*, available: bool = False) -> HostStatus:
 def test_background_recovery_runs_without_work_and_preserves_backoff_on_restart(config: MediaforceConfig) -> None:
     with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
         recovery, "probe_host_status", return_value=status(),
-    ) as probe, patch.object(recovery, "recover_remote_host_mounts_no_ui", return_value=False) as mount:
+    ) as probe, patch.object(recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False)) as mount:
         clock.now.return_value = NOW
         recovery.process_host_recovery_once(config)
         saved = recovery.host_recovery_snapshot(config)
@@ -80,32 +85,158 @@ def test_uncertain_remote_attempt_survives_restart_until_fresh_readiness(config:
         assert not recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["mount_uncertain"]
 
 
-def test_remote_mount_uses_native_no_ui_helper_over_ssh_and_rechecks_identity(config: MediaforceConfig) -> None:
-    mount_calls: list[list[str]] = []
+def test_sign_in_failure_asks_once_and_stops_reconnecting_until_storage_returns(config: MediaforceConfig) -> None:
+    needs_password = NoUiMountResult(ok=False, action="Worker needs its share password saved.", retry=False)
+    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+        recovery, "probe_host_status", return_value=status(),
+    ) as probe, patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", return_value=needs_password,
+    ) as mount, patch.object(alerts, "datetime", wraps=datetime) as alert_clock:
+        clock.now.return_value = alert_clock.now.return_value = NOW
+        recovery.process_host_recovery_once(config)
+        record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
+        assert (record["status"], record["reason"]) == ("action_required", needs_password.action)
+        [alert] = [item for item in alerts.recovery_alerts(config) if item["id"].startswith("host:")]
+        assert needs_password.action in alert["detail"]
+        for hours in range(1, 4):
+            clock.now.return_value = NOW + timedelta(hours=hours)
+            recovery.process_host_recovery_once(config)
+        assert mount.call_count == 1
+        assert probe.call_count == 4, "the computer is still checked, only reconnecting waits"
+        assert recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["reason"] == needs_password.action
+        # Someone connected the share in Finder or used Prepare: the next check clears the request.
+        probe.return_value = status(available=True)
+        clock.now.return_value += timedelta(hours=1)
+        recovery.process_host_recovery_once(config)
+        assert recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["status"] == "ready"
+        assert not [item for item in alerts.recovery_alerts(config) if item["id"].startswith("host:")]
+        # A later outage reconnects automatically again.
+        probe.return_value = status()
+        clock.now.return_value += timedelta(hours=1)
+        recovery.process_host_recovery_once(config)
+        assert mount.call_count == 2
 
-    def ssh(_host: dict[str, object], *args: str, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        mount_calls.append(list(args))
-        if args[0] == "/usr/bin/osascript":
-            return subprocess.CompletedProcess(args, 0, '{"status":0}', '')
-        mounted = any(call[0] == "/usr/bin/osascript" for call in mount_calls)
-        output = ("//user@nas/media on /Volumes/media (smbfs, nodev)\n" if mounted else "")
-        output += f"MEDIAFORCE_MOUNT_PATH_PRESENT={int(mounted)}\nMEDIAFORCE_ACCESS_BEGIN\n"
-        return subprocess.CompletedProcess(args, 0, output, '')
 
-    with patch.object(remote, "_run_remote_ssh", side_effect=ssh):
-        assert not remote.recover_remote_host_mounts_no_ui(config, config.remote_hosts[0], status())
-    assert len(mount_calls) == 3  # before, mount, fresh identity check
-    native = next(call for call in mount_calls if call[0] == "/usr/bin/osascript")
-    assert native[native.index("-l") + 1] == "JavaScript"
-    # The helper's behavior is exercised by controller-mount tests; do not pin script text here.
+def test_missing_login_asks_but_keeps_reconnecting_on_its_own(config: MediaforceConfig) -> None:
+    not_logged_in = NoUiMountResult(ok=False, action="Log in on Worker.")
+    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+        recovery, "probe_host_status", return_value=status(),
+    ) as probe, patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", return_value=not_logged_in,
+    ) as mount:
+        clock.now.return_value = NOW
+        recovery.process_host_recovery_once(config)
+        record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
+        assert (record["status"], record["reason"]) == ("action_required", not_logged_in.action)
+        clock.now.return_value = NOW + timedelta(hours=1)
+        mount.return_value = NoUiMountResult(ok=True)
+        probe.side_effect = [status(), status(available=True)]
+        recovery.process_host_recovery_once(config)
+        assert mount.call_count == 2
+        assert recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["status"] == "ready"
 
 
-def test_remote_timeout_requires_attention_without_another_mount(config: MediaforceConfig) -> None:
-    absent = ControllerMountProbe(False, False, Path("/Volumes/media"), failure_kind="mount_absent")
-    with patch.object(remote, "mount_controller_smb_no_ui", return_value=ControllerMountResult(
-        False, True, "mount_timeout", None, absent,
-    )):
-        assert remote.recover_remote_host_mounts_no_ui(config, config.remote_hosts[0], status())
+@pytest.fixture
+def empty_host_status_cache() -> Iterator[None]:
+    def reset() -> None:
+        host_status._HOST_STATUS_CACHE_KEY = None
+        host_status._HOST_STATUS_CACHE_VALUE = []
+        host_status._HOST_STATUS_CACHE_REFRESH_FUTURE = None
+        host_status._LOCAL_HOST_STORAGE_SIGNATURE = None
+
+    reset()
+    yield
+    reset()
+
+
+def _host_cards(config: MediaforceConfig) -> dict[str, dict[str, Any]]:
+    with patch.object(web_app, "load_config", return_value=config):
+        app = web_app.create_app(config.paths.config_path)
+    endpoint = next(
+        route.endpoint for route in app.router.routes
+        if isinstance(route, APIRoute) and route.path == "/api/hosts"
+    )
+    # Reading the cards must not check anything itself.
+    with patch("subprocess.run", side_effect=AssertionError("read launched a check")), patch.object(
+        host_status, "_schedule_host_status_refresh",
+    ) as schedule:
+        response = endpoint(0)
+    schedule.assert_not_called()
+    return {host["host"]: host for host in json.loads(response.body)["hosts"]}
+
+
+def test_idle_background_checks_keep_remote_cards_current(
+        config: MediaforceConfig, empty_host_status_cache: None,
+) -> None:
+    with patch.object(host_status, "collect_host_statuses", return_value=[status(available=True)]):
+        host_status.refresh_host_status_cache(config)
+    assert _host_cards(config)["user@worker"]["available"]
+    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+        recovery, "probe_host_status", return_value=status(),
+    ) as probe, patch.object(recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False)):
+        clock.now.return_value = NOW
+        recovery.process_host_recovery_once(config)
+        card = _host_cards(config)["user@worker"]
+        assert not card["available"]
+        assert card["probe_message"] == status().message
+        probe.return_value = status(available=True)
+        clock.now.return_value = NOW + timedelta(hours=1)
+        recovery.process_host_recovery_once(config)
+        assert _host_cards(config)["user@worker"]["available"]
+
+
+def test_host_card_says_what_to_do_when_reconnecting_waits_for_someone(
+        config: MediaforceConfig, empty_host_status_cache: None,
+) -> None:
+    needs_password = NoUiMountResult(ok=False, action="Worker needs its share password saved.", retry=False)
+    with patch.object(recovery, "probe_host_status", return_value=status()), patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", return_value=needs_password,
+    ):
+        recovery.process_host_recovery_once(config)
+    card = _host_cards(config)["user@worker"]
+    assert card["message"] == needs_password.action
+
+
+def test_controller_card_follows_its_storage_after_a_restart(
+        config: MediaforceConfig, empty_host_status_cache: None,
+) -> None:
+    config.raw["remote_hosts"] = [
+        {"host": "user@localhost", "label": "Controller", "media_access": "mounted"},
+        *config.raw["remote_hosts"],
+    ]
+
+    def controller(*, available: bool) -> HostStatus:
+        row = status(available=available)
+        row.key, row.label = "user@localhost", "Controller"
+        return row
+
+    def storage(state: str) -> dict[str, Any]:
+        return {"mounts": [{"mount_point": "/Volumes/media", "status": state}], "state_error": None}
+
+    # The first check after a reboot ran before Finder reconnected the share.
+    with patch.object(host_status, "collect_host_statuses", return_value=[
+        controller(available=False), status(available=True),
+    ]):
+        host_status.refresh_host_status_cache(config)
+    assert not _host_cards(config)["user@localhost"]["available"]
+    with patch.object(web_app, "load_config", return_value=config), patch.object(
+        web_app, "process_controller_storage_recovery_once",
+    ), patch.object(
+        host_status, "controller_storage_recovery_snapshot", return_value=storage("ready"),
+    ) as snapshot, patch.object(
+        host_status, "probe_host_status", return_value=controller(available=True),
+    ) as probe:
+        web_app._controller_storage_pass(config.paths.config_path, threading.Event())
+        cards = _host_cards(config)
+        assert cards["user@localhost"]["available"]
+        assert cards["user@worker"]["available"]
+        web_app._controller_storage_pass(config.paths.config_path, threading.Event())
+        assert probe.call_count == 1, "unchanged storage needs no second check"
+        snapshot.return_value = storage("retrying")
+        probe.return_value = controller(available=False)
+        web_app._controller_storage_pass(config.paths.config_path, threading.Event())
+        assert not _host_cards(config)["user@localhost"]["available"]
+        assert {call.args[1]["host"] for call in probe.call_args_list} == {"user@localhost"}
 
 
 def test_unreachable_host_retries_and_eventually_notifies_without_mounting(config: MediaforceConfig) -> None:

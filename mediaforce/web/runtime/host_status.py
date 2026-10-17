@@ -4,8 +4,10 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from pathlib import Path
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.hosts.config import host_targets_current_machine
 from mediaforce.hosts.mount_runtime import controller_smb_mounts_path
-from mediaforce.remote import HostStatus, collect_host_statuses
+from mediaforce.remote import HostStatus, collect_host_statuses, probe_host_status
+from mediaforce.web.runtime.controller_storage_recovery import controller_storage_recovery_snapshot
 from mediaforce.web.settings_runtime import normalize_host_capabilities
 
 _HOST_STATUS_CACHE_LOCK = threading.Lock()
@@ -15,6 +17,8 @@ _HOST_STATUS_CACHE_VALUE: list[HostStatus] = []
 _HOST_STATUS_CACHE_REFRESH_FUTURE: Future[tuple[tuple[str, int, str, int, int], list[HostStatus]]] | None = None
 _HOST_STATUS_CACHE_TTL_SECONDS = 15.0
 _HOST_STATUS_CACHE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="host-status")
+_HOST_STATUS_PENDING_MESSAGE = "Checking host status..."
+_LOCAL_HOST_STORAGE_SIGNATURE: object = None
 
 
 def collect_host_statuses_with_fallback(config: MediaforceConfig) -> list[HostStatus]:
@@ -62,6 +66,62 @@ def safe_collect_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
         return collect_host_statuses_with_fallback(config)
     _schedule_host_status_refresh(config)
     return _fallback_host_statuses(config)
+
+
+def publish_host_status(config: MediaforceConfig, status: HostStatus) -> None:
+    """Show a background check's result on the host cards without checking again.
+
+    Web reads only serve this cache (ddd0c6c1), so the background checks keep it current
+    even with no queued work (#922). One computer's result does not make the rest fresh.
+    """
+    global _HOST_STATUS_CACHE_KEY
+    global _HOST_STATUS_CACHE_FETCHED_AT
+    global _HOST_STATUS_CACHE_VALUE
+
+    if _host_status_config_is_malformed(config):
+        return
+    _complete_host_status_refresh_if_ready()
+    cache_key = _host_status_cache_key(config)
+    with _HOST_STATUS_CACHE_LOCK:
+        if _HOST_STATUS_CACHE_KEY != cache_key or not _HOST_STATUS_CACHE_VALUE:
+            # Settings changed since the last full check: the other computers show as being checked,
+            # as a read would show them anyway, and the next full check is still due.
+            _HOST_STATUS_CACHE_KEY = cache_key
+            _HOST_STATUS_CACHE_FETCHED_AT = float("-inf")
+            _HOST_STATUS_CACHE_VALUE = _fallback_host_statuses(config)
+        _HOST_STATUS_CACHE_VALUE = [
+            status if cached.key == status.key else cached for cached in _HOST_STATUS_CACHE_VALUE
+        ]
+
+
+def refresh_current_machine_host_statuses(config: MediaforceConfig) -> None:
+    """Check this computer's own rows again after its storage changed, so a reboot's first check does not stick."""
+    global _LOCAL_HOST_STORAGE_SIGNATURE
+
+    hosts = [host for host in config.remote_hosts if isinstance(host, dict) and host_targets_current_machine(host)]
+    if not hosts:
+        return
+    storage = controller_storage_recovery_snapshot(config)
+    signature = (
+        storage.get("state_error"),
+        tuple((mount["mount_point"], mount["status"]) for mount in storage["mounts"]),
+    )
+    cached = {status.key: status for status in _cached_statuses_for_current_key(config)}
+    if signature == _LOCAL_HOST_STORAGE_SIGNATURE and all(
+        (status := cached.get(str(host.get("host") or ""))) is not None
+        and status.message != _HOST_STATUS_PENDING_MESSAGE
+        for host in hosts
+    ):
+        return
+    for host in hosts:
+        publish_host_status(config, probe_host_status(config, host))
+    _LOCAL_HOST_STORAGE_SIGNATURE = signature
+
+
+def _cached_statuses_for_current_key(config: MediaforceConfig) -> list[HostStatus]:
+    cache_key = _host_status_cache_key(config)
+    with _HOST_STATUS_CACHE_LOCK:
+        return list(_HOST_STATUS_CACHE_VALUE) if _HOST_STATUS_CACHE_KEY == cache_key else []
 
 
 def cached_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
@@ -115,7 +175,7 @@ def _fallback_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
                 priority=priority,
                 capabilities=capabilities,
                 available=False,
-                message="Checking host status...",
+                message=_HOST_STATUS_PENDING_MESSAGE,
                 missing_paths=[],
                 probe_available=False,
                 repo_path=str(host.get("repo_path") or "").strip() or None,

@@ -51,9 +51,21 @@ remote computers independently of
 queued work, pause and work windows. Checks retry after 30 seconds, increasing
 to at most five minutes. `host-recovery.json` retains the outage start, last
 check/connection and next retry beside runtime settings. Missing mounted-media
-shares on macOS use the existing saved SMB mapping and native NetFS no-UI helper
-over batch SSH, with a fresh mounted-identity check and full host readiness check
-before the computer becomes usable. No Finder fallback runs in this worker.
+shares on macOS use the existing saved SMB mapping and native NetFS no-UI helper.
+Batch SSH starts it as a temporary job in the signed-in user's desktop session,
+through the same per-share job and lock as the Finder helper, because only that
+session can read the login Keychain. A no-UI request cannot open a dialog, so it
+is ended if it does not finish within the attempt. A full host readiness check
+follows before the computer becomes usable. No Finder fallback runs in this worker.
+When the share's password is not saved, or a leftover folder or a share connected
+under a suffixed name is in the way, the computer needs attention: one warning
+names the computer and says what to do there, and automatic connections stop
+until a check finds the storage connected, for example after Prepare. When no one
+is logged in at the computer, the warning asks for a login, and connections keep
+retrying so storage returns on its own after that.
+These checks also update the computer cards, and each controller storage pass
+re-checks the controller's own card when its storage changed, so the cards stay
+current with an idle queue while web reads stay check-free.
 Explicit Prepare retains its existing Finder behavior and shares that computer's
 recovery process lock. Remote probes and connections cannot hold the controller
 readiness lock or delay its background checks. An interrupted/ambiguous remote mount is persisted before SSH

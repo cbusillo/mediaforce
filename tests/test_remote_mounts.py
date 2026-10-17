@@ -1,16 +1,18 @@
 import base64
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from mediaforce import remote
-from mediaforce.hosts.mount_runtime import ControllerSmbMount, RemoteSmbMount, \
-    _remote_mount_script, controller_smb_mounts_from_output, load_controller_smb_mounts, mount_remote_smb_shares, \
-    remote_smb_mounts_for_paths, save_controller_smb_mounts
+from mediaforce.hosts.mount_runtime import ControllerSmbMount, NoUiMountResult, RemoteSmbMount, \
+    _remote_mount_script, controller_smb_mounts_from_output, controller_smb_mounts_path, load_controller_smb_mounts, \
+    mount_remote_smb_shares, mount_smb_shares_no_ui, remote_smb_mounts_for_paths, save_controller_smb_mounts
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.remote import HostStatus
 
@@ -643,7 +645,13 @@ case "$1" in
     esac
     exit 0 ;;
   bootstrap)
+    printf '%s\\n' "$2" >>"$STUB_DIR/bootstrap-domains"
     if [ -e "$STUB_DIR/bootstrap-starts-job" ]; then : >"$STUB_DIR/job-running"; fi
+    if [ -e "$STUB_DIR/bootstrap-runs-job" ]; then
+      # Start the job's program the way launchd would, from the arguments plutil recorded.
+      set -- $(cat "$3.args")
+      IN_LAUNCHD_JOB=1 "$@" >/dev/null 2>&1 &
+    fi
     exit 0 ;;
   bootout)
     rm -f "$STUB_DIR/job-running"
@@ -651,7 +659,31 @@ case "$1" in
 esac
 exit 0
 """
-_BASE64_STUB = "#!" + sys.executable + "\nimport base64, sys\nsys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))\n"
+# Decoded helper files call the same stand-ins.
+_BASE64_STUB = "#!" + sys.executable + """
+import base64, os, sys
+decoded = base64.b64decode(sys.stdin.buffer.read())
+stubs = os.environ["STUB_DIR"].encode() + b"/stubs/"
+for name in (b"/bin/launchctl", b"/usr/bin/osascript"):
+    decoded = decoded.replace(name, stubs + name.rsplit(b"/", 1)[1])
+sys.stdout.buffer.write(decoded)
+"""
+# A NetFS request that answers with the status in netfs-status, connecting the share on 0.
+_OSASCRIPT_STUB = """#!/bin/sh
+if [ -e "$STUB_DIR/netfs-status" ]; then
+  printf '%s\\n' "${IN_LAUNCHD_JOB:-outside}" >>"$STUB_DIR/osascript.log"
+  printf '%s\\n' "$$" >"$STUB_DIR/osascript.pid"
+  answer="$(cat "$STUB_DIR/netfs-status")"
+  if [ "$answer" = hang ]; then sleep 20; fi
+  if [ "$answer" = 0 ]; then
+    printf '//remote@NAS.local/media on /Volumes/media (smbfs, nodev)\\n' >"$STUB_DIR/mount-output"
+  fi
+  printf '{"status":%s}\\n' "$answer"
+  exit 0
+fi
+printf "Finder got an error: User canceled. (-128)\\n" >&2
+exit 1
+"""
 
 
 class GeneratedMountScriptTests(unittest.TestCase):
@@ -665,11 +697,15 @@ class GeneratedMountScriptTests(unittest.TestCase):
         stub_bodies = {
             "launchctl": _LAUNCHCTL_STUB,
             "mount": '#!/bin/sh\ncat "$STUB_DIR/mount-output" 2>/dev/null\nexit 0\n',
-            "stat": "#!/bin/sh\nid -u\n",
+            "stat": '#!/bin/sh\ncat "$STUB_DIR/console-uid" 2>/dev/null || id -u\n',
             "base64": _BASE64_STUB,
             "osacompile": "#!/bin/sh\nexit 0\n",
-            "plutil": "#!/bin/sh\nexit 0\n",
-            "osascript": '#!/bin/sh\nprintf "Finder got an error: User canceled. (-128)\\n" >&2\nexit 1\n',
+            "plutil": (
+                '#!/bin/sh\ncase "$2" in ProgramArguments.[0-9]*) printf \'%s\\n\' "$4" >>"$5.args" ;; esac\n'
+                "exit 0\n"
+            ),
+            "osascript": _OSASCRIPT_STUB,
+            "test": '#!/bin/sh\n[ -e "$STUB_DIR/path-occupied" ]\n',
         }
         for name, body in stub_bodies.items():
             path = self.stubs / name
@@ -678,7 +714,7 @@ class GeneratedMountScriptTests(unittest.TestCase):
 
     def _stubbed(self, shell_text: str) -> str:
         for system_path in ("/bin/launchctl", "/sbin/mount", "/usr/bin/stat", "/usr/bin/base64",
-                            "/usr/bin/osacompile", "/usr/bin/plutil", "/usr/bin/osascript"):
+                            "/usr/bin/osacompile", "/usr/bin/plutil", "/usr/bin/osascript", "/bin/test"):
             shell_text = shell_text.replace(system_path, str(self.stubs / Path(system_path).name))
         return shell_text.replace("/tmp/mediaforce-mount", str(self.root / "mediaforce-mount"))
 
@@ -699,6 +735,110 @@ class GeneratedMountScriptTests(unittest.TestCase):
             env={"HOME": str(self.root / "home"), "STUB_DIR": str(self.root), "PATH": "/usr/bin:/bin"},
             timeout=30,
         )
+
+    def _run_stubbed(self, script: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["/bin/sh", "-s"],
+            input=self._stubbed(script),
+            capture_output=True,
+            text=True,
+            env={"HOME": str(self.root / "home"), "STUB_DIR": str(self.root), "PATH": "/usr/bin:/bin"},
+            timeout=timeout,
+        )
+
+    def _recover_without_dialog(self, netfs_answer: str) -> NoUiMountResult:
+        (self.root / "bootstrap-runs-job").touch()
+        (self.root / "netfs-status").write_text(netfs_answer)
+        runtime_settings = self.root / "runtime-settings.json"
+        save_controller_smb_mounts(controller_smb_mounts_path(runtime_settings), [
+            ControllerSmbMount("//remote@NAS.local/media", Path("/Volumes/media")),
+        ])
+        config = SimpleNamespace(paths=SimpleNamespace(runtime_settings_path=runtime_settings), raw={})
+        host = {"host": "remote@worker", "label": "M1 mini", "media_access": "mounted"}
+        status = HostStatus(
+            key="remote@worker", label="M1 mini", mode="ssh", priority=0, capabilities=[], available=False,
+            message="Shared storage disconnected", missing_paths=["/Volumes/media/tv"], platform="macos",
+            missing_mounts=["/Volumes/media"],
+        )
+
+        def ssh(_host: dict[str, object], *args: str, input_text: str, timeout: int, **_kwargs: object
+                ) -> subprocess.CompletedProcess[str]:
+            self.assertEqual(args, ("sh", "-s"))
+            return self._run_stubbed(input_text, timeout)
+
+        with patch("mediaforce.remote._run_remote_ssh", side_effect=ssh):
+            return remote.recover_remote_host_mounts_no_ui(config, host, status)
+
+    def _osascript_runs(self) -> list[str]:
+        log = self.root / "osascript.log"
+        return log.read_text().splitlines() if log.exists() else []
+
+    def test_unattended_reconnect_runs_inside_the_desktop_session(self) -> None:
+        result = self._recover_without_dialog("0")
+
+        self.assertTrue(result.ok, result)
+        # The request ran as a job in the user's GUI domain, where the login Keychain is readable,
+        # and never directly in the SSH session (#922).
+        self.assertEqual(self._osascript_runs(), ["1"])
+        [domain] = (self.root / "bootstrap-domains").read_text().splitlines()
+        self.assertTrue(domain.startswith("gui/"), domain)
+
+    def test_a_refused_sign_in_asks_for_the_saved_password_by_computer_name(self) -> None:
+        result = self._recover_without_dialog("80")
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.uncertain)
+        self.assertFalse(result.retry, "nothing changes until someone saves the password")
+        self.assertIn("M1 mini", result.action or "")
+        self.assertEqual(self._osascript_runs(), ["1"])
+
+    def test_other_netfs_failures_retry_without_asking(self) -> None:
+        result = self._recover_without_dialog("64")
+
+        self.assertEqual(result, NoUiMountResult(ok=False))
+
+    def test_no_one_logged_in_asks_for_a_login_and_sends_no_request(self) -> None:
+        (self.root / "console-uid").write_text("0\n")
+
+        result = self._recover_without_dialog("0")
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.retry, "storage reconnects on its own once someone logs in")
+        self.assertIn("M1 mini", result.action or "")
+        self.assertEqual(self._osascript_runs(), [])
+
+    def test_a_leftover_folder_stops_the_request_and_asks_by_computer_name(self) -> None:
+        (self.root / "path-occupied").touch()
+
+        result = self._recover_without_dialog("0")
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.retry)
+        self.assertIn("M1 mini", result.action or "")
+        self.assertEqual(self._osascript_runs(), [], "NetFS would connect beside the folder instead")
+
+    def test_a_request_that_does_not_answer_is_ended(self) -> None:
+        (self.root / "bootstrap-runs-job").touch()
+        (self.root / "netfs-status").write_text("hang")
+
+        result = mount_smb_shares_no_ui(
+            {"host": "remote@worker", "label": "M1 mini"},
+            [RemoteSmbMount(Path("/Volumes/media"), "media", "smb://remote@NAS.local/media")],
+            run_mount_script=self._run_stubbed,
+            attempt_seconds=1,
+        )
+
+        self.assertTrue(result.uncertain, "no confirmed result: review before another request")
+        pid = int((self.root / "osascript.pid").read_text())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("the no-UI request was left running")
 
     def _launchctl_calls(self, verb: str) -> list[str]:
         log = self.root / "launchctl.log"
