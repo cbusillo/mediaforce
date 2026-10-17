@@ -581,7 +581,7 @@
 			<OperatorWorkConsole work={operatorWork} onRefresh={onOperatorRefresh} />
 		</section>
 
-		<aside class="ops__rail" aria-label="Computer readiness">
+		<aside class="ops__rail" aria-label="Computers and schedule">
 			<details class="system-details">
 				<summary class="system-details__summary">
 					<span class="system-details__heading">

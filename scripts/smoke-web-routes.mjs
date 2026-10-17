@@ -2385,6 +2385,7 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
       let paused = false;
       let queuedShow = false;
       let mixedFleet = false;
+      let connectedCount = 0;
       await page.route(/\/api\/dashboard(?:\?.*)?$/, async (route) => {
         const response = await route.fetch();
         const payload = await response.json();
@@ -2422,18 +2423,21 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
           host.schedule_profile_label = "Night";
           host.active_encode_count = 0;
         }
-        if (mixedFleet && payload.hosts.length) {
-          payload.hosts[0].schedule_open = true;
-          payload.hosts[0].active_encode_count = payload.hosts[0].max_parallel_encodes;
+        connectedCount = payload.hosts.filter((host) => host.available).length;
+        if (mixedFleet) {
+          const worker = payload.hosts.find((host) => host.capabilities.includes("encode_queue") && host.max_parallel_encodes > 0);
+          if (!worker) throw new Error("The mixed-fleet fixture needs an encode-capable computer");
+          worker.schedule_open = true;
+          worker.active_encode_count = worker.max_parallel_encodes;
         }
         await route.fulfill({ response, json: payload });
       });
       for (waitingCount of [10, 1, 0, undefined]) {
         await openRoute(page, baseUrl, "/ops", timeoutMs);
-        const details = page.locator(".system-details");
+        const details = page.getByRole("complementary", { name: "Computers and schedule" }).locator(".system-details");
         const toggle = details.locator("summary");
         // Reachability is not work readiness: all these computers are outside their windows.
-        await expect(toggle).toContainText("connected");
+        await expect(toggle).toContainText(String(connectedCount));
         await expect(toggle).not.toContainText("ready");
         await toggle.focus();
         await page.keyboard.press("Enter");
@@ -2493,8 +2497,8 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
       }
       mixedFleet = true;
       await openRoute(page, baseUrl, "/ops", timeoutMs);
-      const computers = page.locator(".system-details");
-      await expect(computers.locator("summary")).toContainText("connected");
+      const computers = page.getByRole("complementary", { name: "Computers and schedule" }).locator(".system-details");
+      await expect(computers.locator("summary")).toContainText(String(connectedCount));
       await expect(computers.locator("summary")).not.toContainText("ready");
       await computers.locator("summary").click();
       await expect(computers.locator(".host-row").filter({ hasText: "Working" })).toHaveCount(1);

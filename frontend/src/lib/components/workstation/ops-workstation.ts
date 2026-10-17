@@ -1415,11 +1415,11 @@ export function buildOpsFooterSignals(
 
 export function hostTone(
 	host: HostRuntime,
-	fleetHasReadyCapacity = false,
+	fleetHasConnectedHost = false,
 	dashboard?: DashboardSummaryPayload | null
 ): ShellTone {
 	if (host.storage_recovery_available === true) return 'wait';
-	if (!host.available) return fleetHasReadyCapacity ? 'wait' : 'fail';
+	if (!host.available) return fleetHasConnectedHost ? 'wait' : 'fail';
 	const schedule = activitySchedulePresentationCopy(
 		hostSchedulePresentation(host, dashboard?.encode_queue),
 		hostCopyTerms([host])
