@@ -4047,7 +4047,7 @@ async function checkSampleHistory(baseUrl, timeoutMs) {
       const page = await browser.newPage({ viewport });
       page.setDefaultTimeout(timeoutMs);
       const summary = "Tested 1 of 100 files. Not yet tested: Season 10, HEVC (H.265) video.";
-      const samples = Array.from({ length: 11 }, (_, index) => ({
+      let samples = Array.from({ length: 11 }, (_, index) => ({
         job_id: `historical-${index}`,
         finished_at: "2026-10-06T17:29:00Z",
         file_name: `Historical episode ${index + 1}.mkv`,
@@ -4075,7 +4075,11 @@ async function checkSampleHistory(baseUrl, timeoutMs) {
       await expect(history.getByRole("listitem")).toHaveCount(10);
       await expect(history.getByText(summary, { exact: true })).toHaveCount(10);
       await expect(history.getByRole("button", { name: "Newer samples" })).toBeDisabled();
+      fail = true;
       await history.getByRole("button", { name: "Older samples" }).click();
+      await expect(history.getByRole("alert")).toBeVisible();
+      fail = false;
+      await history.getByRole("button", { name: "Try again", exact: true }).click();
       await expect(history.getByRole("listitem")).toHaveCount(1);
       await expect(history.getByText(samples[10].file_name, { exact: true })).toBeVisible();
       await expect(history.getByRole("button", { name: "Older samples" })).toBeDisabled();
@@ -4088,6 +4092,16 @@ async function checkSampleHistory(baseUrl, timeoutMs) {
       const screenshotDir = path.join(rootDir, "scratch/ui-checks");
       await mkdir(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `sample-history-${viewport.width}.png`) });
+      await history.locator("summary").click();
+      samples = [samples[10]];
+      await history.locator("summary").click();
+      await expect(history.getByRole("listitem")).toHaveCount(1);
+      await expect(history.getByText(samples[0].file_name, { exact: true })).toBeVisible();
+      await history.locator("summary").click();
+      samples = [];
+      await history.locator("summary").click();
+      await expect(history.getByRole("listitem")).toHaveCount(0);
+      await expect(history.getByRole("navigation")).toHaveCount(0);
       await page.goto(`${baseUrl}/folders/tv/Review%20Ready/Season%201/Episode%2001.mkv`, { waitUntil: "networkidle" });
       await expect(page.locator("summary", { hasText: /^Past samples$/ })).toHaveCount(0);
       await page.close();

@@ -510,7 +510,7 @@ checks prove rendering and refresh behavior, not installed Keychain access.
 
 ### Saved sample coverage
 
-On a show or season, open **Past samples**, beside **Details**. The list reads the
+On a show or season, open **Past samples**, below **Details**. The list reads the
 coverage saved with each finished sample, including older samples replaced by
 new ones; it never substitutes the folder's current selection. Page through
 older and newer samples, retry a failed history read, and check the empty and

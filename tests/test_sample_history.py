@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs
@@ -64,14 +64,13 @@ def test_real_app_serves_saved_coverage_over_http(tmp_path: Path) -> None:
     from mediaforce.core.config import ConfigPaths, MediaforceConfig
     from mediaforce.web import app as web_app
 
-    config = MediaforceConfig(raw={}, paths=ConfigPaths(
+    config = MediaforceConfig(raw={"media": {}, "video": {}, "planning": {}}, paths=ConfigPaths(
         project_root=tmp_path, config_path=tmp_path / 'config.toml', db_path=tmp_path / 'library.sqlite3',
         run_manifest_dir=tmp_path / 'runs', web_state_dir=tmp_path / 'web', review_dir=tmp_path / 'review',
         runtime_settings_path=tmp_path / 'settings.json',
     ))
-    with patch.dict(vars(web_app), load_config=lambda _path: config):
+    with patch.dict(vars(web_app), load_config=lambda _path: config, _metric_support=lambda: {}):
         app = web_app.create_app(config.paths.config_path)
-    assert any(getattr(route, 'path', '') == '/api/folders/{prefix:path}/sample-history' for route in app.routes)
     with open_db(config.paths.db_path) as connection:
         selection = add_sample(connection, 'original', summary='Original historical coverage')
     messages = []
@@ -89,9 +88,26 @@ def test_real_app_serves_saved_coverage_over_http(tmp_path: Path) -> None:
             'root_path': '', 'headers': [], 'server': ('fixture', 80), 'client': ('fixture', 1),
         }, receive, send)
 
-    asyncio.run(request())
+    with patch.dict(vars(web_app), _metric_support=lambda: {}):
+        asyncio.run(request())
     assert messages[0]['status'] == 200
     assert (b'cache-control', b'no-store') in messages[0]['headers']
     payload = json.loads(b''.join(message.get('body', b'') for message in messages))
     assert payload['samples'][0]['selection'] == selection
     assert payload['samples'][0]['job_id'] == 'original'
+
+
+def test_history_orders_by_the_displayed_finish_time(tmp_path: Path) -> None:
+    from mediaforce.web.runtime.sample_history import sample_history_payload
+
+    path = tmp_path / 'library.sqlite3'
+    with open_db(path) as connection:
+        add_sample(connection, 'queued_first_finished_last')
+        add_sample(connection, 'queued_last_finished_first')
+        connection.execute(update(calibration_jobs).where(
+            calibration_jobs.c.job_id == 'queued_first_finished_last',
+        ).values(finished_at='2026-10-02T01:00:00Z'))
+    result = sample_history_payload(path, 'tv/Show')
+    assert [row['job_id'] for row in result['samples']] == [
+        'queued_first_finished_last', 'queued_last_finished_first',
+    ]

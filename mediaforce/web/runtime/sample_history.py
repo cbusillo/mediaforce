@@ -23,6 +23,7 @@ def sample_history_payload(db_path: Path, prefix: str, offset: int = 0, limit: i
         calibration_jobs.c.finished_at.is_not(None),
     )
     with open_readonly_db(db_path) as connection:
+        connection.exec_driver_sql("BEGIN")
         total = connection.execute(select(func.count()).select_from(calibration_jobs).where(*conditions)).scalar_one()
         rows = connection.execute(
             select(
@@ -30,6 +31,7 @@ def sample_history_payload(db_path: Path, prefix: str, offset: int = 0, limit: i
                 calibration_jobs.c.finished_at,
                 calibration_jobs.c.sample_item_json,
             ).where(*conditions).order_by(
+                calibration_jobs.c.finished_at.desc(),
                 calibration_jobs.c.created_at.desc(), literal_column("rowid").desc(),
             ).offset(offset).limit(limit)
         ).mappings().all()

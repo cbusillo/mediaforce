@@ -12,9 +12,11 @@
 	let history = $state<History | null>(null);
 	let busy = $state(false);
 	let failed = $state(false);
+	let requestedOffset = 0;
 
 	async function load(offset = 0) {
 		if (busy) return;
+		requestedOffset = offset;
 		busy = true;
 		failed = false;
 		try {
@@ -31,14 +33,14 @@
 <details
 	class="sample-history"
 	ontoggle={(event) => {
-		if (event.currentTarget.open && !history) void load();
+		if (event.currentTarget.open) void load();
 	}}
 >
 	<summary>Past samples</summary>
 	{#if busy}<p role="status">Loading samples…</p>{/if}
 	{#if failed}
 		<p role="alert">Past samples could not be loaded.</p>
-		<button type="button" onclick={() => load(history?.offset)} disabled={busy}>Try again</button>
+		<button type="button" onclick={() => load(requestedOffset)} disabled={busy}>Try again</button>
 	{:else if history}
 		{#if history.total === 0}
 			<p>No saved samples for this folder.</p>
