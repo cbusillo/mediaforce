@@ -512,3 +512,13 @@ viewport. Fixture seeding clears only its own synthetic computers' prior outage
 history so repeated runs have the same initial state. Screenshots live in
 `scratch/ui-checks/`. These
 checks prove rendering and refresh behavior, not installed Keychain access.
+
+### Saved sample coverage
+
+On a show or season, open **Past samples**, below **Details**. The list reads the
+coverage saved with each finished sample, including older samples replaced by
+new ones; it never substitutes the folder's current selection. Page through
+older and newer samples, retry a failed history read, and check the empty and
+legacy-without-coverage states. Exact-file pages do not show this folder history.
+Check desktop and 390px, keyboard disclosure, complete pagination and long
+filenames. History is read-only and does not imply that a sample was approved.
