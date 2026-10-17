@@ -1,10 +1,12 @@
 import base64
 import hashlib
+import json
 import logging
 import os
 import re
 import shlex
 import subprocess
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -23,10 +25,12 @@ _MOUNT_BUSY_EXIT = 43
 _MOUNT_HELPER_EXIT = 44
 _MOUNT_REQUEST_WAITING_EXIT = 45
 _MOUNT_ELSEWHERE_EXIT = 46
+_MOUNT_NOT_CONNECTED_EXIT = 47
+_MOUNT_PATH_OCCUPIED_EXIT = 48
 _SSH_CONNECTION_EXIT = 255
 _MOUNT_ESCAPE_RE = re.compile(r"\\([0-7]{3})")
 _SMB_SERVER_RE = re.compile(r"^[A-Za-z0-9._\-\[\]:]+$")
-_HELPER_MARKER_RE = re.compile(r"^MEDIAFORCE_MOUNT(?:_JOB|_ERR|_AT)?=.*$", re.MULTILINE)
+_HELPER_MARKER_RE = re.compile(r"^MEDIAFORCE_MOUNT(?:_JOB|_ERR|_AT|_NETFS)?=.*$", re.MULTILINE)
 # The share URL names the account; an error echoing it must not put that in the log.
 # Applied to the helper's error text before it is cut, so a cut can never split an account from its URL.
 _REDACT_SMB_ACCOUNT_SED = "/usr/bin/sed -E 's#([Ss][Mm][Bb]://)[^@/[:space:]]+@#\\1#g'"
@@ -48,6 +52,23 @@ _FINDER_UNREACHABLE_MARKERS = (
     "timed out",
 )
 _FINDER_ERROR_SHOWN_CHARS = 300
+# NetFS reports a failed sign-in with the BSD errors EAUTH (80) and ENEEDAUTH (81) from <sys/errno.h>.
+# With UIOption=NoUI that means the login Keychain has no usable password for the share.
+_NETFS_AUTHENTICATION_STATUSES = frozenset({80, 81})
+# Asks NetFS to connect a share with what the login Keychain already holds; NoUI means it never
+# opens a dialog, so it fails instead of asking for a password.
+NO_UI_SMB_MOUNT_JXA = r'''ObjC.import("Foundation");
+ObjC.import("NetFS");
+
+function run(argv) {
+    const url = $.NSURL.URLWithString($(argv[0]));
+    const openOptions = $.NSMutableDictionary.alloc.init;
+    openOptions.setObjectForKey($("NoUI"), $("UIOption"));
+    const mountpoints = Ref();
+    const status = $.NetFSMountURLSync(url, null, null, null, openOptions, null, mountpoints);
+    return JSON.stringify({status: Number(status)});
+}
+'''
 LOGGER = logging.getLogger(__name__)
 
 
@@ -62,6 +83,17 @@ class RemoteSmbMount:
     mount_point: Path
     share_name: str
     url: str
+
+
+@dataclass(frozen=True, slots=True)
+class NoUiMountResult:
+    ok: bool
+    # The request may still be running or ended without a readable result; review before another one.
+    uncertain: bool = False
+    # What someone has to do on that computer, in plain words.
+    action: str | None = None
+    # Whether automatic attempts continue while that action is outstanding.
+    retry: bool = True
 
 
 def controller_smb_mounts_path(runtime_settings_path: Path) -> Path:
@@ -261,15 +293,102 @@ def mount_remote_smb_shares(
     )
 
 
+def mount_smb_shares_no_ui(
+        host: dict[str, Any],
+        mounts: list[RemoteSmbMount],
+        *,
+        run_mount_script: Callable[[str, int], subprocess.CompletedProcess[str]],
+        attempt_seconds: int = REMOTE_MOUNT_ATTEMPT_SECONDS,
+) -> NoUiMountResult:
+    """Connect shares without any dialog, from inside the computer's desktop session.
+
+    The request runs as a temporary job in the signed-in user's GUI launchd domain, like the Finder
+    helper, because only that session can read the login Keychain; over plain SSH NetFS fails
+    to sign in (#922). A no-UI request cannot open a dialog, so unlike Finder's it is bounded.
+    """
+    label = str(host.get("label") or host.get("host") or "Remote host").strip() or "Remote host"
+    for mount in mounts:
+        script = _remote_mount_script(mount, attempt_seconds=attempt_seconds, no_ui=True)
+        try:
+            result = run_mount_script(script, attempt_seconds + 15)
+        except subprocess.TimeoutExpired:
+            return NoUiMountResult(ok=False, uncertain=True)
+        except (OSError, subprocess.SubprocessError):
+            return NoUiMountResult(ok=False)
+        if result.returncode == 0:
+            continue
+        _log_helper_failure(label, mount, result)
+        return _no_ui_failure(label, mount, result, attempt_seconds=attempt_seconds)
+    return NoUiMountResult(ok=True)
+
+
+def _no_ui_failure(
+        label: str,
+        mount: RemoteSmbMount,
+        result: subprocess.CompletedProcess[str],
+        *,
+        attempt_seconds: int,
+) -> NoUiMountResult:
+    share = mount.share_name
+    if result.returncode == _NO_GUI_SESSION_EXIT:
+        # Checked again on every attempt, so storage reconnects on its own once someone logs in.
+        return NoUiMountResult(
+            ok=False,
+            action=f"{label} is not logged in. Log in on {label} so Mediaforce can reconnect its storage.",
+        )
+    if result.returncode == _MOUNT_ELSEWHERE_EXIT:
+        finder_result = _failed_mount_result(
+            label, mount, result, login_account="", attempt_seconds=attempt_seconds,
+        )
+        return NoUiMountResult(ok=False, action=f"{finder_result.message} {finder_result.detail}", retry=False)
+    if result.returncode == _MOUNT_PATH_OCCUPIED_EXIT:
+        return NoUiMountResult(
+            ok=False,
+            action=(
+                f"{label} has an empty {mount.mount_point} folder left from an earlier connection, so the "
+                f"{share} share cannot connect there. Restart {label} to clear it, then use Prepare."
+            ),
+            retry=False,
+        )
+    if result.returncode in {_MOUNT_BUSY_EXIT, _MOUNT_HELPER_EXIT, _MOUNT_REQUEST_WAITING_EXIT}:
+        return NoUiMountResult(ok=False)
+    if result.returncode != _MOUNT_NOT_CONNECTED_EXIT:
+        # A timeout, a lost SSH connection or an unknown exit leaves no confirmed result.
+        return NoUiMountResult(ok=False, uncertain=True)
+    status = _netfs_status(_helper_markers(result).get("MEDIAFORCE_MOUNT_NETFS", ""))
+    if status is None:
+        return NoUiMountResult(ok=False, uncertain=True)
+    if status in _NETFS_AUTHENTICATION_STATUSES:
+        return NoUiMountResult(
+            ok=False,
+            action=(
+                f"{label} needs the password for the {share} share saved: on {label}, connect to {share} "
+                "once in Finder and tick Remember this password, then use Prepare."
+            ),
+            retry=False,
+        )
+    return NoUiMountResult(ok=False)
+
+
+def _netfs_status(output: str) -> int | None:
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    status = payload.get("status") if isinstance(payload, dict) else None
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
+
+
 def _remote_mount_script(
         mount: RemoteSmbMount,
         *,
         attempt_seconds: int,
+        no_ui: bool = False,
 ) -> str:
     expected = str(mount.mount_point)
     if not _finder_mount_point_supported(mount.mount_point):
         raise ValueError("Finder SMB mounts must target one direct child of /Volumes.")
-    applescript = "\n".join([
+    applescript = NO_UI_SMB_MOUNT_JXA if no_ui else "\n".join([
         "use scripting additions",
         "on run argv",
         "    set share_url to item 1 of argv",
@@ -277,6 +396,23 @@ def _remote_mount_script(
         "end run",
         "",
     ])
+    request_lines = [
+        # A no-UI request cannot open a dialog, so ending one that runs too long is safe.
+        '/usr/bin/osascript "$script" "$mount_url" >"$stdout_path" 2>"$stderr_path" &',
+        'child_pid=$!',
+        f'( /bin/sleep {int(attempt_seconds)}; /bin/kill "$child_pid" 2>/dev/null ) >/dev/null 2>&1 &',
+        'watchdog_pid=$!',
+        'wait "$child_pid" || child_status=$?',
+        '/bin/kill "$watchdog_pid" >/dev/null 2>&1 || true',
+        # Reaped here so the shell does not report the stopped timer as an error.
+        'wait "$watchdog_pid" 2>/dev/null || true',
+        '/usr/bin/head -c 400 "$stdout_path" >"$result_dir/output" 2>/dev/null || true',
+    ] if no_ui else [
+        # No time limit: a request Finder has not answered usually has a dialog open, and ending
+        # the request would leave that dialog behind for the next one to stack on (#594). It ends
+        # when someone answers or cancels it, or when Finder gives up on its own.
+        '/usr/bin/osascript "$script" "$mount_url" >"$stdout_path" 2>"$stderr_path" || child_status=$?',
+    ]
     runner = "\n".join(
         [
             "#!/bin/sh",
@@ -290,11 +426,8 @@ def _remote_mount_script(
             'result_dir="$7"',
             'uid="$(/usr/bin/id -u)"',
             'runner_dir="${0%/*}"',
-            # No time limit: a request Finder has not answered usually has a dialog open, and ending
-            # the request would leave that dialog behind for the next one to stack on (#594). It ends
-            # when someone answers or cancels it, or when Finder gives up on its own.
             "child_status=0",
-            '/usr/bin/osascript "$script" "$mount_url" >"$stdout_path" 2>"$stderr_path" || child_status=$?',
+            *request_lines,
             # Kept outside the runner's own folder so the caller can still report it after cleanup. The
             # status appears only once the error is saved, so a caller that sees it can rely on both.
             f'{_REDACT_SMB_ACCOUNT_SED} "$stderr_path" 2>/dev/null | /usr/bin/head -c 4000 >"$result_dir/error" || true',
@@ -322,12 +455,31 @@ def _remote_mount_script(
     q_applescript_payload = shlex.quote(applescript_payload)
     q_runner_payload = shlex.quote(runner_payload)
     q_mount_url_payload = shlex.quote(mount_url_payload)
+    compile_language = "-l JavaScript " if no_ui else ""
+    # A no-UI request that ended without connecting is finished: say so instead of waiting out the attempt.
+    no_ui_finished = f"""if [ -s "$result_dir/status" ]; then
+  if mount_present; then
+    printf 'MEDIAFORCE_MOUNT=mounted\\n'
+    exit 0
+  fi
+  printf 'MEDIAFORCE_MOUNT=not-connected\\n'
+  report_helper
+  exit {_MOUNT_NOT_CONNECTED_EXIT}
+fi
+""" if no_ui else ""
+    # NetFS would connect beside a leftover folder (as "<name>-1"), so a no-UI request stops first.
+    no_ui_occupied = f"""if /bin/test -e "$expected" || /bin/test -L "$expected"; then
+  printf 'MEDIAFORCE_MOUNT=path-occupied\\n'
+  exit {_MOUNT_PATH_OCCUPIED_EXIT}
+fi
+""" if no_ui else ""
     return f"""set -u
 expected={q_expected}
 mount_output_path={q_mount_output_path}
 share_sources={q_share_sources}
 label={q_label}
 attempt_seconds={int(attempt_seconds)}
+keep_waiting_request={0 if no_ui else 1}
 mount_present() {{
   mount_output="$(/sbin/mount 2>/dev/null || true)"
   if printf '%s\\n' "$mount_output" | /usr/bin/grep -F -- " on $expected (smbfs," >/dev/null 2>&1; then
@@ -379,7 +531,7 @@ fi
 if report_mounted_elsewhere; then
   exit {_MOUNT_ELSEWHERE_EXIT}
 fi
-# A request still running from an earlier attempt may have a dialog open. Ending it would not close
+{no_ui_occupied}# A request still running from an earlier attempt may have a dialog open. Ending it would not close
 # that dialog, and a new request would open a second one (#594), so wait for that one instead.
 job_running() {{
   /bin/launchctl print "gui/$uid/$label" 2>/dev/null | /usr/bin/grep -E -q '^[[:space:]]*state = running$'
@@ -418,7 +570,7 @@ fi
 tmp_dir=""
 result_dir=""
 cleanup() {{
-  if [ -n "$result_dir" ] && job_running; then
+  if [ "$keep_waiting_request" = 1 ] && [ -n "$result_dir" ] && job_running; then
     # Leave a request Finder has not answered: ending it would not close its dialog, and the next
     # attempt finds it instead of opening another. Its runner removes its own folder and the lock
     # when it ends, and the result folder too once this side has gone.
@@ -446,7 +598,7 @@ mount_url="$(/usr/bin/printf '%s' {q_mount_url_payload} | /usr/bin/base64 -D)" |
 /usr/bin/printf '%s' {q_applescript_payload} | /usr/bin/base64 -D >"$source_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/printf '%s' {q_runner_payload} | /usr/bin/base64 -D >"$runner_path" || exit {_MOUNT_HELPER_EXIT}
 /bin/chmod 700 "$runner_path" || exit {_MOUNT_HELPER_EXIT}
-/usr/bin/osacompile -o "$script_path" "$source_path" >/dev/null 2>&1 || exit {_MOUNT_HELPER_EXIT}
+/usr/bin/osacompile {compile_language}-o "$script_path" "$source_path" >/dev/null 2>&1 || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -create xml1 "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert Label -string "$label" "$plist_path" || exit {_MOUNT_HELPER_EXIT}
 /usr/bin/plutil -insert ProgramArguments -json '[]' "$plist_path" || exit {_MOUNT_HELPER_EXIT}
@@ -483,6 +635,9 @@ report_helper() {{
   if [ -n "$error_text" ]; then
     printf 'MEDIAFORCE_MOUNT_ERR=%s\\n' "$(printf '%s' "$error_text" | /usr/bin/tr '\\r\\n' '  ' | /usr/bin/tail -c 400)"
   fi
+  if [ -s "$result_dir/output" ]; then
+    printf 'MEDIAFORCE_MOUNT_NETFS=%s\\n' "$(/usr/bin/tr '\\r\\n' '  ' <"$result_dir/output" 2>/dev/null)"
+  fi
 }}
 if ! /bin/launchctl bootstrap "gui/$uid" "$plist_path" >/dev/null 2>&1; then
   printf 'MEDIAFORCE_MOUNT=bootstrap-failed\\n'
@@ -499,10 +654,10 @@ while [ "$waited" -lt "$attempt_seconds" ]; do
     report_helper
     exit {_MOUNT_ELSEWHERE_EXIT}
   fi
-  waited=$((waited + 1))
+{textwrap.indent(no_ui_finished, "  ")}  waited=$((waited + 1))
   /bin/sleep 1
 done
-printf 'MEDIAFORCE_MOUNT=timeout\\n'
+{no_ui_finished}printf 'MEDIAFORCE_MOUNT=timeout\\n'
 report_helper
 exit {_MOUNT_TIMEOUT_EXIT}
 """
@@ -778,6 +933,9 @@ __all__ = [
     "mount_output_field",
     "mount_remote_smb_shares",
     "mount_smb_shares",
+    "mount_smb_shares_no_ui",
+    "NO_UI_SMB_MOUNT_JXA",
+    "NoUiMountResult",
     "remote_smb_mounts_for_paths",
     "save_controller_smb_mounts",
 ]

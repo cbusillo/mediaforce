@@ -8,16 +8,16 @@ from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.process_control import ManagedProcessController
-from mediaforce.hosts.controller_mount import controller_mount_lock, mount_controller_smb_no_ui, is_bonjour_smb_server, \
+from mediaforce.hosts.controller_mount import controller_mount_lock, is_bonjour_smb_server, \
     smb_servers_confirmed_different, smb_source_identity
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host, \
     host_status_targets_current_machine, host_targets_current_machine, normalize_host_media_access, \
     remote_shell_path_export_line, ssh_target_for_host
-from mediaforce.hosts.mount_runtime import REMOTE_MOUNT_ATTEMPT_SECONDS, ControllerSmbMount, RemoteSmbMount, \
-    configured_controller_smb_mounts, controller_smb_mounts_from_output, controller_smb_mounts_path, \
-    finder_mount_roots_for_paths, load_controller_smb_mounts, mount_smb_shares, remote_smb_mounts_for_paths, \
-    save_controller_smb_mounts
+from mediaforce.hosts.mount_runtime import REMOTE_MOUNT_ATTEMPT_SECONDS, ControllerSmbMount, NoUiMountResult, \
+    RemoteSmbMount, configured_controller_smb_mounts, controller_smb_mounts_from_output, controller_smb_mounts_path, \
+    finder_mount_roots_for_paths, load_controller_smb_mounts, mount_smb_shares, mount_smb_shares_no_ui, \
+    remote_smb_mounts_for_paths, save_controller_smb_mounts
 from mediaforce.hosts.status_runtime import _current_machine_host_status as _current_machine_host_status_impl, \
     _remote_host_status as _remote_host_status_impl, _run_remote_status_probe as _run_remote_status_probe_impl
 from mediaforce.hosts.setup_runtime import _finish_remote_host_prepare as _finish_remote_host_prepare_impl, \
@@ -52,6 +52,7 @@ __all__ = [
     "HostSetupResult",
     "HostStatus",
     "HostReadinessError",
+    "NoUiMountResult",
     "LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE",
     "REMOTE_STATUS_RETRY_DELAY_SECONDS",
     "SAMPLE_AV1_ENCODER_MISSING_ISSUE",
@@ -112,22 +113,16 @@ def recover_remote_host_mounts_no_ui(
         config: MediaforceConfig,
         host: dict[str, Any],
         status: HostStatus,
-) -> bool:
-    """Return whether a mount result needs review before another attempt."""
+) -> NoUiMountResult:
+    """Connect a computer's missing shares inside its desktop session, never showing a dialog."""
     mounts = _remote_smb_mounts_for_status(config, host, status) or []
-
-    def run(command: list[str], *, timeout: int, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        return _run_remote_ssh(host, *command, timeout=timeout, wake_before_connect=False)
-
-    for mount in mounts:
-        mapping = ControllerSmbMount("//" + mount.url.removeprefix("smb://"), mount.mount_point)
-        result = mount_controller_smb_no_ui(mapping, {}, run_subprocess=run)
-        if result.action_required:
-            return True
-        if not result.ok:
-            return False
-    return False
-
+    return mount_smb_shares_no_ui(
+        host,
+        mounts,
+        run_mount_script=lambda script, timeout: _run_remote_ssh(
+            host, "sh", "-s", input_text=script, timeout=timeout, wake_before_connect=False,
+        ),
+    )
 
 
 def recover_remote_host_mounts(

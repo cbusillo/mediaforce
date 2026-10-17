@@ -16,7 +16,7 @@ from typing import Iterator, Literal
 from urllib.parse import unquote
 
 from mediaforce.hosts.mount_runtime import (
-    ControllerSmbMount, controller_smb_mounts_from_output, remote_smb_mounts_for_paths,
+    NO_UI_SMB_MOUNT_JXA, ControllerSmbMount, controller_smb_mounts_from_output, remote_smb_mounts_for_paths,
 )
 
 
@@ -63,18 +63,6 @@ for access_spec in "$@"; do
     /usr/bin/printf '0\n'
   fi
 done
-'''
-_JXA_MOUNT_SCRIPT = r'''ObjC.import("Foundation");
-ObjC.import("NetFS");
-
-function run(argv) {
-    const url = $.NSURL.URLWithString($(argv[0]));
-    const openOptions = $.NSMutableDictionary.alloc.init;
-    openOptions.setObjectForKey($("NoUI"), $("UIOption"));
-    const mountpoints = Ref();
-    const status = $.NetFSMountURLSync(url, null, null, null, openOptions, null, mountpoints);
-    return JSON.stringify({status: Number(status)});
-}
 '''
 
 
@@ -274,7 +262,7 @@ def mount_controller_smb_no_ui(
         )
     try:
         result = run_subprocess(
-            ["/usr/bin/osascript", "-l", "JavaScript", "-e", _JXA_MOUNT_SCRIPT, planned[0].url],
+            ["/usr/bin/osascript", "-l", "JavaScript", "-e", NO_UI_SMB_MOUNT_JXA, planned[0].url],
             capture_output=True,
             text=True,
             timeout=mount_timeout_seconds,

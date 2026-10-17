@@ -717,7 +717,9 @@ timeouts, wait for user attention.
 Completed attempts whose share has not appeared yet retry too; a service restart
 retains backoff and incident state rather than discarding them. Remote Macs also
 receive background status checks and no-dialog storage recovery without waiting
-for queued work. The warning below the navigation names unavailable controller
+for queued work; that recovery runs in the remote desktop session so it can use
+the password saved in the login Keychain, and a missing password or login is
+named in plain words for that computer. The warning below the navigation names unavailable controller
 storage immediately and computers still unavailable after five minutes (or
 requiring attention). It stays visible until fresh checks succeed. This feature
 does not configure external notification delivery.
