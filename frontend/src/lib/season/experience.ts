@@ -2027,3 +2027,38 @@ export function productionScope(folder: FolderPayload): ProductionScope {
 	if (isSeriesPrefix(folder.prefix)) return { episodeCount, currentSizeBytes: wholeSize };
 	return { episodeCount, currentSizeBytes: folder.lifecycle?.eligible_size_bytes ?? wholeSize };
 }
+
+export interface MotionHolds {
+	/** Episodes with a measured motion pattern Mediaforce cannot convert on its own; they stay original. */
+	heldFiles: string[];
+	/** Episodes waiting for a motion-pattern check, which compressing the scope starts. */
+	checkFiles: string[];
+}
+
+/** The episodes queueing leaves out of this season or episode for their motion pattern. */
+export function motionHolds(folder: FolderPayload): MotionHolds {
+	const files = folder.motion_hold_files;
+	return { heldFiles: files?.held_files ?? [], checkFiles: files?.check_files ?? [] };
+}
+
+function episodeCountLabel(count: number): string {
+	return `${count} ${count === 1 ? 'episode' : 'episodes'}`;
+}
+
+/** What the ready card adds about the episodes compressing leaves out for their motion pattern. */
+export function motionHoldNotes(holds: MotionHolds): string[] {
+	const notes: string[] = [];
+	const held = holds.heldFiles.length;
+	const check = holds.checkFiles.length;
+	if (held > 0) {
+		notes.push(
+			`${episodeCountLabel(held)} ${held === 1 ? 'stays' : 'stay'} original for ${held === 1 ? 'its' : 'their'} motion pattern. Review ${held === 1 ? 'it' : 'them'} in Activity.`
+		);
+	}
+	if (check > 0) {
+		notes.push(
+			`${episodeCountLabel(check)} ${check === 1 ? 'needs' : 'need'} a motion-pattern check first. Compressing starts the check, and ${check === 1 ? 'it joins' : 'each one joins'} once it passes.`
+		);
+	}
+	return notes;
+}

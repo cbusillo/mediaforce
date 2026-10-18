@@ -111,6 +111,11 @@ describe('page state wording', () => {
 			PAGE_STATE_COPY.ready_to_make.episode
 		],
 		[
+			serverState('motion_held', { tone: 'quiet' }),
+			PAGE_STATE_COPY.motion_held.season,
+			PAGE_STATE_COPY.motion_held.episode
+		],
+		[
 			serverState('making_season', { tone: 'active' }),
 			PAGE_STATE_COPY.making_season.season,
 			PAGE_STATE_COPY.making_season.episode
@@ -273,6 +278,11 @@ describe('card state wording', () => {
 		expect(cardStateWording(card(serverState('ready_to_compare')))).toMatchObject(
 			PAGE_STATE_COPY.ready_to_compare
 		);
+		// A season row whose remaining episodes are all held for motion never reads as ready to compress.
+		expect(cardStateWording(card(serverState('motion_held', { tone: 'quiet' })))).toMatchObject({
+			key: 'motion_held',
+			...PAGE_STATE_COPY.motion_held.season
+		});
 	});
 
 	it('keeps a working season working while naming the files that need the owner', () => {

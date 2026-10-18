@@ -19,7 +19,9 @@ Order, first match wins:
 5. ``ready_to_check``, ``finish_blocked`` / ``ready_to_finish``, ``finished``: the workflow lanes.
 6. ``ready_to_make``: the approval governing the scope (the nearest folder holding one, see
    ``production_approval``) is current, records its contract, and the review evidence still allows
-   production.
+   production. Under such an approval a scope whose every remaining file the queue leaves out for
+   its measured motion pattern is ``motion_held`` instead, so nothing offers to compress files
+   queueing would refuse; the workflow state counts them from the queue's own motion-pattern gate.
 7. ``needs_help`` / ``test``: the page's saved sample cannot be reviewed.
 8. ``needs_test``.
 
@@ -50,6 +52,7 @@ PageStateKey = Literal[
     "making_test",
     "ready_to_compare",
     "ready_to_make",
+    "motion_held",
     "making_season",
     "ready_to_check",
     "finish_blocked",
@@ -225,6 +228,8 @@ def decide_page_state(facts: PageStateFacts) -> PageState:
     approval = facts.approval
     if approval is not None and approval.current and approval.contract is not None:
         if not facts.approval_review_blocked:
+            if _only_motion_held(workflow):
+                return PageState("motion_held", "quiet")
             return PageState(
                 "ready_to_make",
                 "ready",
@@ -447,6 +452,15 @@ def _review_availability(
             or object_dict(gate).get("status") == "missing_review_media"
     )
     return False, recovery
+
+
+def _only_motion_held(workflow: Mapping[str, Any]) -> bool:
+    """True when every file left to make is held for its motion pattern and none for another reason."""
+    counts = object_dict(workflow.get("counts"))
+    if int(counts.get("encode_candidates") or 0):
+        return False
+    motion_held = int(counts.get("motion_held") or 0)
+    return motion_held > 0 and int(counts.get("held") or 0) == motion_held
 
 
 def _workflow_action(workflow: Mapping[str, Any], action: PageAction) -> PageAction | None:

@@ -38,6 +38,7 @@ export type PageStateKey =
 	| 'making_test'
 	| 'ready_to_compare'
 	| 'ready_to_make'
+	| 'motion_held'
 	| 'making_season'
 	| 'ready_to_check'
 	| 'finish_blocked'
@@ -113,6 +114,8 @@ export interface SeasonLifecycleState {
 	candidate_count: number;
 	eligible_candidate_count: number;
 	held_candidate_count: number;
+	motion_held_candidate_count?: number;
+	motion_check_candidate_count?: number;
 	hold_reasons: LifecycleHoldReason[];
 	activity_at?: string | null;
 	ranking_added_at?: string | null;
@@ -132,6 +135,10 @@ export interface LifecycleState {
 	eligible_candidate_count: number;
 	eligible_size_bytes?: number;
 	held_candidate_count: number;
+	/** Eligible episodes queueing leaves out for a measured motion pattern; they stay original. */
+	motion_held_candidate_count?: number;
+	/** Eligible episodes waiting for a motion-pattern check, which queueing starts. */
+	motion_check_candidate_count?: number;
 	hold_reason_counts?: Record<string, number>;
 	ranking_added_at?: string | null;
 	can_override_holds?: boolean;
@@ -143,6 +150,14 @@ export interface AmbiguousMotionPayload {
 	eligible_files: string[];
 	partly_interlaced_count: number;
 	partly_interlaced_files: string[];
+}
+
+/** The files a season or episode page names as left out of its queue for their motion pattern. */
+export interface MotionHoldFilesPayload {
+	held_files: string[];
+	check_files: string[];
+	/** How many of them the show page's motion decision could encode as-is. */
+	as_is_count?: number;
 }
 
 export interface OlderSeasonOverridePayload {
@@ -1795,6 +1810,7 @@ export interface FolderPayload {
 	lifecycle?: LifecycleState | null;
 	older_season_override?: OlderSeasonOverridePayload | null;
 	ambiguous_motion?: AmbiguousMotionPayload | null;
+	motion_hold_files?: MotionHoldFilesPayload | null;
 	movie_context?: MovieTitle | null;
 	other_context?: OtherScopeContext | null;
 }

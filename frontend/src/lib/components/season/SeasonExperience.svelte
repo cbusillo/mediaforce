@@ -60,6 +60,8 @@
 		isSizeGoalSelectionConfirmed,
 		isSeriesPrefix,
 		measuredFollowupRequest,
+		motionHoldNotes,
+		motionHolds,
 		overlappingCalibrationActivity,
 		predictedEpisodeSize,
 		productionScope,
@@ -352,6 +354,12 @@
 	const episodeCount = $derived(folder.summary?.item_count ?? 0);
 	const production = $derived(productionScope(folder));
 	const productionEpisodeCount = $derived(production.episodeCount);
+	// Episodes queueing leaves out for their motion pattern; the show page has its own motion decision.
+	const scopeMotionHolds = $derived(motionHolds(folder));
+	const motionHoldSentences = $derived(motionHoldNotes(scopeMotionHolds));
+	const motionHeldEpisodeCount = $derived(
+		lifecycle?.motion_held_candidate_count ?? scopeMotionHolds.heldFiles.length
+	);
 	const originalSeasonSize = $derived(folder.summary?.total_size_bytes ?? 0);
 	const expectedEpisodeBytes = $derived(predictedEpisodeSize(folder));
 	const olderSeasonProjectedSavingsBytes = $derived(
@@ -2909,7 +2917,9 @@
 							? 'Ready to compress this episode.'
 							: heldEpisodeCount > 0
 								? 'This season is ready, but protected.'
-								: 'Ready to compress the season.'}
+								: productionEpisodeCount > 0
+									? 'Ready to compress the season.'
+									: 'Ready to check the season’s motion patterns.'}
 				</h1>
 				{#if isSeriesScope && canQueueOlderSeasons && olderSeasonOverride}
 					<p class="lede">
@@ -2923,13 +2933,29 @@
 					</p>
 				{:else}
 					<p class="lede">
-						Mediaforce will compress {productionEpisodeCount}
-						{productionEpisodeCount === 1 ? 'episode' : 'episodes'} with the same settings. {heldEpisodeCount >
-						0
+						{#if productionEpisodeCount > 0 || motionHoldSentences.length === 0}
+							Mediaforce will compress {productionEpisodeCount}
+							{productionEpisodeCount === 1 ? 'episode' : 'episodes'} with the same settings.
+						{/if}
+						{heldEpisodeCount > 0
 							? `${heldEpisodeCount} protected ${heldEpisodeCount === 1 ? 'episode stays' : 'episodes stay'} original unless you explicitly override this season.`
-							: 'New files stay separate until they pass their checks.'} Nothing is queued until you choose
-						the action below.
+							: 'New files stay separate until they pass their checks.'}
+						{motionHoldSentences.join(' ')} Nothing is queued until you choose the action below.
 					</p>
+					{#if scopeMotionHolds.heldFiles.length > 0}
+						<details class="motion-held-files">
+							<summary>
+								{scopeMotionHolds.heldFiles.length === 1
+									? 'Show the episode that stays original'
+									: `Show the ${scopeMotionHolds.heldFiles.length} episodes that stay original`}
+							</summary>
+							<ul>
+								{#each scopeMotionHolds.heldFiles as relPath (relPath)}
+									<li>{episodeFileName(relPath)}</li>
+								{/each}
+							</ul>
+						</details>
+					{/if}
 				{/if}
 				<div class="ready-summary">
 					<div>
@@ -3014,6 +3040,54 @@
 						<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 					</button>
 				{/if}
+			</section>
+		{:else if humanState.key === 'motion_held'}
+			<section class="ready-room motion-held-room">
+				<div class="ready-symbol" aria-hidden="true"><span>◆</span></div>
+				<p class="eyebrow">Sample approved</p>
+				<h1>
+					{isExactItemScope
+						? 'This episode stays original for now.'
+						: 'Every remaining episode stays original for now.'}
+				</h1>
+				<p class="lede">
+					{isExactItemScope
+						? 'It has'
+						: motionHeldEpisodeCount === 1
+							? '1 episode has'
+							: `${motionHeldEpisodeCount} episodes have`} a motion pattern Mediaforce cannot convert
+					safely on its own, so there is nothing to compress yet. Review
+					{isExactItemScope || motionHeldEpisodeCount === 1 ? 'it' : 'them'} in Activity.
+					{folder.series_context &&
+					!isSeriesScope &&
+					(folder.motion_hold_files?.as_is_count ?? 0) > 0
+						? 'The show page can encode an unclear motion pattern as-is.'
+						: ''}
+				</p>
+				{#if !isExactItemScope && scopeMotionHolds.heldFiles.length > 0}
+					<details class="motion-held-files">
+						<summary>
+							{scopeMotionHolds.heldFiles.length === 1
+								? 'Show the episode that stays original'
+								: `Show the ${scopeMotionHolds.heldFiles.length} episodes that stay original`}
+						</summary>
+						<ul>
+							{#each scopeMotionHolds.heldFiles as relPath (relPath)}
+								<li>{episodeFileName(relPath)}</li>
+							{/each}
+						</ul>
+					</details>
+				{/if}
+				<div class="motion-held-actions">
+					<a class="primary-button" href={resolve('/ops')}>Open Activity</a>
+					{#if folder.series_context && !isSeriesScope}
+						<a
+							class="secondary-button"
+							href={resolve(folderRoutePath(folder.series_context.prefix))}
+							>Open {folder.series_context.title}</a
+						>
+					{/if}
+				</div>
 			</section>
 		{:else if humanState.key === 'making_season'}
 			<section class="season-progress-room" aria-live="polite">
@@ -5321,6 +5395,27 @@
 	.motion-decision__action {
 		align-self: center;
 		flex: none;
+	}
+
+	.motion-held-files {
+		color: var(--mf-fg-secondary);
+		font-size: 13px;
+		margin-top: 14px;
+		max-width: 720px;
+		text-align: left;
+	}
+
+	.motion-held-files ul {
+		margin: 6px 0 0;
+		padding-left: 18px;
+	}
+
+	.motion-held-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 12px;
+		justify-content: center;
+		margin-top: 28px;
 	}
 
 	.series-season-index {

@@ -23,6 +23,7 @@ import {
 	seasonStateHoldLabel,
 	seasonsByShow,
 	sortShowCards,
+	staysOriginal,
 	tvLibraryStateGroup
 } from './library';
 
@@ -304,6 +305,23 @@ describe('season library grouping', () => {
 			expect(seasonRowHoldLabel(fullyHeld, { key })).toBe('');
 			expect(seasonStateHoldLabel(partlyHeld, { key })).toBe('');
 		}
+	});
+
+	it('shows a season as staying original only when compressing would take none of its episodes', () => {
+		const motion = (held: number, check: number): SeasonLifecycleState => ({
+			...seasonLifecycle('tv/Alpha/Season 1', 0),
+			eligible_candidate_count: 10 - held - check,
+			motion_held_candidate_count: held,
+			motion_check_candidate_count: check
+		});
+
+		expect(staysOriginal(motion(10, 0))).toBe(true);
+		expect(staysOriginal(motion(4, 0))).toBe(false);
+		// Compressing starts the check for these, so the season still has work to start.
+		expect(staysOriginal(motion(4, 6))).toBe(false);
+		expect(staysOriginal(seasonLifecycle('tv/Alpha/Season 2', 10))).toBe(true);
+		expect(staysOriginal(seasonLifecycle('tv/Alpha/Season 1', 0))).toBe(false);
+		expect(staysOriginal(undefined)).toBe(false);
 	});
 
 	it('offers one older-season action while preserving the latest season', () => {

@@ -7,9 +7,9 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_item_evidence_state, library_items
-from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
+from mediaforce.library.item_presence import library_item_is_missing
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
-from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection
+from mediaforce.library.candidate_selection import CandidateDecision, MotionHolds, OlderSeasonOverrideSelection
 from mediaforce.library.evidence_queue import EvidenceQueueConflict, queue_decision_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, project_evidence_state, \
@@ -21,10 +21,21 @@ class CadenceSafetyPartition:
     cleared_item_ids: frozenset[int]
     blocked_item_ids: frozenset[int]
     evidence_required_item_ids: frozenset[int]
+    # The evidence-required files a check can be queued for; a folder queue holds these back for it.
+    check_needed_item_ids: frozenset[int] = frozenset()
 
     @property
     def excluded_item_ids(self) -> frozenset[int]:
         return self.blocked_item_ids | self.evidence_required_item_ids
+
+    @property
+    def queueable_item_ids(self) -> frozenset[int]:
+        """What a folder queue takes now: the old folder gate passed files no check can be queued for."""
+        return self.cleared_item_ids | (self.evidence_required_item_ids - self.check_needed_item_ids)
+
+
+# Evidence states a motion-pattern check can be queued for.
+_CHECKABLE_STATES = (EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_STATE_CLASSIFICATION_REQUIRED)
 
 
 def older_season_cadence_payload(
@@ -90,9 +101,11 @@ def cadence_safety_partition(
                 "state": projection.state,
                 "decision_status": projection.decision_status,
             }
+    present_item_ids = {int(item["id"]) for item in items if not library_item_is_missing(item)}
     cleared_item_ids: set[int] = set()
     blocked_item_ids: set[int] = set()
     evidence_required_item_ids: set[int] = set()
+    check_needed_item_ids: set[int] = set()
     for item_id in normalized_ids:
         row = state_by_item_id.get(item_id)
         state = str(row.get("state") or "") if row is not None else ""
@@ -103,11 +116,43 @@ def cadence_safety_partition(
             blocked_item_ids.add(item_id)
         else:
             evidence_required_item_ids.add(item_id)
+            if state in _CHECKABLE_STATES and item_id in present_item_ids:
+                check_needed_item_ids.add(item_id)
     return CadenceSafetyPartition(
         cleared_item_ids=frozenset(cleared_item_ids),
         blocked_item_ids=frozenset(blocked_item_ids),
         evidence_required_item_ids=frozenset(evidence_required_item_ids),
+        check_needed_item_ids=frozenset(check_needed_item_ids),
     )
+
+
+def queue_motion_holds(connection: DBClient, decisions: Sequence[CandidateDecision]) -> MotionHolds:
+    """The eligible TV files a folder queue's motion-pattern gate leaves out, read without changing anything.
+
+    Pages and library cards use this so they count and offer only what queueing takes; it is the same
+    split `cadence_queue_partition` makes, without syncing evidence rows or queueing checks.
+    """
+    partition = cadence_safety_partition(
+        connection,
+        library_item_ids=[
+            decision.item_id for decision in decisions if decision.eligible and decision.media_domain == "tv"
+        ],
+        synchronize=False,
+    )
+    return MotionHolds(held=partition.blocked_item_ids, check_needed=partition.check_needed_item_ids)
+
+
+def motion_hold_files_payload(
+        decisions: Sequence[CandidateDecision],
+        motion_holds: MotionHolds,
+) -> dict[str, Any] | None:
+    """The files a page names as left out of its queue for their motion pattern, or None when there are none."""
+    rel_paths = {decision.item_id: str(decision.row["rel_path"] or "") for decision in decisions if decision.eligible}
+    held = sorted(rel_paths[item_id] for item_id in motion_holds.held if item_id in rel_paths)
+    check_needed = sorted(rel_paths[item_id] for item_id in motion_holds.check_needed if item_id in rel_paths)
+    if not held and not check_needed:
+        return None
+    return {"held_files": held, "check_files": check_needed}
 
 
 def cadence_evidence_blocker(
@@ -294,27 +339,7 @@ def cadence_queue_partition(
         synchronize=synchronize,
     )
     # Only files whose evidence can be queued wait for it; the old folder gate passed the rest too.
-    evidence_ids = sorted(
-        int(row["library_item_id"])
-        for row in connection.execute(
-            select(library_item_evidence_state.c.library_item_id)
-            .select_from(
-                library_item_evidence_state.join(
-                    library_items,
-                    library_items.c.id == library_item_evidence_state.c.library_item_id,
-                )
-            )
-            .where(
-                library_item_evidence_state.c.library_item_id.in_(sorted(partition.evidence_required_item_ids)),
-                library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
-                library_item_evidence_state.c.state.in_((
-                    EVIDENCE_STATE_ANALYSIS_REQUIRED,
-                    EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
-                )),
-                LIBRARY_ITEM_PRESENT,
-            )
-        ).mappings().fetchall()
-    ) if partition.evidence_required_item_ids else []
+    evidence_ids = sorted(partition.check_needed_item_ids)
     unavailable_reason: str | None = None
     work: dict[str, Any] = {}
     failed_ids: set[int] = set()
@@ -356,7 +381,7 @@ def cadence_queue_partition(
             }
     evidence_id_set = frozenset(evidence_ids)
     return CadenceQueuePartition(
-        cleared_item_ids=partition.cleared_item_ids | (partition.evidence_required_item_ids - evidence_id_set),
+        cleared_item_ids=partition.queueable_item_ids,
         blocked_item_ids=partition.blocked_item_ids,
         analysis_queued_item_ids=(
             frozenset() if unavailable_reason is not None else evidence_id_set - failed_ids

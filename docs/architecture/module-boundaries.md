@@ -188,6 +188,12 @@ Guidance:
       page's own newest sample job and saved sample (never an overlapping
       episode's or show's), and `production_approval` for whether an approval
       governs; the module docstring states the precedence
+    - under a current approval, a scope whose every remaining file the queue
+      leaves out for a measured motion pattern is `motion_held`, never
+      `ready_to_make`; the page, its library card, its episode list and its
+      counts read that split from `decision_evidence.queue_motion_holds`, the
+      read-only form of the gate `cadence_queue_partition` applies when
+      queueing, so they count and offer only what queueing takes
     - the frontend only words it (`frontend/src/lib/season/page-state.ts`):
       one table from key, recovery kind, failure kind and episode or season
       scope to label, detail and recovery action; it never orders jobs

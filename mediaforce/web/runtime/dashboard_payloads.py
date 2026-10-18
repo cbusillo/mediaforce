@@ -16,6 +16,7 @@ from mediaforce.library.movie_library import adapt_movie_workflow_payload, load_
 from mediaforce.library.staged_integrity import staged_integrity_report_for_scope
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.candidate_selection import encode_candidate_decisions, project_candidates, workflow_eligibility
+from mediaforce.web.runtime.decision_evidence import queue_motion_holds
 from mediaforce.web.runtime.job_runtime import calibration_job_public_payload, calibration_scope_relation
 
 
@@ -223,7 +224,9 @@ def folder_status_payload(
         workflow_state = build_folder_workflow_state(
             connection,
             normalized_prefix,
-            candidate_eligibility=workflow_eligibility(lifecycle_decisions),
+            candidate_eligibility=workflow_eligibility(
+                lifecycle_decisions, queue_motion_holds(connection, lifecycle_decisions),
+            ),
             library_types=config.library_type_map,
         ).to_payload()
         staged_integrity = staged_integrity_report_for_scope(

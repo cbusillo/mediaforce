@@ -41,7 +41,8 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.encoding.streams import opus_audio_filter
 from mediaforce.library.background_work import set_background_work_paused
-from mediaforce.library.candidate_selection import scope_lifecycle_payload
+from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload, \
+    scope_lifecycle_payload_from_decisions
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import content_intent_boundary_observations
 from mediaforce.core.db_tables import encode_jobs
@@ -108,7 +109,8 @@ from mediaforce.web.runtime import production_holds as production_holds_runtime
 from mediaforce.web.runtime import host_status as web_host_status_runtime
 from mediaforce.library import workflow_state as workflow_state_runtime
 from mediaforce.web.runtime.episode_progress import folder_episodes_payload
-from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
+from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition, queue_motion_holds
+from mediaforce.web.runtime.page_state import PageStateSources, folder_page_state
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
 
@@ -6870,9 +6872,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             original_payload = folder_cards_runtime.scope_lifecycle_payload_from_decisions
             decision_counts: dict[str, int] = {}
 
-            def capture_payload(prefix: str, decisions: list[Any]) -> dict[str, Any]:
+            def capture_payload(prefix: str, decisions: list[Any], *args: Any) -> dict[str, Any]:
                 decision_counts[prefix] = len(decisions)
-                return original_payload(prefix, decisions)
+                return original_payload(prefix, decisions, *args)
 
             with patch.object(
                     folder_cards_runtime,
@@ -26270,6 +26272,169 @@ raise SystemExit(0)
 
         self.assertEqual(queued.lifecycle["eligible_candidate_count"], len(queued_ids))
         self.assertEqual(queued.lifecycle["eligible_size_bytes"], queued_size)
+
+    def _season_with_motion_holds(self, cadence: dict[str, str]) -> SimpleNamespace:
+        """Season 1 follows the show's approval; ``cadence`` marks episodes "held" for a measured motion
+        pattern or waiting for a motion-pattern "check".
+
+        Returns what the season page, its episode list and the show's season row said, all read before
+        queueing, then what queueing the season did.
+        """
+        approvals = {"tv/show": self._current_approval("show-sample")}
+
+        def load_calibration(_config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+            return approvals.get(prefix)
+
+        season = "tv/show/Season 1"
+        queue_config = self._complete_queue_config()
+        queue_config.raw.setdefault("overrides", []).append({
+            "path_prefix": "tv/show",
+            "planning": {"series_lifecycle_mode": "off", "season_acquisition_hold_days": 0},
+        })
+        episodes = {
+            "One.mkv": "discovered", "Published.mkv": "promoted", "Three.mkv": "discovered", "Four.mkv": "discovered",
+        }
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = {
+                name: self._insert_library_item(
+                    connection, self._create_source_file(f"Season 1-{name}"), status=status,
+                    rel_path=f"{season}/{name}",
+                )
+                for name, status in episodes.items()
+            }
+            connection.execute(
+                update(library_items).where(library_items.c.id.in_(list(item_ids.values()))).values(
+                    size_bytes=2 * 1024 ** 3,
+                )
+            )
+            cleared_summary = json.loads(str(connection.execute(
+                select(library_items.c.cadence_summary_json).where(library_items.c.id == item_ids["One.mkv"])
+            ).scalar_one()))
+            for name, kind in cadence.items():
+                summary = (
+                    json.dumps(self._measured_mixed_cadence(cleared_summary), separators=(",", ":"))
+                    if kind == "held"
+                    else None
+                )
+                connection.execute(
+                    update(library_items).where(library_items.c.id == item_ids[name]).values(
+                        cadence_summary_json=summary,
+                    )
+                )
+            decisions = encode_candidate_decisions(connection, queue_config, prefixes=[season])
+            lifecycle = scope_lifecycle_payload_from_decisions(
+                season, decisions, queue_motion_holds(connection, decisions),
+            )
+            web_app._reset_folder_card_cache()
+            with patch.object(web_app, "_load_calibration_state", side_effect=load_calibration), \
+                    patch.object(web_app, "_load_advice_state", return_value=None):
+                cards = {card.prefix: card for card in web_app._list_folder_cards(queue_config, connection)}
+        status = dashboard_payloads.folder_status_payload(
+            queue_config,
+            season,
+            load_exact_job_state=lambda *_args: None,
+            load_overlapping_job_state=lambda *_args: None,
+            load_retryable_sample_job_state=lambda *_args: None,
+            load_scan_status=lambda *_args: None,
+            load_active_encode_job_for_prefix=lambda *_args: None,
+            page_state=lambda page_connection, prefix, workflow, staged: folder_page_state(
+                page_connection, queue_config, prefix, workflow,
+                PageStateSources(load_calibration_state=load_calibration, load_advice_state=lambda *_args: None),
+                staged_integrity=staged,
+            ),
+        )
+        episode_list = {
+            Path(episode["rel_path"]).name: episode for episode in folder_episodes_payload(queue_config, season)["episodes"]
+        }
+        with open_db(self.config.paths.db_path) as connection:
+            # Reading the page queued no check and held nothing.
+            self.assertEqual(connection.execute(select(func.count()).select_from(production_holds)).scalar_one(), 0)
+            self.assertEqual(connection.execute(
+                select(func.count()).select_from(library_item_evidence_state).where(
+                    library_item_evidence_state.c.work_status.is_not(None),
+                )
+            ).scalar_one(), 0)
+        saved_jobs: list[dict[str, Any]] = []
+        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
+            result = folder_actions_runtime.queue_folder_encode_action(
+                queue_config,
+                season,
+                "",
+                False,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=load_calibration,
+                review_gate=review_gate,
+                upsert_override=self._noop_upsert_override,
+                load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
+                save_encode_job=lambda _connection, job: saved_jobs.append(dict(job)),
+            )
+        left_out_codes = Counter(entry["code"] for entry in result.get("left_out") or [])
+        return SimpleNamespace(
+            item_ids=item_ids, lifecycle=lifecycle, card=cards.get(season), status=status, episodes=episode_list,
+            result=result, left_out_codes=left_out_codes,
+        )
+
+    def test_a_season_whose_remaining_episodes_are_all_motion_held_is_not_ready_to_compress(self) -> None:
+        season = self._season_with_motion_holds({"One.mkv": "held", "Three.mkv": "held", "Four.mkv": "held"})
+
+        # Queueing refuses every one of them for its motion pattern.
+        self.assertFalse(season.result["ok"], season.result)
+        self.assertEqual(season.left_out_codes, Counter({"cadence_unresolved": 3}))
+        # So the page counts nothing to compress and names how many stay original.
+        self.assertEqual(season.lifecycle["eligible_candidate_count"], 0)
+        self.assertEqual(season.lifecycle["eligible_size_bytes"], 0)
+        self.assertEqual(season.lifecycle["motion_held_candidate_count"], season.left_out_codes["cadence_unresolved"])
+        self.assertEqual(season.status["page_state"]["key"], "motion_held")
+        self.assertIsNone(season.status["page_state"]["primary_action"])
+        # The show's season row says the same as the season page.
+        self.assertIsNotNone(season.card)
+        self.assertEqual(season.card.page_state["key"], season.status["page_state"]["key"])
+        self.assertEqual(season.card.lifecycle["eligible_candidate_count"], 0)
+        self.assertEqual(season.card.lifecycle["seasons"][0]["motion_held_candidate_count"], 3)
+        for name in ("One.mkv", "Three.mkv", "Four.mkv"):
+            self.assertEqual(season.episodes[name]["stage"], "held")
+            self.assertIn("motion pattern", season.episodes[name]["detail"])
+
+    def test_a_season_with_some_motion_held_episodes_counts_only_the_ones_queueing_takes(self) -> None:
+        season = self._season_with_motion_holds({"Three.mkv": "held", "Four.mkv": "check"})
+
+        self.assertTrue(season.result["ok"], season.result)
+        queued_ids = season.result["queued_library_item_ids"]
+        self.assertEqual(queued_ids, [season.item_ids["One.mkv"]])
+        self.assertEqual(
+            season.left_out_codes, Counter({"cadence_unresolved": 1, "cadence_analysis_required": 1}),
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            queued_size = sum(connection.execute(
+                select(library_items.c.size_bytes).where(library_items.c.id.in_(queued_ids))
+            ).scalars())
+        self.assertEqual(season.lifecycle["eligible_candidate_count"], len(queued_ids))
+        self.assertEqual(season.lifecycle["eligible_size_bytes"], queued_size)
+        self.assertEqual(season.lifecycle["motion_held_candidate_count"], season.left_out_codes["cadence_unresolved"])
+        self.assertEqual(
+            season.lifecycle["motion_check_candidate_count"], season.left_out_codes["cadence_analysis_required"],
+        )
+        self.assertEqual(season.status["page_state"]["key"], "ready_to_make")
+        self.assertEqual(season.card.page_state["key"], "ready_to_make")
+        self.assertEqual(season.card.lifecycle["eligible_candidate_count"], len(queued_ids))
+        self.assertEqual(season.episodes["Three.mkv"]["stage"], "held")
+        # An episode waiting for its check stays a candidate: queueing starts the check and it joins after.
+        self.assertEqual(season.episodes["Four.mkv"]["stage"], "not_started")
+
+    def test_a_season_whose_remaining_episodes_only_wait_for_a_motion_check_stays_ready(self) -> None:
+        season = self._season_with_motion_holds({"One.mkv": "check", "Three.mkv": "check", "Four.mkv": "check"})
+
+        # Queueing starts each check and holds the episode to join once it passes.
+        self.assertEqual(season.left_out_codes, Counter({"cadence_analysis_required": 3}))
+        with open_db(self.config.paths.db_path) as connection:
+            held = set(connection.execute(select(production_holds.c.library_item_id)).scalars())
+        self.assertEqual(held, {season.item_ids[name] for name in ("One.mkv", "Three.mkv", "Four.mkv")})
+        self.assertEqual(season.lifecycle["eligible_candidate_count"], 0)
+        self.assertEqual(season.lifecycle["motion_check_candidate_count"], 3)
+        self.assertEqual(season.status["page_state"]["key"], "ready_to_make")
 
     def test_paused_background_work_still_admits_files_whose_evidence_is_current(self) -> None:
         queue_config = self._complete_queue_config()

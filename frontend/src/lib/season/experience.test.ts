@@ -64,6 +64,8 @@ import {
 	sizeGoals,
 	approvalStartPlan,
 	productionScope,
+	motionHoldNotes,
+	motionHolds,
 	targetConstraintSummary,
 	targetProvenanceSummary,
 	testRequestWithInstructions,
@@ -2369,6 +2371,32 @@ describe('productionScope', () => {
 			episodeCount: show.lifecycle!.eligible_candidate_count,
 			currentSizeBytes: show.summary!.total_size_bytes
 		});
+	});
+});
+
+describe('motionHolds', () => {
+	const season = (held: string[], check: string[]) =>
+		folder({ motion_hold_files: { held_files: held, check_files: check } });
+
+	it('adds nothing when no episode is left out for its motion pattern', () => {
+		expect(motionHoldNotes(motionHolds(folder()))).toEqual([]);
+	});
+
+	it('names how many stay original and how many wait for a check', () => {
+		const holds = motionHolds(
+			season(['tv/Show/Season 1/A.mkv', 'tv/Show/Season 1/B.mkv'], ['C.mkv'])
+		);
+		const [held, check] = motionHoldNotes(holds);
+
+		expect(holds.heldFiles).toHaveLength(2);
+		expect(held).toContain(`${holds.heldFiles.length} episodes`);
+		expect(check).toContain(`${holds.checkFiles.length} episode `);
+	});
+
+	it('speaks only of the held episodes when none waits for a check', () => {
+		const notes = motionHoldNotes(motionHolds(season(['A.mkv'], [])));
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain('1 episode ');
 	});
 });
 

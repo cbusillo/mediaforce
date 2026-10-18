@@ -16,6 +16,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.encode_queue import encode_run_rel_paths, list_child_encode_jobs_for_parents, \
     list_encode_runs_for_prefix
 from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
+from mediaforce.web.runtime.decision_evidence import queue_motion_holds
 from mediaforce.library.media_scopes import resolve_media_scope
 from mediaforce.library.staged_validation import staged_validation_outcome
 from mediaforce.library.workflow_state import ItemWorkflowState, build_folder_workflow_state
@@ -52,7 +53,8 @@ def folder_episodes_payload(config: MediaforceConfig, prefix: str) -> dict[str, 
         workflow = build_folder_workflow_state(
             connection,
             scope.prefix,
-            candidate_eligibility=workflow_eligibility(decisions),
+            # An episode the queue leaves out for its motion pattern is listed as staying as it is.
+            candidate_eligibility=workflow_eligibility(decisions, queue_motion_holds(connection, decisions)),
             library_types=config.library_type_map,
         )
         episodes = load_season_episode_progress(

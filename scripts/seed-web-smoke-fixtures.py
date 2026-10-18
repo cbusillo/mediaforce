@@ -96,6 +96,11 @@ PROTECTED_READY_SERIES_PREFIX = "tv/Protected Ready"
 SHOW_JOB_HOLD_SERIES_PREFIX = "tv/Show Job Hold"
 SHOW_JOB_HOLD_WORKING_PREFIX = "tv/Show Job Hold/Season 1"
 SHOW_JOB_HOLD_HELD_PREFIX = "tv/Show Job Hold/Season 2"
+# A season following its show's approval whose every remaining episode has a motion pattern the queue
+# leaves out; the show's sample comes from a clean later season.
+MOTION_HELD_PREFIX = "tv/Motion Held/Season 1"
+MOTION_HELD_SAMPLE_PREFIX = "tv/Motion Held/Season 2"
+MOTION_HELD_SERIES_PREFIX = "tv/Motion Held"
 # A season part-way through, with an episode in each stage the season page's episode list shows.
 EPISODE_PROGRESS_PREFIX = "tv/Episode Progress/Season 1"
 # The smoke server reclaims running work when it starts, so no episode here is mid-compression.
@@ -147,6 +152,7 @@ FIXTURE_PREFIXES = (
     SHOW_JOB_HOLD_WORKING_PREFIX,
     SHOW_JOB_HOLD_HELD_PREFIX,
     EPISODE_PROGRESS_PREFIX,
+    MOTION_HELD_SERIES_PREFIX,
 )
 
 
@@ -1003,6 +1009,16 @@ def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]])
     _write_review_sample_state(
         config,
         rows_by_prefix,
+        prefix=MOTION_HELD_SERIES_PREFIX,
+        job_id="web-smoke-motion-held",
+        review_slug="web-smoke-motion-held",
+        predicted_total_size_bytes=396_000_000,
+        quality_score=94.8,
+        accepted=True,
+    )
+    _write_review_sample_state(
+        config,
+        rows_by_prefix,
         prefix=PROTECTED_READY_PREFIX,
         job_id="web-smoke-protected-ready",
         review_slug="web-smoke-protected-ready",
@@ -1551,6 +1567,33 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 )
                 for index in (1, 2)
             ),
+            *(
+                _library_item(
+                    project_root=project_root,
+                    media_root="tv",
+                    rel_path=f"{MOTION_HELD_PREFIX}/Episode {index:02d}.mkv",
+                    size_bytes=4 * 1024**3,
+                    status="discovered",
+                    video_codec="h264",
+                    priority_score=60,
+                    recommendation="priority_encode",
+                    recommendation_reason="Fixture approved-season episode held for its motion pattern.",
+                    age_days=400,
+                )
+                for index in (1, 2)
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path=f"{MOTION_HELD_SAMPLE_PREFIX}/Episode 01.mkv",
+                size_bytes=4 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=60,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture episode the motion-held show's approved sample was made from.",
+                age_days=400,
+            ),
             _library_item(
                 project_root=project_root,
                 media_root="movies",
@@ -1902,6 +1945,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 row["cadence_summary_json"] = _ambiguous_cadence_summary_json(
                     str(row["cadence_summary_json"]), tff_frames=30
                 )
+            elif row["rel_path"].startswith(f"{MOTION_HELD_PREFIX}/"):
+                # One the show's motion decision could encode as-is, one partly interlaced.
+                row["cadence_summary_json"] = _ambiguous_cadence_summary_json(
+                    str(row["cadence_summary_json"]),
+                    tff_frames=0 if row["rel_path"].endswith("Episode 01.mkv") else 30,
+                )
         inserted_ids: list[int] = []
         for row in rows:
             result = connection.execute(library_items.insert().values(**row))
@@ -1933,6 +1982,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             row for row in rows if row["rel_path"] == REVIEW_READY_EXACT_PREFIX
         )
         rows_by_prefix[PROTECTED_READY_SERIES_PREFIX] = rows_by_prefix[PROTECTED_READY_PREFIX]
+        rows_by_prefix[MOTION_HELD_SERIES_PREFIX] = rows_by_prefix[MOTION_HELD_SAMPLE_PREFIX]
         ids_by_rel_path = {
             str(row["rel_path"]): item_id
             for row, item_id in zip(rows, inserted_ids, strict=True)
@@ -2814,6 +2864,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/tv/Protected%20Ready/Season%202",
                 "marker": "Protected Ready",
                 "stageMarker": "This season is ready, but protected",
+            },
+            {
+                "label": "Folder Studio motion-held approved fixture",
+                "route": "/folders/tv/Motion%20Held/Season%201",
+                "marker": "Motion Held",
+                "stageMarker": "Every remaining episode stays original for now",
             },
             {
                 "label": "Folder Studio unclear motion decision fixture",

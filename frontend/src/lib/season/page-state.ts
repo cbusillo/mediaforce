@@ -64,6 +64,17 @@ export const PAGE_STATE_COPY = {
 		season: { label: 'Sample approved', detail: 'The rest of the season can be compressed.' },
 		episode: { label: 'Sample approved', detail: 'This episode can be compressed.' }
 	},
+	motion_held: {
+		season: {
+			label: 'Held for motion pattern',
+			detail:
+				'Every remaining episode has a motion pattern Mediaforce cannot convert safely on its own.'
+		},
+		episode: {
+			label: 'Held for motion pattern',
+			detail: 'This episode has a motion pattern Mediaforce cannot convert safely on its own.'
+		}
+	},
 	making_season: {
 		season: {
 			label: 'Compressing the season',

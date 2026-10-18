@@ -154,7 +154,8 @@ from mediaforce.web.checked_output_preview import (
     checked_output_media_type,
     checked_output_stream_response,
 )
-from mediaforce.web.runtime.decision_evidence import cadence_safety_partition, older_season_cadence_payload
+from mediaforce.web.runtime.decision_evidence import cadence_safety_partition, motion_hold_files_payload, \
+    older_season_cadence_payload, queue_motion_holds
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_folders_payload, \
     dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
@@ -1324,6 +1325,7 @@ def create_app(
         latest_failed_sample_job_payload: dict[str, Any] | None = None
         older_season_override: dict[str, Any] | None = None
         ambiguous_motion: dict[str, Any] | None = None
+        motion_hold_files: dict[str, Any] | None = None
         with open_db(config.paths.db_path) as connection:
             media_scope = resolve_media_scope(
                 connection,
@@ -1458,11 +1460,20 @@ def create_app(
                 if media_scope.domain == "movie" or media_scope.kind == "tv_series"
                 else encode_candidate_decisions(connection, config, prefixes=[normalized_prefix])
             )
+            motion_holds = queue_motion_holds(connection, lifecycle_decisions)
             lifecycle = (
-                scope_lifecycle_payload_from_decisions(normalized_prefix, lifecycle_decisions)
+                scope_lifecycle_payload_from_decisions(normalized_prefix, lifecycle_decisions, motion_holds)
                 if media_scope.domain == "tv"
                 else None
             )
+            if lifecycle is not None and media_scope.kind != "tv_series":
+                # The show page has its own motion decision; a season or episode names the files it leaves out.
+                motion_hold_files = motion_hold_files_payload(lifecycle_decisions, motion_holds)
+                if motion_hold_files is not None:
+                    # How many of them the show's one motion decision could encode as-is.
+                    motion_hold_files["as_is_count"] = len(ambiguous_motion_files(
+                        connection, normalized_prefix, library_types=config.library_type_map,
+                    ).eligible)
             if media_scope.kind == "tv_series":
                 older_season_selection = older_season_override_selection(
                     lifecycle_decisions,
@@ -1503,7 +1514,7 @@ def create_app(
             workflow_state = build_folder_workflow_state(
                 connection,
                 normalized_prefix,
-                candidate_eligibility=workflow_eligibility(lifecycle_decisions),
+                candidate_eligibility=workflow_eligibility(lifecycle_decisions, motion_holds),
                 library_types=config.library_type_map,
             ).to_payload()
             series_context = (
@@ -1654,6 +1665,7 @@ def create_app(
                 "lifecycle": lifecycle,
                 "older_season_override": older_season_override,
                 "ambiguous_motion": ambiguous_motion,
+                "motion_hold_files": motion_hold_files,
                 "series_context": series_context,
                 "resolved_metric": resolved_metric.upper(),
                 "sample_host_key": sample_host_key,
@@ -2353,7 +2365,9 @@ def create_app(
                 config,
                 prefixes=[normalized_prefix],
             )
-            lifecycle = scope_lifecycle_payload_from_decisions(normalized_prefix, decisions)
+            lifecycle = scope_lifecycle_payload_from_decisions(
+                normalized_prefix, decisions, queue_motion_holds(connection, decisions),
+            )
         _reset_folder_card_cache()
         return {
             "ok": True,

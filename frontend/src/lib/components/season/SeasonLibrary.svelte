@@ -25,6 +25,7 @@
 		seasonsByShow,
 		sortShowCards,
 		seasonStateHoldLabel,
+		staysOriginal,
 		tvLibraryStateGroup,
 		type LibrarySort,
 		type TvLibraryStateKey
@@ -196,11 +197,7 @@
 	}
 
 	function fullyHeld(card: FolderCard): boolean {
-		return Boolean(
-			card.lifecycle &&
-			card.lifecycle.held_candidate_count > 0 &&
-			card.lifecycle.eligible_candidate_count === 0
-		);
+		return staysOriginal(card.lifecycle);
 	}
 
 	function librarySizeLabel(bytes: number): string {
@@ -689,7 +686,7 @@
 										<small
 											>{detailsPending ? 'estimating space saved' : 'estimate unavailable'}</small
 										>
-									{:else if seasonLifecycle?.held_candidate_count && !seasonLifecycle.eligible_candidate_count}
+									{:else if staysOriginal(seasonLifecycle)}
 										<strong>Held</strong>
 										<small>stays original</small>
 									{:else}

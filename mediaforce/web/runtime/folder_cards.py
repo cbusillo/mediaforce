@@ -11,13 +11,14 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, staged_artifacts
-from mediaforce.library.candidate_selection import CandidateDecision, project_candidates, \
-    scope_lifecycle_payload_from_decisions, workflow_eligibility
+from mediaforce.library.candidate_selection import NO_MOTION_HOLDS, CandidateDecision, MotionHolds, \
+    project_candidates, scope_lifecycle_payload_from_decisions, workflow_eligibility
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, resolve_media_scopes
 from mediaforce.library.workflow_state import build_folder_workflow_states_for_scopes
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES
 from mediaforce.library.workflow_state import WorkflowPayload
+from mediaforce.web.runtime.decision_evidence import queue_motion_holds
 
 FolderGroup = tuple[str, str, str, str]
 FolderBadge = dict[str, str | None]
@@ -257,8 +258,9 @@ def preview_folder_cards(
         for card in grouped.values()
         if card.pending_count > 0 and card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
     ]
-    _apply_lifecycle(cards, decisions)
-    _apply_folder_workflow_states(connection, cards, decisions, config=config)
+    motion_holds = queue_motion_holds(connection, decisions)
+    _apply_lifecycle(cards, decisions, motion_holds)
+    _apply_folder_workflow_states(connection, cards, decisions, motion_holds, config=config)
     _apply_folder_review_badges(cards, review_badge_for_prefix)
     return sorted(
         cards,
@@ -475,10 +477,13 @@ def list_folder_cards(
             or card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
         )
     ]
+    motion_holds = (
+        queue_motion_holds(connection, decisions) if include_lifecycle or include_workflow_states else NO_MOTION_HOLDS
+    )
     if include_lifecycle:
-        _apply_lifecycle(cards, decisions)
+        _apply_lifecycle(cards, decisions, motion_holds)
     if include_workflow_states:
-        _apply_folder_workflow_states(connection, cards, decisions, config=config)
+        _apply_folder_workflow_states(connection, cards, decisions, motion_holds, config=config)
     _apply_folder_review_badges(cards, review_badge_for_prefix)
     return sorted(
         cards,
@@ -532,6 +537,7 @@ def _apply_folder_workflow_states(
         connection: DBClient,
         cards: list[FolderCard],
         decisions: list[CandidateDecision] | None = None,
+        motion_holds: MotionHolds = NO_MOTION_HOLDS,
         *,
         config: MediaforceConfig | None = None,
 ) -> None:
@@ -545,7 +551,7 @@ def _apply_folder_workflow_states(
     workflow_by_prefix = build_folder_workflow_states_for_scopes(
         connection,
         scopes,
-        candidate_eligibility=workflow_eligibility(decisions or []),
+        candidate_eligibility=workflow_eligibility(decisions or [], motion_holds),
     )
     for card, scope in zip(cards, scopes, strict=True):
         workflow = workflow_by_prefix.get(card.prefix)
@@ -630,7 +636,11 @@ def _copy_folder_card(card: FolderCard, *, include_review_badges: bool = True) -
     )
 
 
-def _apply_lifecycle(cards: list[FolderCard], decisions: list[CandidateDecision]) -> None:
+def _apply_lifecycle(
+        cards: list[FolderCard],
+        decisions: list[CandidateDecision],
+        motion_holds: MotionHolds = NO_MOTION_HOLDS,
+) -> None:
     if not decisions:
         return
     now = datetime.now(tz=UTC)
@@ -645,6 +655,7 @@ def _apply_lifecycle(cards: list[FolderCard], decisions: list[CandidateDecision]
         payload = scope_lifecycle_payload_from_decisions(
             card.prefix,
             decisions_by_prefix.get(card.prefix, decisions),
+            motion_holds,
         )
         card.lifecycle = payload
         ranking_added_at = payload.get("ranking_added_at")

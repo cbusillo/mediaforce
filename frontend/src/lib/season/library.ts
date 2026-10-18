@@ -54,6 +54,25 @@ export function seasonStateHoldLabel(
 	return STATES_A_HOLD_EXPLAINS.has(state.key) ? seasonHoldLabel(season) : '';
 }
 
+type HoldCounts = Pick<
+	SeasonLifecycleState,
+	| 'eligible_candidate_count'
+	| 'held_candidate_count'
+	| 'motion_held_candidate_count'
+	| 'motion_check_candidate_count'
+>;
+
+/**
+ * True when compressing would take none of the remaining episodes: each is held by a lifecycle rule
+ * or for its motion pattern. An episode waiting for a motion-pattern check still counts, since
+ * compressing starts its check.
+ */
+export function staysOriginal(counts: HoldCounts | null | undefined): boolean {
+	if (!counts || counts.eligible_candidate_count > 0) return false;
+	if (counts.held_candidate_count > 0) return true;
+	return (counts.motion_held_candidate_count ?? 0) > 0 && !counts.motion_check_candidate_count;
+}
+
 /** The show page's badge for a season with all of its episodes held. */
 export function seasonRowHoldLabel(
 	season: SeasonLifecycleState | null | undefined,
@@ -177,6 +196,8 @@ function lifecycleForSeason(
 		candidate_count: season.candidate_count,
 		eligible_candidate_count: season.eligible_candidate_count,
 		held_candidate_count: season.held_candidate_count,
+		motion_held_candidate_count: season.motion_held_candidate_count,
+		motion_check_candidate_count: season.motion_check_candidate_count,
 		hold_reason_counts: Object.fromEntries(
 			season.hold_reasons.map((reason) => [reason.code, season.held_candidate_count])
 		),
@@ -323,6 +344,14 @@ function aggregateShowCard(showPrefix: string, seasons: FolderCard[]): FolderCar
 					),
 					held_candidate_count: seasons.reduce(
 						(total, season) => total + (season.lifecycle?.held_candidate_count ?? 0),
+						0
+					),
+					motion_held_candidate_count: seasons.reduce(
+						(total, season) => total + (season.lifecycle?.motion_held_candidate_count ?? 0),
+						0
+					),
+					motion_check_candidate_count: seasons.reduce(
+						(total, season) => total + (season.lifecycle?.motion_check_candidate_count ?? 0),
 						0
 					),
 					seasons: seasons.flatMap((season) => season.lifecycle?.seasons ?? [])

@@ -81,6 +81,8 @@ class EncodeEligibility:
     eligible: bool
     blocker: str | None = None
     blocked: bool = False
+    # Left out by the queue's motion-pattern gate rather than by policy.
+    motion_held: bool = False
 
 
 class ScopeJobLane(NamedTuple):
@@ -115,6 +117,7 @@ class ItemWorkflowState:
     lane: WorkflowLane
     has_staged_output: bool
     blocker: str | None = None
+    motion_held: bool = False
 
     def to_payload(self) -> WorkflowPayload:
         return {
@@ -125,6 +128,7 @@ class ItemWorkflowState:
             "lane": self.lane,
             "has_staged_output": self.has_staged_output,
             "blocker": self.blocker,
+            "motion_held": self.motion_held,
         }
 
 
@@ -250,6 +254,7 @@ def derive_item_workflow_state(
         encode_eligible: bool = True,
         policy_blocker: str | None = None,
         encode_blocked: bool = False,
+        motion_held: bool = False,
 ) -> ItemWorkflowState:
     status = str(row["status"] or "idle")
     # A remake that already removed its finished copy waits to be queued, not on that copy's old check.
@@ -260,6 +265,7 @@ def derive_item_workflow_state(
     state: WorkflowItemState
     lane: WorkflowLane
     blocker: str | None = None
+    held_for_motion = False
 
     if library_item_is_missing(row):
         state = "missing"
@@ -282,6 +288,7 @@ def derive_item_workflow_state(
         state = "blocked" if encode_blocked else "held"
         lane = "blocked" if encode_blocked else "none"
         blocker = policy_blocker or "This item is excluded from the current production scope."
+        held_for_motion = motion_held and not encode_blocked
     elif has_staged_output and status == "encoded":
         state = "ready_to_validate"
         lane = "validate"
@@ -307,6 +314,7 @@ def derive_item_workflow_state(
         lane=lane,
         has_staged_output=has_staged_output,
         blocker=blocker,
+        motion_held=held_for_motion,
     )
 
 
@@ -324,6 +332,7 @@ def _derive_item_workflow_state(
         encode_eligible=eligibility.eligible,
         policy_blocker=eligibility.blocker,
         encode_blocked=eligibility.blocked,
+        motion_held=eligibility.motion_held,
     )
 
 
@@ -396,6 +405,7 @@ def _build_folder_state(
         "items": len(items),
         "encode_candidates": state_counts.get("encode_candidate", 0),
         "held": state_counts.get("held", 0),
+        "motion_held": sum(item.motion_held for item in items),
         "ready_to_validate": state_counts.get("ready_to_validate", 0),
         "ready_to_promote": state_counts.get("ready_to_promote", 0),
         "processing": lane_counts.get("processing", 0),
@@ -527,7 +537,9 @@ def _folder_summary(
             "none",
             "Protected",
             "idle",
-            f"{counts['held']} item(s) are held by the library lifecycle policy.",
+            f"{counts['held']} item(s) stay original for their motion pattern."
+            if counts["held"] == counts["motion_held"]
+            else f"{counts['held']} item(s) are held by the library lifecycle policy.",
             WorkflowNextAction("review_scope", "Review protection", True, prefix),
         )
     return (

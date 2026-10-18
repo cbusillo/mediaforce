@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mediaforce.core.type_defs import object_dict
+from mediaforce.library.candidate_selection import MOTION_HELD_DETAIL
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 
 # Short plural-aware phrases for the summary line, keyed by left-out code.
@@ -76,7 +77,7 @@ def cadence_left_out_files(
         (
             partition.blocked_item_ids,
             "cadence_unresolved",
-            "Has a measured motion pattern Mediaforce cannot convert safely on its own. Review it in Activity.",
+            MOTION_HELD_DETAIL,
         ),
         (partition.analysis_queued_item_ids, "cadence_analysis_required", queued_reason),
         (
