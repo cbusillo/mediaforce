@@ -731,6 +731,7 @@ def scope_lifecycle_payload_from_decisions(
             "prefix": normalized_prefix,
             "candidate_count": 0,
             "eligible_candidate_count": 0,
+            "eligible_size_bytes": 0,
             "held_candidate_count": 0,
             "seasons": [],
         }
@@ -774,6 +775,8 @@ def scope_lifecycle_payload_from_decisions(
         ),
         "candidate_count": sum(decision.workflow_lane == "encode" for decision in decisions),
         "eligible_candidate_count": len(eligible),
+        # What queueing the scope selects, so a page can say what it will make without counting published files.
+        "eligible_size_bytes": sum(int(decision.row.get("size_bytes") or 0) for decision in eligible),
         "held_candidate_count": len(held),
         "hold_reason_counts": dict(reason_counts),
         "ranking_added_at": rank_age.isoformat(timespec="seconds") if rank_age is not None else None,

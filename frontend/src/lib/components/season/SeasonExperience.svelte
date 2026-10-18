@@ -62,6 +62,7 @@
 		measuredFollowupRequest,
 		overlappingCalibrationActivity,
 		predictedEpisodeSize,
+		productionScope,
 		qualityMemoryView,
 		resolvedTargetSummary,
 		reviewFeedbackIntent,
@@ -349,7 +350,8 @@
 	const hasOwnCalibration = $derived(Object.keys(calibration).length > 0);
 	const sampleResult = $derived(asRecord(calibration.sample_result));
 	const episodeCount = $derived(folder.summary?.item_count ?? 0);
-	const productionEpisodeCount = $derived(isSeriesScope ? eligibleEpisodeCount : episodeCount);
+	const production = $derived(productionScope(folder));
+	const productionEpisodeCount = $derived(production.episodeCount);
 	const originalSeasonSize = $derived(folder.summary?.total_size_bytes ?? 0);
 	const expectedEpisodeBytes = $derived(predictedEpisodeSize(folder));
 	const olderSeasonProjectedSavingsBytes = $derived(
@@ -364,7 +366,7 @@
 	const approvalStart = $derived(
 		approvalStartPlan({
 			scope: isExactItemScope ? 'episode' : isSeriesScope ? 'series' : 'season',
-			episodeCount,
+			episodeCount: productionEpisodeCount,
 			eligibleEpisodeCount,
 			heldEpisodeCount,
 			olderSeasons:
@@ -386,7 +388,7 @@
 	const expectedSeasonBytes = $derived(expectedEpisodeBytes * productionEpisodeCount);
 	const estimatedSeasonSavingsBytes = $derived(
 		!isSeriesScope && expectedSeasonBytes > 0
-			? Math.max(0, originalSeasonSize - expectedSeasonBytes)
+			? Math.max(0, production.currentSizeBytes - expectedSeasonBytes)
 			: null
 	);
 	const exactExpectedSizeChange = $derived(
@@ -2941,7 +2943,9 @@
 					</div>
 					<div><span>Approved episode target</span><strong>{sizeTargetLabel}</strong></div>
 					<div>
-						<span>Current size</span><strong>{formatDecimalFileSize(originalSeasonSize)}</strong>
+						<span>Current size</span><strong
+							>{formatDecimalFileSize(production.currentSizeBytes)}</strong
+						>
 						{#if isSeriesScope}<small>Whole selected show scope.</small>{/if}
 					</div>
 					<div>

@@ -63,6 +63,7 @@ import {
 	shouldPrioritizeScopeActivity,
 	sizeGoals,
 	approvalStartPlan,
+	productionScope,
 	targetConstraintSummary,
 	targetProvenanceSummary,
 	testRequestWithInstructions,
@@ -2338,6 +2339,36 @@ describe('approvalStartPlan', () => {
 				olderSeasons: null
 			})
 		).toBeNull();
+	});
+});
+
+describe('productionScope', () => {
+	const lifecycle = (eligible: number, eligibleSizeBytes: number) => ({
+		schema_version: 1,
+		prefix: card.prefix,
+		candidate_count: eligible,
+		eligible_candidate_count: eligible,
+		eligible_size_bytes: eligibleSizeBytes,
+		held_candidate_count: 0,
+		seasons: []
+	});
+
+	it('counts and sizes only the episodes queueing selects, leaving out the published ones', () => {
+		const season = folder({ lifecycle: lifecycle(6, 5_400_000_000) });
+		const selected = season.lifecycle!;
+
+		expect(productionScope(season)).toEqual({
+			episodeCount: selected.eligible_candidate_count,
+			currentSizeBytes: selected.eligible_size_bytes
+		});
+	});
+
+	it('keeps a whole show sized as the show and one episode as itself', () => {
+		const show = folder({ prefix: 'tv/Big Brother (US)', lifecycle: lifecycle(6, 5_400_000_000) });
+		expect(productionScope(show)).toEqual({
+			episodeCount: show.lifecycle!.eligible_candidate_count,
+			currentSizeBytes: show.summary!.total_size_bytes
+		});
 	});
 });
 

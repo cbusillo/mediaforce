@@ -165,9 +165,13 @@ Guidance:
   - `production_approval.py`
     - the one rule for which sample approval governs a file: the nearest folder
       holding an approval (the file, then its season, show and library)
-    - a run records the contract of the approval it was queued under; queueing
-      leaves out each file a nearer approval with a different contract governs,
-      and refuses an approval too old to record a contract
+    - a production action runs under the nearest saved sample at or above its
+      scope, approved or not, as the folder page shows it: a season following
+      its show queues under the show's approval, and a sample still awaiting
+      review keeps blocking; a run records that approval's contract and the
+      folder it was saved at; queueing leaves out each file a nearer approval
+      with a different contract governs, and refuses an approval too old to
+      record a contract
     - automatic publishing, manual publishing and the folder page accept a file
       only while its governing approval is current and has the contract its
       run recorded

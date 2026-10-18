@@ -52,7 +52,7 @@ from mediaforce.web.runtime.production_holds import queue_mode, record_holds, re
 from mediaforce.web.runtime.production_approval import NEARER_APPROVAL_CODE, approval_needs_fresh_sample_response, \
     cached_calibration_loader, effective_production_approval, governed_by, nearer_approval_reason, \
     policy_with_owner_settings, production_approval_contract, production_approval_identity, \
-    production_approval_matches, valid_production_approval_contract
+    production_approval_matches, production_calibration, valid_production_approval_contract
 from mediaforce.web.runtime.left_out_files import LeftOutFile, cadence_left_out_files, drop_manifest_items, \
     left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response
 from mediaforce.web.runtime.encode_runtime import (
@@ -741,7 +741,8 @@ def queue_folder_encode_action(
         existing_job = load_job_state(connection, config, normalized_prefix)
         if existing_job and existing_job.get("status") in {"queued", "starting", "running"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
-        calibration = load_calibration_state(config, normalized_prefix)
+        # The run goes under the approval the page shows, which may be the show's for a season.
+        approval_prefix, calibration = production_calibration(config, normalized_prefix, load_calibration_state)
         gate = review_gate(calibration)
         if not gate["can_confirm_full"]:
             raise HTTPException(status_code=400, detail=str(gate["message"]))
@@ -788,13 +789,13 @@ def queue_folder_encode_action(
                 detail="Choose and confirm a compression goal before queueing production.",
             )
         # The owner's current sound choice and lifecycle win over the sample's snapshot of them.
-        production_policy = policy_with_owner_settings(calibration_policy, config, normalized_prefix)
-        preflight_config = with_folder_policy_override(config, normalized_prefix, production_policy)
+        production_policy = policy_with_owner_settings(calibration_policy, config, approval_prefix)
+        preflight_config = with_folder_policy_override(config, approval_prefix, production_policy)
         left_out, target_size_refusal = _target_size_left_out(connection, preflight_config, normalized_prefix)
         if target_size_refusal is not None:
             return target_size_refusal
         latest_failed_sample_job = (
-            load_latest_failed_target_size_job_state(connection, config, normalized_prefix)
+            load_latest_failed_target_size_job_state(connection, config, approval_prefix)
             if load_latest_failed_target_size_job_state is not None
             else existing_job
         )
@@ -806,9 +807,9 @@ def queue_folder_encode_action(
             raise HTTPException(status_code=409, detail=failed_target_reason)
         advice_state: ActionPayload = {}
         if load_advice_state is not None:
-            advice_state = object_dict(load_advice_state(config, normalized_prefix))
+            advice_state = object_dict(load_advice_state(config, approval_prefix))
             quality_risk_contract = build_quality_risk_contract(
-                prefix=normalized_prefix,
+                prefix=approval_prefix,
                 sample_item=object_dict(calibration_payload.get("sample_item")),
                 current_policy=object_dict(calibration_payload.get("policy")),
                 preview_policy=object_dict(calibration_payload.get("policy")),
@@ -1180,6 +1181,8 @@ def queue_folder_encode_action(
         selection["queue_mode"] = hold_mode
         if queued_contract is not None:
             selection["production_approval_contract"] = queued_contract
+            # The folder whose approval the run went under: the run's own, or the show's for a season following it.
+            selection["production_approval_prefix"] = approval_prefix
         manifest["selection"] = selection
         if older_season_selection is not None and older_season_cadence_partition is not None:
             manifest_item_ids = {
@@ -1260,7 +1263,8 @@ def queue_folder_encode_action(
             advice_state=advice_state, approval_contract=queued_contract,
         )
         saved_profile_path = config.paths.runtime_settings_path
-        upsert_override(saved_profile_path, normalized_prefix, production_policy)
+        # Saved where it was approved, so a season following its show gains no settings of its own.
+        upsert_override(saved_profile_path, approval_prefix, production_policy)
         refreshed_config = load_config(config.paths.config_path)
         if manifest_path is None:
             manifest_path = write_manifest(connection, refreshed_config, manifest)
@@ -1355,7 +1359,8 @@ def approve_measured_encode_recovery_action(
         upsert_override: UpsertOverrideFn,
         queue_folder_encode_action: QueueFolderEncodeActionFn,
 ) -> ActionPayload:
-    calibration = load_calibration_state(config, normalized_prefix)
+    # Recovery re-approves the approval the folder's run went under, saved where it was approved.
+    approval_prefix, calibration = production_calibration(config, normalized_prefix, load_calibration_state)
     gate = review_gate(calibration)
     if not bool(gate.get("can_confirm_full")):
         raise HTTPException(status_code=400, detail=str(gate.get("message") or "Approve a sampled draft first."))
@@ -1458,7 +1463,7 @@ def approve_measured_encode_recovery_action(
         }
         for item_recovery in item_recoveries
     ]
-    save_calibration_state(config, normalized_prefix, calibration_payload)
+    save_calibration_state(config, approval_prefix, calibration_payload)
     for item_recovery in item_recoveries:
         upsert_override(
             config.paths.runtime_settings_path,
@@ -3152,12 +3157,12 @@ def child_recovery_approval(
         review_gate: ReviewGateFn,
         load_advice_state: LoadAdviceStateFn,
 ) -> ActionPayload:
-    """The show's current production approval; recovery judges per child whether it covers that child."""
-    prefix = str(parent["prefix"])
-    blocker = production_action_blocker(config, prefix)
+    """The current approval governing the run's scope; recovery judges per child whether it covers that child."""
+    blocker = production_action_blocker(config, str(parent["prefix"]))
     if blocker is not None:
         raise HTTPException(status_code=409, detail=blocker["message"])
-    calibration = object_dict(load_calibration_state(config, prefix))
+    prefix, saved_calibration = production_calibration(config, str(parent["prefix"]), load_calibration_state)
+    calibration = object_dict(saved_calibration)
     gate = review_gate(calibration)
     if not gate.get("can_confirm_full"):
         raise HTTPException(status_code=409, detail=str(gate.get("message") or "Current approval is required."))
