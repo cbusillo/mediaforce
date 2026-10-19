@@ -88,7 +88,10 @@ def cadence_left_out_files(
         (
             partition.analysis_failed_item_ids,
             "cadence_analysis_failed",
-            "Its motion-pattern check failed earlier. Open Activity and use Prepare item to retry it.",
+            (
+                "Its motion-pattern check failed earlier. Open Activity, use Prepare analysis for its folder, "
+                "then select Start analysis to check it again."
+            ),
         ),
         (
             partition.analysis_unavailable_item_ids,
