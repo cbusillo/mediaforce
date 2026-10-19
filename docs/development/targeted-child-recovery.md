@@ -210,7 +210,9 @@ encode's output was written by the process that shut down, so it needs no
 remote check. When the check cannot confirm the old encode ended, or the
 encoder ran locally under the old process, the episode stays stopped with one
 message naming the episode and the computer, and is not retried in a loop. An
-owner's Stop, including one pressed just before the shutdown, stays stopped.
+owner's Stop, including one pressed just before the shutdown, stays stopped,
+and a Stop pressed while a restart-stopped episode waits makes it an owner's
+Stop too.
 
 This recovery is for mounted remote outputs. Scratch-host lifetime protection
 remains described in [staged encode hosts](../architecture/staged-encode-hosts.md).

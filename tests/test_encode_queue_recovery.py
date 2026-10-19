@@ -19750,6 +19750,7 @@ raise SystemExit(0)
     def test_app_lifespan_joins_writers_and_releases_leadership_before_runtime_lock(self) -> None:
         startup_threads: list[Any] = []
         call_order: list[str] = []
+        encode_cancel_errors: list[ProcessCancelledError | None] = []
 
         class FakeLifecycleThread:
             def __init__(
@@ -19823,7 +19824,7 @@ raise SystemExit(0)
                 return_value=[calibration_controller],
         ), patch(
                 "mediaforce.web.app._cancel_active_encode_processes",
-                side_effect=lambda error=None: call_order.append(f"encode:cancel:{type(error).__name__}"),
+                side_effect=lambda error=None: (call_order.append("encode:cancel"), encode_cancel_errors.append(error)),
         ), patch(
                 "mediaforce.web.app._cancel_active_scan_processes",
                 side_effect=lambda: call_order.append("scan:cancel"),
@@ -19870,10 +19871,9 @@ raise SystemExit(0)
         self.assertLess(call_order.index("calibration:cancel"), call_order.index("workers:stop"))
         self.assertEqual(call_order.count("scan:cancel"), 2)
         # Mediaforce's own shutdown is not an owner's Stop, so the next start can queue the encodes again.
-        self.assertEqual(
-            [event for event in call_order if event.startswith("encode:cancel")],
-            ["encode:cancel:ControllerShutdownCancelledError"] * 2,
-        )
+        self.assertEqual(len(encode_cancel_errors), 2)
+        for error in encode_cancel_errors:
+            self.assertIsInstance(error, encode_runtime.ControllerShutdownCancelledError)
         self.assertLess(call_order.index("scan:cancel"), call_order.index("workers:stop"))
         self.assertLess(call_order.index("workers:stop"), call_order.index("workers:join"))
         self.assertLess(call_order.index("workers:join"), call_order.index("calibration:joined"))
@@ -22408,7 +22408,7 @@ raise SystemExit(0)
                            attempt_count=1)
             if owner_stop_requested:
                 state = load_queue_state(connection)
-                state.update({"stop_requested": True, "is_paused": True})
+                state.update({"stop_requested": True, "is_paused": True, "updated_at": web_app._now_iso()})
                 save_queue_state(connection, state)
             connection.commit()
         controller = ManagedProcessController()
@@ -30868,6 +30868,23 @@ raise SystemExit(0)
         self.assertEqual(job["status"], "stopped")
         self.assertTrue(job["progress"]["remote_cleanup_verified"])
         self.assertEqual(encode_runtime.unfinished_child_reason(job)[0], "stopped")
+
+    def test_owner_stop_keeps_a_restart_stopped_episode_stopped(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_restart_stopped_job(connection, "restart-then-owner-stop")
+            state = load_queue_state(connection)
+            state.update({"stop_requested": True, "is_paused": True, "updated_at": web_app._now_iso()})
+            save_queue_state(connection, state)
+            connection.commit()
+            # The owner's Stop runs the sweep after the computer is reachable again.
+            with patch.object(encode_runtime, "end_remote_output_writers"):
+                encode_runtime.sweep_stopped_remote_encodes(
+                    connection, self.config, web_app._encode_queue_runtime_deps())
+            job = load_encode_job(connection, "restart-then-owner-stop")
+        assert job is not None
+        self.assertEqual(job["status"], "stopped")
+        self.assertIsNone(job["terminal_reason"])
+        self.assertTrue(job["progress"]["remote_cleanup_verified"])
 
     def test_restart_stop_on_its_last_attempt_is_not_queued_again(self) -> None:
         deps = web_app._encode_queue_runtime_deps()

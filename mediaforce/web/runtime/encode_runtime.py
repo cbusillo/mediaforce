@@ -278,15 +278,25 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
         return
     _, active_paths = active
     failed_hosts: dict[str, str] = {}
+    # Stop runs this sweep too: an episode a restart had stopped then stays stopped for the owner.
+    owner_stop_requested = bool(load_queue_state(connection).get("stop_requested"))
     for row in rows:
         job = load_encode_job(connection, str(row["job_id"]))
         if job is None:
             continue
+        restart_stop = job["status"] == "stopped" and job.get("terminal_reason") == CONTROLLER_RESTART_STOP_REASON
+        if restart_stop and owner_stop_requested:
+            snapshot = stable_json_hash(job)
+            job["terminal_reason"] = None
+            reloaded = load_encode_job(connection, str(row["job_id"])) if _save_swept_job(
+                connection, job, snapshot, deps) else None
+            if reloaded is None:
+                continue
+            job, restart_stop = reloaded, False
         snapshot = stable_json_hash(job)
         host = object_dict(job.get("host"))
         host_key = str(host.get("host") or host.get("key") or stable_json_hash(host))
         progress = object_dict(job.get("progress"))
-        restart_stop = job["status"] == "stopped" and job.get("terminal_reason") == CONTROLLER_RESTART_STOP_REASON
         if execution_mode_for_host(host) != "ssh" or host_media_access_for_host(host) == "stream":
             if not restart_stop:
                 continue
@@ -394,16 +404,27 @@ def _settle_restart_stop_without_remote_writer(
             job["progress"] = {**object_dict(job.get("progress")), "restart_stop_last_attempt": True}
     else:
         job["error"] = _restart_stop_unconfirmed_message(episode, host_label)
+    _save_swept_job(connection, job, snapshot, deps)
+
+
+def _save_swept_job(
+        connection: DBClient, job: dict[str, Any], snapshot: str, deps: EncodeQueueRuntimeDeps,
+) -> bool:
+    """Save a sweep's change unless the job changed meanwhile; True when the job now holds `job`."""
     connection.commit()
     connection.exec_driver_sql("BEGIN IMMEDIATE")
     current = load_encode_job(connection, str(job["job_id"]))
-    if current is None or stable_json_hash(current) != snapshot or current == job:
+    if current is None or stable_json_hash(current) != snapshot:
         connection.rollback()
-        return
+        return False
+    if current == job:
+        connection.rollback()
+        return True
     job["updated_at"] = deps.now_iso()
     save_encode_job(connection, job)
     sync_encode_job_parent(connection, job, deps)
     connection.commit()
+    return True
 
 
 def reconcile_encode_jobs(
