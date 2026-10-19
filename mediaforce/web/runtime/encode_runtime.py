@@ -1084,6 +1084,9 @@ def aggregate_encode_parent_job(
     aggregate_speed = 0.0
     aggregate_fps = 0.0
     recoverable_item_count = 0
+    left_out_duration_seconds = 0.0
+    left_out_needs_attention_item_count = 0
+    left_out_failed_item_count = 0
     speed_reporting_children = 0
     running_progress_states: list[str] = []
     running_schedule_deadlines: list[tuple[datetime, str]] = []
@@ -1120,9 +1123,17 @@ def aggregate_encode_parent_job(
         total_item_count += child_total_item_count
         completed_duration_seconds += child_shown_duration_seconds
         completed_item_count += min(child_completed_item_count, child_total_item_count)
-        remaining_duration_seconds += max(child_total_duration_seconds - child_completed_duration_seconds, 0.0)
+        child_remaining_duration_seconds = max(child_total_duration_seconds - child_completed_duration_seconds, 0.0)
         if str(child.get("status") or "") in {"needs_attention", "failed", "stopped"}:
             recoverable_item_count += child_total_item_count
+            # Nothing runs this part until someone acts, so the estimate leaves it out and says so.
+            left_out_duration_seconds += child_remaining_duration_seconds
+            if str(child.get("status") or "") == "needs_attention":
+                left_out_needs_attention_item_count += child_total_item_count
+            else:
+                left_out_failed_item_count += child_total_item_count
+        else:
+            remaining_duration_seconds += child_remaining_duration_seconds
         speed = float_value(progress.get("speed"))
         child_progress_state = str(progress.get("progress_state") or "").strip().lower()
         if str(child.get("status") or "") == "running" and child_progress_state:
@@ -1188,6 +1199,9 @@ def aggregate_encode_parent_job(
         "completed_duration_seconds": completed_duration_seconds,
         "overall_completed_duration_seconds": completed_duration_seconds,
         "remaining_duration_seconds": max(remaining_duration_seconds, 0.0),
+        "left_out_duration_seconds": left_out_duration_seconds,
+        "left_out_needs_attention_item_count": left_out_needs_attention_item_count,
+        "left_out_failed_item_count": left_out_failed_item_count,
         "percent_complete": percent_complete,
         "speed": aggregate_speed or None,
         "eta_speed": eta_speed or None,
@@ -2681,6 +2695,44 @@ def _globally_backed_off_encode_hosts(
 ) -> dict[str, dict[str, Any]]:
     if connection is None:
         return {}
+    return backed_off_encode_hosts(connection, parse_iso=deps.parse_iso, now=now)
+
+
+def mark_host_cooldowns(
+        host_rows: list[dict[str, Any]],
+        connection: DBClient,
+        *,
+        parse_iso: Callable[[Any], datetime | None],
+        now: datetime,
+) -> list[dict[str, Any]]:
+    """Each computer row says when the queue takes it back after repeated failures, or None.
+
+    A computer cooling down and running nothing reads `cooldown`, not idle: it is held out on purpose.
+    """
+    blocked_hosts = list(backed_off_encode_hosts(connection, parse_iso=parse_iso, now=now).values())
+    for row in host_rows:
+        row_tokens = _host_identity_tokens({"key": row.get("key"), "host": row.get("host")})
+        cooldown_until = max(
+            (
+                blocked["cooldown_until"]
+                for blocked in blocked_hosts
+                if _host_identity_tokens(blocked) & row_tokens
+            ),
+            default=None,
+        )
+        row["cooldown_until"] = cooldown_until.isoformat(timespec="seconds") if cooldown_until else None
+        if cooldown_until is not None and not int_value(row.get("active_encode_count")):
+            row["active_flag"] = "cooldown"
+    return host_rows
+
+
+def backed_off_encode_hosts(
+        connection: DBClient,
+        *,
+        parse_iso: Callable[[Any], datetime | None],
+        now: datetime,
+) -> dict[str, dict[str, Any]]:
+    """Computers the queue holds out after repeated failures, each with when it takes them back."""
     rows = connection.execute(
         select(
             encode_jobs.c.last_host_json,
@@ -2694,7 +2746,7 @@ def _globally_backed_off_encode_hosts(
     ).mappings().fetchall()
     host_failures: list[dict[str, Any]] = []
     for row in rows:
-        cooldown_until = deps.parse_iso(row["host_cooldown_until"])
+        cooldown_until = parse_iso(row["host_cooldown_until"])
         if cooldown_until is None or cooldown_until <= now:
             continue
         host_payload = _load_quarantine_host_payload(row["last_host_json"])
@@ -3258,6 +3310,7 @@ def _duration_aware_encode_waiting_reason(
     if not estimate_items or not encode_hosts:
         return None
     best_estimate_seconds: int | None = None
+    best_estimate_host = ""
     longest_window_seconds = 0.0
     longest_window_host = ""
     longest_window_estimate_seconds = 0
@@ -3266,6 +3319,7 @@ def _duration_aware_encode_waiting_reason(
         estimate = estimate_encode_job_duration(estimate_items, host, duration_samples)
         if best_estimate_seconds is None or estimate.total_seconds < best_estimate_seconds:
             best_estimate_seconds = estimate.total_seconds
+            best_estimate_host = _blocked_host_display_name(host)
         policy = deps.schedule_profile_policy_for_host(config, host)
         max_window_seconds = deps.max_encode_schedule_window_seconds(
             policy,
@@ -3281,20 +3335,30 @@ def _duration_aware_encode_waiting_reason(
             longest_window_estimate_seconds = estimate.total_seconds
         if estimate.total_seconds <= max_window_seconds:
             fits_configured_window = True
+    # Each sentence names the computer whose estimate it quotes: estimates differ by computer.
     estimate_copy = _format_estimated_duration(best_estimate_seconds or 0)
     if not fits_configured_window:
-        impossible_estimate_copy = _format_estimated_duration(
-            longest_window_estimate_seconds or best_estimate_seconds or 0
-        )
+        if longest_window_estimate_seconds:
+            impossible_estimate_seconds, estimate_host = longest_window_estimate_seconds, longest_window_host
+        else:
+            impossible_estimate_seconds, estimate_host = best_estimate_seconds or 0, best_estimate_host
+        impossible_estimate_copy = _format_estimated_duration(impossible_estimate_seconds)
         longest_copy = _format_estimated_duration(longest_window_seconds)
-        host_copy = f" on {longest_window_host}" if longest_window_host else ""
+        estimate_host_copy = f" on {estimate_host}" if estimate_host else ""
+        window_host_copy = (
+            f" on {longest_window_host}" if longest_window_host and longest_window_host != estimate_host else ""
+        )
         return (
-            f"Estimated runtime {impossible_estimate_copy} is {HOST_WINDOW_IMPOSSIBLE_MARKER} "
-            f"(longest {longest_copy}{host_copy}). Widen a host window or use Bypass scheduler."
+            f"Estimated runtime {impossible_estimate_copy}{estimate_host_copy} is {HOST_WINDOW_IMPOSSIBLE_MARKER} "
+            f"(longest {longest_copy}{window_host_copy}). Widen a host window or use Bypass scheduler."
         )
     if impossible_only:
         return None
-    return f"Estimated runtime {estimate_copy}; waiting for a host window with enough time remaining."
+    estimate_host_copy = f" on {best_estimate_host}" if best_estimate_host else ""
+    return (
+        f"Estimated runtime {estimate_copy}{estimate_host_copy}; "
+        "waiting for a host window with enough time remaining."
+    )
 
 
 def _format_estimated_duration(seconds: float) -> str:

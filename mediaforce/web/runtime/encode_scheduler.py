@@ -361,9 +361,12 @@ def _transition_timestamp(value: datetime | None) -> str | None:
 
 
 def format_eta_seconds(seconds: float | None) -> str | None:
-    if seconds is None or seconds < 0:
+    """Copy for a time estimate; no estimate, or one that rounds to nothing, has no copy rather than "0s"."""
+    if seconds is None:
         return None
     total_seconds = int(round(seconds))
+    if total_seconds <= 0:
+        return None
     hours, remainder = divmod(total_seconds, 3600)
     minutes, secs = divmod(remainder, 60)
     if hours:
@@ -406,9 +409,10 @@ def decorate_encode_job_telemetry(
         progress.get("total_item_count") or manifest_totals.get("total_item_count") or decorated.get("item_count")
     )
     overall_completed_duration_seconds = float_value(progress.get("overall_completed_duration_seconds"))
-    remaining_duration_seconds = float_value(
-        progress.get("remaining_duration_seconds")
-        or max(total_duration_seconds - overall_completed_duration_seconds, 0.0)
+    remaining_duration_seconds = (
+        float_value(progress.get("remaining_duration_seconds"))
+        if progress.get("remaining_duration_seconds") is not None
+        else max(total_duration_seconds - overall_completed_duration_seconds, 0.0)
     )
     percent_complete = _float_or_none(progress.get("percent_complete"))
     if percent_complete is None and total_duration_seconds > 0:
@@ -419,8 +423,14 @@ def decorate_encode_job_telemetry(
     progress_state = str(progress.get("progress_state") or "").strip().lower()
     phase_label = str(progress.get("phase_label") or "").strip()
     speed_value = speed if speed not in {None, 0, 0.0} else None
-    if eta_seconds is None and speed_value is not None:
+    if eta_seconds is not None and eta_seconds <= 0:
+        # Zero is not an estimate: it is what a job reports before it has one.
+        eta_seconds = None
+    if eta_seconds is None and speed_value is not None and remaining_duration_seconds > 0:
         eta_seconds = remaining_duration_seconds / speed_value
+    if progress_state in {"quality_search", "starting"}:
+        # Compression has not started, so no reading says how long it will take.
+        eta_seconds = None
     decorated["progress"] = {
         **progress,
         "total_duration_seconds": total_duration_seconds,
@@ -464,16 +474,78 @@ def encode_queue_telemetry(encode_queue: dict[str, Any]) -> dict[str, Any]:
         for job in running_jobs
     )
     total_remaining_duration_seconds += sum(
-        float_value(object_dict(job.get("progress")).get("total_duration_seconds")) for job in queued_jobs
+        max(
+            float_value(object_dict(job.get("progress")).get("total_duration_seconds"))
+            - float_value(object_dict(job.get("progress")).get("left_out_duration_seconds")),
+            0.0,
+        )
+        for job in queued_jobs
     )
-    eta_seconds = (total_remaining_duration_seconds / aggregate_speed) if aggregate_speed > 0 else None
+    attention_jobs = [object_dict(job) for job in object_list(encode_queue.get("needs_attention"))]
+    # A show that reads needs_attention can still have episodes queued; those still run.
+    total_remaining_duration_seconds += sum(
+        float_value(object_dict(job.get("progress")).get("remaining_duration_seconds"))
+        for job in attention_jobs
+        if _reports_left_out_items(job)
+    )
+    eta_seconds = (
+        total_remaining_duration_seconds / aggregate_speed
+        if aggregate_speed > 0 and total_remaining_duration_seconds > 0
+        else None
+    )
     return {
         "aggregate_speed": aggregate_speed or None,
         "eta_seconds": eta_seconds,
         "eta_copy": format_eta_seconds(eta_seconds),
         "running_jobs": len(running_jobs),
         "queued_jobs": len(queued_jobs),
+        **_queue_left_out_item_counts([*running_jobs, *queued_jobs], attention_jobs),
     }
+
+
+def _reports_left_out_items(job: dict[str, Any]) -> bool:
+    """Whether the job sums its parts, saying which of them its estimate leaves out."""
+    return "left_out_needs_attention_item_count" in object_dict(job.get("progress"))
+
+
+def _queue_left_out_item_counts(
+        active_jobs: list[dict[str, Any]],
+        attention_jobs: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Items the queue estimate does not cover because they wait for the Director or did not finish."""
+    summed_jobs = [*active_jobs, *(job for job in attention_jobs if _reports_left_out_items(job))]
+    needs_attention = sum(
+        int_value(object_dict(job.get("progress")).get("left_out_needs_attention_item_count"))
+        for job in summed_jobs
+    )
+    failed = sum(
+        int_value(object_dict(job.get("progress")).get("left_out_failed_item_count"))
+        for job in summed_jobs
+    )
+    # A single job that reads needs_attention waits for the Director as a whole.
+    needs_attention += sum(
+        max(int_value(job.get("item_count")), 1)
+        for job in attention_jobs
+        if not _reports_left_out_items(job)
+    )
+    return {
+        "left_out_needs_attention_item_count": needs_attention,
+        "left_out_failed_item_count": failed,
+    }
+
+
+def left_out_items_copy(counts: dict[str, Any]) -> str | None:
+    """Says how many items an estimate leaves out, or nothing when it covers everything."""
+    needs_attention = int_value(counts.get("left_out_needs_attention_item_count"))
+    failed = int_value(counts.get("left_out_failed_item_count"))
+    parts: list[str] = []
+    if needs_attention:
+        parts.append(f"{needs_attention} {'item' if needs_attention == 1 else 'items'} waiting for you")
+    if failed:
+        parts.append(f"{failed} that didn't finish")
+    if not parts:
+        return None
+    return f"leaves out {' and '.join(parts)}"
 
 
 def decorate_encode_job_for_scheduler(
@@ -680,7 +752,10 @@ def encode_queue_summary_copy(
 
     queue_eta_copy = str(object_dict(encode_queue.get("telemetry")).get("eta_copy") or "").strip()
     if queue_eta_copy:
-        parts.append(f"estimated queue finish in {queue_eta_copy}")
+        left_out_copy = left_out_items_copy(object_dict(encode_queue.get("telemetry")))
+        parts.append(
+            f"estimated queue finish in {queue_eta_copy}" + (f" ({left_out_copy})" if left_out_copy else "")
+        )
 
     if encode_job and encode_job.get("scheduler_status_copy") and status in {"queued", "retry_backoff", "running", "needs_attention"}:
         parts.append(str(encode_job["scheduler_status_copy"]))

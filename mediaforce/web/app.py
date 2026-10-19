@@ -212,7 +212,7 @@ from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEA
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
 from mediaforce.web.runtime.episode_progress import folder_episodes_payload
 from mediaforce.web.runtime.sample_history import sample_history_payload
-from mediaforce.web.runtime.encode_runtime import release_host_cooldowns, sync_encode_job_parent, \
+from mediaforce.web.runtime.encode_runtime import mark_host_cooldowns, release_host_cooldowns, sync_encode_job_parent, \
     sweep_stopped_remote_encodes
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
@@ -3231,7 +3231,8 @@ def _host_runtime_rows(
         collect_statuses: Any | None = None,
         now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    return host_runtime_rows(
+    current_time = now or datetime.now(UTC)
+    rows = host_runtime_rows(
         connection,
         config,
         safe_collect_statuses=collect_statuses or _safe_collect_host_statuses,
@@ -3242,8 +3243,9 @@ def _host_runtime_rows(
         format_eta_seconds=_format_eta_seconds,
         always_schedule_profile=ALWAYS_SCHEDULE_PROFILE,
         default_host_schedule_profile=DEFAULT_HOST_SCHEDULE_PROFILE,
-        now=now,
+        now=current_time,
     )
+    return mark_host_cooldowns(rows, connection, parse_iso=_parse_iso, now=current_time)
 
 
 def evidence_host_rows(
