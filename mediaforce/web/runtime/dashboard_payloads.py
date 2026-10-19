@@ -15,7 +15,9 @@ from mediaforce.library.media_scopes import MediaScopeConflict, resolve_media_sc
 from mediaforce.library.movie_library import adapt_movie_workflow_payload, load_movie_scope_payload
 from mediaforce.library.staged_integrity import staged_integrity_report_for_scope
 from mediaforce.library.workflow_state import build_folder_workflow_state
-from mediaforce.library.candidate_selection import encode_candidate_decisions, project_candidates, workflow_eligibility
+from mediaforce.library.candidate_selection import encode_candidate_decisions, project_candidates, \
+    scope_lifecycle_payload_from_decisions, workflow_eligibility
+from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.web.runtime.job_runtime import calibration_job_public_payload, calibration_scope_relation
 
 
@@ -187,7 +189,9 @@ def folder_status_payload(
         load_retryable_sample_job_state: Any,
         load_scan_status: Any,
         load_active_encode_job_for_prefix: Any,
-        page_state: Callable[[DBClient, str, Mapping[str, Any], Mapping[str, Any]], dict[str, Any]] | None = None,
+        page_state: Callable[
+            [DBClient, str, Mapping[str, Any], Mapping[str, Any], Mapping[str, Any] | None], dict[str, Any]
+        ] | None = None,
 ) -> dict[str, Any]:
     """The folder's live status; `page_state` decides what the page leads with from the same reads."""
     with open_db(config.paths.db_path) as connection:
@@ -215,15 +219,22 @@ def folder_status_payload(
         retryable_sample_job = load_retryable_sample_job_state(connection, config, normalized_prefix)
         active_encode_job = load_active_encode_job_for_prefix(connection, normalized_prefix)
         folder_scan_job = load_scan_status(connection, config, normalized_prefix)
+        # The same decisions the folder page reads, so the state and the page's counts agree.
         lifecycle_decisions = (
             project_candidates(connection, config, prefixes=[normalized_prefix])
-            if media_scope.domain == "movie"
+            if media_scope.domain == "movie" or media_scope.kind == "tv_series"
             else encode_candidate_decisions(connection, config, prefixes=[normalized_prefix])
+        )
+        motion_holds = queue_motion_holds(connection, lifecycle_decisions)
+        lifecycle = (
+            scope_lifecycle_payload_from_decisions(normalized_prefix, lifecycle_decisions, motion_holds)
+            if media_scope.domain == "tv"
+            else None
         )
         workflow_state = build_folder_workflow_state(
             connection,
             normalized_prefix,
-            candidate_eligibility=workflow_eligibility(lifecycle_decisions),
+            candidate_eligibility=workflow_eligibility(lifecycle_decisions, motion_holds),
             library_types=config.library_type_map,
         ).to_payload()
         staged_integrity = staged_integrity_report_for_scope(
@@ -245,7 +256,7 @@ def folder_status_payload(
                     members=list(movie_context.get("members") or []),
                 ) or workflow_state
         folder_page_state = (
-            page_state(connection, normalized_prefix, workflow_state, staged_integrity)
+            page_state(connection, normalized_prefix, workflow_state, staged_integrity, lifecycle)
             if page_state is not None
             else None
         )

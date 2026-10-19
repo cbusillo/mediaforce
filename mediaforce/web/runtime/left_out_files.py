@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mediaforce.core.type_defs import object_dict
+from mediaforce.library.candidate_selection import MOTION_HELD_DETAIL
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 
 # Short plural-aware phrases for the summary line, keyed by left-out code.
@@ -76,7 +77,7 @@ def cadence_left_out_files(
         (
             partition.blocked_item_ids,
             "cadence_unresolved",
-            "Has a measured motion pattern Mediaforce cannot convert safely on its own. Review it in Activity.",
+            MOTION_HELD_DETAIL,
         ),
         (partition.analysis_queued_item_ids, "cadence_analysis_required", queued_reason),
         (
@@ -151,6 +152,37 @@ def nothing_queued_response(left_out: list[LeftOutFile], **extra: Any) -> dict[s
         "affected_item_count": len(left_out),
         "left_out": left_out_payload(left_out),
         "queued_count": 0,
+        "next_route": "/ops",
+        "next_action_label": "Open Activity",
+        **extra,
+    }
+
+
+def queue_result_without_files(left_out: list[LeftOutFile], **extra: Any) -> dict[str, Any]:
+    """The answer when a queue action made no files but may have started motion-pattern checks.
+
+    Each file whose check started is held to join production once it passes, so starting checks is
+    the action working: it succeeds and says what happens next. Only an action that started nothing
+    is refused.
+    """
+    checking = [file for file in left_out if file.code == "cadence_analysis_required"]
+    if not checking:
+        return nothing_queued_response(left_out, **extra)
+    others = [file for file in left_out if file.code != "cadence_analysis_required"]
+    count = len(checking)
+    message = (
+        f"Started motion-pattern checks for {count} {'episode' if count == 1 else 'episodes'}. "
+        f"{'It compresses' if count == 1 else 'They compress'} once {'its check passes' if count == 1 else 'their checks pass'}."
+    )
+    if others:
+        message += f" Left {len(others)} out: {left_out_summary(others)}."
+    return {
+        "ok": True,
+        "code": "motion_checks_started",
+        "message": message,
+        "queued_count": 0,
+        "checks_started_count": count,
+        "left_out": left_out_payload(left_out),
         "next_route": "/ops",
         "next_action_label": "Open Activity",
         **extra,

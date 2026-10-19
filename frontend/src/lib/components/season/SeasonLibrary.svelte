@@ -25,6 +25,8 @@
 		seasonsByShow,
 		sortShowCards,
 		seasonStateHoldLabel,
+		startableEpisodeCount,
+		staysOriginal,
 		tvLibraryStateGroup,
 		type LibrarySort,
 		type TvLibraryStateKey
@@ -120,8 +122,16 @@
 	);
 	const policySaving = $derived(Boolean(policySavingPrefix));
 	const lifecycleAvailable = $derived(selectedLifecycle !== null);
-	const eligibleEpisodeCount = $derived(selectedLifecycle?.eligible_candidate_count ?? 0);
-	const heldEpisodeCount = $derived(selectedLifecycle?.held_candidate_count ?? 0);
+	// Episodes the show's action takes now or starts a motion-pattern check for.
+	const eligibleEpisodeCount = $derived(startableEpisodeCount(selectedLifecycle));
+	// Of those, the ones that wait for a motion-pattern check before they compress.
+	const checkEpisodeCount = $derived(selectedLifecycle?.motion_check_candidate_count ?? 0);
+	const readyEpisodeCount = $derived(eligibleEpisodeCount - checkEpisodeCount);
+	// Protected episodes and the ones that stay original for their motion pattern.
+	const heldEpisodeCount = $derived(
+		(selectedLifecycle?.held_candidate_count ?? 0) +
+			(selectedLifecycle?.motion_held_candidate_count ?? 0)
+	);
 	const selectedShowActionAvailable = $derived(
 		Boolean(
 			olderSeasonAction ||
@@ -196,11 +206,7 @@
 	}
 
 	function fullyHeld(card: FolderCard): boolean {
-		return Boolean(
-			card.lifecycle &&
-			card.lifecycle.held_candidate_count > 0 &&
-			card.lifecycle.eligible_candidate_count === 0
-		);
+		return staysOriginal(card.lifecycle);
 	}
 
 	function librarySizeLabel(bytes: number): string {
@@ -593,7 +599,9 @@
 										<strong>{providerStateCopy()}</strong>
 										{#if lifecycleAvailable}
 											<span
-												>{countLabel(eligibleEpisodeCount, 'episode')} ready · {heldEpisodeCount} skipped</span
+												>{countLabel(readyEpisodeCount, 'episode')} ready{checkEpisodeCount > 0
+													? ` · ${checkEpisodeCount} need a motion check first`
+													: ''} · {heldEpisodeCount} skipped</span
 											>
 											{#if selectedLifecycle?.provider_state === 'stale'}
 												<span
@@ -621,9 +629,16 @@
 									<strong>Process older seasons with one setup</strong>
 									<span>
 										Include {olderSeasonAction.episodeCount}
-										{olderSeasonAction.episodeCount === 1 ? 'episode' : 'episodes'} across
+										{olderSeasonAction.episodeCount === 1
+											? 'episode'
+											: 'episodes'}{olderSeasonAction.checkEpisodeCount > 0
+											? ` and check ${olderSeasonAction.checkEpisodeCount} more`
+											: ''} across
 										{olderSeasonAction.seasonCount} older
 										{olderSeasonAction.seasonCount === 1 ? 'season' : 'seasons'}.
+										{olderSeasonAction.checkEpisodeCount > 0
+											? `Each checked episode compresses once its motion-pattern check passes.`
+											: ''}
 										{olderSeasonAction.latestSeasonLabel} stays original, and the current-season policy
 										does not change. Recent-acquisition holds are bypassed only after confirmation.
 									</span>
@@ -641,10 +656,12 @@
 									{#if lifecycleAvailable}
 										<span
 											>Approve one sample, then compress {countLabel(
-												eligibleEpisodeCount,
+												readyEpisodeCount,
 												'ready episode'
 											)}
-											the same way. {countLabel(heldEpisodeCount, 'skipped episode')}
+											the same way{checkEpisodeCount > 0
+												? ` and check ${checkEpisodeCount} more, which compress once their motion-pattern check passes`
+												: ''}. {countLabel(heldEpisodeCount, 'skipped episode')}
 											{heldEpisodeCount === 1 ? 'stays as it is' : 'stay as they are'}.</span
 										>
 									{:else}
@@ -689,7 +706,7 @@
 										<small
 											>{detailsPending ? 'estimating space saved' : 'estimate unavailable'}</small
 										>
-									{:else if seasonLifecycle?.held_candidate_count && !seasonLifecycle.eligible_candidate_count}
+									{:else if staysOriginal(seasonLifecycle)}
 										<strong>Held</strong>
 										<small>stays original</small>
 									{:else}

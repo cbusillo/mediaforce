@@ -64,6 +64,29 @@ export const PAGE_STATE_COPY = {
 		season: { label: 'Sample approved', detail: 'The rest of the season can be compressed.' },
 		episode: { label: 'Sample approved', detail: 'This episode can be compressed.' }
 	},
+	motion_held: {
+		season: {
+			label: 'Stays original',
+			detail:
+				'The remaining episodes stay original because Mediaforce can’t convert their motion pattern safely.'
+		},
+		episode: {
+			label: 'Stays original',
+			detail:
+				'This episode stays original because Mediaforce can’t convert its motion pattern safely.'
+		}
+	},
+	// Some held episodes have an unclear motion pattern the show page can encode as-is.
+	motion_decision: {
+		season: {
+			label: 'Motion decision',
+			detail: 'The show page can encode episodes with an unclear motion pattern as-is.'
+		},
+		episode: {
+			label: 'Motion decision',
+			detail: 'The show page can encode this episode’s unclear motion pattern as-is.'
+		}
+	},
 	making_season: {
 		season: {
 			label: 'Compressing the season',
@@ -137,13 +160,21 @@ export const CARD_STATE_COPY = {
 		label: 'Ready to compress',
 		detail: 'The season has an approved setup and can be compressed.'
 	},
+	// Approved, but every episode the action takes needs a motion-pattern check first.
+	ready_to_check_motion: {
+		label: 'Motion check first',
+		detail:
+			'Starting the season checks each episode’s motion pattern, then compresses it once it passes.'
+	},
 	making_season_needs_you: {
 		label: 'Compressing · needs you',
 		detail: PAGE_STATE_COPY.making_season.season.detail
 	},
 	stopped: NEEDS_A_LITTLE_HELP,
 	sample_failed: NEEDS_A_LITTLE_HELP
-} as const satisfies Partial<Record<PageStateCopyKey | 'making_season_needs_you', Copy>>;
+} as const satisfies Partial<
+	Record<PageStateCopyKey | 'making_season_needs_you' | 'ready_to_check_motion', Copy>
+>;
 
 export type PageStateCopyKey = keyof typeof PAGE_STATE_COPY;
 
@@ -211,6 +242,8 @@ export function pageStateCopyKey(
 			return integrity.available ? 'finish_blocked' : 'finish_checking';
 		case 'finish_blocked':
 			return integrity && !integrity.available ? 'finish_checking' : 'finish_blocked';
+		case 'motion_held':
+			return state.primary_action === 'decide_motion' ? 'motion_decision' : 'motion_held';
 		case 'needs_help':
 			return state.recovery_kind === 'files'
 				? 'files_blocked'
@@ -268,11 +301,18 @@ export function cardStateWording(card: FolderCard): HumanSeasonState {
 	const needsYou =
 		copyKey === 'making_season' &&
 		(card.review_badge_label ?? '').toLowerCase().includes('attention');
+	// A ready season whose action only starts motion-pattern checks says so, not that it compresses now.
+	const checksOnly =
+		copyKey === 'ready_to_make' &&
+		card.lifecycle?.eligible_candidate_count === 0 &&
+		(card.lifecycle.motion_check_candidate_count ?? 0) > 0;
 	const cardCopy: Copy | undefined = needsYou
 		? {
 				...CARD_STATE_COPY.making_season_needs_you,
 				detail: card.review_badge_detail || CARD_STATE_COPY.making_season_needs_you.detail
 			}
-		: CARD_STATE_COPY[copyKey as keyof typeof CARD_STATE_COPY];
+		: checksOnly
+			? CARD_STATE_COPY.ready_to_check_motion
+			: CARD_STATE_COPY[copyKey as keyof typeof CARD_STATE_COPY];
 	return cardCopy ? { ...wording, label: cardCopy.label, detail: cardCopy.detail } : wording;
 }

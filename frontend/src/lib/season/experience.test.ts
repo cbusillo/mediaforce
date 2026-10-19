@@ -9,6 +9,7 @@ import type {
 	FolderPayload,
 	FolderStatusPayload,
 	CompressionIntentOptionPayload,
+	LifecycleState,
 	OperatorIntentRequestPayload,
 	PageStatePayload,
 	SizeGoalOptionPayload
@@ -63,7 +64,11 @@ import {
 	shouldPrioritizeScopeActivity,
 	sizeGoals,
 	approvalStartPlan,
+	type QueueAdmission,
 	productionScope,
+	motionHoldNotes,
+	motionHolds,
+	queueAdmission,
 	targetConstraintSummary,
 	targetProvenanceSummary,
 	testRequestWithInstructions,
@@ -2292,12 +2297,19 @@ describe('season experience translation', () => {
 });
 
 describe('approvalStartPlan', () => {
+	const admission = (overrides: Partial<QueueAdmission> = {}): QueueAdmission => ({
+		clearedCount: 0,
+		checkCount: 0,
+		protectedCount: 0,
+		protectedCheckCount: 0,
+		motionHeldCount: 0,
+		asIsCount: 0,
+		...overrides
+	});
 	const series = (overrides: Partial<Parameters<typeof approvalStartPlan>[0]>) =>
 		approvalStartPlan({
 			scope: 'series',
-			episodeCount: 88,
-			eligibleEpisodeCount: 66,
-			heldEpisodeCount: 22,
+			admission: admission({ clearedCount: 66, protectedCount: 22 }),
 			olderSeasons: { candidateCount: 66, overriddenCount: 0, seasonCount: 3 },
 			...overrides
 		});
@@ -2307,16 +2319,14 @@ describe('approvalStartPlan', () => {
 		expect(series({})?.label).toBe('Keep and compress 66 episodes');
 		expect(
 			series({
-				eligibleEpisodeCount: 0,
+				admission: admission(),
 				olderSeasons: { candidateCount: 10, overriddenCount: 0, seasonCount: 3 }
 			})
 		).toMatchObject({ mode: 'older_seasons', episodeCount: 10 });
 		expect(
 			approvalStartPlan({
 				scope: 'episode',
-				episodeCount: 1,
-				eligibleEpisodeCount: 1,
-				heldEpisodeCount: 0,
+				admission: admission({ clearedCount: 1 }),
 				olderSeasons: null
 			})
 		).toMatchObject({ mode: 'scope', label: 'Keep and compress this episode' });
@@ -2329,16 +2339,43 @@ describe('approvalStartPlan', () => {
 		expect(
 			series({ olderSeasons: { candidateCount: 70, overriddenCount: 0, seasonCount: 3 } })
 		).toBeNull();
-		expect(series({ eligibleEpisodeCount: 0, olderSeasons: null })).toBeNull();
+		expect(series({ admission: admission(), olderSeasons: null })).toBeNull();
 		expect(
 			approvalStartPlan({
 				scope: 'season',
-				episodeCount: 22,
-				eligibleEpisodeCount: 0,
-				heldEpisodeCount: 22,
+				admission: admission({ protectedCount: 22 }),
 				olderSeasons: null
 			})
 		).toBeNull();
+	});
+
+	it('offers nothing for an episode or season the queue would leave out for its motion pattern', () => {
+		const held = admission({ motionHeldCount: 1 });
+		expect(approvalStartPlan({ scope: 'episode', admission: held, olderSeasons: null })).toBeNull();
+		expect(
+			approvalStartPlan({
+				scope: 'season',
+				admission: admission({ motionHeldCount: 6 }),
+				olderSeasons: null
+			})
+		).toBeNull();
+	});
+
+	it('starts motion-pattern checks when they are all the queue can start', () => {
+		const checks = admission({ checkCount: 3 });
+		const season = approvalStartPlan({ scope: 'season', admission: checks, olderSeasons: null });
+		const show = approvalStartPlan({ scope: 'series', admission: checks, olderSeasons: null });
+
+		expect(season).toMatchObject({ mode: 'scope', episodeCount: checks.checkCount });
+		expect(show).toMatchObject({ mode: 'scope', episodeCount: checks.checkCount });
+		// The label says the episodes are checked first, not compressed straight away.
+		expect(season?.label).not.toBe(
+			approvalStartPlan({
+				scope: 'season',
+				admission: admission({ clearedCount: 3 }),
+				olderSeasons: null
+			})?.label
+		);
 	});
 });
 
@@ -2368,6 +2405,97 @@ describe('productionScope', () => {
 		expect(productionScope(show)).toEqual({
 			episodeCount: show.lifecycle!.eligible_candidate_count,
 			currentSizeBytes: show.summary!.total_size_bytes
+		});
+	});
+});
+
+describe('motionHolds', () => {
+	const season = (held: string[], check: string[]) =>
+		folder({ motion_hold_files: { held_files: held, check_files: check } });
+
+	it('adds nothing when no episode is left out for its motion pattern', () => {
+		expect(motionHoldNotes(motionHolds(folder()))).toEqual([]);
+	});
+
+	it('names how many stay original and how many wait for a check', () => {
+		const holds = motionHolds(
+			season(['tv/Show/Season 1/A.mkv', 'tv/Show/Season 1/B.mkv'], ['C.mkv'])
+		);
+		const [held, check] = motionHoldNotes(holds);
+
+		expect(holds.heldFiles).toHaveLength(2);
+		expect(held).toContain(`${holds.heldFiles.length} episodes`);
+		expect(check).toContain(`${holds.checkFiles.length} episode `);
+	});
+
+	it('speaks only of the held episodes when none waits for a check', () => {
+		const notes = motionHoldNotes(motionHolds(season(['A.mkv'], [])));
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain('1 episode ');
+		// A held pattern no one can change sends the owner nowhere.
+		expect(notes[0]).not.toContain('Activity');
+	});
+
+	it('points to the show page only when its encode-as-is decision covers a held episode', () => {
+		const held = ['A.mkv', 'B.mkv'];
+		const decided = motionHoldNotes(
+			motionHolds(
+				folder({ motion_hold_files: { held_files: held, check_files: [], as_is_count: 1 } })
+			)
+		);
+		const settled = motionHoldNotes(motionHolds(season(held, [])));
+
+		expect(decided.some((note) => note.includes('show page'))).toBe(true);
+		expect(settled.some((note) => note.includes('show page'))).toBe(false);
+		// The show page holds the decision itself, so it does not point to itself.
+		const onShow = motionHoldNotes(
+			motionHolds(
+				folder({ motion_hold_files: { held_files: held, check_files: [], as_is_count: 1 } })
+			),
+			true
+		);
+		expect(onShow.some((note) => note.includes('show page'))).toBe(false);
+	});
+});
+
+describe('queueAdmission', () => {
+	const lifecycle = (overrides: Partial<LifecycleState>): LifecycleState => ({
+		schema_version: 1,
+		prefix: card.prefix,
+		candidate_count: 6,
+		eligible_candidate_count: 0,
+		held_candidate_count: 0,
+		seasons: [],
+		...overrides
+	});
+
+	it('counts only protected episodes an override could take as protected', () => {
+		const admission = queueAdmission(
+			folder({
+				lifecycle: lifecycle({ held_candidate_count: 6, protected_motion_held_candidate_count: 6 })
+			})
+		);
+		expect(admission).toMatchObject({ protectedCount: 0, motionHeldCount: 6, clearedCount: 0 });
+	});
+
+	it('keeps episodes waiting for a check apart from the ones compressed now', () => {
+		const admission = queueAdmission(
+			folder({
+				lifecycle: lifecycle({
+					eligible_candidate_count: 1,
+					motion_check_candidate_count: 5,
+					motion_held_candidate_count: 2,
+					motion_as_is_candidate_count: 1
+				})
+			})
+		);
+		expect(admission).toEqual({
+			clearedCount: 1,
+			checkCount: 5,
+			protectedCount: 0,
+			protectedCheckCount: 0,
+			motionHeldCount: 2,
+			asIsCount: 1
 		});
 	});
 });

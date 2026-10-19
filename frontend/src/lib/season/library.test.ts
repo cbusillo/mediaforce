@@ -23,6 +23,7 @@ import {
 	seasonStateHoldLabel,
 	seasonsByShow,
 	sortShowCards,
+	staysOriginal,
 	tvLibraryStateGroup
 } from './library';
 
@@ -306,6 +307,91 @@ describe('season library grouping', () => {
 		}
 	});
 
+	it('shows a season as staying original only when compressing would take none of its episodes', () => {
+		const motion = (held: number, check: number): SeasonLifecycleState => ({
+			...seasonLifecycle('tv/Alpha/Season 1', 0),
+			eligible_candidate_count: 10 - held - check,
+			motion_held_candidate_count: held,
+			motion_check_candidate_count: check
+		});
+
+		expect(staysOriginal(motion(10, 0))).toBe(true);
+		expect(staysOriginal(motion(4, 0))).toBe(false);
+		// Compressing starts the check for these, so the season still has work to start.
+		expect(staysOriginal(motion(4, 6))).toBe(false);
+		expect(staysOriginal(seasonLifecycle('tv/Alpha/Season 2', 10))).toBe(true);
+		expect(staysOriginal(seasonLifecycle('tv/Alpha/Season 1', 0))).toBe(false);
+		expect(staysOriginal(undefined)).toBe(false);
+		// A protected season whose other episodes wait for a check still has a check to start.
+		expect(
+			staysOriginal({
+				...seasonLifecycle('tv/Alpha/Season 2', 4),
+				eligible_candidate_count: 0,
+				motion_check_candidate_count: 6
+			})
+		).toBe(false);
+	});
+
+	it('counts older seasons only by the episodes whose motion pattern is resolved', () => {
+		const olderSeason = (prefix: string, cleared: number, protectedCleared: number) => ({
+			...seasonLifecycle(prefix, 6),
+			is_current_season: false,
+			hold_reasons: [
+				{ code: 'recent_acquisition', label: 'Recent acquisition', detail: 'Waiting.' }
+			],
+			motion_cleared_candidate_count: cleared,
+			protected_motion_cleared_candidate_count: protectedCleared
+		});
+		const action = olderSeasonLibraryAction({
+			...lifecycle('on', 0),
+			seasons: [
+				olderSeason('tv/Alpha/Season 1', 1, 1),
+				// Every episode here stays original for its motion pattern, so the action leaves it out.
+				olderSeason('tv/Alpha/Season 2', 0, 0),
+				{ ...seasonLifecycle('tv/Alpha/Season 3', 10), is_current_season: true }
+			]
+		});
+
+		expect(action).toEqual({
+			latestSeasonLabel: 'Season 3',
+			seasonCount: 1,
+			episodeCount: 1,
+			checkEpisodeCount: 0,
+			overriddenSeasonCount: 1,
+			overriddenEpisodeCount: 1
+		});
+	});
+
+	it('offers older seasons whose protected episodes only wait for a motion-pattern check', () => {
+		const checkOnly = {
+			...seasonLifecycle('tv/Alpha/Season 1', 4),
+			is_current_season: false,
+			hold_reasons: [
+				{ code: 'recent_acquisition', label: 'Recent acquisition', detail: 'Waiting.' }
+			],
+			eligible_candidate_count: 0,
+			motion_cleared_candidate_count: 0,
+			protected_motion_cleared_candidate_count: 0,
+			protected_motion_check_candidate_count: 4
+		};
+		const action = olderSeasonLibraryAction({
+			...lifecycle('on', 0),
+			seasons: [checkOnly, { ...seasonLifecycle('tv/Alpha/Season 2', 10), is_current_season: true }]
+		});
+
+		expect(action).toMatchObject({
+			seasonCount: 1,
+			episodeCount: 0,
+			checkEpisodeCount: checkOnly.protected_motion_check_candidate_count,
+			overriddenEpisodeCount: checkOnly.protected_motion_check_candidate_count
+		});
+	});
+
+	it('groups a season held for motion with no work, unless the show can decide it', () => {
+		expect(tvLibraryStateGroup([{ key: 'motion_held', tone: 'quiet' }]).key).toBe('idle');
+		expect(tvLibraryStateGroup([{ key: 'motion_held', tone: 'attention' }]).key).toBe('attention');
+	});
+
 	it('offers one older-season action while preserving the latest season', () => {
 		const heldOlderSeason = {
 			...seasonLifecycle('tv/Alpha/Season 1', 10),
@@ -339,6 +425,7 @@ describe('season library grouping', () => {
 			latestSeasonLabel: 'Season 3',
 			seasonCount: 2,
 			episodeCount: 20,
+			checkEpisodeCount: 0,
 			overriddenSeasonCount: 1,
 			overriddenEpisodeCount: 10
 		});
@@ -391,6 +478,7 @@ describe('season library grouping', () => {
 			latestSeasonLabel: 'Season 3',
 			seasonCount: 2,
 			episodeCount: 20,
+			checkEpisodeCount: 0,
 			overriddenSeasonCount: 0,
 			overriddenEpisodeCount: 0
 		});

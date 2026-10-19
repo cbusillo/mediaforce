@@ -19,7 +19,12 @@ Order, first match wins:
 5. ``ready_to_check``, ``finish_blocked`` / ``ready_to_finish``, ``finished``: the workflow lanes.
 6. ``ready_to_make``: the approval governing the scope (the nearest folder holding one, see
    ``production_approval``) is current, records its contract, and the review evidence still allows
-   production.
+   production. Under such an approval a scope where neither queueing nor an override the page
+   offers would take or start a check for any file, and some file is held for its measured motion
+   pattern, is ``motion_held`` instead, so nothing offers to compress files queueing would refuse.
+   The counts come from the scope's lifecycle payload, which reads the queue's own motion-pattern
+   gate. It is quiet when no one can change the outcome, and asks for attention when the show's
+   encode-as-is decision could accept some of the files.
 7. ``needs_help`` / ``test``: the page's saved sample cannot be reviewed.
 8. ``needs_test``.
 
@@ -50,6 +55,7 @@ PageStateKey = Literal[
     "making_test",
     "ready_to_compare",
     "ready_to_make",
+    "motion_held",
     "making_season",
     "ready_to_check",
     "finish_blocked",
@@ -69,6 +75,7 @@ PageAction = Literal[
     "review_files",
     "validate_outputs",
     "promote_outputs",
+    "decide_motion",
 ]
 FailureKind = Literal[
     "arithmetic_infeasible",
@@ -151,6 +158,8 @@ class PageStateFacts:
     approval_review_blocked: bool = False
     # The staged-file summary, when the caller read one.
     staged_integrity: Mapping[str, Any] | None = None
+    # The scope's lifecycle payload with its motion-pattern counts, for a TV scope.
+    lifecycle: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +234,9 @@ def decide_page_state(facts: PageStateFacts) -> PageState:
     approval = facts.approval
     if approval is not None and approval.current and approval.contract is not None:
         if not facts.approval_review_blocked:
+            motion_held = _motion_held_state(facts.lifecycle, workflow)
+            if motion_held is not None:
+                return motion_held
             return PageState(
                 "ready_to_make",
                 "ready",
@@ -263,6 +275,7 @@ def folder_page_state(
         sources: PageStateSources,
         *,
         staged_integrity: Mapping[str, Any] | None = None,
+        lifecycle: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The page state for one folder page."""
     facts = _facts(
@@ -275,6 +288,7 @@ def folder_page_state(
         load_calibration=cached_calibration_loader(sources.load_calibration_state),
         review_blocked=_review_blocked_checker(config, sources.load_advice_state),
         staged_integrity=staged_integrity,
+        lifecycle=lifecycle,
     )
     return decide_page_state(facts).to_payload()
 
@@ -282,7 +296,7 @@ def folder_page_state(
 def card_page_states(
         connection: DBClient,
         config: MediaforceConfig,
-        cards: Iterable[tuple[str, Mapping[str, Any] | None]],
+        cards: Iterable[tuple[str, Mapping[str, Any] | None, Mapping[str, Any] | None]],
         sources: PageStateSources,
 ) -> dict[str, dict[str, Any]]:
     """The page state each library card shows, as its folder page decides it, keyed by prefix.
@@ -290,7 +304,7 @@ def card_page_states(
     Cards carry no staged-file summary, so a card ready to finish does not check for blocked files.
     """
     card_list = list(cards)
-    latest_jobs = load_latest_jobs_for_prefixes(connection, [prefix for prefix, _workflow in card_list])
+    latest_jobs = load_latest_jobs_for_prefixes(connection, [prefix for prefix, _workflow, _lifecycle in card_list])
     load_calibration = cached_calibration_loader(sources.load_calibration_state)
     review_blocked = _review_blocked_checker(config, sources.load_advice_state)
     return {
@@ -303,8 +317,9 @@ def card_page_states(
             sample_job=latest_jobs.get(prefix),
             load_calibration=load_calibration,
             review_blocked=review_blocked,
+            lifecycle=lifecycle,
         )).to_payload()
-        for prefix, workflow in card_list
+        for prefix, workflow, lifecycle in card_list
     }
 
 
@@ -319,6 +334,7 @@ def _facts(
         load_calibration: LoadCalibrationState,
         review_blocked: Callable[[EffectiveApproval], bool],
         staged_integrity: Mapping[str, Any] | None = None,
+        lifecycle: Mapping[str, Any] | None = None,
 ) -> PageStateFacts:
     source_job_id = str(object_dict(workflow).get("source_job_id") or "")
     approval = effective_production_approval(config, prefix, load_calibration)
@@ -331,6 +347,7 @@ def _facts(
         approval=approval,
         approval_review_blocked=review_blocked(approval) if approval is not None and approval.current else False,
         staged_integrity=staged_integrity,
+        lifecycle=lifecycle,
     )
 
 
@@ -447,6 +464,45 @@ def _review_availability(
             or object_dict(gate).get("status") == "missing_review_media"
     )
     return False, recovery
+
+
+def _motion_held_state(lifecycle: Mapping[str, Any] | None, workflow: Mapping[str, Any]) -> PageState | None:
+    """``motion_held`` when nothing the page offers would take or start a check for any file, and some
+    file stays original for its motion pattern; None otherwise.
+
+    What the page offers is queueing the scope, an override of its lifecycle holds when it has one,
+    and a show's older-seasons action. A scope without a lifecycle payload reads its workflow counts.
+    """
+    if lifecycle is None:
+        counts = object_dict(workflow.get("counts"))
+        startable = int(counts.get("encode_candidates") or 0)
+        held_for_motion = int(counts.get("motion_held") or 0)
+        as_is = 0
+    else:
+        older = object_dict(lifecycle.get("older_seasons"))
+        protected_startable = (
+            int(lifecycle.get("held_candidate_count") or 0)
+            - int(lifecycle.get("protected_motion_held_candidate_count") or 0)
+            if lifecycle.get("can_override_holds")
+            else 0
+        )
+        startable = (
+            int(lifecycle.get("eligible_candidate_count") or 0)
+            + int(lifecycle.get("motion_check_candidate_count") or 0)
+            + protected_startable
+            + int(older.get("candidate_count") or 0)
+            + int(older.get("cadence_check_candidate_count") or 0)
+        )
+        held_for_motion = (
+            int(lifecycle.get("motion_held_candidate_count") or 0)
+            + int(lifecycle.get("protected_motion_held_candidate_count") or 0)
+        )
+        as_is = int(lifecycle.get("motion_as_is_candidate_count") or 0)
+    if startable or not held_for_motion:
+        return None
+    if as_is:
+        return PageState("motion_held", "attention", primary_action="decide_motion")
+    return PageState("motion_held", "quiet")
 
 
 def _workflow_action(workflow: Mapping[str, Any], action: PageAction) -> PageAction | None:

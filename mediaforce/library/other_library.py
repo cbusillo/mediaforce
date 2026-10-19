@@ -15,6 +15,7 @@ from mediaforce.core.type_defs import mapping_dict, object_dict
 from mediaforce.library.candidate_selection import CandidateDecision, project_candidates, workflow_eligibility
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
+from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.library.other_profiles import (
     OTHER_FOLDER_SCOPE_MAX_ITEMS,
     OTHER_LIBRARY_CATALOG_MAX_ITEMS,
@@ -99,7 +100,7 @@ def load_other_library_payload(
         build_folder_workflow_states(
             connection,
             visible_prefixes,
-            candidate_eligibility=workflow_eligibility(decisions),
+            candidate_eligibility=workflow_eligibility(decisions, queue_motion_holds(connection, decisions)),
             library_types=config.library_type_map,
         )
         if include_details and visible_prefixes

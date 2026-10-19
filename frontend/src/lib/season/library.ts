@@ -21,7 +21,10 @@ export interface TvLibraryStateGroup {
 export interface OlderSeasonLibraryAction {
 	latestSeasonLabel: string;
 	seasonCount: number;
+	/** Episodes the action compresses now: their motion pattern is resolved. */
 	episodeCount: number;
+	/** Episodes whose motion-pattern check the action starts; each compresses once it passes. */
+	checkEpisodeCount: number;
 	overriddenSeasonCount: number;
 	overriddenEpisodeCount: number;
 }
@@ -52,6 +55,36 @@ export function seasonStateHoldLabel(
 	state: { key: string }
 ): string {
 	return STATES_A_HOLD_EXPLAINS.has(state.key) ? seasonHoldLabel(season) : '';
+}
+
+type HoldCounts = Pick<
+	SeasonLifecycleState,
+	| 'eligible_candidate_count'
+	| 'held_candidate_count'
+	| 'motion_held_candidate_count'
+	| 'motion_check_candidate_count'
+>;
+
+/** Episodes the show's normal action takes now or starts a motion-pattern check for. */
+export function startableEpisodeCount(lifecycle: HoldCounts | null | undefined): number {
+	return (
+		(lifecycle?.eligible_candidate_count ?? 0) + (lifecycle?.motion_check_candidate_count ?? 0)
+	);
+}
+
+/**
+ * True when compressing would take none of the remaining episodes: each is held by a lifecycle rule
+ * or for its motion pattern. An episode waiting for a motion-pattern check still counts, since
+ * compressing starts its check.
+ */
+export function staysOriginal(counts: HoldCounts | null | undefined): boolean {
+	if (
+		!counts ||
+		counts.eligible_candidate_count > 0 ||
+		(counts.motion_check_candidate_count ?? 0) > 0
+	)
+		return false;
+	return counts.held_candidate_count > 0 || (counts.motion_held_candidate_count ?? 0) > 0;
 }
 
 /** The show page's badge for a season with all of its episodes held. */
@@ -165,8 +198,10 @@ function lifecycleForSeason(
 	lifecycle: LifecycleState,
 	season: SeasonLifecycleState
 ): LifecycleState {
+	// As the server decides it: an override has something to take only when a protected episode is
+	// not also held for its motion pattern.
 	const canOverrideHolds =
-		season.held_candidate_count > 0 &&
+		season.held_candidate_count > (season.protected_motion_held_candidate_count ?? 0) &&
 		season.hold_reasons.length > 0 &&
 		season.hold_reasons.every((reason) =>
 			['current_season', 'recent_acquisition'].includes(reason.code)
@@ -177,6 +212,12 @@ function lifecycleForSeason(
 		candidate_count: season.candidate_count,
 		eligible_candidate_count: season.eligible_candidate_count,
 		held_candidate_count: season.held_candidate_count,
+		motion_held_candidate_count: season.motion_held_candidate_count,
+		motion_check_candidate_count: season.motion_check_candidate_count,
+		protected_motion_held_candidate_count: season.protected_motion_held_candidate_count,
+		protected_motion_check_candidate_count: season.protected_motion_check_candidate_count,
+		motion_as_is_candidate_count: season.motion_as_is_candidate_count,
+		older_seasons: null,
 		hold_reason_counts: Object.fromEntries(
 			season.hold_reasons.map((reason) => [reason.code, season.held_candidate_count])
 		),
@@ -228,7 +269,7 @@ export function olderSeasonLibraryAction(
 			seasonNumber >= latestSeasonNumber ||
 			season.ambiguous ||
 			(prefixCountByNumber.get(seasonNumber) ?? 0) > 1 ||
-			season.candidate_count <= 0
+			olderSeasonEpisodes(season) + olderSeasonChecks(season) <= 0
 		)
 			return false;
 		if (season.held_candidate_count <= 0) return season.eligible_candidate_count > 0;
@@ -237,18 +278,42 @@ export function olderSeasonLibraryAction(
 			season.hold_reasons.every((reason) => OVERRIDEABLE_HOLD_CODES.has(reason.code))
 		);
 	});
-	const overridden = included.filter((season) => season.held_candidate_count > 0);
+	const overridden = included.filter((season) => olderSeasonProtectedEpisodes(season) > 0);
 	if (!included.length) return null;
 	return {
 		latestSeasonLabel: `Season ${latestSeasonNumber}`,
 		seasonCount: included.length,
-		episodeCount: included.reduce((total, season) => total + season.candidate_count, 0),
+		episodeCount: included.reduce((total, season) => total + olderSeasonEpisodes(season), 0),
+		checkEpisodeCount: included.reduce((total, season) => total + olderSeasonChecks(season), 0),
 		overriddenSeasonCount: overridden.length,
 		overriddenEpisodeCount: overridden.reduce(
-			(total, season) => total + season.held_candidate_count,
+			(total, season) => total + olderSeasonProtectedEpisodes(season),
 			0
 		)
 	};
+}
+
+// The older-seasons action takes only episodes whose motion pattern is resolved, as Studio shows it.
+function olderSeasonEpisodes(season: SeasonLifecycleState): number {
+	return season.motion_cleared_candidate_count ?? season.candidate_count;
+}
+
+// The action also starts motion-pattern checks, protected episodes included, as the server counts them.
+function olderSeasonChecks(season: SeasonLifecycleState): number {
+	return (
+		(season.motion_check_candidate_count ?? 0) +
+		(season.protected_motion_check_candidate_count ?? 0)
+	);
+}
+
+// Protected episodes the action takes or starts a check for, each bypassing its lifecycle hold.
+function olderSeasonProtectedEpisodes(season: SeasonLifecycleState): number {
+	if (season.protected_motion_cleared_candidate_count === undefined)
+		return season.held_candidate_count;
+	return (
+		season.protected_motion_cleared_candidate_count +
+		(season.protected_motion_check_candidate_count ?? 0)
+	);
 }
 
 function addCounts(
@@ -325,6 +390,20 @@ function aggregateShowCard(showPrefix: string, seasons: FolderCard[]): FolderCar
 						(total, season) => total + (season.lifecycle?.held_candidate_count ?? 0),
 						0
 					),
+					motion_held_candidate_count: seasons.reduce(
+						(total, season) => total + (season.lifecycle?.motion_held_candidate_count ?? 0),
+						0
+					),
+					motion_check_candidate_count: seasons.reduce(
+						(total, season) => total + (season.lifecycle?.motion_check_candidate_count ?? 0),
+						0
+					),
+					protected_motion_held_candidate_count: seasons.reduce(
+						(total, season) =>
+							total + (season.lifecycle?.protected_motion_held_candidate_count ?? 0),
+						0
+					),
+					older_seasons: null,
 					seasons: seasons.flatMap((season) => season.lifecycle?.seasons ?? [])
 				}
 			: null,

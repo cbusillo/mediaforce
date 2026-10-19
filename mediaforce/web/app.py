@@ -100,9 +100,9 @@ from mediaforce.library.other_profiles import OTHER_FOLDER_SCOPE_MAX_ITEMS
 from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.representatives import RepresentativeSelection, load_representative_selection, \
     public_representative_item
-from mediaforce.library.candidate_selection import CandidateDecision, encode_candidate_decisions, \
-    older_season_candidate_item_ids, older_season_override_selection, project_candidates, \
-    restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, workflow_eligibility
+from mediaforce.library.candidate_selection import CandidateDecision, encode_candidate_decisions, project_candidates, \
+    scope_lifecycle_payload_from_decisions, workflow_eligibility
+from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.encoding.audio_quality import check_sample_audio
@@ -154,7 +154,7 @@ from mediaforce.web.checked_output_preview import (
     checked_output_media_type,
     checked_output_stream_response,
 )
-from mediaforce.web.runtime.decision_evidence import cadence_safety_partition, older_season_cadence_payload
+from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_folders_payload, \
     dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
@@ -926,13 +926,14 @@ def create_app(
             load_retryable_sample_job_state=_load_retryable_sample_job_state,
             load_scan_status=_load_scan_status,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
-            page_state=lambda connection, prefix, workflow, staged_integrity: folder_page_state(
+            page_state=lambda connection, prefix, workflow, staged_integrity, lifecycle: folder_page_state(
                 connection,
                 config,
                 prefix,
                 workflow,
                 _page_state_sources(),
                 staged_integrity=staged_integrity,
+                lifecycle=lifecycle,
             ),
         )
 
@@ -1324,6 +1325,7 @@ def create_app(
         latest_failed_sample_job_payload: dict[str, Any] | None = None
         older_season_override: dict[str, Any] | None = None
         ambiguous_motion: dict[str, Any] | None = None
+        motion_hold_files: dict[str, Any] | None = None
         with open_db(config.paths.db_path) as connection:
             media_scope = resolve_media_scope(
                 connection,
@@ -1458,34 +1460,17 @@ def create_app(
                 if media_scope.domain == "movie" or media_scope.kind == "tv_series"
                 else encode_candidate_decisions(connection, config, prefixes=[normalized_prefix])
             )
+            motion_holds = queue_motion_holds(connection, lifecycle_decisions)
             lifecycle = (
-                scope_lifecycle_payload_from_decisions(normalized_prefix, lifecycle_decisions)
+                scope_lifecycle_payload_from_decisions(normalized_prefix, lifecycle_decisions, motion_holds)
                 if media_scope.domain == "tv"
                 else None
             )
-            if media_scope.kind == "tv_series":
-                older_season_selection = older_season_override_selection(
-                    lifecycle_decisions,
-                    normalized_prefix,
-                )
-                older_season_candidate_ids = older_season_candidate_item_ids(
-                    lifecycle_decisions,
-                    older_season_selection,
-                )
-                cadence_partition = cadence_safety_partition(
-                    connection,
-                    library_item_ids=older_season_candidate_ids,
-                    synchronize=False,
-                )
-                older_season_selection = restrict_older_season_override_selection(
-                    lifecycle_decisions,
-                    older_season_selection,
-                    included_item_ids=cadence_partition.cleared_item_ids,
-                )
-                older_season_override = older_season_cadence_payload(
-                    older_season_selection,
-                    cadence_partition,
-                )
+            if lifecycle is not None:
+                # The files this scope's queue leaves out for their motion pattern, named on its page.
+                motion_hold_files = motion_hold_files_payload(lifecycle_decisions, motion_holds)
+            if media_scope.kind == "tv_series" and lifecycle is not None:
+                older_season_override = lifecycle.get("older_seasons")
                 ambiguous_motion = ambiguous_motion_files(
                     connection,
                     normalized_prefix,
@@ -1499,11 +1484,11 @@ def create_app(
                     candidate_decisions=lifecycle_decisions,
                 )
                 base_context["other_context"] = other_context
-            encode_candidate_count = sum(decision.eligible for decision in lifecycle_decisions)
+            encode_candidate_count = sum(motion_holds.queueable(decision) for decision in lifecycle_decisions)
             workflow_state = build_folder_workflow_state(
                 connection,
                 normalized_prefix,
-                candidate_eligibility=workflow_eligibility(lifecycle_decisions),
+                candidate_eligibility=workflow_eligibility(lifecycle_decisions, motion_holds),
                 library_types=config.library_type_map,
             ).to_payload()
             series_context = (
@@ -1654,6 +1639,7 @@ def create_app(
                 "lifecycle": lifecycle,
                 "older_season_override": older_season_override,
                 "ambiguous_motion": ambiguous_motion,
+                "motion_hold_files": motion_hold_files,
                 "series_context": series_context,
                 "resolved_metric": resolved_metric.upper(),
                 "sample_host_key": sample_host_key,
@@ -2353,7 +2339,9 @@ def create_app(
                 config,
                 prefixes=[normalized_prefix],
             )
-            lifecycle = scope_lifecycle_payload_from_decisions(normalized_prefix, decisions)
+            lifecycle = scope_lifecycle_payload_from_decisions(
+                normalized_prefix, decisions, queue_motion_holds(connection, decisions),
+            )
         _reset_folder_card_cache()
         return {
             "ok": True,
@@ -3189,7 +3177,7 @@ def _attach_page_states(
     states = card_page_states(
         connection,
         config,
-        [(card.prefix, card.workflow_state) for card in tv_cards],
+        [(card.prefix, card.workflow_state, card.lifecycle) for card in tv_cards],
         _page_state_sources(),
     )
     for card in tv_cards:

@@ -31,8 +31,8 @@ from mediaforce.library.staged_integrity import IntegrityDisposition, StagedInte
     staged_integrity_report_for_scope
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest, write_manifest
-from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection, encode_candidate_decisions, \
-    older_season_candidate_item_ids, older_season_override_selection, project_candidates, \
+from mediaforce.library.candidate_selection import MOTION_HELD_DETAIL, OlderSeasonOverrideSelection, \
+    encode_candidate_decisions, older_season_candidate_item_ids, older_season_override_selection, project_candidates, \
     restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, scope_target_size_partition, \
     workflow_eligibility
 from mediaforce.tuning.production_lineage import attach_target_lineage
@@ -54,7 +54,7 @@ from mediaforce.web.runtime.production_approval import NEARER_APPROVAL_CODE, app
     policy_with_owner_settings, production_approval_contract, production_approval_identity, \
     production_approval_matches, production_calibration, valid_production_approval_contract
 from mediaforce.web.runtime.left_out_files import LeftOutFile, cadence_left_out_files, drop_manifest_items, \
-    left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response
+    left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response, queue_result_without_files
 from mediaforce.web.runtime.encode_runtime import (
     remove_stale_staging_path, staged_output_cleanup_blocker, staged_output_cleanup_target,
 )
@@ -457,6 +457,61 @@ def _nearer_approval_left_out(
                 nearer_approval_reason(approval, rel_path),
             ))
     return left_out
+
+
+def _production_admission_left_out(
+        connection: DBClient,
+        config: MediaforceConfig,
+        items: list[FolderItem],
+        *,
+        latest_encode_job: JobPayload | None,
+        queued_contract: ActionPayload | None,
+        load_calibration_state: LoadCalibrationStateFn,
+) -> tuple[list[LeftOutFile], ActionPayload | None, dict[int, int]]:
+    """Files production refuses under this approval whatever their motion pattern, and any whole-action refusal.
+
+    A file that missed its final size waits for a fresh goal, and a file a nearer approval governs
+    starts on its own. The refusal is returned when the latest run's miss covers every file or names none.
+    The last value maps the latest run's missed manifest indexes to their files.
+    """
+    left_out: list[LeftOutFile] = []
+    final_size_miss_indexes: dict[int, int] = {}
+    item_ids = {int(item.get("library_item_id") or 0) for item in items}
+    final_size_requeue_blocker = _final_size_requeue_contract_blocker(latest_encode_job, queued_contract)
+    if final_size_requeue_blocker is not None:
+        final_size_misses = _final_size_miss_item_ids_by_index(latest_encode_job)
+        if final_size_misses is None or item_ids <= set(final_size_misses[0].values()):
+            return [], final_size_requeue_blocker, {}
+        final_size_miss_indexes, covered_miss_indexes = final_size_misses
+        rel_paths = {
+            int(item.get("library_item_id") or 0): str(item.get("rel_path") or "")
+            for item in _manifest_items(object_dict(latest_encode_job))
+        }
+        named_miss_ids = {
+            item_id for index, item_id in final_size_miss_indexes.items() if index not in covered_miss_indexes
+        }
+        # A file that only possibly missed is listed when it would otherwise be queued again.
+        covered_miss_ids = {final_size_miss_indexes[index] for index in covered_miss_indexes} & item_ids
+        left_out.extend(
+            LeftOutFile(
+                item_id,
+                rel_paths.get(item_id, ""),
+                _FINAL_SIZE_RECOVERY_BLOCKER_CODE,
+                _FINAL_SIZE_MISSED_REASON if item_id in named_miss_ids else _FINAL_SIZE_POSSIBLY_MISSED_REASON,
+            )
+            for item_id in sorted(named_miss_ids | covered_miss_ids)
+        )
+    for file in [
+        *_recorded_final_size_miss_left_out(connection, items, queued_contract),
+        *(
+            _nearer_approval_left_out(config, items, queued_contract, load_calibration_state)
+            if queued_contract is not None
+            else []
+        ),
+    ]:
+        if file.library_item_id not in {left.library_item_id for left in left_out}:
+            left_out.append(file)
+    return left_out, None, final_size_miss_indexes
 
 
 def _folder_encode_queue_message(
@@ -976,12 +1031,38 @@ def queue_folder_encode_action(
                 library_item_ids=older_season_candidate_ids,
                 synchronize=True,
             )
+            older_season_rel_paths = {
+                decision.item_id: str(decision.row["rel_path"] or "") for decision in older_season_decisions
+            }
+            # Production refuses some files under this approval whatever their motion pattern. They get
+            # no check and no hold, since they could never join this run; the refusal is the whole
+            # action's when it covers every older-season file.
+            _record_final_size_misses(connection, normalized_prefix, queued_contract, now=now_iso())
+            older_season_refused, admission_refusal, _missed_indexes = _production_admission_left_out(
+                connection,
+                config,
+                [
+                    {"library_item_id": item_id, "rel_path": older_season_rel_paths.get(item_id, "")}
+                    for item_id in older_season_candidate_ids
+                ],
+                latest_encode_job=latest_encode_job,
+                queued_contract=queued_contract,
+                load_calibration_state=load_calibration_state,
+            )
+            if admission_refusal is not None:
+                return admission_refusal
+            refused_ids = {file.library_item_id for file in older_season_refused}
+            older_season_motion_refused = [
+                file
+                for file in older_season_refused
+                if file.library_item_id in older_season_cadence_partition.excluded_item_ids
+            ]
             # Held files get their check queued now so they can join production once it clears.
             older_season_checks = cadence_queue_partition(
                 connection,
                 preflight_config,
                 normalized_prefix,
-                library_item_ids=sorted(older_season_cadence_partition.evidence_required_item_ids),
+                library_item_ids=sorted(older_season_cadence_partition.evidence_required_item_ids - refused_ids),
                 work_reason="encode_safety",
                 synchronize=False,
             )
@@ -993,11 +1074,11 @@ def queue_folder_encode_action(
                 files=[
                     *(
                         LeftOutFile(item_id, "", "cadence_unresolved", "")
-                        for item_id in older_season_cadence_partition.blocked_item_ids
+                        for item_id in older_season_cadence_partition.blocked_item_ids - refused_ids
                     ),
                     *(
                         LeftOutFile(item_id, "", "cadence_analysis_required", "")
-                        for item_id in older_season_cadence_partition.evidence_required_item_ids
+                        for item_id in older_season_cadence_partition.evidence_required_item_ids - refused_ids
                     ),
                 ],
                 now_iso=now_iso(),
@@ -1012,10 +1093,28 @@ def queue_folder_encode_action(
                 older_season_selection,
                 included_item_ids=older_season_included_ids,
             )
+            if not older_season_selection.available and older_season_checks.analysis_queued_item_ids:
+                # Nothing is cleared yet, but the checks just started hold their files to join once they pass.
+                return queue_result_without_files(
+                    [
+                        *older_season_motion_refused,
+                        *(
+                            LeftOutFile(
+                                item_id, older_season_rel_paths.get(item_id, ""), "cadence_unresolved",
+                                MOTION_HELD_DETAIL,
+                            )
+                            for item_id in sorted(older_season_cadence_partition.blocked_item_ids - refused_ids)
+                        ),
+                        *cadence_left_out_files(older_season_checks, older_season_rel_paths),
+                    ],
+                    evidence_work=older_season_checks.evidence_work,
+                )
             if not older_season_selection.available:
-                blocked_count = len(older_season_cadence_partition.blocked_item_ids)
-                evidence_required_count = len(older_season_cadence_partition.evidence_required_item_ids)
+                blocked_count = len(older_season_cadence_partition.blocked_item_ids - refused_ids)
+                evidence_required_count = len(older_season_cadence_partition.evidence_required_item_ids - refused_ids)
                 exclusion_reasons: list[str] = []
+                if older_season_motion_refused:
+                    exclusion_reasons.append(left_out_summary(older_season_motion_refused))
                 if blocked_count:
                     exclusion_reasons.append(
                         f"{blocked_count} {'has' if blocked_count == 1 else 'have'} a measured motion pattern "
@@ -1034,7 +1133,8 @@ def queue_folder_encode_action(
                         "No older-season episodes are currently cleared for safe production. "
                         f"{exclusion_detail[:1].upper()}{exclusion_detail[1:]}. No files were queued."
                     ),
-                    "affected_item_count": blocked_count + evidence_required_count,
+                    "affected_item_count": blocked_count + evidence_required_count + len(older_season_motion_refused),
+                    "left_out": left_out_payload(older_season_motion_refused),
                     "evidence_work": older_season_checks.evidence_work,
                     "next_route": "/ops",
                     "next_action_label": "Open Activity",
@@ -1138,44 +1238,18 @@ def queue_folder_encode_action(
                 detail=f"No encode candidates were found for this folder. Next action: {action_label}.",
             )
         _record_final_size_misses(connection, normalized_prefix, queued_contract, now=now_iso())
-        final_size_requeue_blocker = _final_size_requeue_contract_blocker(
-            latest_encode_job,
-            queued_contract,
+        refused, admission_refusal, final_size_miss_indexes = _production_admission_left_out(
+            connection,
+            config,
+            manifest["items"],
+            latest_encode_job=latest_encode_job,
+            queued_contract=queued_contract,
+            load_calibration_state=load_calibration_state,
         )
-        final_size_miss_indexes: dict[int, int] = {}
-        if final_size_requeue_blocker is not None:
-            final_size_misses = _final_size_miss_item_ids_by_index(latest_encode_job)
-            if final_size_misses is None or {
-                int(item.get("library_item_id") or 0) for item in manifest["items"]
-            } <= set(final_size_misses[0].values()):
-                return final_size_requeue_blocker
-            final_size_miss_indexes, covered_miss_indexes = final_size_misses
-            rel_paths = {
-                int(item.get("library_item_id") or 0): str(item.get("rel_path") or "")
-                for item in _manifest_items(object_dict(latest_encode_job))
-            }
-            named_miss_ids = {
-                item_id for index, item_id in final_size_miss_indexes.items() if index not in covered_miss_indexes
-            }
-            # A file that only possibly missed is listed when it would otherwise be queued again.
-            covered_miss_ids = {
-                final_size_miss_indexes[index] for index in covered_miss_indexes
-            } & {int(item.get("library_item_id") or 0) for item in manifest["items"]}
-            left_out.extend(
-                LeftOutFile(
-                    item_id,
-                    rel_paths.get(item_id, ""),
-                    _FINAL_SIZE_RECOVERY_BLOCKER_CODE,
-                    _FINAL_SIZE_MISSED_REASON if item_id in named_miss_ids else _FINAL_SIZE_POSSIBLY_MISSED_REASON,
-                )
-                for item_id in sorted(named_miss_ids | covered_miss_ids)
-            )
+        if admission_refusal is not None:
+            return admission_refusal
         left_out_ids = {file.library_item_id for file in left_out}
-        left_out.extend(
-            file
-            for file in _recorded_final_size_miss_left_out(connection, manifest["items"], queued_contract)
-            if file.library_item_id not in left_out_ids
-        )
+        left_out.extend(file for file in refused if file.library_item_id not in left_out_ids)
         selection = object_dict(manifest.get("selection"))
         # Files accepted later can join this run under the same mode; see ambiguous_motion.
         selection["queue_mode"] = hold_mode
@@ -1212,12 +1286,6 @@ def queue_folder_encode_action(
                 "excluded_item_count": len(older_season_cadence_partition.excluded_item_ids),
                 "excluded_library_item_ids": sorted(older_season_cadence_partition.excluded_item_ids),
             }
-        left_out_ids = {file.library_item_id for file in left_out}
-        left_out.extend(
-            file
-            for file in _nearer_approval_left_out(config, manifest["items"], queued_contract, load_calibration_state)
-            if file.library_item_id not in left_out_ids
-        )
         drop_manifest_items(manifest, {file.library_item_id for file in left_out})
         cadence_partition = cadence_queue_partition(
             connection,
@@ -1241,7 +1309,7 @@ def queue_folder_encode_action(
             now_iso=now_iso(),
         )
         if not manifest["items"]:
-            return nothing_queued_response(left_out, evidence_work=cadence_partition.evidence_work)
+            return queue_result_without_files(left_out, evidence_work=cadence_partition.evidence_work)
         reserve = reserve_preflight(preflight_config, manifest["items"])
         if not reserve.allowed:
             return {

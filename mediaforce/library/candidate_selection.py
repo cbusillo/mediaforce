@@ -679,8 +679,42 @@ def scope_target_size_blocker(
     return blocked[0].blocker
 
 
-def workflow_eligibility(decisions: list[CandidateDecision]) -> dict[int, EncodeEligibility]:
-    return {
+@dataclass(frozen=True, slots=True)
+class MotionHolds:
+    """How the queue's motion-pattern gate splits a scope's encode candidates, protected ones included.
+
+    ``held`` have a measured pattern Mediaforce cannot convert on its own and stay original;
+    ``as_is`` are the held files the show's one encode-as-is decision could accept. ``check_needed``
+    wait for a motion-pattern check, which queueing starts. ``unchecked`` need evidence no check can
+    be queued for: a folder queue still takes them, an older-seasons queue does not. A lifecycle
+    override never lifts any of these.
+    """
+
+    held: frozenset[int] = frozenset()
+    check_needed: frozenset[int] = frozenset()
+    unchecked: frozenset[int] = frozenset()
+    as_is: frozenset[int] = frozenset()
+
+    def queueable(self, decision: CandidateDecision) -> bool:
+        return decision.eligible and decision.item_id not in self.held | self.check_needed
+
+    def strictly_cleared(self, item_ids: Collection[int]) -> frozenset[int]:
+        """The files whose motion pattern is measured and resolved, as an older-seasons queue requires."""
+        return frozenset(item_ids) - self.held - self.check_needed - self.unchecked
+
+
+NO_MOTION_HOLDS = MotionHolds()
+
+
+# Why a folder queue leaves out a held file, and why its page lists it as staying original.
+MOTION_HELD_DETAIL = "Stays original: Mediaforce can't convert its motion pattern safely."
+
+
+def workflow_eligibility(
+        decisions: list[CandidateDecision],
+        motion_holds: MotionHolds = NO_MOTION_HOLDS,
+) -> dict[int, EncodeEligibility]:
+    eligibility = {
         decision.item_id: EncodeEligibility(
             eligible=decision.eligible if decision.workflow_lane == "encode" else decision.production_included,
             blocker=(
@@ -692,6 +726,13 @@ def workflow_eligibility(decisions: list[CandidateDecision]) -> dict[int, Encode
         )
         for decision in decisions
     }
+    # A file waiting for a check stays a candidate, since queueing starts its check and holds it to join after.
+    for decision in decisions:
+        if decision.eligible and decision.item_id in motion_holds.held:
+            eligibility[decision.item_id] = EncodeEligibility(
+                eligible=False, blocker=MOTION_HELD_DETAIL, motion_held=True,
+            )
+    return eligibility
 
 
 def _target_size_projection_blocker(
@@ -718,6 +759,7 @@ def scope_lifecycle_payload(
 def scope_lifecycle_payload_from_decisions(
         prefix: str,
         decisions: list[CandidateDecision],
+        motion_holds: MotionHolds = NO_MOTION_HOLDS,
 ) -> dict[str, Any]:
     normalized_prefix = prefix.strip().strip("/")
     decisions = [
@@ -733,15 +775,17 @@ def scope_lifecycle_payload_from_decisions(
             "eligible_candidate_count": 0,
             "eligible_size_bytes": 0,
             "held_candidate_count": 0,
+            **_motion_hold_counts([], motion_holds),
             "seasons": [],
         }
     held = [decision for decision in decisions if decision.workflow_lane == "encode" and not decision.eligible]
-    eligible = [decision for decision in decisions if decision.eligible]
+    # What queueing the scope takes now: the motion-pattern gate leaves out the rest of the eligible files.
+    eligible = [decision for decision in decisions if motion_holds.queueable(decision)]
     season_groups: dict[str, list[CandidateDecision]] = {}
     for decision in decisions:
         if decision.season is not None:
             season_groups.setdefault(decision.season.season_prefix, []).append(decision)
-    seasons = [_season_payload(group) for group in season_groups.values()]
+    seasons = [_season_payload(group, motion_holds) for group in season_groups.values()]
     seasons.sort(key=lambda value: (value.get("season_number") is None, value.get("season_number") or 0, value["prefix"]))
     representative = next((decision for decision in decisions if decision.season is not None), decisions[0])
     reason_counts = Counter(reason.code for decision in held for reason in decision.hold_reasons)
@@ -778,14 +822,49 @@ def scope_lifecycle_payload_from_decisions(
         # What queueing the scope selects, so a page can say what it will make without counting published files.
         "eligible_size_bytes": sum(int(decision.row.get("size_bytes") or 0) for decision in eligible),
         "held_candidate_count": len(held),
+        **_motion_hold_counts(decisions, motion_holds),
         "hold_reason_counts": dict(reason_counts),
         "ranking_added_at": rank_age.isoformat(timespec="seconds") if rank_age is not None else None,
+        # An override lifts only lifecycle timing holds, so it has nothing to take when every protected
+        # file is held for its motion pattern too.
         "can_override_holds": bool(
             held
             and selected_season_scope
             and all(all(reason.code in OVERRIDEABLE_HOLD_CODES for reason in decision.hold_reasons) for decision in held)
+            and any(decision.item_id not in motion_holds.held for decision in held)
         ),
         "seasons": seasons,
+        "older_seasons": (
+            older_season_motion_payload(decisions, normalized_prefix, motion_holds)
+            if representative.season is not None and representative.season.series_prefix == normalized_prefix
+            else None
+        ),
+    }
+
+
+def older_season_motion_payload(
+        decisions: list[CandidateDecision],
+        series_prefix: str,
+        motion_holds: MotionHolds,
+) -> dict[str, Any]:
+    """The show's older-seasons selection narrowed to files whose motion pattern is resolved, as its queue does.
+
+    The counts say how many files stay original for their motion pattern and how many wait for a
+    motion-pattern check, which the older-seasons queue starts and holds them for.
+    """
+    selection = older_season_override_selection(decisions, series_prefix)
+    candidate_ids = frozenset(older_season_candidate_item_ids(decisions, selection))
+    cleared = restrict_older_season_override_selection(
+        decisions, selection, included_item_ids=motion_holds.strictly_cleared(candidate_ids),
+    )
+    return {
+        **cleared.to_payload(),
+        "schema_version": 2,
+        "cadence_blocked_candidate_count": len(candidate_ids & motion_holds.held),
+        "cadence_evidence_required_candidate_count": len(
+            candidate_ids & (motion_holds.check_needed | motion_holds.unchecked)
+        ),
+        "cadence_check_candidate_count": len(candidate_ids & motion_holds.check_needed),
     }
 
 
@@ -1020,10 +1099,28 @@ def _newest_age_evidence(values: Any) -> AgeEvidence:
     return max(known, key=lambda value: value.timestamp or datetime.min.replace(tzinfo=UTC))
 
 
-def _season_payload(decisions: list[CandidateDecision]) -> dict[str, Any]:
+def _motion_hold_counts(decisions: list[CandidateDecision], motion_holds: MotionHolds) -> dict[str, int]:
+    """The motion-pattern split of the files queueing takes normally and of the protected ones an override adds."""
+    eligible_ids = {decision.item_id for decision in decisions if decision.eligible}
+    protected_ids = {
+        decision.item_id for decision in decisions if decision.workflow_lane == "encode" and not decision.eligible
+    }
+    return {
+        "motion_held_candidate_count": len(eligible_ids & motion_holds.held),
+        "motion_check_candidate_count": len(eligible_ids & motion_holds.check_needed),
+        "protected_motion_held_candidate_count": len(protected_ids & motion_holds.held),
+        "protected_motion_check_candidate_count": len(protected_ids & motion_holds.check_needed),
+        "motion_as_is_candidate_count": len((eligible_ids | protected_ids) & motion_holds.as_is),
+        # What an older-seasons queue would take, which requires a resolved motion pattern.
+        "motion_cleared_candidate_count": len(motion_holds.strictly_cleared(eligible_ids | protected_ids)),
+        "protected_motion_cleared_candidate_count": len(motion_holds.strictly_cleared(protected_ids)),
+    }
+
+
+def _season_payload(decisions: list[CandidateDecision], motion_holds: MotionHolds) -> dict[str, Any]:
     representative = decisions[0]
     held = [decision for decision in decisions if decision.workflow_lane == "encode" and not decision.eligible]
-    eligible = [decision for decision in decisions if decision.eligible]
+    eligible = [decision for decision in decisions if motion_holds.queueable(decision)]
     reasons = []
     seen_codes: set[str] = set()
     for decision in held:
@@ -1042,6 +1139,7 @@ def _season_payload(decisions: list[CandidateDecision]) -> dict[str, Any]:
         "candidate_count": sum(decision.workflow_lane == "encode" for decision in decisions),
         "eligible_candidate_count": len(eligible),
         "held_candidate_count": len(held),
+        **_motion_hold_counts(decisions, motion_holds),
         "hold_reasons": reasons,
         "activity_at": (
             representative.season_activity_at.isoformat(timespec="seconds")

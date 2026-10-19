@@ -142,6 +142,9 @@ export function movieCompositionDetail(title: MovieTitle): string | null {
 	return details.length ? details.join(' · ') : null;
 }
 
+// A movie the queue leaves out because Mediaforce can't convert its motion pattern safely.
+const MOVIE_MOTION_HELD_LABEL = 'Stays original';
+
 export function movieLibraryStateGroup(title: MovieTitle): MovieLibraryStateGroup {
 	if (title.availability === 'browse_only' || title.workflow_state?.state === 'browse_only') {
 		return { key: 'idle', label: 'View only', tone: 'idle' };
@@ -154,6 +157,9 @@ export function movieLibraryStateGroup(title: MovieTitle): MovieLibraryStateGrou
 	}
 	if (title.workflow_state?.state === 'explicit_selection_required') {
 		return { key: 'explicit', label: 'Needs a file choice', tone: 'wait' };
+	}
+	if (title.workflow_state?.state === 'motion_held') {
+		return { key: 'idle', label: MOVIE_MOTION_HELD_LABEL, tone: 'idle' };
 	}
 	if (moviePendingReviewBadge(title) || title.workflow_state?.primary_lane === 'attention') {
 		return { key: 'attention', label: 'Needs attention', tone: 'fail' };
@@ -179,6 +185,7 @@ export function movieWorkflowLabel(title: MovieWorkflowDisplayState): string {
 		return 'View only';
 	}
 	if (title.workflow_state?.state === 'explicit_selection_required') return 'Choose a file';
+	if (title.workflow_state?.state === 'motion_held') return MOVIE_MOTION_HELD_LABEL;
 	if (movieWorkflowIsComplete(title.workflow_state)) return 'Finished';
 	const pendingReview = moviePendingReviewBadge(title);
 	if (pendingReview) return pendingReview.label;

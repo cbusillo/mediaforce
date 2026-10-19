@@ -38,6 +38,7 @@ export type PageStateKey =
 	| 'making_test'
 	| 'ready_to_compare'
 	| 'ready_to_make'
+	| 'motion_held'
 	| 'making_season'
 	| 'ready_to_check'
 	| 'finish_blocked'
@@ -54,7 +55,8 @@ export type PageStateAction =
 	| 'retry_encode'
 	| 'review_files'
 	| 'validate_outputs'
-	| 'promote_outputs';
+	| 'promote_outputs'
+	| 'decide_motion';
 
 export type PageStateFailure =
 	| 'arithmetic_infeasible'
@@ -113,6 +115,15 @@ export interface SeasonLifecycleState {
 	candidate_count: number;
 	eligible_candidate_count: number;
 	held_candidate_count: number;
+	motion_held_candidate_count?: number;
+	motion_check_candidate_count?: number;
+	protected_motion_held_candidate_count?: number;
+	protected_motion_check_candidate_count?: number;
+	motion_as_is_candidate_count?: number;
+	/** Episodes whose motion pattern is measured and resolved, as an older-seasons queue requires. */
+	motion_cleared_candidate_count?: number;
+	/** Of those, the ones a lifecycle hold protects. */
+	protected_motion_cleared_candidate_count?: number;
 	hold_reasons: LifecycleHoldReason[];
 	activity_at?: string | null;
 	ranking_added_at?: string | null;
@@ -132,6 +143,17 @@ export interface LifecycleState {
 	eligible_candidate_count: number;
 	eligible_size_bytes?: number;
 	held_candidate_count: number;
+	/** Eligible episodes queueing leaves out for a measured motion pattern; they stay original. */
+	motion_held_candidate_count?: number;
+	/** Eligible episodes waiting for a motion-pattern check, which queueing starts. */
+	motion_check_candidate_count?: number;
+	/** Protected episodes an override would still leave out for their motion pattern. */
+	protected_motion_held_candidate_count?: number;
+	protected_motion_check_candidate_count?: number;
+	/** Held episodes the show's encode-as-is decision could accept. */
+	motion_as_is_candidate_count?: number;
+	/** A show's older-seasons action, narrowed to files whose motion pattern is resolved. */
+	older_seasons?: OlderSeasonOverridePayload | null;
 	hold_reason_counts?: Record<string, number>;
 	ranking_added_at?: string | null;
 	can_override_holds?: boolean;
@@ -143,6 +165,14 @@ export interface AmbiguousMotionPayload {
 	eligible_files: string[];
 	partly_interlaced_count: number;
 	partly_interlaced_files: string[];
+}
+
+/** The files a season or episode page names as left out of its queue for their motion pattern. */
+export interface MotionHoldFilesPayload {
+	held_files: string[];
+	check_files: string[];
+	/** How many of them the show page's motion decision could encode as-is. */
+	as_is_count?: number;
 }
 
 export interface OlderSeasonOverridePayload {
@@ -162,6 +192,8 @@ export interface OlderSeasonOverridePayload {
 	current_size_bytes: number;
 	cadence_blocked_candidate_count: number;
 	cadence_evidence_required_candidate_count: number;
+	/** Older-season episodes whose motion-pattern check the older-seasons action starts. */
+	cadence_check_candidate_count?: number;
 }
 
 export type MediaScopeDomain = 'tv' | 'movie' | 'other';
@@ -1795,6 +1827,7 @@ export interface FolderPayload {
 	lifecycle?: LifecycleState | null;
 	older_season_override?: OlderSeasonOverridePayload | null;
 	ambiguous_motion?: AmbiguousMotionPayload | null;
+	motion_hold_files?: MotionHoldFilesPayload | null;
 	movie_context?: MovieTitle | null;
 	other_context?: OtherScopeContext | null;
 }

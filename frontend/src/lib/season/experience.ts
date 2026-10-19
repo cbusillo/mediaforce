@@ -1970,32 +1970,44 @@ export interface ApprovalStartPlan {
 
 /**
  * Approving a sample starts the encode only when exactly one start action exists and it
- * needs no further confirmation. Anything that bypasses a hold keeps its own explicit step.
+ * needs no further confirmation. Anything that bypasses a hold keeps its own explicit step, and
+ * nothing starts when the queue would take no episode and start no motion-pattern check.
  */
 export function approvalStartPlan(input: {
 	scope: 'episode' | 'season' | 'series';
-	episodeCount: number;
-	eligibleEpisodeCount: number;
-	heldEpisodeCount: number;
+	admission: QueueAdmission;
 	olderSeasons: { candidateCount: number; overriddenCount: number; seasonCount: number } | null;
 }): ApprovalStartPlan | null {
-	const plan = (mode: ApprovalStartMode, count: number, what: string): ApprovalStartPlan => ({
-		mode,
-		episodeCount: count,
-		label: `Keep and compress ${what}`,
-		detail: `Keeping this version starts compressing ${what} now. Originals stay in place until you replace them.`
-	});
+	const { clearedCount, checkCount, protectedCount } = input.admission;
+	const startable = clearedCount + checkCount;
+	const plan = (mode: ApprovalStartMode, count: number, what: string): ApprovalStartPlan =>
+		mode === 'scope' && checkCount > 0
+			? {
+					mode,
+					episodeCount: count,
+					label: `Keep, check, and compress ${what}`,
+					detail: `Keeping this version starts compressing ${what}. ${checkCount === 1 ? 'An episode that needs' : 'Episodes that need'} a motion-pattern check ${checkCount === 1 ? 'gets it' : 'get it'} first and ${checkCount === 1 ? 'compresses' : 'compress'} once it passes. Originals stay in place until you replace them.`
+				}
+			: {
+					mode,
+					episodeCount: count,
+					label: `Keep and compress ${what}`,
+					detail: `Keeping this version starts compressing ${what} now. Originals stay in place until you replace them.`
+				};
 	const episodes = (count: number) => `${count} ${count === 1 ? 'episode' : 'episodes'}`;
-	if (input.scope === 'episode') return plan('scope', 1, 'this episode');
+	if (input.scope === 'episode') {
+		if (protectedCount > 0 || startable <= 0) return null;
+		return plan('scope', 1, 'this episode');
+	}
 	if (input.scope === 'season') {
-		if (input.heldEpisodeCount > 0 || input.episodeCount <= 0) return null;
-		return plan('scope', input.episodeCount, `${episodes(input.episodeCount)} in this season`);
+		if (protectedCount > 0 || startable <= 0) return null;
+		return plan('scope', startable, `${episodes(startable)} in this season`);
 	}
 	const older = input.olderSeasons;
 	if (older && older.overriddenCount > 0) return null;
-	if (input.eligibleEpisodeCount > 0) {
-		if (older && older.candidateCount !== input.eligibleEpisodeCount) return null;
-		return plan('scope', input.eligibleEpisodeCount, episodes(input.eligibleEpisodeCount));
+	if (startable > 0) {
+		if (older && older.candidateCount !== clearedCount) return null;
+		return plan('scope', startable, episodes(startable));
 	}
 	if (older && older.candidateCount > 0) {
 		return plan(
@@ -2026,4 +2038,93 @@ export function productionScope(folder: FolderPayload): ProductionScope {
 		folder.lifecycle?.eligible_candidate_count ?? folder.encode_candidate_count ?? 0;
 	if (isSeriesPrefix(folder.prefix)) return { episodeCount, currentSizeBytes: wholeSize };
 	return { episodeCount, currentSizeBytes: folder.lifecycle?.eligible_size_bytes ?? wholeSize };
+}
+
+/** What the queue action takes for a scope, split the way its motion-pattern gate splits it. */
+export interface QueueAdmission {
+	/** Episodes compressing takes now. */
+	clearedCount: number;
+	/** Episodes whose motion-pattern check compressing starts; each compresses once it passes. */
+	checkCount: number;
+	/** Protected episodes an override of the lifecycle hold would take or check. */
+	protectedCount: number;
+	/** Of those, the ones the override starts a motion-pattern check for instead of compressing now. */
+	protectedCheckCount: number;
+	/** Episodes that stay original for their motion pattern, protected or not. */
+	motionHeldCount: number;
+	/** Of those, how many the show's encode-as-is decision could accept. */
+	asIsCount: number;
+}
+
+/** The scope's queue admission, from the lifecycle counts the server reads from the queue's own gate. */
+export function queueAdmission(folder: FolderPayload): QueueAdmission {
+	const lifecycle = folder.lifecycle;
+	if (!lifecycle) {
+		return {
+			clearedCount: folder.encode_candidate_count ?? 0,
+			checkCount: 0,
+			protectedCount: 0,
+			protectedCheckCount: 0,
+			motionHeldCount: 0,
+			asIsCount: 0
+		};
+	}
+	const protectedMotionHeld = lifecycle.protected_motion_held_candidate_count ?? 0;
+	return {
+		clearedCount: lifecycle.eligible_candidate_count,
+		checkCount: lifecycle.motion_check_candidate_count ?? 0,
+		protectedCount: Math.max(0, lifecycle.held_candidate_count - protectedMotionHeld),
+		protectedCheckCount: lifecycle.protected_motion_check_candidate_count ?? 0,
+		motionHeldCount: (lifecycle.motion_held_candidate_count ?? 0) + protectedMotionHeld,
+		asIsCount: lifecycle.motion_as_is_candidate_count ?? 0
+	};
+}
+
+export interface MotionHolds {
+	/** Episodes with a measured motion pattern Mediaforce cannot convert safely; they stay original. */
+	heldFiles: string[];
+	/** Episodes waiting for a motion-pattern check, which compressing the scope starts. */
+	checkFiles: string[];
+	/** How many held episodes the show's encode-as-is decision could accept. */
+	asIsCount: number;
+}
+
+/** The episodes queueing leaves out of this scope for their motion pattern. */
+export function motionHolds(folder: FolderPayload): MotionHolds {
+	const files = folder.motion_hold_files;
+	return {
+		heldFiles: files?.held_files ?? [],
+		checkFiles: files?.check_files ?? [],
+		asIsCount: files?.as_is_count ?? 0
+	};
+}
+
+function episodeCountLabel(count: number): string {
+	return `${count} ${count === 1 ? 'episode' : 'episodes'}`;
+}
+
+/**
+ * What the ready card adds about the episodes compressing leaves out for their motion pattern. The show
+ * page shows its encode-as-is decision itself, so only a season or episode points to it.
+ */
+export function motionHoldNotes(holds: MotionHolds, onShowPage = false): string[] {
+	const notes: string[] = [];
+	const held = holds.heldFiles.length;
+	const check = holds.checkFiles.length;
+	if (held > 0) {
+		notes.push(
+			`${episodeCountLabel(held)} ${held === 1 ? 'stays' : 'stay'} original because Mediaforce can’t convert ${held === 1 ? 'its' : 'their'} motion pattern safely.`
+		);
+	}
+	if (holds.asIsCount > 0 && !onShowPage) {
+		notes.push(
+			`The show page can encode ${holds.asIsCount === held ? (held === 1 ? 'it' : 'them') : holds.asIsCount} as-is.`
+		);
+	}
+	if (check > 0) {
+		notes.push(
+			`${episodeCountLabel(check)} ${check === 1 ? 'needs' : 'need'} a motion-pattern check first. Compressing starts the check, and ${check === 1 ? 'it compresses' : 'each one compresses'} once it passes.`
+		);
+	}
+	return notes;
 }
