@@ -1090,6 +1090,10 @@ def aggregate_encode_parent_job(
     seen_host_keys: set[str] = set()
     current_items: list[str] = []
     manifest_items_cache: dict[Path, list[dict[str, Any]] | None] = {}
+    # A child being worked again (a retried shard, or a re-encode after a size miss) restarts its own
+    # progress at zero. Hold the season at what it had reached until that child catches up again.
+    previous_progress_floor = object_dict(object_dict(job.get("progress")).get("child_progress_floor_seconds"))
+    progress_floor: dict[str, float] = {}
     for child in children:
         progress = object_dict(child.get("progress"))
         child_totals = encode_job_manifest_totals(child, manifest_items_cache=manifest_items_cache)
@@ -1103,9 +1107,17 @@ def aggregate_encode_parent_job(
             child_completed_item_count = child_total_item_count
         else:
             child_completed_item_count = int_value(progress.get("completed_item_count"))
+        child_shown_duration_seconds = min(child_completed_duration_seconds, child_total_duration_seconds)
+        if str(child.get("status") or "") in {"running", "queued", "retry_backoff"}:
+            child_shown_duration_seconds = min(
+                max(child_shown_duration_seconds, float_value(previous_progress_floor.get(str(child["job_id"])))),
+                child_total_duration_seconds,
+            )
+            if child_shown_duration_seconds > 0:
+                progress_floor[str(child["job_id"])] = child_shown_duration_seconds
         total_duration_seconds += child_total_duration_seconds
         total_item_count += child_total_item_count
-        completed_duration_seconds += min(child_completed_duration_seconds, child_total_duration_seconds)
+        completed_duration_seconds += child_shown_duration_seconds
         completed_item_count += min(child_completed_item_count, child_total_item_count)
         remaining_duration_seconds += max(child_total_duration_seconds - child_completed_duration_seconds, 0.0)
         if str(child.get("status") or "") in {"needs_attention", "failed", "stopped"}:
@@ -1217,6 +1229,7 @@ def aggregate_encode_parent_job(
         )
     # Stored inside progress because the dashboard lists parents from their saved rows, and only
     # progress survives the save beside the real columns.
+    progress["child_progress_floor_seconds"] = progress_floor
     progress["retrying_shard_count"] = sum(
         1 for child in children if str(child.get("status") or "") == "retry_backoff"
     )

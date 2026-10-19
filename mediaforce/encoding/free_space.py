@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import shutil
+import subprocess
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -32,8 +33,13 @@ class VolumeCapacity:
     free_bytes: int
 
 
+class RemoteVolumeUnreachableError(OSError):
+    """The encode computer did not answer the free-space check in time."""
+
+
 VolumeProbe = Callable[[Path], VolumeCapacity]
-CapacityCache = dict[tuple[str, Path], VolumeCapacity]
+# A timed-out probe is cached too, so one pass waits on an unreachable host once, not once per item.
+CapacityCache = dict[tuple[str, Path], VolumeCapacity | RemoteVolumeUnreachableError]
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,11 +93,17 @@ while [ ! -e "$path" ]; do
 done
 exec df -Pk "$path"
 """
-    result = run_remote_command(
-        host,
-        ["sh", "-lc", nearest_parent_script, "mediaforce-df", str(path)],
-        timeout=REMOTE_DISK_USAGE_TIMEOUT_SECONDS,
-    )
+    try:
+        result = run_remote_command(
+            host,
+            ["sh", "-lc", nearest_parent_script, "mediaforce-df", str(path)],
+            timeout=REMOTE_DISK_USAGE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        name = str(host.get("label") or host.get("key") or host.get("host") or "the encode computer")
+        raise RemoteVolumeUnreachableError(
+            f"{name} did not answer the free-space check within {REMOTE_DISK_USAGE_TIMEOUT_SECONDS} seconds"
+        ) from exc
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "remote df failed"
         raise OSError(detail)
@@ -475,8 +487,14 @@ def _cached_volume_capacity(
 ) -> VolumeCapacity:
     cache_key = (volume_probe_key, path)
     capacity = cache.get(cache_key)
+    if isinstance(capacity, RemoteVolumeUnreachableError):
+        raise RemoteVolumeUnreachableError(*capacity.args)
     if capacity is None:
-        capacity = volume_probe(path)
+        try:
+            capacity = volume_probe(path)
+        except RemoteVolumeUnreachableError as exc:
+            cache[cache_key] = exc
+            raise
         cache[cache_key] = capacity
     return capacity
 
@@ -486,6 +504,13 @@ def _format_bytes(value: int) -> str:
 
 
 def _unmeasurable_preflight(exc: Exception) -> ReservePreflight:
+    if isinstance(exc, RemoteVolumeUnreachableError):
+        return ReservePreflight(
+            allowed=False,
+            waiting_reason=f"Waiting to check free space: {exc}. Mediaforce will check again.",
+            required_by_volume={},
+            measurable=False,
+        )
     if isinstance(exc, (KeyError, ReserveInputError)):
         return ReservePreflight(
             allowed=False,
