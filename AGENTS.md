@@ -53,8 +53,8 @@ in an `AGENTS.md` too.
 
 Follow the shared Tests rules in the global agent instructions
 ([`instructions/global.md`](https://github.com/cbusillo/codex-skills/blob/main/instructions/global.md#tests)).
-Here that also means tests never reach the developer's `~/.ssh` or a real
-encode host; pin or stub remote hosts.
+Here that also means tests pin or stub the host platform, the developer's
+`~/.ssh` and remote encode hosts; they never reach a real one.
 
 ## See also
 
