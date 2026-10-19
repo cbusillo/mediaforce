@@ -3206,7 +3206,7 @@
 					<div class="progress-facts">
 						<strong>{seasonProgressCompleted} of {encodeProgress.total}</strong>
 						<span>{isExactItemScope ? 'episode finished' : 'episodes finished'}</span>
-						{#if encodeProgress.eta}<small>{encodeProgress.eta}</small>{/if}
+						{#if encodeProgress.etaDetail}<small>{encodeProgress.etaDetail}</small>{/if}
 					</div>
 					<WaitingReasons
 						anchorId="season-decisions"

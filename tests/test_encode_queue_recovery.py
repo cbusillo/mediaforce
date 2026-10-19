@@ -17766,6 +17766,110 @@ raise SystemExit(0)
         self.assertAlmostEqual(0.0 if eta_seconds is None else float(eta_seconds), 45.0)
         self.assertEqual(eta_copy, "45s")
 
+    def test_decorate_encode_queue_for_scheduler_never_shows_a_zero_eta(self) -> None:
+        manifest_path = self.root / "zero-eta-manifest.json"
+        manifest_path.write_text(json.dumps({"items": [{"duration_seconds": 60.0, "source_size_bytes": 1000}]}))
+        running_job = {
+            "job_id": "zero-eta-job",
+            "prefix": "tv/House/Season 2",
+            "status": "running",
+            "manifest_path": str(manifest_path),
+            "item_count": 1,
+            "host": {"key": "cbusillo@studio", "schedule_profile": "always"},
+            "attempt_count": 1,
+        }
+        cases = {
+            "no estimate yet": {"remaining_duration_seconds": 0.0, "speed": 0.0, "eta_seconds": 0.0},
+            "searching quality": {
+                "progress_state": "quality_search",
+                "remaining_duration_seconds": 600.0,
+                "speed": 4.0,
+                "eta_seconds": 0.0,
+            },
+        }
+        for name, progress in cases.items():
+            with self.subTest(name):
+                decorated = web_app._decorate_encode_queue_for_scheduler(
+                    self.config,
+                    {
+                        "state": {"is_paused": False, "stop_requested": False},
+                        "running": [{**running_job, "progress": progress}],
+                        "queued": [],
+                        "recent": [],
+                        "queued_count": 0,
+                        "running_count": 1,
+                        "retry_backoff_count": 0,
+                        "needs_attention_count": 0,
+                    },
+                )
+                self.assertIsNone(decorated["running"][0]["progress"]["eta_seconds"])
+                self.assertIsNone(decorated["running"][0]["progress"]["eta_copy"])
+                self.assertNotIn("ETA", decorated["running"][0]["telemetry_summary"])
+                self.assertNotEqual(decorated["telemetry"]["eta_copy"], "0s")
+
+    def test_decorate_encode_queue_for_scheduler_counts_items_left_out_of_the_eta(self) -> None:
+        manifest_path = self.root / "left-out-manifest.json"
+        manifest_path.write_text(json.dumps({"items": [{"duration_seconds": 60.0, "source_size_bytes": 1000}]}))
+
+        def job(job_id: str, status: str, progress: dict[str, object] | None) -> dict[str, object]:
+            return {
+                "job_id": job_id,
+                "prefix": f"tv/{job_id}",
+                "status": status,
+                "manifest_path": str(manifest_path),
+                "item_count": 1,
+                "host": {"key": "cbusillo@studio", "schedule_profile": "always"},
+                "attempt_count": 1,
+                "progress": progress,
+            }
+
+        encode_queue = {
+            "state": {"is_paused": False, "stop_requested": False},
+            "running": [
+                job(
+                    "show-running",
+                    "running",
+                    {
+                        "remaining_duration_seconds": 600.0,
+                        "speed": 2.0,
+                        "left_out_needs_attention_item_count": 1,
+                        "left_out_failed_item_count": 2,
+                    },
+                )
+            ],
+            "queued": [],
+            "recent": [],
+            "needs_attention": [
+                # A show whose row reads needs_attention still has a queued episode that will run.
+                job(
+                    "show-waiting",
+                    "needs_attention",
+                    {
+                        "remaining_duration_seconds": 600.0,
+                        "left_out_needs_attention_item_count": 1,
+                        "left_out_failed_item_count": 0,
+                    },
+                ),
+                job("single-episode", "needs_attention", None),
+            ],
+            "queued_count": 0,
+            "running_count": 1,
+            "retry_backoff_count": 0,
+            "needs_attention_count": 2,
+        }
+
+        decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
+
+        telemetry = decorated["telemetry"]
+        self.assertEqual(telemetry["left_out_needs_attention_item_count"], 3)
+        self.assertEqual(telemetry["left_out_failed_item_count"], 2)
+        self.assertEqual(telemetry["eta_copy"], "10m 0s")
+        summary = web_app._encode_queue_summary_copy(decorated, decorated["state"], None)
+        self.assertIn(
+            "estimated queue finish in 10m 0s (leaves out 3 items waiting for you and 2 that didn't finish)",
+            summary,
+        )
+
     def test_decorate_encode_queue_for_scheduler_attempt_summary_respects_started_at(self) -> None:
         manifest_path = self.root / "started-at-manifest.json"
         manifest_path.write_text(json.dumps({"items": [{"duration_seconds": 60.0, "source_size_bytes": 1000}]}))
@@ -17964,8 +18068,93 @@ raise SystemExit(0)
             rows = web_app._host_runtime_rows(connection, self.config)
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["running_jobs"][0]["telemetry_summary"], "0% · Est. ETA 0s")
+        # Zero progress stays visible; a zero ETA is no estimate at all, so it is not shown as "0s".
+        self.assertEqual(rows[0]["running_jobs"][0]["telemetry_summary"], "0%")
+        self.assertIsNone(rows[0]["running_jobs"][0]["progress"]["eta_copy"])
         self.assertIsNone(rows[0]["telemetry"]["eta_copy"])
+
+    def test_host_runtime_rows_leave_quality_search_eta_unknown(self) -> None:
+        status = HostStatus(
+            key="cbusillo@studio",
+            label="Studio",
+            mode="ssh",
+            priority=100,
+            capabilities=["encode_queue"],
+            available=True,
+            message="Mounted and ready",
+            missing_paths=[],
+            repo_path=str(self.root),
+            platform="macos",
+            videotoolbox_available=True,
+        )
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._safe_collect_host_statuses", return_value=[status]
+        ):
+            self._save_job(
+                connection,
+                job_id="searching-job",
+                manifest_name="manifest-searching.json",
+                host={"key": "cbusillo@studio", "label": "Studio", "mode": "ssh", "schedule_profile": "always"},
+                status="running",
+                attempt_count=1,
+            )
+            job = load_encode_job(connection, "searching-job")
+            assert job is not None
+            job["progress"] = {
+                "progress_state": "quality_search",
+                "phase_label": "Searching quality",
+                "remaining_duration_seconds": 1800.0,
+                "speed": 6.0,
+                "eta_seconds": 0.0,
+            }
+            save_encode_job(connection, job)
+            rows = web_app._host_runtime_rows(connection, self.config)
+
+        self.assertIsNone(rows[0]["running_jobs"][0]["progress"]["eta_copy"])
+        self.assertIsNone(rows[0]["telemetry"]["eta_seconds"])
+        self.assertIsNone(rows[0]["telemetry"]["eta_copy"])
+
+    def test_host_runtime_rows_mark_cooling_down_host(self) -> None:
+        statuses = [
+            HostStatus(
+                key=key,
+                label=label,
+                mode="ssh",
+                priority=50,
+                capabilities=["encode_queue"],
+                available=True,
+                message="Mounted and ready",
+                missing_paths=[],
+                repo_path=str(self.root),
+                platform="linux",
+                videotoolbox_available=False,
+            )
+            for key, label in (("remote-a", "Remote A"), ("remote-b", "Remote B"))
+        ]
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._safe_collect_host_statuses", return_value=statuses
+        ):
+            for index, cooldown_until in enumerate(("2999-01-01T00:00:00+00:00", "2999-01-02T00:00:00+00:00")):
+                self._save_job(
+                    connection,
+                    job_id=f"cooling-{index}",
+                    manifest_name=f"manifest-cooling-{index}.json",
+                    host={},
+                    status="queued",
+                    attempt_count=1,
+                    host_cooldown_until=cooldown_until,
+                )
+                job = load_encode_job(connection, f"cooling-{index}")
+                assert job is not None
+                job["last_host"] = {"key": "remote-a", "label": "Remote A"}
+                job["last_failure_kind"] = "host_configuration"
+                save_encode_job(connection, job)
+            rows = {row["key"]: row for row in web_app._host_runtime_rows(connection, self.config)}
+
+        self.assertEqual(rows["remote-a"]["active_flag"], "cooldown")
+        self.assertEqual(rows["remote-a"]["cooldown_until"], "2999-01-02T00:00:00+00:00")
+        self.assertIsNone(rows["remote-b"]["cooldown_until"])
+        self.assertEqual(rows["remote-b"]["active_flag"], "active")
 
     def test_host_runtime_rows_ignore_folder_aggregate_running_rows(self) -> None:
         status = HostStatus(
@@ -18228,6 +18417,9 @@ raise SystemExit(0)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["active_encode_count"], 40)
         self.assertEqual(len(rows[0]["running_jobs"]), 32)
+        # No slot is free, but the computer is working, not idle.
+        self.assertFalse(rows[0]["queue_active"])
+        self.assertEqual(rows[0]["active_flag"], "busy")
 
     def test_host_runtime_rows_fall_back_to_last_host_when_current_host_keys_are_blank(self) -> None:
         status = HostStatus(
@@ -21344,6 +21536,8 @@ raise SystemExit(0)
             self.assertEqual(deferred["status"], "queued")
             self.assertEqual(deferred["attempt_count"], 0)
             self.assertIn("waiting for a host window with enough time remaining", deferred["waiting_reason"])
+            # The estimate is that computer's own, so the sentence names it.
+            self.assertRegex(deferred["waiting_reason"], r"^Estimated runtime about [^;]+ on worker; ")
 
     def test_duration_aware_selection_surfaces_never_fits_reason(self) -> None:
         close_at = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
@@ -21375,6 +21569,11 @@ raise SystemExit(0)
             assert deferred is not None
             self.assertIn("longer than every configured host schedule window", deferred["waiting_reason"])
             self.assertIn("Widen a host window or use Bypass scheduler", deferred["waiting_reason"])
+            self.assertRegex(
+                deferred["waiting_reason"],
+                r"^Estimated runtime about [^(]+ on worker is longer than every configured host schedule window "
+                r"\(longest about 1h\)\.",
+            )
 
     def test_duration_aware_never_fits_reason_persists_while_host_window_is_closed(self) -> None:
         host_row = self._encode_host_row("worker", schedule_closes_at=None)
@@ -23877,6 +24076,11 @@ raise SystemExit(0)
         self.assertEqual(aggregated["status"], "running")
         self.assertEqual(aggregated["running_shard_count"], 1)
         self.assertEqual(aggregated["progress"]["progress_state"], "running")
+        # The episode waiting for the Director runs only after they act: the estimate leaves it out and says so.
+        self.assertEqual(aggregated["progress"]["remaining_duration_seconds"], 120.0)
+        self.assertEqual(aggregated["progress"]["eta_seconds"], 240.0)
+        self.assertEqual(aggregated["progress"]["left_out_needs_attention_item_count"], 1)
+        self.assertEqual(aggregated["progress"]["left_out_failed_item_count"], 0)
 
     def test_running_season_does_not_show_a_recovered_episodes_stopped_message(self) -> None:
         manifest_path = self._write_manifest(

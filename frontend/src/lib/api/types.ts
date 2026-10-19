@@ -510,6 +510,8 @@ export interface EncodeJobProgressTelemetry {
 	speed?: number | null;
 	eta_seconds?: number | null;
 	eta_copy?: string | null;
+	left_out_needs_attention_item_count?: number;
+	left_out_failed_item_count?: number;
 	current_item_number?: number;
 	total_item_count?: number;
 	completed_item_count?: number;
@@ -727,6 +729,8 @@ export interface EncodeQueueTelemetry {
 	eta_copy?: string | null;
 	running_jobs?: number;
 	queued_jobs?: number;
+	left_out_needs_attention_item_count?: number;
+	left_out_failed_item_count?: number;
 }
 
 export interface EncodeQueueSummary {
@@ -1061,6 +1065,7 @@ export interface HostRuntime {
 	schedule_next_opens_at?: string | null;
 	active_flag: string;
 	active_reason: string;
+	cooldown_until?: string | null;
 	repo_path?: string;
 	queue_active?: boolean;
 	setup_supported?: boolean;
