@@ -29,6 +29,7 @@ export type OpsActionId =
 	| 'stop-calibration'
 	| 'start-host'
 	| 'prepare-host'
+	| 'retry-host-connection'
 	| 'reset-host-trust';
 
 export type OpsQueueRow = {
@@ -592,6 +593,11 @@ export function workerCapabilitiesSummary(capabilities: string[]): string {
 
 function hostRecoveryAction(host: HostRuntime) {
 	return !host.available && host.recovery?.status === 'action_required' ? host.recovery : null;
+}
+
+/** Retry connection runs one background reconnect pass now, for a computer that has one. */
+export function hostConnectionRetryAvailable(host: HostRuntime): boolean {
+	return !host.available && Boolean(host.recovery) && host.recovery?.status !== 'ready';
 }
 
 export function hostRecoveryCopy(host: HostRuntime, now = new Date()): string | null {

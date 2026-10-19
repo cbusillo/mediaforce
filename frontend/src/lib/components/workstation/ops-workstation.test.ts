@@ -10,6 +10,7 @@ import {
 	buildOpsReadinessSummary,
 	buildOpsFooterSignals,
 	buildOpsStatusTiles,
+	hostConnectionRetryAvailable,
 	hostPrepareDisabled,
 	hostPrepareTitle,
 	hostStateCopy,
@@ -1509,6 +1510,31 @@ describe('Ops workstation mapping', () => {
 		expect(hostStateCopy(needsSomeone)).toBe('Needs attention');
 		expect(hostWorkReason(needsSomeone, hosts, null, now)).toBe(
 			`Worker needs its share password saved. Last checked ${at('2026-10-19T14:28:00Z')}.`
+		);
+	});
+
+	it('offers Retry connection only for a computer that background reconnects are working on', () => {
+		const reachable = hostsFixture().hosts[0];
+		const recovery = { status: 'retrying' as const, failure_count: 2 };
+		expect(hostConnectionRetryAvailable({ ...reachable, available: false, recovery })).toBe(true);
+		expect(
+			hostConnectionRetryAvailable({
+				...reachable,
+				available: false,
+				recovery: { ...recovery, status: 'action_required' }
+			})
+		).toBe(true);
+		expect(hostConnectionRetryAvailable({ ...reachable, available: true, recovery })).toBe(false);
+		expect(
+			hostConnectionRetryAvailable({
+				...reachable,
+				available: false,
+				recovery: { ...recovery, status: 'ready' }
+			})
+		).toBe(false);
+		// This computer, or one not checked yet, has no background reconnect to run now.
+		expect(hostConnectionRetryAvailable({ ...reachable, available: false, recovery: null })).toBe(
+			false
 		);
 	});
 

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
-	import { fetchJson } from '$lib/api/client';
+	import { fetchJson, postJson } from '$lib/api/client';
 	import type { DashboardScanJob } from '$lib/api/types';
 	import { catalogWarningNotice } from '$lib/season/experience';
 	import { onMount, type Snippet } from 'svelte';
@@ -10,20 +10,47 @@
 	let { children }: { children: Snippet } = $props();
 	let scanJob = $state<DashboardScanJob | null>(null);
 	let scanRequest = 0;
-	let recoveryAlerts = $state<{ id: string; title: string; detail: string }[]>([]);
+	type RecoveryAlert = { id: string; title: string; detail: string; host_key?: string };
+	let recoveryAlerts = $state<RecoveryAlert[]>([]);
+	let retryingAlert = $state<string | null>(null);
+	let retryOutcome = $state<{ id: string; message: string } | null>(null);
+
+	async function loadAlerts() {
+		try {
+			const payload = await fetchJson<{ alerts: RecoveryAlert[] }>('/api/recovery-alerts');
+			recoveryAlerts = payload.alerts;
+		} catch {
+			// Retain the last warning when a refresh fails.
+		}
+	}
+
+	async function retryConnection(alert: RecoveryAlert) {
+		if (!alert.host_key || retryingAlert) return;
+		retryingAlert = alert.id;
+		retryOutcome = null;
+		try {
+			const response = await postJson<{ ok: boolean; message?: string }>(
+				`${resolve('/')}api/hosts/retry-connection`,
+				{ host_key: alert.host_key }
+			);
+			retryOutcome = { id: alert.id, message: response.message ?? '' };
+		} catch (error) {
+			retryOutcome = {
+				id: alert.id,
+				message: error instanceof Error ? error.message : 'Retry connection failed.'
+			};
+		} finally {
+			retryingAlert = null;
+			await loadAlerts();
+		}
+	}
 
 	onMount(() => {
 		let stopped = false;
 		let timer: ReturnType<typeof setTimeout>;
 		async function refreshAlerts() {
-			try {
-				const payload = await fetchJson<{ alerts: typeof recoveryAlerts }>('/api/recovery-alerts');
-				if (!stopped) recoveryAlerts = payload.alerts;
-			} catch {
-				// Retain the last warning when a refresh fails.
-			} finally {
-				if (!stopped) timer = setTimeout(refreshAlerts, 30_000);
-			}
+			await loadAlerts();
+			if (!stopped) timer = setTimeout(refreshAlerts, 30_000);
 		}
 		void refreshAlerts();
 		return () => {
@@ -127,6 +154,19 @@
 			<div class="catalog-warning__inner">
 				<strong>{alert.title}</strong>
 				<span>{alert.detail} <a href={resolve('/ops')}>View computers</a></span>
+				{#if alert.host_key}
+					<button
+						type="button"
+						class="recovery-alert__retry"
+						disabled={retryingAlert !== null}
+						aria-busy={retryingAlert === alert.id}
+						title="Check this computer and try to reconnect its storage now, without opening any window on it"
+						onclick={() => retryConnection(alert)}>Retry connection</button
+					>
+				{/if}
+				{#if retryOutcome?.id === alert.id && retryOutcome.message}
+					<span class="recovery-alert__outcome" role="status">{retryOutcome.message}</span>
+				{/if}
 			</div>
 		</div>
 	{/each}
@@ -259,6 +299,40 @@
 		overflow-wrap: anywhere;
 	}
 
+	.catalog-warning__inner {
+		flex-wrap: wrap;
+	}
+
+	.catalog-warning__inner > span:not(.recovery-alert__outcome) {
+		flex: 1 1 20rem;
+	}
+
+	.recovery-alert__retry {
+		align-self: center;
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-wait-line);
+		border-radius: var(--mf-radius-1);
+		color: var(--mf-fg-primary);
+		cursor: pointer;
+		flex: none;
+		font: inherit;
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+		min-height: 28px;
+		padding: 0 var(--mf-space-3);
+		white-space: nowrap;
+	}
+
+	.recovery-alert__retry:disabled {
+		cursor: progress;
+		opacity: 0.6;
+	}
+
+	.recovery-alert__outcome {
+		flex-basis: 100%;
+		font-weight: var(--mf-weight-semibold);
+	}
+
 	@media (max-width: 680px) {
 		.app-header__inner {
 			height: 62px;
@@ -311,6 +385,15 @@
 
 		.catalog-warning__inner strong {
 			white-space: normal;
+		}
+
+		.catalog-warning__inner > span:not(.recovery-alert__outcome) {
+			flex: none;
+		}
+
+		.recovery-alert__retry {
+			align-self: flex-start;
+			margin-top: 4px;
 		}
 	}
 </style>
