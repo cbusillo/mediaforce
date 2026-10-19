@@ -16,7 +16,7 @@ from mediaforce.core.db_tables import library_item_evidence_state, library_items
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, cadence_awaits_as_is_decision
 from mediaforce.library.candidate_selection import CandidateDecision, MotionHolds
 from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, \
-    EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, project_evidence_state, \
+    EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, project_library_item_evidence_state, \
     sync_library_item_evidence_state
 from mediaforce.library.item_presence import library_item_is_missing
 
@@ -62,12 +62,10 @@ def cadence_safety_partition(
                 item,
                 CADENCE_EVIDENCE_KIND,
             )
+    # Whole stored rows: their summary, source and policy identity decide whether retained
+    # measurements still belong to the item's current source and policy.
     rows = connection.execute(
-        select(
-            library_item_evidence_state.c.library_item_id,
-            library_item_evidence_state.c.state,
-            library_item_evidence_state.c.decision_status,
-        ).where(
+        select(library_item_evidence_state).where(
             library_item_evidence_state.c.library_item_id.in_(normalized_ids),
             library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
         )
@@ -77,18 +75,13 @@ def cadence_safety_partition(
         for row in rows
     }
     if not synchronize:
+        # The same projection syncing would store, so a page reads what the synchronized queue decides.
         for item in items:
             item_id = int(item["id"])
-            previous_state = state_by_item_id.get(item_id)
-            projection = project_evidence_state(
+            projection = project_library_item_evidence_state(
+                item,
                 CADENCE_EVIDENCE_KIND,
-                item.get("cadence_summary_json"),
-                source_fingerprint=(
-                    str(item.get("content_version_fingerprint") or "").strip()
-                    or str(item.get("fingerprint") or "").strip()
-                    or None
-                ),
-                previous_state=previous_state,
+                previous_state=state_by_item_id.get(item_id),
             )
             state_by_item_id[item_id] = {
                 "state": projection.state,

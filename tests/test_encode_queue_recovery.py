@@ -111,6 +111,7 @@ from mediaforce.library import workflow_state as workflow_state_runtime
 from mediaforce.web.runtime.episode_progress import folder_episodes_payload
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 from mediaforce.library.motion_holds import queue_motion_holds
+from mediaforce.library.evidence_state import sync_library_item_evidence_state
 from mediaforce.web.runtime.page_state import PageStateSources, folder_page_state
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
@@ -26567,6 +26568,107 @@ raise SystemExit(0)
         self.assertEqual(older_seasons["candidate_count"], len(older.queued))
         self.assertEqual(older_seasons["cadence_blocked_candidate_count"], 1)
         self.assertEqual(older_seasons["cadence_check_candidate_count"], 1)
+
+    def _replace_source_after_measuring(self, item_id: int) -> None:
+        """The file's motion pattern was measured and stored, then its source changed under it."""
+        with open_db(self.config.paths.db_path) as connection:
+            item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
+            sync_library_item_evidence_state(connection, item, CADENCE_EVIDENCE_KIND)
+            connection.execute(
+                update(library_items).where(library_items.c.id == item_id).values(fingerprint="replaced-source")
+            )
+
+    def test_a_page_requires_a_motion_check_for_a_source_changed_since_it_was_measured(self) -> None:
+        show = self._motion_show({"Season 1/One.mkv": "clear", "Season 1/Two.mkv": "clear"})
+        self._replace_source_after_measuring(show.item_ids["Season 1/One.mkv"])
+        page = self._motion_page(show, "tv/show/Season 1")
+        queued = self._motion_queue(show, "tv/show/Season 1")
+
+        # The queue checks the replaced source again, so the page counts it as waiting for that check.
+        self.assertEqual(queued.left_out, Counter({"cadence_analysis_required": 1}))
+        self.assertEqual(queued.queued, [show.item_ids["Season 1/Two.mkv"]])
+        self.assertEqual(page.lifecycle["eligible_candidate_count"], len(queued.queued))
+        self.assertEqual(page.lifecycle["motion_check_candidate_count"], 1)
+
+    def test_older_seasons_start_a_check_for_a_source_changed_since_it_was_measured(self) -> None:
+        show = self._motion_show(
+            {"Season 1/One.mkv": "clear", "Season 2/One.mkv": "clear"}, lifecycle_mode="on",
+        )
+        self._replace_source_after_measuring(show.item_ids["Season 1/One.mkv"])
+        page = self._motion_page(show, "tv/show")
+        older = self._motion_queue(show, "tv/show", override_older_seasons=True, older_seasons_confirmed=True)
+
+        self.assertEqual(page.lifecycle["older_seasons"]["candidate_count"], 0)
+        self.assertEqual(page.lifecycle["older_seasons"]["cadence_check_candidate_count"], 1)
+        self.assertTrue(older.result["ok"], older.result)
+        self.assertEqual(older.result["checks_started_count"], 1)
+
+    def _missed_final_size_run(self, show: SimpleNamespace, missed: str, also_in_run: str) -> None:
+        """The show's latest run missed its final size for one file, under the approval still current."""
+        approval = show.load_calibration(show.config, "tv/show")
+        manifest_path = self._write_manifest(
+            "manifest-older-season-final-size.json",
+            [
+                {"library_item_id": show.item_ids[name], "rel_path": f"tv/show/{name}"}
+                for name in (missed, also_in_run)
+            ],
+            selection={"production_approval_contract": production_approval_contract(approval)},
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(
+                connection, job_id="older-season-final-size", manifest_name=manifest_path.name, host={},
+                status="needs_attention", attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs).where(encode_jobs.c.job_id == "older-season-final-size").values(
+                    prefix="tv/show",
+                    progress_json=json.dumps({"failure_analysis": {
+                        "kind": "final_size_target_miss",
+                        "retry_strategy": "fresh_goal_required",
+                        "manifest_indexes": [0, 1],
+                        "item_analyses": [
+                            {"kind": "final_size_target_miss", "manifest_index": 0, "manifest_indexes": [0]},
+                            {"kind": "quality_policy_failure", "manifest_index": 1, "manifest_indexes": [1]},
+                        ],
+                    }}),
+                )
+            )
+
+    def test_older_season_checks_leave_out_a_file_that_missed_its_final_size(self) -> None:
+        show = self._motion_show(
+            {"Season 1/One.mkv": "check", "Season 1/Two.mkv": "check", "Season 2/One.mkv": "clear"},
+            lifecycle_mode="on",
+        )
+        self._missed_final_size_run(show, "Season 1/One.mkv", "Season 1/Two.mkv")
+        older = self._motion_queue(show, "tv/show", override_older_seasons=True, older_seasons_confirmed=True)
+
+        # The missed file needs a fresh goal, so it gets no check and no hold that would promise to compress it.
+        self.assertTrue(older.result["ok"], older.result)
+        self.assertEqual(older.result["checks_started_count"], 1)
+        self.assertEqual(
+            older.left_out, Counter({"final_size_recovery_contract_unchanged": 1, "cadence_analysis_required": 1}),
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            held = set(connection.execute(select(production_holds.c.library_item_id)).scalars())
+        self.assertEqual(held, {show.item_ids["Season 1/Two.mkv"]})
+
+    def test_older_season_checks_leave_out_a_season_with_its_own_approval(self) -> None:
+        show = self._motion_show(
+            {"Season 1/One.mkv": "check", "Season 1/Two.mkv": "check", "Season 2/One.mkv": "clear"},
+            lifecycle_mode="on",
+        )
+        own_approval = self._current_approval("season-1-sample")
+        show_approval = show.load_calibration(show.config, "tv/show")
+        show.load_calibration = lambda _config, prefix: {
+            "tv/show": show_approval, "tv/show/Season 1": own_approval,
+        }.get(prefix)
+        older = self._motion_queue(show, "tv/show", override_older_seasons=True, older_seasons_confirmed=True)
+
+        # Season 1 publishes only under its own approval, so a show run must not start and hold its checks.
+        self.assertFalse(older.result["ok"], older.result)
+        self.assertEqual(older.left_out, Counter({"nearer_approval": 2}))
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertEqual(connection.execute(select(func.count()).select_from(production_holds)).scalar_one(), 0)
 
     def test_starting_older_season_motion_checks_succeeds_when_none_is_cleared_yet(self) -> None:
         show = self._motion_show(

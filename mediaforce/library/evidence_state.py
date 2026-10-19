@@ -256,10 +256,9 @@ def sync_library_item_evidence_state(
     previous_state = None
     if preserve_source_identity or preserve_policy_identity:
         previous_state = load_library_item_evidence_states(connection, library_item_id).get(evidence_kind)
-    projection = project_evidence_state(
+    projection = project_library_item_evidence_state(
+        item,
         evidence_kind,
-        item.get(_evidence_spec(evidence_kind).column_name),
-        source_fingerprint=_item_source_fingerprint(item),
         previous_state=previous_state,
         preserve_source_identity=preserve_source_identity,
         preserve_policy_identity=preserve_policy_identity,
@@ -272,6 +271,31 @@ def sync_library_item_evidence_state(
         reset_attempt_state=reset_attempt_state,
     )
     return projection
+
+
+def project_library_item_evidence_state(
+        item: Mapping[str, Any],
+        evidence_kind: EvidenceKind,
+        *,
+        previous_state: Mapping[str, Any] | None,
+        preserve_source_identity: bool = True,
+        preserve_policy_identity: bool = True,
+        updated_at: str | None = None,
+) -> EvidenceStateProjection:
+    """What syncing this item's evidence would store, without storing it.
+
+    ``previous_state`` is the item's whole stored row for the kind, since its summary, source and policy
+    identity decide whether retained measurements still belong to the current source and policy.
+    """
+    return project_evidence_state(
+        evidence_kind,
+        item.get(_evidence_spec(evidence_kind).column_name),
+        source_fingerprint=_item_source_fingerprint(item),
+        previous_state=previous_state,
+        preserve_source_identity=preserve_source_identity,
+        preserve_policy_identity=preserve_policy_identity,
+        updated_at=updated_at,
+    )
 
 
 def rebuild_library_item_evidence_states(

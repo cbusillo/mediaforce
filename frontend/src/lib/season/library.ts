@@ -21,7 +21,10 @@ export interface TvLibraryStateGroup {
 export interface OlderSeasonLibraryAction {
 	latestSeasonLabel: string;
 	seasonCount: number;
+	/** Episodes the action compresses now: their motion pattern is resolved. */
 	episodeCount: number;
+	/** Episodes whose motion-pattern check the action starts; each compresses once it passes. */
+	checkEpisodeCount: number;
 	overriddenSeasonCount: number;
 	overriddenEpisodeCount: number;
 }
@@ -266,7 +269,7 @@ export function olderSeasonLibraryAction(
 			seasonNumber >= latestSeasonNumber ||
 			season.ambiguous ||
 			(prefixCountByNumber.get(seasonNumber) ?? 0) > 1 ||
-			olderSeasonEpisodes(season) <= 0
+			olderSeasonEpisodes(season) + olderSeasonChecks(season) <= 0
 		)
 			return false;
 		if (season.held_candidate_count <= 0) return season.eligible_candidate_count > 0;
@@ -281,6 +284,7 @@ export function olderSeasonLibraryAction(
 		latestSeasonLabel: `Season ${latestSeasonNumber}`,
 		seasonCount: included.length,
 		episodeCount: included.reduce((total, season) => total + olderSeasonEpisodes(season), 0),
+		checkEpisodeCount: included.reduce((total, season) => total + olderSeasonChecks(season), 0),
 		overriddenSeasonCount: overridden.length,
 		overriddenEpisodeCount: overridden.reduce(
 			(total, season) => total + olderSeasonProtectedEpisodes(season),
@@ -294,8 +298,22 @@ function olderSeasonEpisodes(season: SeasonLifecycleState): number {
 	return season.motion_cleared_candidate_count ?? season.candidate_count;
 }
 
+// The action also starts motion-pattern checks, protected episodes included, as the server counts them.
+function olderSeasonChecks(season: SeasonLifecycleState): number {
+	return (
+		(season.motion_check_candidate_count ?? 0) +
+		(season.protected_motion_check_candidate_count ?? 0)
+	);
+}
+
+// Protected episodes the action takes or starts a check for, each bypassing its lifecycle hold.
 function olderSeasonProtectedEpisodes(season: SeasonLifecycleState): number {
-	return season.protected_motion_cleared_candidate_count ?? season.held_candidate_count;
+	if (season.protected_motion_cleared_candidate_count === undefined)
+		return season.held_candidate_count;
+	return (
+		season.protected_motion_cleared_candidate_count +
+		(season.protected_motion_check_candidate_count ?? 0)
+	);
 }
 
 function addCounts(

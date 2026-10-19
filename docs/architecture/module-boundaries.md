@@ -202,7 +202,12 @@ Guidance:
       but never the motion-pattern gate
     - a queue action that queues no file but starts motion-pattern checks
       succeeds (`motion_checks_started`): each checked file is held to join
-      production once its check passes
+      production once its check passes; files production refuses under the
+      approval anyway (a missed final size, a nearer approval) get no check
+      and no hold, and are listed with their own reasons
+    - the read-only projection reads each item's whole stored evidence row,
+      so a source or policy changed since measuring needs a check on the page
+      exactly as it does in the synchronized queue
     - the frontend only words it (`frontend/src/lib/season/page-state.ts`):
       one table from key, recovery kind, failure kind and episode or season
       scope to label, detail and recovery action; it never orders jobs

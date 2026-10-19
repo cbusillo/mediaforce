@@ -2301,6 +2301,7 @@ describe('approvalStartPlan', () => {
 		clearedCount: 0,
 		checkCount: 0,
 		protectedCount: 0,
+		protectedCheckCount: 0,
 		motionHeldCount: 0,
 		asIsCount: 0,
 		...overrides
@@ -2492,6 +2493,7 @@ describe('queueAdmission', () => {
 			clearedCount: 1,
 			checkCount: 5,
 			protectedCount: 0,
+			protectedCheckCount: 0,
 			motionHeldCount: 2,
 			asIsCount: 1
 		});

@@ -967,13 +967,32 @@
 		});
 	}
 
+	// What overriding the lifecycle hold does, keeping files compressed now apart from checks it starts.
+	function overrideConfirmationDetail(): string {
+		const checks = admission.protectedCheckCount;
+		const now = heldEpisodeCount - checks;
+		const episodes = (count: number) =>
+			`${count} protected ${count === 1 ? 'episode' : 'episodes'}`;
+		const parts = [
+			now > 0 ? `This will queue ${episodes(now)} now.` : '',
+			checks > 0
+				? `It starts motion-pattern checks for ${episodes(checks)}, and each compresses once its check passes.`
+				: '',
+			'It bypasses only lifecycle timing holds; normal file, validation, and active-work safeguards still apply.',
+			admission.motionHeldCount > 0
+				? `${admission.motionHeldCount} ${admission.motionHeldCount === 1 ? 'episode stays' : 'episodes stay'} original because Mediaforce can’t convert ${admission.motionHeldCount === 1 ? 'its' : 'their'} motion pattern safely.`
+				: ''
+		];
+		return parts.filter(Boolean).join(' ');
+	}
+
 	async function requestQueueSeason() {
 		if (!isSeriesScope && heldEpisodeCount > 0) {
 			if (!canOverrideLifecycleHolds) return;
 			await openSafetyDialog({
 				kind: 'lifecycle_override',
 				title: 'Override this season’s protection?',
-				detail: `This will queue ${heldEpisodeCount} protected ${heldEpisodeCount === 1 ? 'episode' : 'episodes'} now. It bypasses only lifecycle timing holds; normal file, validation, and active-work safeguards still apply.${admission.motionHeldCount > 0 ? ` ${admission.motionHeldCount} ${admission.motionHeldCount === 1 ? 'episode stays' : 'episodes stay'} original because Mediaforce can’t convert ${admission.motionHeldCount === 1 ? 'its' : 'their'} motion pattern safely.` : ''}`,
+				detail: overrideConfirmationDetail(),
 				primaryLabel: 'Override and queue',
 				changes: lifecycleHoldReasons.map((reason) => `${reason.label}: ${reason.detail}`)
 			});

@@ -283,6 +283,20 @@ describe('card state wording', () => {
 		expect(cardStateWording(card(serverState('ready_to_compare')))).toMatchObject(
 			PAGE_STATE_COPY.ready_to_compare
 		);
+		// A ready season row whose action only starts motion-pattern checks says so.
+		const checkOnly = card(serverState('ready_to_make'), {
+			lifecycle: {
+				schema_version: 1,
+				prefix: 'tv/Show/Season 1',
+				candidate_count: 3,
+				eligible_candidate_count: 0,
+				held_candidate_count: 0,
+				motion_check_candidate_count: 3,
+				seasons: []
+			}
+		});
+		expect(cardStateWording(checkOnly)).toMatchObject(CARD_STATE_COPY.ready_to_check_motion);
+		expect(cardStateWording(checkOnly).label).not.toBe(CARD_STATE_COPY.ready_to_make.label);
 		// A season row whose remaining episodes are all held for motion never reads as ready to compress.
 		expect(cardStateWording(card(serverState('motion_held', { tone: 'quiet' })))).toMatchObject({
 			key: 'motion_held',

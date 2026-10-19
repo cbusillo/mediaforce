@@ -356,8 +356,34 @@ describe('season library grouping', () => {
 			latestSeasonLabel: 'Season 3',
 			seasonCount: 1,
 			episodeCount: 1,
+			checkEpisodeCount: 0,
 			overriddenSeasonCount: 1,
 			overriddenEpisodeCount: 1
+		});
+	});
+
+	it('offers older seasons whose protected episodes only wait for a motion-pattern check', () => {
+		const checkOnly = {
+			...seasonLifecycle('tv/Alpha/Season 1', 4),
+			is_current_season: false,
+			hold_reasons: [
+				{ code: 'recent_acquisition', label: 'Recent acquisition', detail: 'Waiting.' }
+			],
+			eligible_candidate_count: 0,
+			motion_cleared_candidate_count: 0,
+			protected_motion_cleared_candidate_count: 0,
+			protected_motion_check_candidate_count: 4
+		};
+		const action = olderSeasonLibraryAction({
+			...lifecycle('on', 0),
+			seasons: [checkOnly, { ...seasonLifecycle('tv/Alpha/Season 2', 10), is_current_season: true }]
+		});
+
+		expect(action).toMatchObject({
+			seasonCount: 1,
+			episodeCount: 0,
+			checkEpisodeCount: checkOnly.protected_motion_check_candidate_count,
+			overriddenEpisodeCount: checkOnly.protected_motion_check_candidate_count
 		});
 	});
 
@@ -399,6 +425,7 @@ describe('season library grouping', () => {
 			latestSeasonLabel: 'Season 3',
 			seasonCount: 2,
 			episodeCount: 20,
+			checkEpisodeCount: 0,
 			overriddenSeasonCount: 1,
 			overriddenEpisodeCount: 10
 		});
@@ -451,6 +478,7 @@ describe('season library grouping', () => {
 			latestSeasonLabel: 'Season 3',
 			seasonCount: 2,
 			episodeCount: 20,
+			checkEpisodeCount: 0,
 			overriddenSeasonCount: 0,
 			overriddenEpisodeCount: 0
 		});

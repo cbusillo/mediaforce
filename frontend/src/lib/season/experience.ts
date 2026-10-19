@@ -2048,6 +2048,8 @@ export interface QueueAdmission {
 	checkCount: number;
 	/** Protected episodes an override of the lifecycle hold would take or check. */
 	protectedCount: number;
+	/** Of those, the ones the override starts a motion-pattern check for instead of compressing now. */
+	protectedCheckCount: number;
 	/** Episodes that stay original for their motion pattern, protected or not. */
 	motionHeldCount: number;
 	/** Of those, how many the show's encode-as-is decision could accept. */
@@ -2062,6 +2064,7 @@ export function queueAdmission(folder: FolderPayload): QueueAdmission {
 			clearedCount: folder.encode_candidate_count ?? 0,
 			checkCount: 0,
 			protectedCount: 0,
+			protectedCheckCount: 0,
 			motionHeldCount: 0,
 			asIsCount: 0
 		};
@@ -2071,6 +2074,7 @@ export function queueAdmission(folder: FolderPayload): QueueAdmission {
 		clearedCount: lifecycle.eligible_candidate_count,
 		checkCount: lifecycle.motion_check_candidate_count ?? 0,
 		protectedCount: Math.max(0, lifecycle.held_candidate_count - protectedMotionHeld),
+		protectedCheckCount: lifecycle.protected_motion_check_candidate_count ?? 0,
 		motionHeldCount: (lifecycle.motion_held_candidate_count ?? 0) + protectedMotionHeld,
 		asIsCount: lifecycle.motion_as_is_candidate_count ?? 0
 	};
