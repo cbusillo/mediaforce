@@ -584,7 +584,7 @@ def _button_labels() -> set[str]:
 
     sources = [
         Path(__file__).parents[1] / "frontend/src/lib/components/workstation/OpsWorkstationView.svelte",
-        Path(__file__).parents[1] / "frontend/src/lib/components/shell/AppShell.svelte",
+        Path(__file__).parents[1] / "frontend/src/lib/components/shell/ShellWarnings.svelte",
     ]
     return {
         label.strip()
