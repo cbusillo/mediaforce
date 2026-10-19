@@ -22,7 +22,7 @@ from sqlalchemy import select, update
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import item_events, library_items, production_holds
-from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, accept_cadence_as_is, cadence_as_is_eligible, \
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, accept_cadence_as_is, cadence_awaits_as_is_decision, \
     cadence_measurement_complete, reclassify_cadence_summary
 from mediaforce.library.evidence_state import sync_library_item_evidence_state
 from mediaforce.encoding.encode_queue import list_encode_runs_for_prefix
@@ -77,12 +77,13 @@ def ambiguous_motion_files(
     partly_interlaced: list[Mapping[str, Any]] = []
     for row in rows:
         summary = _summary(row)
+        if cadence_awaits_as_is_decision(summary):
+            eligible.append(row)
+            continue
         decision = object_dict(reclassify_cadence_summary(summary).get("decision"))
         if decision.get("classification") != "unknown" or decision.get("status") == "resolved":
             continue
-        if cadence_as_is_eligible(summary):
-            eligible.append(row)
-        elif cadence_measurement_complete(object_dict(summary.get("analysis"))):
+        if cadence_measurement_complete(object_dict(summary.get("analysis"))):
             partly_interlaced.append(row)
     return AmbiguousMotionFiles(tuple(eligible), tuple(partly_interlaced))
 

@@ -356,6 +356,10 @@ def config(tmp_path: Path) -> Iterator[MediaforceConfig]:
     reset_engine_cache()
 
 
+def _cards(workflows: dict[str, dict[str, Any]]) -> list[tuple[str, dict[str, Any], None]]:
+    return [(prefix, workflow, None) for prefix, workflow in workflows.items()]
+
+
 def _sources(calibrations: Mapping[str, dict[str, Any]]) -> PageStateSources:
     return PageStateSources(
         load_calibration_state=lambda _config, prefix: calibrations.get(prefix),
@@ -435,8 +439,8 @@ def test_case_2_cards_say_ready_to_compress_only_under_a_current_approval(config
             for season in seasons
         }
         listed = list_queue_summary(connection)["sample"]["queued"]
-        without_approval = card_page_states(connection, config, workflows.items(), _sources({}))
-        under_show_approval = card_page_states(connection, config, workflows.items(), _sources({SHOW: _approved()}))
+        without_approval = card_page_states(connection, config, _cards(workflows), _sources({}))
+        under_show_approval = card_page_states(connection, config, _cards(workflows), _sources({SHOW: _approved()}))
 
     assert {workflow["primary_lane"] for workflow in workflows.values()} == {"encode"}
     assert len(listed) == 6
@@ -491,8 +495,9 @@ def test_case_4_a_seasons_sample_state_ignores_an_episodes_sample(config: Mediaf
         load_retryable_sample_job_state=web_app._load_retryable_sample_job_state,
         load_scan_status=lambda *_args, **_kwargs: None,
         load_active_encode_job_for_prefix=lambda *_args: None,
-        page_state=lambda connection, prefix, workflow, integrity: folder_page_state(
+        page_state=lambda connection, prefix, workflow, integrity, lifecycle: folder_page_state(
             connection, config, prefix, workflow, _sources({SEASON: _approved()}), staged_integrity=integrity,
+            lifecycle=lifecycle,
         ),
     )
 
@@ -542,7 +547,7 @@ def test_status_payload_and_card_agree(config: MediaforceConfig) -> None:
         _insert_sample_job(connection, "sample-new", prefix=SEASON, status="completed")
         connection.commit()
         workflow = build_folder_workflow_state(connection, SEASON, library_types=config.library_type_map).to_payload()
-        card = card_page_states(connection, config, [(SEASON, workflow)], _sources({SEASON: _review_ready()}))
+        card = card_page_states(connection, config, [(SEASON, workflow, None)], _sources({SEASON: _review_ready()}))
         page = folder_page_state(connection, config, SEASON, workflow, _sources({SEASON: _review_ready()}))
 
     assert card[SEASON] == page
@@ -586,7 +591,7 @@ def _states(connection: DBClient, config: MediaforceConfig, prefixes: list[str],
     for prefix in prefixes:
         workflow = build_folder_workflow_state(connection, prefix, library_types=config.library_type_map).to_payload()
         page = folder_page_state(connection, config, prefix, workflow, _sources(calibrations))
-        card = card_page_states(connection, config, [(prefix, workflow)], _sources(calibrations))[prefix]
+        card = card_page_states(connection, config, [(prefix, workflow, None)], _sources(calibrations))[prefix]
         assert card == page
         states[prefix] = (workflow["primary_lane"], page["key"])
     return states

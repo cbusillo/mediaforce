@@ -116,6 +116,11 @@ describe('page state wording', () => {
 			PAGE_STATE_COPY.motion_held.episode
 		],
 		[
+			serverState('motion_held', { tone: 'attention', primary_action: 'decide_motion' }),
+			PAGE_STATE_COPY.motion_decision.season,
+			PAGE_STATE_COPY.motion_decision.episode
+		],
+		[
 			serverState('making_season', { tone: 'active' }),
 			PAGE_STATE_COPY.making_season.season,
 			PAGE_STATE_COPY.making_season.episode

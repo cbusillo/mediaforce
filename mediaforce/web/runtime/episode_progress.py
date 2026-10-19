@@ -16,7 +16,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.encode_queue import encode_run_rel_paths, list_child_encode_jobs_for_parents, \
     list_encode_runs_for_prefix
 from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
-from mediaforce.web.runtime.decision_evidence import queue_motion_holds
+from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.library.media_scopes import resolve_media_scope
 from mediaforce.library.staged_validation import staged_validation_outcome
 from mediaforce.library.workflow_state import ItemWorkflowState, build_folder_workflow_state

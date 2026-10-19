@@ -31,8 +31,8 @@ from mediaforce.library.staged_integrity import IntegrityDisposition, StagedInte
     staged_integrity_report_for_scope
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest, write_manifest
-from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection, encode_candidate_decisions, \
-    older_season_candidate_item_ids, older_season_override_selection, project_candidates, \
+from mediaforce.library.candidate_selection import MOTION_HELD_DETAIL, OlderSeasonOverrideSelection, \
+    encode_candidate_decisions, older_season_candidate_item_ids, older_season_override_selection, project_candidates, \
     restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, scope_target_size_partition, \
     workflow_eligibility
 from mediaforce.tuning.production_lineage import attach_target_lineage
@@ -54,7 +54,7 @@ from mediaforce.web.runtime.production_approval import NEARER_APPROVAL_CODE, app
     policy_with_owner_settings, production_approval_contract, production_approval_identity, \
     production_approval_matches, production_calibration, valid_production_approval_contract
 from mediaforce.web.runtime.left_out_files import LeftOutFile, cadence_left_out_files, drop_manifest_items, \
-    left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response
+    left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response, queue_result_without_files
 from mediaforce.web.runtime.encode_runtime import (
     remove_stale_staging_path, staged_output_cleanup_blocker, staged_output_cleanup_target,
 )
@@ -1012,6 +1012,24 @@ def queue_folder_encode_action(
                 older_season_selection,
                 included_item_ids=older_season_included_ids,
             )
+            if not older_season_selection.available and older_season_checks.analysis_queued_item_ids:
+                # Nothing is cleared yet, but the checks just started hold their files to join once they pass.
+                older_season_rel_paths = {
+                    decision.item_id: str(decision.row["rel_path"] or "") for decision in older_season_decisions
+                }
+                return queue_result_without_files(
+                    [
+                        *(
+                            LeftOutFile(
+                                item_id, older_season_rel_paths.get(item_id, ""), "cadence_unresolved",
+                                MOTION_HELD_DETAIL,
+                            )
+                            for item_id in sorted(older_season_cadence_partition.blocked_item_ids)
+                        ),
+                        *cadence_left_out_files(older_season_checks, older_season_rel_paths),
+                    ],
+                    evidence_work=older_season_checks.evidence_work,
+                )
             if not older_season_selection.available:
                 blocked_count = len(older_season_cadence_partition.blocked_item_ids)
                 evidence_required_count = len(older_season_cadence_partition.evidence_required_item_ids)
@@ -1241,7 +1259,7 @@ def queue_folder_encode_action(
             now_iso=now_iso(),
         )
         if not manifest["items"]:
-            return nothing_queued_response(left_out, evidence_work=cadence_partition.evidence_work)
+            return queue_result_without_files(left_out, evidence_work=cadence_partition.evidence_work)
         reserve = reserve_preflight(preflight_config, manifest["items"])
         if not reserve.allowed:
             return {

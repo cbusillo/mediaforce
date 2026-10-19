@@ -17,6 +17,7 @@ from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.library.candidate_selection import CandidateDecision, project_candidates, workflow_eligibility
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import resolve_media_scope, resolve_media_scopes, scope_rel_path_filter
+from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.library.movie_workflow import MovieMembership, classify_movie_path, movie_item_included
 from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.workflow_state import EncodeEligibility, build_folder_workflow_states, derive_item_workflow_state
@@ -303,7 +304,8 @@ def load_movie_library_payload(
         else []
     )
     decisions_by_item = {decision.item_id: decision for decision in decisions}
-    eligibility = workflow_eligibility(decisions)
+    # A movie the queue leaves out for its motion pattern is held here too, so the library never offers it.
+    eligibility = workflow_eligibility(decisions, queue_motion_holds(connection, decisions))
     for grouped in grouped_rows.values():
         for row, membership in grouped:
             item_id = int(row["item_id"])
@@ -640,6 +642,21 @@ def adapt_movie_workflow_payload(
             "next_action": {
                 "kind": "none",
                 "label": "Browse title",
+                "enabled": False,
+                "target_prefix": payload["prefix"],
+            },
+        }
+    counts = object_dict(payload.get("counts"))
+    if payload.get("state") == "held" and 0 < int(counts.get("held") or 0) == int(counts.get("motion_held") or 0):
+        return {
+            **payload,
+            "state": "motion_held",
+            "label": "Stays original",
+            "tone": "idle",
+            "detail": "Mediaforce can't convert its motion pattern safely, so it stays original.",
+            "next_action": {
+                "kind": "none",
+                "label": "No action",
                 "enabled": False,
                 "target_prefix": payload["prefix"],
             },

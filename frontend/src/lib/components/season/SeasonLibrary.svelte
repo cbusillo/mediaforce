@@ -25,6 +25,7 @@
 		seasonsByShow,
 		sortShowCards,
 		seasonStateHoldLabel,
+		startableEpisodeCount,
 		staysOriginal,
 		tvLibraryStateGroup,
 		type LibrarySort,
@@ -121,8 +122,13 @@
 	);
 	const policySaving = $derived(Boolean(policySavingPrefix));
 	const lifecycleAvailable = $derived(selectedLifecycle !== null);
-	const eligibleEpisodeCount = $derived(selectedLifecycle?.eligible_candidate_count ?? 0);
-	const heldEpisodeCount = $derived(selectedLifecycle?.held_candidate_count ?? 0);
+	// Episodes the show's action takes now or starts a motion-pattern check for.
+	const eligibleEpisodeCount = $derived(startableEpisodeCount(selectedLifecycle));
+	// Protected episodes and the ones that stay original for their motion pattern.
+	const heldEpisodeCount = $derived(
+		(selectedLifecycle?.held_candidate_count ?? 0) +
+			(selectedLifecycle?.motion_held_candidate_count ?? 0)
+	);
 	const selectedShowActionAvailable = $derived(
 		Boolean(
 			olderSeasonAction ||

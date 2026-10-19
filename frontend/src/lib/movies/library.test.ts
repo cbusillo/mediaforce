@@ -517,6 +517,34 @@ describe('movie action discoverability', () => {
 		expect(selectMovieLeadTitle([title, explicitTitle], 'priority', '')).toBe(explicitTitle);
 	});
 
+	it('never offers to compress a movie held for its motion pattern', () => {
+		const heldTitle: MovieTitle = {
+			...readyTitle,
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'motion_held',
+				primary_lane: 'none',
+				tone: 'idle',
+				next_action: {
+					kind: 'none',
+					label: 'No action',
+					enabled: false,
+					target_prefix: readyTitle.prefix
+				}
+			}
+		};
+
+		const idleTitle: MovieTitle = {
+			...heldTitle,
+			workflow_state: { ...heldTitle.workflow_state!, state: 'idle' }
+		};
+
+		expect(movieTitleNeedsAction(heldTitle)).toBe(false);
+		// It says why it stays as it is rather than reading as a movie with nothing left to do.
+		expect(movieWorkflowLabel(heldTitle)).not.toBe(movieWorkflowLabel(idleTitle));
+		expect(movieLibraryStateGroup(heldTitle).label).toBe(movieWorkflowLabel(heldTitle));
+	});
+
 	it('labels view-only and conflict states truthfully', () => {
 		const browseOnlyTitle: MovieTitle = {
 			...readyTitle,

@@ -66,13 +66,25 @@ export const PAGE_STATE_COPY = {
 	},
 	motion_held: {
 		season: {
-			label: 'Held for motion pattern',
+			label: 'Stays original',
 			detail:
-				'Every remaining episode has a motion pattern Mediaforce cannot convert safely on its own.'
+				'The remaining episodes stay original because Mediaforce can’t convert their motion pattern safely.'
 		},
 		episode: {
-			label: 'Held for motion pattern',
-			detail: 'This episode has a motion pattern Mediaforce cannot convert safely on its own.'
+			label: 'Stays original',
+			detail:
+				'This episode stays original because Mediaforce can’t convert its motion pattern safely.'
+		}
+	},
+	// Some held episodes have an unclear motion pattern the show page can encode as-is.
+	motion_decision: {
+		season: {
+			label: 'Motion decision',
+			detail: 'The show page can encode episodes with an unclear motion pattern as-is.'
+		},
+		episode: {
+			label: 'Motion decision',
+			detail: 'The show page can encode this episode’s unclear motion pattern as-is.'
 		}
 	},
 	making_season: {
@@ -222,6 +234,8 @@ export function pageStateCopyKey(
 			return integrity.available ? 'finish_blocked' : 'finish_checking';
 		case 'finish_blocked':
 			return integrity && !integrity.available ? 'finish_checking' : 'finish_blocked';
+		case 'motion_held':
+			return state.primary_action === 'decide_motion' ? 'motion_decision' : 'motion_held';
 		case 'needs_help':
 			return state.recovery_kind === 'files'
 				? 'files_blocked'

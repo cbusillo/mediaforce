@@ -2869,7 +2869,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio motion-held approved fixture",
                 "route": "/folders/tv/Motion%20Held/Season%201",
                 "marker": "Motion Held",
-                "stageMarker": "Every remaining episode stays original for now",
+                "stageMarker": "The remaining episodes stay original.",
             },
             {
                 "label": "Folder Studio unclear motion decision fixture",

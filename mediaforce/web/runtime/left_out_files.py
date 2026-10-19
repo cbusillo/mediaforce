@@ -156,3 +156,34 @@ def nothing_queued_response(left_out: list[LeftOutFile], **extra: Any) -> dict[s
         "next_action_label": "Open Activity",
         **extra,
     }
+
+
+def queue_result_without_files(left_out: list[LeftOutFile], **extra: Any) -> dict[str, Any]:
+    """The answer when a queue action made no files but may have started motion-pattern checks.
+
+    Each file whose check started is held to join production once it passes, so starting checks is
+    the action working: it succeeds and says what happens next. Only an action that started nothing
+    is refused.
+    """
+    checking = [file for file in left_out if file.code == "cadence_analysis_required"]
+    if not checking:
+        return nothing_queued_response(left_out, **extra)
+    others = [file for file in left_out if file.code != "cadence_analysis_required"]
+    count = len(checking)
+    message = (
+        f"Started motion-pattern checks for {count} {'episode' if count == 1 else 'episodes'}. "
+        f"{'It compresses' if count == 1 else 'They compress'} once {'its check passes' if count == 1 else 'their checks pass'}."
+    )
+    if others:
+        message += f" Left {len(others)} out: {left_out_summary(others)}."
+    return {
+        "ok": True,
+        "code": "motion_checks_started",
+        "message": message,
+        "queued_count": 0,
+        "checks_started_count": count,
+        "left_out": left_out_payload(left_out),
+        "next_route": "/ops",
+        "next_action_label": "Open Activity",
+        **extra,
+    }

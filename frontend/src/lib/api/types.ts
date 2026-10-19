@@ -55,7 +55,8 @@ export type PageStateAction =
 	| 'retry_encode'
 	| 'review_files'
 	| 'validate_outputs'
-	| 'promote_outputs';
+	| 'promote_outputs'
+	| 'decide_motion';
 
 export type PageStateFailure =
 	| 'arithmetic_infeasible'
@@ -116,6 +117,13 @@ export interface SeasonLifecycleState {
 	held_candidate_count: number;
 	motion_held_candidate_count?: number;
 	motion_check_candidate_count?: number;
+	protected_motion_held_candidate_count?: number;
+	protected_motion_check_candidate_count?: number;
+	motion_as_is_candidate_count?: number;
+	/** Episodes whose motion pattern is measured and resolved, as an older-seasons queue requires. */
+	motion_cleared_candidate_count?: number;
+	/** Of those, the ones a lifecycle hold protects. */
+	protected_motion_cleared_candidate_count?: number;
 	hold_reasons: LifecycleHoldReason[];
 	activity_at?: string | null;
 	ranking_added_at?: string | null;
@@ -139,6 +147,13 @@ export interface LifecycleState {
 	motion_held_candidate_count?: number;
 	/** Eligible episodes waiting for a motion-pattern check, which queueing starts. */
 	motion_check_candidate_count?: number;
+	/** Protected episodes an override would still leave out for their motion pattern. */
+	protected_motion_held_candidate_count?: number;
+	protected_motion_check_candidate_count?: number;
+	/** Held episodes the show's encode-as-is decision could accept. */
+	motion_as_is_candidate_count?: number;
+	/** A show's older-seasons action, narrowed to files whose motion pattern is resolved. */
+	older_seasons?: OlderSeasonOverridePayload | null;
 	hold_reason_counts?: Record<string, number>;
 	ranking_added_at?: string | null;
 	can_override_holds?: boolean;
@@ -177,6 +192,8 @@ export interface OlderSeasonOverridePayload {
 	current_size_bytes: number;
 	cadence_blocked_candidate_count: number;
 	cadence_evidence_required_candidate_count: number;
+	/** Older-season episodes whose motion-pattern check the older-seasons action starts. */
+	cadence_check_candidate_count?: number;
 }
 
 export type MediaScopeDomain = 'tv' | 'movie' | 'other';

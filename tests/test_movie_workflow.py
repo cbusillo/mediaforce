@@ -15,6 +15,7 @@ from mediaforce.cli import main as cli_main
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, with_folder_policy_override
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, staged_artifacts
+from mediaforce.encoding.cadence import analyze_cadence, reclassify_cadence_summary
 from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.library import candidate_selection
 from mediaforce.library.candidate_selection import candidate_rank_key, project_candidates, workflow_eligibility
@@ -32,7 +33,7 @@ from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action,
 from mediaforce.web.runtime.folder_cards import list_folder_cards
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
-from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
+from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition, cadence_safety_partition
 
 
 def _approval_at(prefix: str, calibration: dict[str, object]) -> Callable[[object, str], dict[str, object] | None]:
@@ -61,6 +62,36 @@ def _cadence_clears_every_item(*_args: object, library_item_ids: list[int], **_k
         analysis_unavailable_reason=None,
         evidence_work={},
     )
+
+
+def _mixed_cadence_summary() -> dict[str, object]:
+    """A fully measured motion pattern the classifier blocks as mixed."""
+    summary = analyze_cadence(
+        Path("unused.mkv"),
+        video_stream={
+            "field_order": "progressive",
+            "avg_frame_rate": "24/1",
+            "r_frame_rate": "24/1",
+            "time_base": "1/1000",
+        },
+        duration_seconds=7_200.0,
+    )
+    summary["probe"]["idet_required"] = True
+    summary["analysis"].update({
+        "progressive_frames": 300,
+        "tff_frames": 303,
+        "bff_frames": 0,
+        "undetermined_frames": 0,
+        "sampled_frames": 603,
+        "measured_range_count": 3,
+        "coverage": 1.0,
+        "ranges": [
+            {"start_seconds": float(start), "end_seconds": float(start) + 8.0, "frame_limit": 201,
+             "sampled_frames": 201, "status": "measured"}
+            for start in (10, 20, 30)
+        ],
+    })
+    return reclassify_cadence_summary(summary)
 
 
 class MovieWorkflowTests(unittest.TestCase):
@@ -281,6 +312,28 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertEqual(title["age"]["source"], "plex")
         self.assertFalse(members[trailer_id]["included_by_default"])
         self.assertEqual(title["promotion_conflicts"][0]["kind"], "duplicate_destination")
+
+    def test_movie_library_holds_a_movie_the_queue_leaves_out_for_its_motion_pattern(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            held_id = self._insert_item(connection, "films/Mixed/Mixed.mkv")
+            self._insert_item(connection, "films/Clear/Clear.mkv")
+            connection.execute(
+                library_items.update().where(library_items.c.id == held_id).values(
+                    cadence_summary_json=json.dumps(_mixed_cadence_summary()),
+                )
+            )
+            decisions = project_candidates(connection, self.config, prefixes=[])
+            gate = cadence_safety_partition(
+                connection, library_item_ids=[decision.item_id for decision in decisions], synchronize=False,
+            )
+            payload = load_movie_library_payload(connection, self.config, include_details=True)
+
+        titles = {title["prefix"]: title for title in payload["titles"]}
+        # The queue's motion-pattern gate refuses it, so the library does not offer to compress it.
+        self.assertIn(held_id, gate.blocked_item_ids)
+        self.assertEqual(titles["films/Mixed"]["workflow_state"]["state"], "motion_held")
+        self.assertFalse(titles["films/Mixed"]["workflow_state"]["next_action"]["enabled"])
+        self.assertNotEqual(titles["films/Clear"]["workflow_state"]["state"], "motion_held")
 
     def test_movie_library_payload_uses_mediaforce_discovery_age_fallback(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

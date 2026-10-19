@@ -63,6 +63,7 @@
 		motionHoldNotes,
 		motionHolds,
 		overlappingCalibrationActivity,
+		queueAdmission,
 		predictedEpisodeSize,
 		productionScope,
 		qualityMemoryView,
@@ -117,6 +118,7 @@
 
 	type ActionResponse = {
 		ok?: boolean;
+		code?: string;
 		message?: string;
 		left_out?: { library_item_id?: number; reason?: string }[];
 		proposal?: Record<string, unknown> | null;
@@ -224,16 +226,24 @@
 			lifecycle?.seasons[0] ??
 			null
 	);
-	const eligibleEpisodeCount = $derived(
-		lifecycle?.eligible_candidate_count ?? folder.encode_candidate_count ?? 0
-	);
-	const heldEpisodeCount = $derived(lifecycle?.held_candidate_count ?? 0);
+	// What the queue action takes, split the way its motion-pattern gate splits it.
+	const admission = $derived(queueAdmission(folder));
+	// Episodes compressing takes now.
+	const eligibleEpisodeCount = $derived(admission.clearedCount);
+	// Episodes whose motion-pattern check compressing starts; each compresses once it passes.
+	const checkEpisodeCount = $derived(admission.checkCount);
+	// Protected episodes an override would take; ones held for their motion pattern too stay out.
+	const heldEpisodeCount = $derived(admission.protectedCount);
 	const canOverrideLifecycleHolds = $derived(Boolean(lifecycle?.can_override_holds));
 	const olderSeasonOverride = $derived(
 		isSeriesScope ? (folder.older_season_override ?? null) : null
 	);
+	const olderSeasonCheckCount = $derived(olderSeasonOverride?.cadence_check_candidate_count ?? 0);
 	const canQueueOlderSeasons = $derived(
-		Boolean(olderSeasonOverride?.available && olderSeasonOverride.candidate_count > 0)
+		Boolean(
+			(olderSeasonOverride?.available && olderSeasonOverride.candidate_count > 0) ||
+			olderSeasonCheckCount > 0
+		)
 	);
 	const ambiguousMotion = $derived(isSeriesScope ? (folder.ambiguous_motion ?? null) : null);
 	const cadenceBlockedEpisodeCount = $derived(
@@ -258,16 +268,24 @@
 		isSeriesScope ? identity.show : isExactItemScope ? exactEpisodeName : identity.season
 	);
 	const scopeNoun = $derived(isSeriesScope ? 'show' : isExactItemScope ? 'episode' : 'season');
+	// Checks only: no episode is cleared now, but compressing starts their motion-pattern checks.
+	const checksOnly = $derived(eligibleEpisodeCount === 0 && checkEpisodeCount > 0);
 	const makeActionLabel = $derived(
 		isSeriesScope
-			? `Compress ${eligibleEpisodeCount} eligible ${eligibleEpisodeCount === 1 ? 'episode' : 'episodes'}`
+			? checksOnly
+				? `Check and compress ${checkEpisodeCount} ${checkEpisodeCount === 1 ? 'episode' : 'episodes'}`
+				: `Compress ${eligibleEpisodeCount} eligible ${eligibleEpisodeCount === 1 ? 'episode' : 'episodes'}`
 			: isExactItemScope
-				? 'Compress this episode'
+				? checksOnly
+					? 'Check and compress this episode'
+					: 'Compress this episode'
 				: heldEpisodeCount > 0
 					? canOverrideLifecycleHolds
 						? 'Override hold and compress the season'
 						: 'Season remains protected'
-					: 'Compress the season'
+					: checksOnly
+						? 'Check and compress the season'
+						: 'Compress the season'
 	);
 	const waitingReasons = $derived(encodeWaitingReasons(folder.encode_job));
 	// A show-wide job can back a season page; say so rather than presenting its counts as the season's.
@@ -356,10 +374,12 @@
 	const productionEpisodeCount = $derived(production.episodeCount);
 	// Episodes queueing leaves out for their motion pattern; the show page has its own motion decision.
 	const scopeMotionHolds = $derived(motionHolds(folder));
-	const motionHoldSentences = $derived(motionHoldNotes(scopeMotionHolds));
+	const motionHoldSentences = $derived(motionHoldNotes(scopeMotionHolds, isSeriesScope));
 	const motionHeldEpisodeCount = $derived(
-		lifecycle?.motion_held_candidate_count ?? scopeMotionHolds.heldFiles.length
+		admission.motionHeldCount || scopeMotionHolds.heldFiles.length
 	);
+	// The show page holds the one encode-as-is decision; a season or episode sends the owner there.
+	const motionDecisionPending = $derived(status.page_state?.primary_action === 'decide_motion');
 	const originalSeasonSize = $derived(folder.summary?.total_size_bytes ?? 0);
 	const expectedEpisodeBytes = $derived(predictedEpisodeSize(folder));
 	const olderSeasonProjectedSavingsBytes = $derived(
@@ -374,9 +394,7 @@
 	const approvalStart = $derived(
 		approvalStartPlan({
 			scope: isExactItemScope ? 'episode' : isSeriesScope ? 'series' : 'season',
-			episodeCount: productionEpisodeCount,
-			eligibleEpisodeCount,
-			heldEpisodeCount,
+			admission,
 			olderSeasons:
 				canQueueOlderSeasons && olderSeasonOverride
 					? {
@@ -934,7 +952,7 @@
 
 	async function queueSeason(overridePolicyHolds = false) {
 		await runAction('queueing', `We couldn’t start the ${scopeNoun}.`, async () => {
-			ensureOk(
+			const response = ensureOk(
 				await postJson<ActionResponse>(endpoint('queue-encode'), {
 					notes: 'Approved after comparing the representative sample.',
 					bypass_schedule: false,
@@ -944,6 +962,8 @@
 					? 'We couldn’t start this episode.'
 					: 'We couldn’t start the remaining episodes.'
 			);
+			// Starting only motion-pattern checks queues no file, so say what did start.
+			if (response.code === 'motion_checks_started') actionMessage = response.message || '';
 		});
 	}
 
@@ -953,7 +973,7 @@
 			await openSafetyDialog({
 				kind: 'lifecycle_override',
 				title: 'Override this season’s protection?',
-				detail: `This will queue ${heldEpisodeCount} protected ${heldEpisodeCount === 1 ? 'episode' : 'episodes'} now. It bypasses only lifecycle timing holds; normal file, validation, and active-work safeguards still apply.`,
+				detail: `This will queue ${heldEpisodeCount} protected ${heldEpisodeCount === 1 ? 'episode' : 'episodes'} now. It bypasses only lifecycle timing holds; normal file, validation, and active-work safeguards still apply.${admission.motionHeldCount > 0 ? ` ${admission.motionHeldCount} ${admission.motionHeldCount === 1 ? 'episode stays' : 'episodes stay'} original because Mediaforce can’t convert ${admission.motionHeldCount === 1 ? 'its' : 'their'} motion pattern safely.` : ''}`,
 				primaryLabel: 'Override and queue',
 				changes: lifecycleHoldReasons.map((reason) => `${reason.label}: ${reason.detail}`)
 			});
@@ -978,7 +998,19 @@
 
 	async function requestQueueOlderSeasons() {
 		const selection = olderSeasonOverride;
-		if (!selection?.available) return;
+		if (!selection) return;
+		if (!selection.available) {
+			// Nothing is cleared yet, but the action starts the checks that clear older-season episodes.
+			if (olderSeasonCheckCount === 0) return;
+			await openSafetyDialog({
+				kind: 'older_seasons_override',
+				title: `Check ${olderSeasonCheckCount} older-season ${olderSeasonCheckCount === 1 ? 'episode' : 'episodes'} now?`,
+				detail: `Mediaforce starts a motion-pattern check for ${olderSeasonCheckCount === 1 ? 'this episode' : 'these episodes'}, and each one compresses once its check passes. ${selection.latest_season_label || 'The latest season'} stays original.`,
+				primaryLabel: 'Start checks',
+				changes: [libraryCopy.newestSeasonUnchanged]
+			});
+			return;
+		}
 		const latestSeason = selection.latest_season_label || 'The latest season';
 		const changes = [
 			`${selection.season_count} ${selection.season_count === 1 ? 'season' : 'seasons'} · ${selection.candidate_count} safety-cleared ${selection.candidate_count === 1 ? 'episode' : 'episodes'}.`,
@@ -1754,7 +1786,8 @@
 							<p>
 								No older-season episodes are cleared for automatic conversion yet.
 								{#if cadenceBlockedEpisodeCount > 0}
-									{cadenceBlockedEpisodeCount} have measured motion patterns that require review.
+									{cadenceBlockedEpisodeCount} stay original because Mediaforce can’t convert their motion
+									pattern safely.
 								{/if}
 								{#if cadenceEvidenceRequiredEpisodeCount > 0}
 									{cadenceEvidenceRequiredEpisodeCount} still need motion-pattern analysis.
@@ -2851,10 +2884,14 @@
 				<div class="exact-approved__decision">
 					<div class="exact-approved__next">
 						<p class="exact-approved__label">Next step</p>
-						<h2>Compress the full episode</h2>
+						<h2>
+							{checksOnly ? 'Check and compress the full episode' : 'Compress the full episode'}
+						</h2>
 						<p id="exact-approved-action-description">
-							Mediaforce will compress the complete episode into a separate file using the settings
-							you approved. Your original file is not changed.
+							{checksOnly
+								? 'This episode needs a motion-pattern check first. Mediaforce starts the check and compresses the complete episode once it passes, using the settings you approved.'
+								: 'Mediaforce will compress the complete episode into a separate file using the settings you approved.'}
+							Your original file is not changed.
 						</p>
 					</div>
 
@@ -2874,7 +2911,7 @@
 							aria-describedby="exact-approved-action-description exact-approved-safety"
 							disabled={heldEpisodeCount > 0 && !canOverrideLifecycleHolds}
 						>
-							Compress the full episode
+							{checksOnly ? 'Check and compress the full episode' : 'Compress the full episode'}
 							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 						</button>
 						{#if reviewPairs.length}
@@ -2909,31 +2946,35 @@
 				<h1>
 					{isSeriesScope
 						? canQueueOlderSeasons
-							? eligibleEpisodeCount > 0
+							? eligibleEpisodeCount + checkEpisodeCount > 0
 								? 'Ready to choose which seasons to compress.'
 								: 'Ready to compress the older seasons.'
-							: 'Ready to compress the eligible seasons.'
+							: checksOnly
+								? 'Ready to check the show’s motion patterns.'
+								: 'Ready to compress the eligible seasons.'
 						: isExactItemScope
 							? 'Ready to compress this episode.'
 							: heldEpisodeCount > 0
 								? 'This season is ready, but protected.'
-								: productionEpisodeCount > 0
-									? 'Ready to compress the season.'
-									: 'Ready to check the season’s motion patterns.'}
+								: checksOnly
+									? 'Ready to check the season’s motion patterns.'
+									: 'Ready to compress the season.'}
 				</h1>
 				{#if isSeriesScope && canQueueOlderSeasons && olderSeasonOverride}
 					<p class="lede">
 						The approved setup can compress {eligibleEpisodeCount} normally eligible
 						{eligibleEpisodeCount === 1 ? 'episode' : 'episodes'}. The older-season option can
 						include {olderSeasonOverride.candidate_count} safety-cleared
-						{olderSeasonOverride.candidate_count === 1 ? 'episode' : 'episodes'} across
-						{olderSeasonOverride.season_count} older
-						{olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'} with explicit confirmation.
-						Nothing is queued until you choose an action.
+						{olderSeasonOverride.candidate_count === 1
+							? 'episode'
+							: 'episodes'}{olderSeasonCheckCount > 0
+							? ` and start motion-pattern checks for ${olderSeasonCheckCount} more`
+							: ''} in older seasons with explicit confirmation. Nothing is queued until you choose an
+						action.
 					</p>
 				{:else}
 					<p class="lede">
-						{#if productionEpisodeCount > 0 || motionHoldSentences.length === 0}
+						{#if eligibleEpisodeCount > 0 || motionHoldSentences.length === 0}
 							Mediaforce will compress {productionEpisodeCount}
 							{productionEpisodeCount === 1 ? 'episode' : 'episodes'} with the same settings.
 						{/if}
@@ -2958,40 +2999,54 @@
 					{/if}
 				{/if}
 				<div class="ready-summary">
-					<div>
-						<span
-							>{isSeriesScope
-								? 'Eligible episodes'
-								: isExactItemScope
-									? 'Episode'
-									: 'Episodes'}</span
-						><strong>{productionEpisodeCount}</strong>
-					</div>
-					<div><span>Approved episode target</span><strong>{sizeTargetLabel}</strong></div>
-					<div>
-						<span>Current size</span><strong
-							>{formatDecimalFileSize(production.currentSizeBytes)}</strong
-						>
-						{#if isSeriesScope}<small>Whole selected show scope.</small>{/if}
-					</div>
-					<div>
-						<span>Estimated output</span><strong
-							>{expectedSeasonBytes
-								? formatDecimalFileSize(expectedSeasonBytes)
-								: 'Varies by episode'}</strong
-						>
-						<small
-							>{isExactItemScope
-								? 'This episode uses its runtime-derived target.'
-								: 'Each episode gets its own runtime-derived target.'}</small
-						>
-					</div>
-					{#if estimatedSeasonSavingsBytes !== null}
+					{#if checksOnly}
 						<div>
-							<span>Estimated space saved</span><strong
-								>{formatDecimalFileSize(estimatedSeasonSavingsBytes)}</strong
+							<span>Episodes to check</span><strong>{checkEpisodeCount}</strong>
+							<small>Each one compresses once its motion-pattern check passes.</small>
+						</div>
+						<div><span>Approved episode target</span><strong>{sizeTargetLabel}</strong></div>
+					{:else}
+						<div>
+							<span
+								>{isSeriesScope
+									? 'Eligible episodes'
+									: isExactItemScope
+										? 'Episode'
+										: 'Episodes'}</span
+							><strong>{productionEpisodeCount}</strong>
+							{#if checkEpisodeCount > 0}
+								<small
+									>Plus {checkEpisodeCount} after {checkEpisodeCount === 1 ? 'its' : 'their'} motion-pattern
+									check.</small
+								>
+							{/if}
+						</div>
+						<div><span>Approved episode target</span><strong>{sizeTargetLabel}</strong></div>
+						<div>
+							<span>Current size</span><strong
+								>{formatDecimalFileSize(production.currentSizeBytes)}</strong
+							>
+							{#if isSeriesScope}<small>Whole selected show scope.</small>{/if}
+						</div>
+						<div>
+							<span>Estimated output</span><strong
+								>{expectedSeasonBytes
+									? formatDecimalFileSize(expectedSeasonBytes)
+									: 'Varies by episode'}</strong
+							>
+							<small
+								>{isExactItemScope
+									? 'This episode uses its runtime-derived target.'
+									: 'Each episode gets its own runtime-derived target.'}</small
 							>
 						</div>
+						{#if estimatedSeasonSavingsBytes !== null}
+							<div>
+								<span>Estimated space saved</span><strong
+									>{formatDecimalFileSize(estimatedSeasonSavingsBytes)}</strong
+								>
+							</div>
+						{/if}
 					{/if}
 				</div>
 				{#if isSeriesScope && canQueueOlderSeasons && olderSeasonOverride}
@@ -3000,10 +3055,16 @@
 							<strong>Compress older seasons</strong>
 							<p>
 								{olderSeasonOverride.latest_season_label || 'The latest season'} stays original.
-								{#if cadenceExcludedEpisodeCount > 0}
-									{cadenceExcludedEpisodeCount} additional
-									{cadenceExcludedEpisodeCount === 1 ? 'episode stays' : 'episodes stay'} original for
-									motion-pattern safety.
+								{#if cadenceBlockedEpisodeCount > 0}
+									{cadenceBlockedEpisodeCount} more
+									{cadenceBlockedEpisodeCount === 1 ? 'episode stays' : 'episodes stay'} original because
+									Mediaforce can’t convert {cadenceBlockedEpisodeCount === 1 ? 'its' : 'their'} motion
+									pattern safely.
+								{/if}
+								{#if olderSeasonCheckCount > 0}
+									{olderSeasonCheckCount}
+									{olderSeasonCheckCount === 1 ? 'episode gets' : 'episodes get'} a motion-pattern check
+									first and {olderSeasonCheckCount === 1 ? 'compresses' : 'compress'} once it passes.
 								{/if}
 								{#if olderSeasonOverride.overridden_candidate_count > 0}
 									{olderSeasonOverride.overridden_candidate_count} protected
@@ -3014,26 +3075,30 @@
 									queue.
 								{/if}
 							</p>
-							<small>
-								{formatDecimalFileSize(olderSeasonOverride.current_size_bytes)} current
-								{#if olderSeasonProjectedSavingsBytes !== null}
-									· about {formatDecimalFileSize(olderSeasonProjectedSavingsBytes)} estimated space saved
-								{/if}
-							</small>
+							{#if olderSeasonOverride.candidate_count > 0}
+								<small>
+									{formatDecimalFileSize(olderSeasonOverride.current_size_bytes)} current
+									{#if olderSeasonProjectedSavingsBytes !== null}
+										· about {formatDecimalFileSize(olderSeasonProjectedSavingsBytes)} estimated space
+										saved
+									{/if}
+								</small>
+							{/if}
 						</div>
 						<button class="primary-button" type="button" onclick={requestQueueOlderSeasons}>
-							Compress {olderSeasonOverride.season_count} older
-							{olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'}
+							{olderSeasonOverride.season_count > 0
+								? `Compress ${olderSeasonOverride.season_count} older ${olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'}`
+								: `Check and compress ${olderSeasonCheckCount} older-season ${olderSeasonCheckCount === 1 ? 'episode' : 'episodes'}`}
 							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 						</button>
 					</div>
 				{/if}
-				{#if !isSeriesScope || eligibleEpisodeCount > 0 || !canQueueOlderSeasons}
+				{#if !isSeriesScope || eligibleEpisodeCount + checkEpisodeCount > 0 || !canQueueOlderSeasons}
 					<button
 						class="primary-button"
 						type="button"
 						onclick={requestQueueSeason}
-						disabled={(isSeriesScope && eligibleEpisodeCount === 0) ||
+						disabled={(isSeriesScope && eligibleEpisodeCount + checkEpisodeCount === 0) ||
 							(!isSeriesScope && heldEpisodeCount > 0 && !canOverrideLifecycleHolds)}
 					>
 						{makeActionLabel}
@@ -3047,21 +3112,19 @@
 				<p class="eyebrow">Sample approved</p>
 				<h1>
 					{isExactItemScope
-						? 'This episode stays original for now.'
-						: 'Every remaining episode stays original for now.'}
+						? 'This episode stays original.'
+						: isSeriesScope
+							? 'Nothing in this show can be compressed now.'
+							: 'The remaining episodes stay original.'}
 				</h1>
 				<p class="lede">
 					{isExactItemScope
-						? 'It has'
-						: motionHeldEpisodeCount === 1
-							? '1 episode has'
-							: `${motionHeldEpisodeCount} episodes have`} a motion pattern Mediaforce cannot convert
-					safely on its own, so there is nothing to compress yet. Review
-					{isExactItemScope || motionHeldEpisodeCount === 1 ? 'it' : 'them'} in Activity.
-					{folder.series_context &&
-					!isSeriesScope &&
-					(folder.motion_hold_files?.as_is_count ?? 0) > 0
-						? 'The show page can encode an unclear motion pattern as-is.'
+						? 'Mediaforce can’t convert its motion pattern safely, so it stays as it is.'
+						: `${motionHeldEpisodeCount} ${motionHeldEpisodeCount === 1 ? 'episode stays' : 'episodes stay'} original because Mediaforce can’t convert ${motionHeldEpisodeCount === 1 ? 'its' : 'their'} motion pattern safely.`}
+					{motionDecisionPending
+						? isSeriesScope
+							? `You can decide above whether to encode ${admission.asIsCount} with an unclear motion pattern as-is.`
+							: `The show page can encode ${admission.asIsCount === motionHeldEpisodeCount ? (motionHeldEpisodeCount === 1 ? 'it' : 'them') : admission.asIsCount} as-is.`
 						: ''}
 				</p>
 				{#if !isExactItemScope && scopeMotionHolds.heldFiles.length > 0}
@@ -3078,16 +3141,13 @@
 						</ul>
 					</details>
 				{/if}
-				<div class="motion-held-actions">
-					<a class="primary-button" href={resolve('/ops')}>Open Activity</a>
-					{#if folder.series_context && !isSeriesScope}
-						<a
-							class="secondary-button"
-							href={resolve(folderRoutePath(folder.series_context.prefix))}
-							>Open {folder.series_context.title}</a
+				{#if motionDecisionPending && folder.series_context && !isSeriesScope}
+					<div class="motion-held-actions">
+						<a class="primary-button" href={resolve(folderRoutePath(folder.series_context.prefix))}
+							>Decide on the show page</a
 						>
-					{/if}
-				</div>
+					</div>
+				{/if}
 			</section>
 		{:else if humanState.key === 'making_season'}
 			<section class="season-progress-room" aria-live="polite">

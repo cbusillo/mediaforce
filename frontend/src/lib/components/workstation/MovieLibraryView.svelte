@@ -283,6 +283,7 @@
 		if (title.availability === 'browse_only' || title.workflow_state?.state === 'browse_only') {
 			return 'You can review these files, but Mediaforce cannot change this library.';
 		}
+		if (title.workflow_state?.state === 'motion_held') return title.workflow_state.detail;
 		if (title.workflow_state?.state === 'explicit_selection_required') {
 			const explicitCount = title.members.filter((member) => !member.included_by_default).length;
 			return `${explicitCount} ${explicitCount === 1 ? 'file needs' : 'files need'} you to choose ${explicitCount === 1 ? 'it' : 'them'} individually.`;

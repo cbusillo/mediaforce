@@ -676,6 +676,8 @@
 		if (workflow?.next_action.kind === 'promote_outputs') return 'promote';
 		if (pendingProposalIsStale) return 'prepare-again';
 		if (hasPendingProposal && pendingProposalCanQueue) return 'start';
+		// The queue would leave this movie out for its motion pattern, so there is nothing to start.
+		if (workflow?.state === 'motion_held') return 'none';
 		if (reviewGate.status === 'accepted') return 'queue';
 		if (reviewReady) return 'queue';
 		if (isWorkflowBlocked) return 'none';
@@ -706,6 +708,7 @@
 		if (isBrowseOnly || workflow?.state === 'browse_only') {
 			return 'You can review these files, but Mediaforce cannot change this library.';
 		}
+		if (workflow?.state === 'motion_held') return workflow.detail;
 		if (workflow?.state === 'explicit_selection_required') {
 			const explicitCount =
 				context?.members.filter((member) => !member.included_by_default).length ?? 0;

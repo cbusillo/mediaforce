@@ -402,6 +402,16 @@ def cadence_as_is_eligible(summary: Mapping[str, Any]) -> bool:
     )
 
 
+def cadence_awaits_as_is_decision(summary: Mapping[str, Any]) -> bool:
+    """A file the owner's one encode-as-is decision could accept that has not been accepted yet."""
+    decision = object_dict(reclassify_cadence_summary(summary).get("decision"))
+    return (
+        decision.get("classification") == "unknown"
+        and decision.get("status") != "resolved"
+        and cadence_as_is_eligible(summary)
+    )
+
+
 def accept_cadence_as_is(
         summary: Mapping[str, Any],
         *,

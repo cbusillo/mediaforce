@@ -322,6 +322,48 @@ describe('season library grouping', () => {
 		expect(staysOriginal(seasonLifecycle('tv/Alpha/Season 2', 10))).toBe(true);
 		expect(staysOriginal(seasonLifecycle('tv/Alpha/Season 1', 0))).toBe(false);
 		expect(staysOriginal(undefined)).toBe(false);
+		// A protected season whose other episodes wait for a check still has a check to start.
+		expect(
+			staysOriginal({
+				...seasonLifecycle('tv/Alpha/Season 2', 4),
+				eligible_candidate_count: 0,
+				motion_check_candidate_count: 6
+			})
+		).toBe(false);
+	});
+
+	it('counts older seasons only by the episodes whose motion pattern is resolved', () => {
+		const olderSeason = (prefix: string, cleared: number, protectedCleared: number) => ({
+			...seasonLifecycle(prefix, 6),
+			is_current_season: false,
+			hold_reasons: [
+				{ code: 'recent_acquisition', label: 'Recent acquisition', detail: 'Waiting.' }
+			],
+			motion_cleared_candidate_count: cleared,
+			protected_motion_cleared_candidate_count: protectedCleared
+		});
+		const action = olderSeasonLibraryAction({
+			...lifecycle('on', 0),
+			seasons: [
+				olderSeason('tv/Alpha/Season 1', 1, 1),
+				// Every episode here stays original for its motion pattern, so the action leaves it out.
+				olderSeason('tv/Alpha/Season 2', 0, 0),
+				{ ...seasonLifecycle('tv/Alpha/Season 3', 10), is_current_season: true }
+			]
+		});
+
+		expect(action).toEqual({
+			latestSeasonLabel: 'Season 3',
+			seasonCount: 1,
+			episodeCount: 1,
+			overriddenSeasonCount: 1,
+			overriddenEpisodeCount: 1
+		});
+	});
+
+	it('groups a season held for motion with no work, unless the show can decide it', () => {
+		expect(tvLibraryStateGroup([{ key: 'motion_held', tone: 'quiet' }]).key).toBe('idle');
+		expect(tvLibraryStateGroup([{ key: 'motion_held', tone: 'attention' }]).key).toBe('attention');
 	});
 
 	it('offers one older-season action while preserving the latest season', () => {

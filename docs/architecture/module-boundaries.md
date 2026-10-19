@@ -188,12 +188,21 @@ Guidance:
       page's own newest sample job and saved sample (never an overlapping
       episode's or show's), and `production_approval` for whether an approval
       governs; the module docstring states the precedence
-    - under a current approval, a scope whose every remaining file the queue
-      leaves out for a measured motion pattern is `motion_held`, never
-      `ready_to_make`; the page, its library card, its episode list and its
-      counts read that split from `decision_evidence.queue_motion_holds`, the
-      read-only form of the gate `cadence_queue_partition` applies when
-      queueing, so they count and offer only what queueing takes
+    - under a current approval, a scope where neither queueing, an override of
+      its lifecycle hold, nor a show's older-seasons action would take a file or
+      start a motion-pattern check, and some file is held for its motion
+      pattern, is `motion_held`, never `ready_to_make`: quiet when no one can
+      change the outcome, attention with `decide_motion` when the show's
+      encode-as-is decision could accept a held file
+    - pages, library cards, episode lists, the movie and Other libraries and
+      the lifecycle counts read the queue's motion-pattern split from
+      `library/motion_holds.queue_motion_holds`, the read-only form of the gate
+      `cadence_queue_partition` applies when queueing; it covers every media
+      domain and protected files too, since an override lifts a lifecycle hold
+      but never the motion-pattern gate
+    - a queue action that queues no file but starts motion-pattern checks
+      succeeds (`motion_checks_started`): each checked file is held to join
+      production once its check passes
     - the frontend only words it (`frontend/src/lib/season/page-state.ts`):
       one table from key, recovery kind, failure kind and episode or season
       scope to label, detail and recovery action; it never orders jobs

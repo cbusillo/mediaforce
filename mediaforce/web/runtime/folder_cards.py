@@ -18,7 +18,7 @@ from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix,
 from mediaforce.library.workflow_state import build_folder_workflow_states_for_scopes
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES
 from mediaforce.library.workflow_state import WorkflowPayload
-from mediaforce.web.runtime.decision_evidence import queue_motion_holds
+from mediaforce.library.motion_holds import queue_motion_holds
 
 FolderGroup = tuple[str, str, str, str]
 FolderBadge = dict[str, str | None]
@@ -170,6 +170,8 @@ def preview_folder_cards(
 ) -> list[FolderCard]:
     decisions = project_candidates(connection, config, prefixes=[]) if config is not None else []
     decisions_by_item = {decision.item_id: decision for decision in decisions}
+    # Read once: the estimate, lifecycle and workflow state all leave out files held for their motion pattern.
+    motion_holds = queue_motion_holds(connection, decisions)
     folder_history, codec_history = _load_savings_history(
         connection,
         folder_group=folder_group,
@@ -237,7 +239,7 @@ def preview_folder_cards(
             card.known_saved_bytes += known_saved_bytes
         if status != "promoted" and production_included:
             card.pending_count += 1
-            if known_saved_bytes is None and _eligible_for_estimate(status, decision):
+            if known_saved_bytes is None and _eligible_for_estimate(status, decision, motion_holds):
                 if decision is not None and decision.media_domain == "movie":
                     card.estimate_unavailable_count += 1
                 else:
@@ -258,7 +260,6 @@ def preview_folder_cards(
         for card in grouped.values()
         if card.pending_count > 0 and card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
     ]
-    motion_holds = queue_motion_holds(connection, decisions)
     _apply_lifecycle(cards, decisions, motion_holds)
     _apply_folder_workflow_states(connection, cards, decisions, motion_holds, config=config)
     _apply_folder_review_badges(cards, review_badge_for_prefix)
@@ -359,6 +360,8 @@ def list_folder_cards(
         else []
     )
     decisions_by_item = {decision.item_id: decision for decision in decisions}
+    # Read once: the estimate, lifecycle and workflow state all leave out files held for their motion pattern.
+    motion_holds = queue_motion_holds(connection, decisions)
     folder_history, codec_history = _load_savings_history(
         connection,
         folder_group=folder_group,
@@ -448,7 +451,7 @@ def list_folder_cards(
                 card.sort_score += known_saved_bytes / (1024 ** 3)
             elif decision is not None and decision.target_size_blocker is not None:
                 card.estimate_unavailable_count += 1
-            elif _eligible_for_estimate(status, decision):
+            elif _eligible_for_estimate(status, decision, motion_holds):
                 if decision is not None and decision.media_domain == "movie":
                     card.estimate_unavailable_count += 1
                 else:
@@ -477,9 +480,6 @@ def list_folder_cards(
             or card.projected_reclaim_bytes >= minimum_recommended_savings_bytes
         )
     ]
-    motion_holds = (
-        queue_motion_holds(connection, decisions) if include_lifecycle or include_workflow_states else NO_MOTION_HOLDS
-    )
     if include_lifecycle:
         _apply_lifecycle(cards, decisions, motion_holds)
     if include_workflow_states:
@@ -671,10 +671,11 @@ def _apply_lifecycle(
         card.sort_score = age_days * 1_000_000 + card.projected_reclaim_bytes / (1024 ** 3)
 
 
-def _eligible_for_estimate(status: str, decision: CandidateDecision | None) -> bool:
+def _eligible_for_estimate(status: str, decision: CandidateDecision | None, motion_holds: MotionHolds) -> bool:
     if status not in ENCODE_CANDIDATE_STATUSES:
         return True
-    return decision is None or decision.eligible
+    # A file held for its motion pattern stays original, so it saves nothing.
+    return decision is None or (decision.eligible and decision.item_id not in motion_holds.held)
 
 
 def _decision_age_days(decision: CandidateDecision | None) -> float | None:
