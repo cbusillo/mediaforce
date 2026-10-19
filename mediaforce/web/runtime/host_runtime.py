@@ -111,7 +111,7 @@ def host_runtime_rows(
             active_reason = "status check deferred while encode is running"
         elif not status.available:
             active_reason = (
-                "shared storage will reconnect when work starts"
+                "shared storage is reconnecting in the background"
                 if storage_recovery_available
                 else status.message
             )
@@ -148,7 +148,7 @@ def host_runtime_rows(
                 "probe_issues": list(status.issues),
             }
             if storage_recovery_available:
-                status_payload["message"] = "Storage will reconnect when work starts"
+                status_payload["message"] = "Storage is reconnecting in the background"
             needs_action = object_dict(recovery.get(status.key))
             if not status.available and needs_action.get("status") == "action_required" and needs_action.get("reason"):
                 # Background reconnects stopped for something only someone at that computer can do.
@@ -180,6 +180,7 @@ def host_runtime_rows(
                 "active_flag": _host_active_flag(active_encode_count=active_encode_count, queue_active=queue_active),
                 "active_reason": active_reason,
                 "controller_storage_issue": controller_issue,
+                "recovery": host_recovery_row(recovery.get(status.key)),
             }
         )
     return rows
@@ -205,6 +206,21 @@ def _host_eta_seconds(host_running_jobs: list[dict[str, Any]]) -> float | None:
     if host_speed <= 0 or host_remaining_duration_seconds <= 0:
         return None
     return host_remaining_duration_seconds / host_speed
+
+
+def host_recovery_row(record: object) -> dict[str, Any] | None:
+    """The background reconnect state a computer card shows, read from host-recovery.json."""
+    state = object_dict(record)
+    if not state:
+        return None
+    return {
+        "status": state.get("status"),
+        "reason": state.get("reason"),
+        "first_failure_at": state.get("first_failure_at"),
+        "last_check_at": state.get("last_check_at"),
+        "next_retry_at": state.get("next_retry_at"),
+        "failure_count": state.get("failure_count"),
+    }
 
 
 def running_encode_counts_by_host(connection: DBClient) -> dict[str, int]:

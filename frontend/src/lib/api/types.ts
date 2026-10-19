@@ -1073,6 +1073,16 @@ export interface HostRuntime {
 	trust_reset_supported?: boolean;
 	running_jobs?: EncodeQueueJob[];
 	telemetry?: EncodeQueueTelemetry;
+	recovery?: HostRecoveryState | null;
+}
+
+export interface HostRecoveryState {
+	status: 'ready' | 'retrying' | 'action_required';
+	reason?: string | null;
+	first_failure_at?: string | null;
+	last_check_at?: string | null;
+	next_retry_at?: string | null;
+	failure_count?: number;
 }
 
 export interface HostsPayload {
