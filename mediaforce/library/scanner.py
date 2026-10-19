@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from sqlalchemy import and_
+from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import not_
@@ -15,8 +16,10 @@ from sqlalchemy import update
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
+from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.library.evidence_state import library_item_source_fingerprint, sync_library_item_evidence_states
@@ -422,6 +425,7 @@ def _execute_scan_library(
     )
 
     _throw_if_scan_cancelled(process_controller)
+    _reopen_replaced_publishes(connection, updated_at=started_at)
     completed_at = timestamp()
     connection.execute(
         update(scan_runs)
@@ -502,6 +506,48 @@ def _commit_scan_progress_before_probe(
     connection.commit()
     _throw_if_scan_cancelled(process_controller)
     return 0
+
+
+def _reopen_replaced_publishes(connection: DBClient, *, updated_at: str) -> None:
+    """A new original downloaded over a published file starts over, as a new file does.
+
+    Our own publish stamps the item's content change at its publish time, so only a
+    content change recorded after the publish is a replacement.
+    """
+    rows = connection.execute(
+        select(
+            library_items.c.id,
+            library_items.c.content_version_changed_at,
+            staged_artifacts.c.promoted_at,
+            staged_artifacts.c.promoted_path,
+            staged_artifacts.c.archived_source_path,
+        )
+        .join(staged_artifacts, staged_artifacts.c.library_item_id == library_items.c.id)
+        .where(LIBRARY_ITEM_PRESENT)
+        .where(library_items.c.status == "promoted")
+        .where(library_items.c.content_version_changed_at > staged_artifacts.c.promoted_at)
+    ).mappings().all()
+    for row in rows:
+        # The old rollback copy stays in the Cleanup folder; only the publish record is retired.
+        connection.execute(
+            insert(item_events).values(
+                library_item_id=row["id"],
+                event_type="published_copy_replaced",
+                details_json=json.dumps({
+                    "promoted_at": row["promoted_at"],
+                    "promoted_path": row["promoted_path"],
+                    "archived_source_path": row["archived_source_path"],
+                    "replaced_at": row["content_version_changed_at"],
+                }),
+                created_at=updated_at,
+            )
+        )
+        connection.execute(delete(staged_artifacts).where(staged_artifacts.c.library_item_id == row["id"]))
+        connection.execute(
+            update(library_items)
+            .where(library_items.c.id == row["id"])
+            .values(status="discovered", updated_at=updated_at)
+        )
 
 
 def _content_version_changed(
