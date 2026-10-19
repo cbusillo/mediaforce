@@ -19750,6 +19750,7 @@ raise SystemExit(0)
     def test_app_lifespan_joins_writers_and_releases_leadership_before_runtime_lock(self) -> None:
         startup_threads: list[Any] = []
         call_order: list[str] = []
+        encode_cancel_errors: list[ProcessCancelledError | None] = []
 
         class FakeLifecycleThread:
             def __init__(
@@ -19823,7 +19824,7 @@ raise SystemExit(0)
                 return_value=[calibration_controller],
         ), patch(
                 "mediaforce.web.app._cancel_active_encode_processes",
-                side_effect=lambda: call_order.append("encode:cancel"),
+                side_effect=lambda error=None: (call_order.append("encode:cancel"), encode_cancel_errors.append(error)),
         ), patch(
                 "mediaforce.web.app._cancel_active_scan_processes",
                 side_effect=lambda: call_order.append("scan:cancel"),
@@ -19869,6 +19870,10 @@ raise SystemExit(0)
         self.assertIsNone(metric_thread.daemon)
         self.assertLess(call_order.index("calibration:cancel"), call_order.index("workers:stop"))
         self.assertEqual(call_order.count("scan:cancel"), 2)
+        # Mediaforce's own shutdown is not an owner's Stop, so the next start can queue the encodes again.
+        self.assertEqual(len(encode_cancel_errors), 2)
+        for error in encode_cancel_errors:
+            self.assertIsInstance(error, encode_runtime.ControllerShutdownCancelledError)
         self.assertLess(call_order.index("scan:cancel"), call_order.index("workers:stop"))
         self.assertLess(call_order.index("workers:stop"), call_order.index("workers:join"))
         self.assertLess(call_order.index("workers:join"), call_order.index("calibration:joined"))
@@ -22387,6 +22392,63 @@ raise SystemExit(0)
         self.assertIsNone(job["error"])
         self.assertTrue(staging_path.exists())
         self.assertEqual(persist_attempts, 2)
+
+    def _run_job_cancelled_by(
+            self, job_id: str, error: ProcessCancelledError | None, *, owner_stop_requested: bool = False,
+    ) -> dict[str, Any]:
+        source_path = self._create_source_file(f"{job_id}.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                f"manifest-{job_id}.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{job_id}.mkv"))}],
+            )
+            self._save_job(connection, job_id=job_id, manifest_name=f"manifest-{job_id}.json",
+                           host={"key": "local", "label": "Local", "mode": "local"}, status="running",
+                           attempt_count=1)
+            if owner_stop_requested:
+                state = load_queue_state(connection)
+                state.update({"stop_requested": True, "is_paused": True, "updated_at": web_app._now_iso()})
+                save_queue_state(connection, state)
+            connection.commit()
+        controller = ManagedProcessController()
+        deps = web_app._encode_queue_runtime_deps()
+        deps.load_config = Mock(return_value=self.config)
+        deps.ensure_encode_host_ready = Mock(return_value=False)
+
+        def encode_until_cancelled(*_args: Any, **_kwargs: Any) -> list[Any]:
+            controller.cancel(error)
+            controller.throw_if_cancelled()
+            return []
+
+        deps.encode_manifest_items = Mock(side_effect=encode_until_cancelled)
+        encode_runtime.run_encode_job(
+            config_path=self.config.paths.config_path, job_id=job_id, process_controller=controller, deps=deps,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            job = load_encode_job(connection, job_id)
+        assert job is not None
+        return job
+
+    def test_run_encode_job_marks_a_stop_by_mediaforce_shutdown_for_requeue(self) -> None:
+        job = self._run_job_cancelled_by(
+            "job-shutdown", encode_runtime.ControllerShutdownCancelledError("Mediaforce is shutting down."))
+
+        self.assertEqual(job["status"], "stopped")
+        self.assertEqual(job["terminal_reason"], encode_runtime.CONTROLLER_RESTART_STOP_REASON)
+
+    def test_run_encode_job_keeps_an_owner_stop_as_an_owner_stop(self) -> None:
+        for job_id, error, owner_stop_requested in (
+                ("job-owner-stop", None, False),
+                # The owner pressed Stop just before the shutdown cancelled the encode.
+                ("job-owner-stop-then-shutdown",
+                 encode_runtime.ControllerShutdownCancelledError("Mediaforce is shutting down."), True),
+        ):
+            with self.subTest(job_id=job_id):
+                job = self._run_job_cancelled_by(job_id, error, owner_stop_requested=owner_stop_requested)
+
+                self.assertEqual(job["status"], "stopped")
+                self.assertIsNone(job["terminal_reason"])
 
     def _run_job_ended_by_reclaim(self, job_id: str, *, reclaim_first: bool) -> tuple[dict[str, Any], int]:
         source_path = self._create_source_file(f"{job_id}.mkv")
@@ -30720,6 +30782,140 @@ raise SystemExit(0)
             assert job is not None
             self.assertTrue(job["progress"]["remote_cleanup_verified"])
             self.assertIn("remote processes have ended", job["error"])
+
+    def _save_restart_stopped_job(
+            self, connection: DBClient, job_id: str, *, attempt_count: int = 1,
+            terminal_reason: str | None = encode_runtime.CONTROLLER_RESTART_STOP_REASON,
+            host: dict[str, object] | None = None,
+    ) -> tuple[Path, int]:
+        source = self._create_source_file(f"Show.S02E09.{job_id}.mkv")
+        output = self._staging_path(f"Show.S02E09.{job_id}.mkv")
+        item_id = self._insert_library_item(connection, source, status="encoding")
+        self._write_manifest(f"{job_id}.json", [{
+            "library_item_id": item_id, "staging_path": str(output),
+            "rel_path": f"tv/show/Show.S02E09.{job_id}.mkv",
+        }])
+        self._save_job(connection, job_id=job_id, manifest_name=f"{job_id}.json", status="stopped",
+                       attempt_count=attempt_count,
+                       host=host or {"mode": "ssh", "host": "fixture", "label": "M1 mini", "media_access": "mounted"})
+        job = load_encode_job(connection, job_id)
+        assert job is not None
+        job.update({"terminal_reason": terminal_reason, "started_at": web_app._now_iso(),
+                    "finished_at": web_app._now_iso()})
+        save_encode_job(connection, job)
+        connection.commit()
+        return output, item_id
+
+    def test_restart_stopped_episode_with_verified_cleanup_is_queued_again(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            output, item_id = self._save_restart_stopped_job(connection, "restart-verified")
+            partial = staging_runtime.partial_output_path(output)
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_text("frames the old encode left")
+            deps = web_app._encode_queue_runtime_deps()
+            with patch.object(encode_runtime, "end_remote_output_writers") as end_writers:
+                encode_runtime.recover_encode_queue(connection, self.config, deps)
+            end_writers.assert_called()
+            job = load_encode_job(connection, "restart-verified")
+            assert job is not None
+            self.assertEqual(job["status"], "retry_backoff")
+            self.assertEqual(job["attempt_count"], 1)
+            self.assertIsNone(job["terminal_reason"])
+            self.assertTrue(job["progress"]["remote_cleanup_verified"])
+
+            with patch.object(encode_runtime, "run_remote_command", new=_remote_cleanup_succeeds):
+                encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+            job = load_encode_job(connection, "restart-verified")
+            assert job is not None
+            self.assertEqual(job["status"], "queued")
+            self.assertEqual(job["attempt_count"], 1)
+            # The unfinished file is removed before the episode is made again, never reused.
+            self.assertFalse(partial.exists())
+            self.assertEqual(self._library_item_value(connection, item_id, library_items.c.status)["status"], "planned")
+
+    def test_restart_stopped_episode_with_unconfirmed_cleanup_asks_once_and_waits(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_restart_stopped_job(connection, "restart-unconfirmed")
+            deps = web_app._encode_queue_runtime_deps()
+            with patch.object(encode_runtime, "end_remote_output_writers",
+                              side_effect=RuntimeError("ssh: connect to host: Operation timed out")):
+                encode_runtime.recover_encode_queue(connection, self.config, deps)
+                first = load_encode_job(connection, "restart-unconfirmed")
+                encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+                encode_runtime.sweep_stopped_remote_encodes(connection, self.config, deps)
+            job = load_encode_job(connection, "restart-unconfirmed")
+        assert first is not None and job is not None
+        self.assertEqual(job["status"], "stopped")
+        self.assertEqual(job["attempt_count"], 1)
+        self.assertNotIn("remote_cleanup_verified", object_dict(job["progress"]))
+        self.assertIn("Show.S02E09.restart-unconfirmed", job["error"])
+        self.assertIn("M1 mini", job["error"])
+        # One message: a later pass does not reword or repeat it.
+        self.assertEqual(job["error"], first["error"])
+        reason, label, needs_owner = encode_runtime.unfinished_child_reason(job)
+        self.assertTrue(needs_owner)
+        self.assertIn("M1 mini", label)
+
+    def test_owner_stop_stays_stopped_after_its_cleanup_is_verified(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_restart_stopped_job(connection, "owner-stop", terminal_reason=None)
+            deps = web_app._encode_queue_runtime_deps()
+            with patch.object(encode_runtime, "end_remote_output_writers"):
+                encode_runtime.recover_encode_queue(connection, self.config, deps)
+                encode_runtime.reconcile_encode_jobs(connection, self.config, deps)
+            job = load_encode_job(connection, "owner-stop")
+        assert job is not None
+        self.assertEqual(job["status"], "stopped")
+        self.assertTrue(job["progress"]["remote_cleanup_verified"])
+        self.assertEqual(encode_runtime.unfinished_child_reason(job)[0], "stopped")
+
+    def test_owner_stop_keeps_a_restart_stopped_episode_stopped(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_restart_stopped_job(connection, "restart-then-owner-stop")
+            state = load_queue_state(connection)
+            state.update({"stop_requested": True, "is_paused": True, "updated_at": web_app._now_iso()})
+            save_queue_state(connection, state)
+            connection.commit()
+            # The owner's Stop runs the sweep after the computer is reachable again.
+            with patch.object(encode_runtime, "end_remote_output_writers"):
+                encode_runtime.sweep_stopped_remote_encodes(
+                    connection, self.config, web_app._encode_queue_runtime_deps())
+            job = load_encode_job(connection, "restart-then-owner-stop")
+        assert job is not None
+        self.assertEqual(job["status"], "stopped")
+        self.assertIsNone(job["terminal_reason"])
+        self.assertTrue(job["progress"]["remote_cleanup_verified"])
+
+    def test_restart_stop_on_its_last_attempt_is_not_queued_again(self) -> None:
+        deps = web_app._encode_queue_runtime_deps()
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_restart_stopped_job(connection, "restart-last", attempt_count=deps.encode_job_max_attempts)
+            with patch.object(encode_runtime, "end_remote_output_writers"):
+                encode_runtime.recover_encode_queue(connection, self.config, deps)
+            job = load_encode_job(connection, "restart-last")
+        assert job is not None
+        self.assertEqual(job["status"], "stopped")
+        self.assertTrue(encode_runtime.unfinished_child_reason(job)[2])
+
+    def test_restart_stopped_streamed_episode_is_queued_again_without_a_remote_check(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_restart_stopped_job(connection, "restart-stream", host={
+                "mode": "ssh", "host": "fixture", "label": "chris-testing", "media_access": "stream"})
+            with patch.object(encode_runtime, "end_remote_output_writers") as end_writers:
+                encode_runtime.recover_encode_queue(connection, self.config, web_app._encode_queue_runtime_deps())
+            end_writers.assert_not_called()
+            job = load_encode_job(connection, "restart-stream")
+        assert job is not None
+        self.assertEqual(job["status"], "retry_backoff")
+
+    def test_restart_stopped_local_episode_asks_instead_of_queueing_again(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_restart_stopped_job(connection, "restart-local", host={"mode": "local", "label": "Studio"})
+            encode_runtime.recover_encode_queue(connection, self.config, web_app._encode_queue_runtime_deps())
+            job = load_encode_job(connection, "restart-local")
+        assert job is not None
+        self.assertEqual(job["status"], "stopped")
+        self.assertIn("Studio", job["error"])
 
     def test_reconcile_does_not_poll_stopped_remote_host(self) -> None:
         output = self._staging_path("offline.mkv")

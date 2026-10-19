@@ -104,7 +104,7 @@ from mediaforce.library.candidate_selection import CandidateDecision, encode_can
     scope_lifecycle_payload_from_decisions, workflow_eligibility
 from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.hosts.types import HostSetupResult
-from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.encoding.audio_quality import check_sample_audio
 from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.quality import quality_toolchain_identity, run_sample_encode, select_quality_metric
@@ -212,8 +212,8 @@ from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEA
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
 from mediaforce.web.runtime.episode_progress import folder_episodes_payload
 from mediaforce.web.runtime.sample_history import sample_history_payload
-from mediaforce.web.runtime.encode_runtime import mark_host_cooldowns, release_host_cooldowns, sync_encode_job_parent, \
-    sweep_stopped_remote_encodes
+from mediaforce.web.runtime.encode_runtime import ControllerShutdownCancelledError, mark_host_cooldowns, \
+    release_host_cooldowns, sync_encode_job_parent, sweep_stopped_remote_encodes
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle, run_supervised_worker_loop
@@ -659,14 +659,14 @@ def create_app(
                 shutdown_event.set()
                 for controller in _active_calibration_process_controllers():
                     controller.cancel()
-                _cancel_active_encode_processes()
+                _cancel_encode_processes_for_shutdown()
                 _cancel_active_scan_processes()
                 if background_runtime is not None:
                     background_runtime.stop()
                     background_runtime.join()
                 for controller in _active_calibration_process_controllers():
                     controller.cancel()
-                _cancel_active_encode_processes()
+                _cancel_encode_processes_for_shutdown()
                 _cancel_active_scan_processes()
                 _wait_for_calibration_submissions()
                 _wait_for_encode_queue_threads()
@@ -5205,10 +5205,16 @@ def _wait_for_encode_queue_threads() -> None:
             ENCODE_QUEUE_THREADS_CONDITION.wait()
 
 
-def _cancel_active_encode_processes() -> None:
+def _cancel_active_encode_processes(error: ProcessCancelledError | None = None) -> None:
     for controller in _active_encode_process_controllers():
-        controller.cancel()
-    ENCODE_QUEUE_PROCESS.cancel()
+        controller.cancel(error)
+    ENCODE_QUEUE_PROCESS.cancel(error)
+
+
+def _cancel_encode_processes_for_shutdown() -> None:
+    # The next start queues these episodes again once their earlier encodes are confirmed ended;
+    # an owner's Stop uses the plain cancel and stays stopped.
+    _cancel_active_encode_processes(ControllerShutdownCancelledError("Mediaforce is shutting down."))
 
 
 def _dispatch_encode_job(*, config_path: Path, job_id: str) -> None:
