@@ -679,7 +679,15 @@ stop time, and draining is distinct from off-schedule or unavailable. An episode
 stopped at close is labeled `Paused until the next work window` with its
 automatic whole-episode restart expectation, while an explicit bypass is
 labeled `Not limited by the work window` and a job that cannot fit any configured window links to the work-window
-settings that need attention.
+settings that need attention. A waiting reason that quotes a runtime estimate
+names the computer whose estimate it used.
+
+A computer the queue holds out after repeated failures shows `Cooling down`
+with when Mediaforce tries it again; Prepare clears the hold at once. Time
+estimates stay blank until one exists: quality search and an unmeasured job
+never show `0s`. Queue and season estimates cover only work that will run on
+its own and say how many items they leave out because they wait for you or did
+not finish.
 
 Transient SSH transport failures, including a remote host reboot or an OpenSSH
 `closed by remote host` disconnect, enter bounded retry backoff instead of

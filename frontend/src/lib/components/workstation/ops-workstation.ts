@@ -1,11 +1,13 @@
 import type {
 	DashboardSummaryPayload,
 	EncodeQueueJob,
+	EncodeQueueSummary,
 	HostRuntime,
 	HostsPayload,
 	ReviewReadySample
 } from '$lib/api/types';
 import { folderRoutePath } from '$lib/folder-display';
+import { formatScheduleMoment, leftOutItemsCopy } from '$lib/format';
 import {
 	hostSchedulePresentation,
 	jobSchedulePresentation,
@@ -589,10 +591,27 @@ export function workerCapabilitiesSummary(capabilities: string[]): string {
 	return labels.length ? labels.join(' · ') : 'No work assigned to this computer';
 }
 
+/**
+ * A computer Mediaforce holds out after repeated failures, while it runs nothing and its work
+ * window is open; outside the window, the window is the reason it waits.
+ */
+export function hostCoolingDown(host: HostRuntime, now = new Date()): boolean {
+	if (!host.available || host.schedule_open === false) return false;
+	if (numberValue(host.active_encode_count) > 0) return false;
+	const until = Date.parse(String(host.cooldown_until ?? ''));
+	return Number.isFinite(until) && until > now.getTime();
+}
+
+function hostCooldownReason(host: HostRuntime, now = new Date()): string {
+	const until = formatScheduleMoment(host.cooldown_until, host.schedule_timezone, now);
+	return `Held back after repeated failures. Mediaforce tries it again ${until ?? 'soon'}, or prepare it to try now.`;
+}
+
 export function hostWorkReason(
 	host: HostRuntime,
 	hosts: HostsPayload | null | undefined,
-	dashboard: DashboardSummaryPayload | null | undefined
+	dashboard: DashboardSummaryPayload | null | undefined,
+	now = new Date()
 ): string {
 	const schedule = activitySchedulePresentationCopy(
 		hostSchedulePresentation(host, dashboard?.encode_queue),
@@ -605,6 +624,7 @@ export function hostWorkReason(
 			'Outside its work schedule; this is a normal wait.'
 		);
 	}
+	if (hostCoolingDown(host, now)) return hostCooldownReason(host, now);
 	const activeCount = numberValue(host.active_encode_count);
 	const maxParallel = Math.max(numberValue(host.max_parallel_encodes), 1);
 	if (host.available && activeCount > 0) {
@@ -1165,7 +1185,10 @@ export function buildOpsReadinessSummary(
 			detailParts.push(reviewReadySummaryCopy(reviewReadyCount));
 		}
 		if (queue?.telemetry?.eta_copy) {
-			detailParts.push(`Estimated finish in ${queue.telemetry.eta_copy}`);
+			const leftOut = leftOutItemsCopy(queue.telemetry);
+			detailParts.push(
+				`Estimated finish in ${queue.telemetry.eta_copy}${leftOut ? ` (${leftOut.toLowerCase()})` : ''}`
+			);
 		}
 		return {
 			tone: 'active',
@@ -1322,8 +1345,7 @@ export function buildOpsStatusTiles(
 		{
 			label: 'Compression queue',
 			value: `${visibleRunningCount} working · ${visibleQueuedCount} waiting`,
-			detail:
-				encode?.telemetry?.eta_copy ?? `${encode?.needs_attention_count ?? 0} retry available`,
+			detail: compressionQueueEtaCopy(encode),
 			tone:
 				(encode?.needs_attention_count ?? 0) > 0
 					? 'wait'
@@ -1413,6 +1435,13 @@ export function buildOpsFooterSignals(
 	];
 }
 
+function compressionQueueEtaCopy(encode: EncodeQueueSummary | null | undefined): string {
+	const eta = encode?.telemetry?.eta_copy;
+	if (!eta) return `${encode?.needs_attention_count ?? 0} retry available`;
+	const leftOut = leftOutItemsCopy(encode?.telemetry);
+	return leftOut ? `${eta} · ${leftOut}` : eta;
+}
+
 export function hostTone(
 	host: HostRuntime,
 	fleetHasConnectedHost = false,
@@ -1420,6 +1449,7 @@ export function hostTone(
 ): ShellTone {
 	if (host.storage_recovery_available === true) return 'wait';
 	if (!host.available) return fleetHasConnectedHost ? 'wait' : 'fail';
+	if (hostCoolingDown(host)) return 'wait';
 	const schedule = activitySchedulePresentationCopy(
 		hostSchedulePresentation(host, dashboard?.encode_queue),
 		hostCopyTerms([host])
@@ -1436,6 +1466,7 @@ export function hostStateCopy(
 ): string {
 	if (host.storage_recovery_available === true) return 'Reconnecting storage';
 	if (!host.available) return 'Unavailable';
+	if (hostCoolingDown(host)) return 'Cooling down';
 	const schedule = activitySchedulePresentationCopy(
 		hostSchedulePresentation(host, dashboard?.encode_queue),
 		hostCopyTerms([host])

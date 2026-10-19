@@ -156,3 +156,23 @@ export function formatScheduleCountdown(
 	if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 	return `${remainingMinutes}m`;
 }
+
+export interface LeftOutItemCounts {
+	left_out_needs_attention_item_count?: number;
+	left_out_failed_item_count?: number;
+}
+
+/** Says how many items an estimate leaves out, or '' when it covers everything. */
+export function leftOutItemsCopy(counts: LeftOutItemCounts | null | undefined): string {
+	const needsAttention = Math.max(
+		0,
+		Math.trunc(Number(counts?.left_out_needs_attention_item_count) || 0)
+	);
+	const failed = Math.max(0, Math.trunc(Number(counts?.left_out_failed_item_count) || 0));
+	const parts: string[] = [];
+	if (needsAttention) {
+		parts.push(`${needsAttention} ${needsAttention === 1 ? 'item' : 'items'} waiting for you`);
+	}
+	if (failed) parts.push(`${failed} that didn't finish`);
+	return parts.length ? `Leaves out ${parts.join(' and ')}` : '';
+}

@@ -1432,6 +1432,46 @@ describe('Ops workstation mapping', () => {
 		).toBe('Idle');
 	});
 
+	it('says when a computer is held back after repeated failures', () => {
+		const [ready] = hostsFixture().hosts;
+		const cooling = {
+			...ready,
+			active_encode_count: 0,
+			cooldown_until: '2999-01-01T12:00:00+00:00'
+		};
+		const hosts: HostsPayload = { ...hostsFixture(), hosts: [cooling] };
+
+		expect(hostStateCopy(cooling)).toBe('Cooling down');
+		expect(hostTone(cooling)).toBe('wait');
+		expect(hostWorkReason(cooling, hosts, dashboardFixture())).toMatch(
+			/^Held back after repeated failures\. Mediaforce tries it again .+, or prepare it to try now\.$/
+		);
+		// Work already running on it, or a cooldown that has run out, reads as before.
+		expect(hostStateCopy({ ...cooling, active_encode_count: 1 })).toBe('Working');
+		expect(hostStateCopy({ ...cooling, cooldown_until: '2000-01-01T00:00:00+00:00' })).not.toBe(
+			'Cooling down'
+		);
+	});
+
+	it('says how many items the queue estimate leaves out', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.telemetry = {
+			eta_copy: '5h 2m',
+			left_out_needs_attention_item_count: 2,
+			left_out_failed_item_count: 1
+		};
+
+		const tiles = buildOpsStatusTiles(dashboard, hostsFixture(), null);
+		const summary = buildOpsReadinessSummary(dashboard, hostsFixture(), null);
+
+		expect(tiles.find((tile) => tile.label === 'Compression queue')?.detail).toBe(
+			"5h 2m · Leaves out 2 items waiting for you and 1 that didn't finish"
+		);
+		expect(summary.detail).toContain(
+			"Estimated finish in 5h 2m (leaves out 2 items waiting for you and 1 that didn't finish)"
+		);
+	});
+
 	it('treats storage-recoverable computers as reconnecting capacity', () => {
 		const dashboard = dashboardFixture();
 		dashboard.encode_queue.needs_attention_count = 0;

@@ -23,7 +23,7 @@ import type {
 	TargetSizeProvenance
 } from '$lib/api/types';
 import { folderRoutePath } from '$lib/folder-display';
-import { formatFileSize as formatOperatorFileSize } from '$lib/format';
+import { formatFileSize as formatOperatorFileSize, leftOutItemsCopy } from '$lib/format';
 import type { HumanSeasonTone } from './page-state';
 
 export interface SeasonPromotionIntegrityBlocker {
@@ -1935,6 +1935,13 @@ export function currentEncodeProgress(job: EncodeQueueJob | null | undefined) {
 		total: numberValue(progress?.total_item_count || job?.shard_count || record(job).item_count),
 		currentEpisode: episodeLabel(progress?.current_item_rel_path),
 		eta: text(progress?.eta_copy),
+		// The estimate and, beside it, the episodes it does not count.
+		etaDetail: [
+			text(progress?.eta_copy),
+			text(progress?.eta_copy) ? leftOutItemsCopy(progress) : ''
+		]
+			.filter(Boolean)
+			.join(' · '),
 		hosts: Array.isArray(record(progress).active_host_labels)
 			? (record(progress).active_host_labels as unknown[]).map(String).filter(Boolean)
 			: []
