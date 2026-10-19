@@ -652,3 +652,132 @@ def test_host_alert_reads_as_sentences(config: MediaforceConfig, empty_host_stat
         recovery.process_host_recovery_once(config)
         alert_clock.now.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
         assert _host_alert(config)["detail"].startswith("Fix hostname or DNS first. Mediaforce is retrying")
+
+
+def test_two_computer_outage_keeps_work_on_the_other_and_readmits_after_a_fresh_check(
+        config: MediaforceConfig, empty_host_status_cache: None,
+) -> None:
+    """Worker loses its storage while Den keeps encoding; nothing waits on the Director (#943)."""
+    from mediaforce.core.db import open_db
+    from mediaforce.core.db_tables import encode_jobs
+    from mediaforce.web.runtime import controller_storage_recovery as controller
+
+    config.raw["remote_hosts"] = [
+        {**config.raw["remote_hosts"][0], "capabilities": ["encode_queue"]},
+        {"host": "user@den", "label": "Den", "media_access": "mounted", "capabilities": ["encode_queue"],
+         "max_parallel_encodes": 2},
+    ]
+    worker_storage = {"connected": True}
+    checked: list[str] = []
+
+    def worker(*, available: bool) -> HostStatus:
+        row = status(available=available)
+        row.priority = 2  # Worker is preferred whenever the queue may use it.
+        return row
+
+    def probe(_config: MediaforceConfig, host: dict[str, Any]) -> HostStatus:
+        checked.append(host["host"])
+        if host["host"] == "user@worker":
+            return worker(available=worker_storage["connected"])
+        return _other("user@den", available=True)
+
+    # Den is already encoding one file and has room for another.
+    with open_db(config.paths.db_path) as db:
+        db.execute(encode_jobs.insert().values(
+            job_id="den-running", prefix="tv/Show", status="running", manifest_path="/runs/den.json",
+            host_json=json.dumps({"key": "user@den", "host": "user@den", "label": "Den"}),
+            created_at=NOW.isoformat(), updated_at=NOW.isoformat(),
+        ))
+    ready = ControllerMountProbe(True, True, Path("/Volumes/media"), "//user@nas/media", "smbfs", True)
+    with patch.object(controller.sys, "platform", "darwin"), patch.object(
+        controller, "probe_controller_mount", return_value=ready,
+    ):
+        controller.process_controller_storage_recovery_once(config)
+    with patch.object(host_status, "collect_host_statuses", side_effect=lambda cfg: [
+        probe(cfg, host) for host in cfg.remote_hosts
+    ]):
+        host_status.refresh_host_status_cache(config)
+
+    def chosen() -> str:
+        with open_db(config.paths.db_path) as connection:
+            host, reason = web_app._select_encode_host(connection, config, {})
+        assert host is not None, reason
+        return str(host["key"])
+
+    attempts: list[tuple[datetime, datetime]] = []
+
+    def no_ui_mount(_config: MediaforceConfig, host: dict[str, Any], _status: HostStatus) -> NoUiMountResult:
+        assert host["host"] == "user@worker", "only the computer that lost storage reconnects"
+        record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
+        assert record["mount_uncertain"], "the attempt is saved before the connection is tried"
+        attempts.append((clock.now.return_value, datetime.fromisoformat(record["next_retry_at"])))
+        return NoUiMountResult(ok=False)
+
+    def run_pass(at: datetime) -> None:
+        clock.now.return_value = alert_clock.now.return_value = at
+        recovery.process_host_recovery_once(config)
+        alerts.record_recovery_alerts(config)
+
+    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+        alerts, "datetime", wraps=datetime,
+    ) as alert_clock, patch.object(recovery, "probe_host_status", side_effect=probe), patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", side_effect=no_ui_mount,
+    ), patch("mediaforce.remote.recover_remote_host_mounts", side_effect=AssertionError("Finder dialog")), patch(
+        "mediaforce.hosts.mount_runtime.mount_smb_shares", side_effect=AssertionError("Finder dialog"),
+    ), patch("subprocess.run", side_effect=AssertionError("real command")), patch.object(
+        host_status, "_schedule_host_status_refresh", side_effect=AssertionError("unstubbed full check"),
+    ), patch.object(alerts.LOGGER, "warning") as warning, patch.object(alerts.LOGGER, "info") as recovered:
+        run_pass(NOW)
+        assert chosen() == "user@worker"
+        assert not alerts.recovery_alerts(config)
+
+        # Worker's storage drops just before its next routine check, 30 seconds after the last one.
+        # The worker loop polls every 30 seconds; poll more often to prove that the saved backoff,
+        # not the poll rate, paces reconnects.
+        worker_storage["connected"] = False
+        outage = NOW + timedelta(seconds=30)
+        seen_alerts: list[list[dict[str, str]]] = []
+        for step in range(0, 12 * 60, 10):
+            run_pass(outage + timedelta(seconds=step))
+            seen_alerts.append(alerts.recovery_alerts(config))
+            assert chosen() == "user@den", "Den keeps taking work while Worker is out"
+            cards = _host_cards(config)
+            assert cards["user@den"]["available"] and cards["user@den"]["active_encode_count"] == 1
+            assert not cards["user@worker"]["available"]
+            assert cards["user@worker"]["recovery"]["status"] == "retrying"
+
+        assert len(attempts) >= 4, "background reconnects keep trying on their own"
+        for (_previous, due), (attempted, _next_due) in zip(attempts, attempts[1:]):
+            assert attempted >= due, "a reconnect never runs before its backoff ends"
+        gaps = [later[0] - earlier[0] for earlier, later in zip(attempts, attempts[1:])]
+        assert gaps == sorted(gaps) and gaps[-1] <= timedelta(seconds=recovery._MAX_RETRY_SECONDS + 10)
+
+        # Exactly one warning: for Worker, not before the outage is prolonged, the same one every pass.
+        first_shown = next(index for index, current in enumerate(seen_alerts) if current)
+        assert timedelta(minutes=5) <= timedelta(seconds=10 * first_shown) < timedelta(minutes=5, seconds=10)
+        assert all(current == seen_alerts[first_shown] for current in seen_alerts[first_shown:])
+        [alert] = seen_alerts[-1]
+        assert alert["host_key"] == "user@worker" and alert["title"] == "Worker is unavailable"
+        assert alert["detail"].endswith("1 other computer is still working.")
+        assert warning.call_count == 1
+        recovered.assert_not_called()
+
+        # Someone reconnects Worker's storage. Until a check confirms it, nothing changes.
+        worker_storage["connected"] = True
+        last_attempt, due = attempts[-1]
+        checked.clear()
+        run_pass(due - timedelta(seconds=1))
+        assert "user@worker" not in checked
+        assert chosen() == "user@den", "Worker is not taken back on saved state alone"
+        assert len(alerts.recovery_alerts(config)) == 1
+
+        attempt_count = len(attempts)
+        run_pass(due)
+        assert "user@worker" in checked
+        assert len(attempts) == attempt_count, "the check found storage connected; nothing to reconnect"
+        assert recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["status"] == "ready"
+        assert not alerts.recovery_alerts(config)
+        assert chosen() == "user@worker", "the fresh check admits Worker again"
+        assert _host_cards(config)["user@worker"]["available"]
+        assert warning.call_count == 1
+        recovered.assert_called_once()
