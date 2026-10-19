@@ -23878,6 +23878,95 @@ raise SystemExit(0)
         self.assertEqual(aggregated["running_shard_count"], 1)
         self.assertEqual(aggregated["progress"]["progress_state"], "running")
 
+    def test_running_season_does_not_show_a_recovered_episodes_stopped_message(self) -> None:
+        manifest_path = self._write_manifest(
+            "manifest-parent-recovered-stop.json",
+            [
+                {"library_item_id": 1, "duration_seconds": 120.0, "source_size_bytes": 1000},
+                {"library_item_id": 2, "duration_seconds": 180.0, "source_size_bytes": 2000},
+            ],
+        )
+        now = web_app._now_iso()
+        stopped_message = "Encode queue job was stopped; its remote processes have ended."
+
+        def job(job_id: str, *, status: str, kind: str = "shard", indexes: list[int] | None = None,
+                error: str | None = None) -> dict[str, Any]:
+            return {
+                "job_id": job_id, "prefix": "tv/show", "job_kind": kind,
+                "parent_job_id": None if kind == "folder" else "folder-recovered-parent",
+                "status": status, "manifest_path": str(manifest_path), "manifest_indexes": indexes,
+                "item_count": len(indexes or [0, 1]), "saved_profile_path": None, "host": {}, "last_host": {},
+                "notes": "", "bypass_schedule": False, "attempt_count": 1, "process_pid": None, "error": error,
+                "leased_at": None, "lease_expires_at": None, "heartbeat_at": None, "worker_id": None,
+                "retry_not_before": None, "waiting_reason": None, "terminal_reason": None,
+                "last_failure_kind": None, "last_failure_at": None, "host_cooldown_until": None,
+                "created_at": now, "started_at": now, "finished_at": None, "updated_at": now,
+            }
+
+        deps = web_app._encode_queue_runtime_deps()
+        with open_db(self.config.paths.db_path) as connection:
+            # Restart recovery stopped the season and wrote its message on the season too.
+            save_encode_job(connection, job("folder-recovered-parent", status="running", kind="folder",
+                                            error=stopped_message))
+            save_encode_job(connection, job("recovered-stopped-shard", status="stopped", indexes=[0],
+                                            error=stopped_message))
+            save_encode_job(connection, job("resumed-running-shard", status="running", indexes=[1]))
+            running = encode_runtime.sync_encode_job_parent(
+                connection, job("resumed-running-shard", status="running", indexes=[1]), deps,
+            )
+            assert running is not None
+            self.assertEqual(running["status"], "running")
+            self.assertIsNone(running["error"])
+            self.assertEqual(
+                [entry["reason"] for entry in running["progress"]["unfinished_breakdown"]], ["stopped"],
+            )
+
+            # Once nothing in the season is working, the stopped message is the season's real state.
+            save_encode_job(connection, job("resumed-running-shard", status="stopped", indexes=[1]))
+            stopped = encode_runtime.sync_encode_job_parent(
+                connection, job("resumed-running-shard", status="stopped", indexes=[1]), deps,
+            )
+            assert stopped is not None
+            self.assertEqual(stopped["status"], "stopped")
+            self.assertEqual(stopped["error"], stopped_message)
+
+    def test_claimed_job_that_was_stopped_before_runs_without_its_old_message(self) -> None:
+        source_path = self._create_source_file("episode-resumed.mkv")
+        staging_path = self._staging_path("episode-resumed.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path)
+            self._write_manifest(
+                "manifest-resumed.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-resumed",
+                manifest_name="manifest-resumed.json",
+                host={},
+                status="queued",
+                attempt_count=1,
+            )
+            requeued = load_encode_job(connection, "job-resumed")
+            assert requeued is not None
+            # Requeueing a recovered job keeps the message restart recovery wrote while it was stopped.
+            requeued["error"] = "Encode queue job was stopped; its remote processes have ended."
+            save_encode_job(connection, requeued)
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[])
+
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                    return_value=({"key": "local", "label": "Local", "mode": "local"}, None),
+            ):
+                claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
+
+            assert claimed is not None
+            self.assertEqual(claimed["status"], "running")
+            self.assertIsNone(claimed["error"])
+
     def test_aggregate_encode_parent_job_includes_all_quality_failures(self) -> None:
         manifest_path = self._write_manifest(
             "manifest-parent-quality-failures.json",

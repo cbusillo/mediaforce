@@ -37,8 +37,8 @@ from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
-from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, list_child_encode_jobs, \
-    load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
+from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, \
+    list_child_encode_jobs, load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
 from mediaforce.core.process_control import (
     ManagedProcessController,
     ProcessCancelledError,
@@ -1247,7 +1247,12 @@ def aggregate_encode_parent_job(
         if terminal_reason:
             break
     error = None
-    for child in attention_children + failed_children + stopped_children:
+    # A stopped episode in a season that is still working is listed in the unfinished breakdown;
+    # its "stopped" message would read as the whole season having stopped.
+    error_children = attention_children + failed_children
+    if status not in ACTIVE_ENCODE_JOB_STATUSES:
+        error_children += stopped_children
+    for child in error_children:
         error = str(child.get("error") or "").strip() or None
         if error:
             break
@@ -3621,6 +3626,8 @@ def claim_next_runnable_encode_job(
                     waiting_reason=None,
                     terminal_reason=None,
                     last_failure_kind=None,
+                    # A job that was stopped or failed earlier is running again; its old message is stale.
+                    error=None,
                     progress_json=json.dumps(_initial_encode_job_progress(next_job, deps), sort_keys=True),
                     updated_at=now_iso,
                 )
