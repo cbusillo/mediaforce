@@ -151,7 +151,10 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   both finishes the season, the kept episodes stay listed with their reason and
   an undo, and undoing returns the season to its held state. `tv/Motion
   Kept/Season 1` has one published episode and one kept original, so it reads as
-  finished and names the kept episode.
+  finished and names the kept episode. `tv/Motion Held/Season 3` has one
+  episode to compress and one held, so its ready page and the exact episode
+  page of a held Season 1 episode still offer `Keep original` beside their own
+  state.
 - Unclear motion decision: `tv/Unclear Motion` has one fully measured episode
   whose motion pattern stays ambiguous and one that looks partly interlaced. The
   show route must offer one `Encode as-is` decision naming the episode to

@@ -64,6 +64,7 @@
 		measuredFollowupRequest,
 		motionHoldNotes,
 		motionHolds,
+		showsMotionKeepFiles,
 		overlappingCalibrationActivity,
 		queueAdmission,
 		predictedEpisodeSize,
@@ -1942,7 +1943,7 @@
 			</section>
 		{/if}
 
-		{#if !folder.pending && isSeriesScope && (scopeMotionHolds.heldItems.length > 0 || scopeMotionHolds.keptItems.length > 0)}
+		{#if !folder.pending && isSeriesScope && showsMotionKeepFiles(scopeMotionHolds)}
 			<section class="lifecycle-notice" aria-label="Episodes held for their motion pattern">
 				<span aria-hidden="true">◆</span>
 				<MotionKeepFiles
@@ -3042,20 +3043,6 @@
 							: 'New files stay separate until they pass their checks.'}
 						{motionHoldSentences.join(' ')} Nothing is queued until you choose the action below.
 					</p>
-					{#if scopeMotionHolds.heldFiles.length > 0}
-						<details class="motion-held-files">
-							<summary>
-								{scopeMotionHolds.heldFiles.length === 1
-									? 'Show the episode that stays original'
-									: `Show the ${scopeMotionHolds.heldFiles.length} episodes that stay original`}
-							</summary>
-							<ul>
-								{#each scopeMotionHolds.heldFiles as relPath (relPath)}
-									<li>{episodeFileName(relPath)}</li>
-								{/each}
-							</ul>
-						</details>
-					{/if}
 				{/if}
 				<div class="ready-summary">
 					{#if checksOnly}
@@ -3186,29 +3173,6 @@
 							: `The show page can encode ${admission.asIsCount === motionHeldEpisodeCount ? (motionHeldEpisodeCount === 1 ? 'it' : 'them') : admission.asIsCount} as-is.`
 						: ''}
 				</p>
-				{#if isSeriesScope && scopeMotionHolds.heldFiles.length > 0}
-					<details class="motion-held-files">
-						<summary>
-							{scopeMotionHolds.heldFiles.length === 1
-								? 'Show the episode that stays original'
-								: `Show the ${scopeMotionHolds.heldFiles.length} episodes that stay original`}
-						</summary>
-						<ul>
-							{#each scopeMotionHolds.heldFiles as relPath (relPath)}
-								<li>{episodeFileName(relPath)}</li>
-							{/each}
-						</ul>
-					</details>
-				{:else if !isSeriesScope}
-					<MotionKeepFiles
-						held={scopeMotionHolds.heldItems}
-						kept={scopeMotionHolds.keptItems}
-						busy={actionPending}
-						finishes={isExactItemScope ? 'episode' : 'season'}
-						onKeep={keepMotionOriginal}
-						onUndo={undoMotionKeep}
-					/>
-				{/if}
 				{#if motionDecisionPending && folder.series_context && !isSeriesScope}
 					<div class="motion-held-actions">
 						<a class="primary-button" href={resolve(folderRoutePath(folder.series_context.prefix))}
@@ -3603,11 +3567,13 @@
 			</div>
 		{/if}
 
-		<!-- Episodes kept original stay listed with their undo in every other state; the held room lists them itself. -->
-		{#if !folder.pending && !isSeriesScope && humanState.key !== 'motion_held' && scopeMotionHolds.keptItems.length > 0}
+		<!-- Held and kept episodes keep their decision in every state, as the show page lists them above. -->
+		{#if !folder.pending && !isSeriesScope && showsMotionKeepFiles(scopeMotionHolds)}
 			<MotionKeepFiles
+				held={scopeMotionHolds.heldItems}
 				kept={scopeMotionHolds.keptItems}
 				busy={actionPending}
+				finishes={isExactItemScope ? 'episode' : 'season'}
 				onKeep={keepMotionOriginal}
 				onUndo={undoMotionKeep}
 			/>
@@ -5535,19 +5501,6 @@
 	.motion-decision__action {
 		align-self: center;
 		flex: none;
-	}
-
-	.motion-held-files {
-		color: var(--mf-fg-secondary);
-		font-size: 13px;
-		margin-top: 14px;
-		max-width: 720px;
-		text-align: left;
-	}
-
-	.motion-held-files ul {
-		margin: 6px 0 0;
-		padding-left: 18px;
 	}
 
 	.motion-held-actions {

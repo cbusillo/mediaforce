@@ -16,12 +16,14 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.db_tables import item_events, library_items, motion_keep_decisions
+from mediaforce.core.db_tables import item_events, library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.encoding.cadence import cadence_hold_reason
 from mediaforce.library.evidence_state import library_item_source_fingerprint
 from mediaforce.library.item_presence import library_item_is_missing
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope
 from mediaforce.library.motion_holds import cadence_safety_partition, cadence_summary_payload
+from mediaforce.library.evidence_queue import release_kept_motion_work
+from mediaforce.web.runtime.folder_actions import active_encode_library_item_ids
 
 KEPT_ORIGINAL_EVENT = "motion_kept_original"
 KEEP_UNDONE_EVENT = "motion_keep_original_undone"
@@ -59,6 +61,8 @@ def keep_motion_held_originals(
                     .on_conflict_do_update(index_elements=[motion_keep_decisions.c.library_item_id], set_=values)
                 )
                 _record_event(connection, row, KEPT_ORIGINAL_EVENT, now_iso, {**values, "rel_path": row["rel_path"]})
+            # A motion-pattern check queued for a kept file would only measure what no one will encode.
+            release_kept_motion_work(connection, updated_at=now_iso)
     except _Refused as refused:
         return refused.payload()
     count = len(to_keep)
@@ -131,10 +135,49 @@ def _files_to_keep(
             "Refresh the page to see where it is now."
         )
     to_keep = [row for item_id, row in rows.items() if item_id not in partition.kept_item_ids]
+    _refuse_files_with_work(connection, prefix, to_keep, noun)
     unidentified = next((row for row in to_keep if not library_item_source_fingerprint(row)), None)
     if unidentified is not None:
         raise _Refused(f"Mediaforce can't identify the source of {_file_name(unidentified)}, so it can't be kept.")
     return noun, to_keep
+
+
+def _refuse_files_with_work(
+        connection: DBClient,
+        prefix: str,
+        rows: list[Mapping[str, Any]],
+        noun: str,
+) -> None:
+    """Refuse when a named file has encode work queued, running or retrying, or a copy not yet published.
+
+    Keeping original only settles a file nothing is making: work already under way would still make
+    and publish it, so the owner stops or finishes that first.
+    """
+    if not rows:
+        return
+    ids = {int(row["id"]) for row in rows}
+    active = active_encode_library_item_ids(connection, prefix)
+    if active is None:
+        raise _Refused(
+            f"Mediaforce can't tell which {noun}s this folder's current work is making. "
+            "Try again once that work finishes."
+        )
+    staged = set(
+        connection.execute(
+            select(staged_artifacts.c.library_item_id).where(
+                staged_artifacts.c.library_item_id.in_(sorted(ids)),
+                staged_artifacts.c.promoted_at.is_(None),
+            )
+        ).scalars()
+    )
+    busy = sorted(_file_name(row) for row in rows if int(row["id"]) in active | staged)
+    if busy:
+        names = ", ".join(busy)
+        raise _Refused(
+            f"{names} {'is' if len(busy) == 1 else 'are'} being made or {'has' if len(busy) == 1 else 'have'} "
+            "a copy waiting to be published, so nothing was kept original. "
+            "Let that work finish or stop it, then choose again."
+        )
 
 
 def _scoped_rows(

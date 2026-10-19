@@ -9,24 +9,21 @@ leave it alone until the owner undoes the choice or the source changes.
 """
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import item_events, library_item_evidence_state, library_items, motion_keep_decisions
-from mediaforce.core.utils import timestamp
+from mediaforce.core.db_tables import library_item_evidence_state, library_items
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, cadence_awaits_as_is_decision
 from mediaforce.library.candidate_selection import CandidateDecision, MotionHolds
 from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, \
-    EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, library_item_source_fingerprint, \
-    project_library_item_evidence_state, sync_library_item_evidence_state
+    EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, project_library_item_evidence_state, \
+    sync_library_item_evidence_state
 from mediaforce.library.item_presence import library_item_is_missing
-
-MOTION_KEEP_LAPSED_EVENT = "motion_keep_original_lapsed"
-
+from mediaforce.library.motion_keep_state import kept_original_item_ids
 
 @dataclass(frozen=True, slots=True)
 class CadenceSafetyPartition:
@@ -123,50 +120,6 @@ def cadence_safety_partition(
         check_needed_item_ids=frozenset(check_needed_item_ids),
         kept_item_ids=kept_item_ids,
     )
-
-
-def kept_original_item_ids(
-        connection: DBClient,
-        items: Sequence[Mapping[str, Any]],
-        *,
-        forget_lapsed: bool,
-) -> frozenset[int]:
-    """The files among ``items`` whose keep-original choice was made for their current source.
-
-    A choice made for another source has lapsed: the file is checked again like any other. With
-    ``forget_lapsed`` the lapsed choices are removed, so an old source coming back cannot revive one.
-    """
-    fingerprints = {int(item["id"]): library_item_source_fingerprint(item) for item in items}
-    if not fingerprints:
-        return frozenset()
-    rows = connection.execute(
-        select(motion_keep_decisions.c.library_item_id, motion_keep_decisions.c.source_fingerprint).where(
-            motion_keep_decisions.c.library_item_id.in_(sorted(fingerprints)),
-        )
-    ).fetchall()
-    kept: set[int] = set()
-    lapsed: set[int] = set()
-    for item_id, source_fingerprint in rows:
-        current = fingerprints.get(int(item_id))
-        if current and str(source_fingerprint) == current:
-            kept.add(int(item_id))
-        else:
-            lapsed.add(int(item_id))
-    if forget_lapsed and lapsed:
-        connection.execute(
-            delete(motion_keep_decisions).where(motion_keep_decisions.c.library_item_id.in_(sorted(lapsed)))
-        )
-        now_iso = timestamp()
-        connection.execute(item_events.insert(), [
-            {
-                "library_item_id": item_id,
-                "created_at": now_iso,
-                "event_type": MOTION_KEEP_LAPSED_EVENT,
-                "details_json": json.dumps({"source_fingerprint": fingerprints.get(item_id)}),
-            }
-            for item_id in sorted(lapsed)
-        ])
-    return frozenset(kept)
 
 
 def queue_motion_holds(connection: DBClient, decisions: Sequence[CandidateDecision]) -> MotionHolds:

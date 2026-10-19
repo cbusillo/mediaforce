@@ -70,6 +70,7 @@ import {
 	motionHoldNotes,
 	motionHoldReasonLabel,
 	motionHolds,
+	showsMotionKeepFiles,
 	queueAdmission,
 	targetConstraintSummary,
 	targetProvenanceSummary,
@@ -2711,6 +2712,14 @@ describe('keeping motion-held episodes original', () => {
 		const holds = motionHolds(folder({ motion_hold_files: { held_files: [], check_files: [] } }));
 		expect(holds.heldItems).toEqual([]);
 		expect(holds.keptItems).toEqual([]);
+	});
+
+	it('lists the keep decision whenever an episode is held or kept, whatever leads the page', () => {
+		const files = (held: (typeof heldFile)[], kept: (typeof keptFile)[]) =>
+			motionHolds(folder({ motion_hold_files: { held_files: [], check_files: [], held, kept } }));
+		expect(showsMotionKeepFiles(files([heldFile], []))).toBe(true);
+		expect(showsMotionKeepFiles(files([], [keptFile]))).toBe(true);
+		expect(showsMotionKeepFiles(files([], []))).toBe(false);
 	});
 
 	it('names each reason a file is held in plain words', () => {

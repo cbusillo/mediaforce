@@ -2108,6 +2108,11 @@ export function motionHolds(folder: FolderPayload): MotionHolds {
 	};
 }
 
+/** Whether a page lists any episode to keep original or to undo; it does in every page state. */
+export function showsMotionKeepFiles(holds: MotionHolds): boolean {
+	return holds.heldItems.length > 0 || holds.keptItems.length > 0;
+}
+
 const MOTION_HOLD_REASON_LABELS: Record<MotionHoldReason, string> = {
 	mixed: 'Mixed motion pattern',
 	partly_interlaced: 'Partly interlaced',

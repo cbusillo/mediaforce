@@ -1777,7 +1777,20 @@ async function checkMotionKeepOriginal(baseUrl, timeoutMs) {
     await kept.getByRole("button", { name: "Undo all 2", exact: true }).click();
     await expect(page.getByRole("heading", { name: "The remaining episodes stay original." })).toBeVisible();
     await expect(page.getByRole("region", { name: "Kept original" })).toHaveCount(0);
-    console.log("motion keep-original ok: kept, finished and undone");
+    // Held episodes keep their decision whichever state leads the page.
+    for (const [route, heading] of [
+      ["/folders/tv/Motion%20Held/Season%203", "Ready to compress the season."],
+      ["/folders/tv/Motion%20Held/Season%201/Episode%2002.mkv", null],
+    ]) {
+      await openRoute(page, baseUrl, route, timeoutMs);
+      if (heading) await expect(page.getByRole("heading", { name: heading })).toBeVisible();
+      await expect(
+        page
+          .getByRole("region", { name: "Held for their motion pattern" })
+          .getByRole("button", { name: "Keep Episode 02.mkv original", exact: true }),
+      ).toBeVisible();
+    }
+    console.log("motion keep-original ok: kept, finished and undone; offered beside other states");
   } finally {
     await browser.close();
   }

@@ -471,7 +471,8 @@ def test_promotion_reserve_preflight_is_atomic_before_any_move(tmp_path: Path) -
     class _Connection:
         @staticmethod
         def execute(_statement: object) -> SimpleNamespace:
-            return SimpleNamespace(mappings=lambda: SimpleNamespace(fetchone=lambda: {
+            # No file is kept original, so the keep check finds nothing.
+            return SimpleNamespace(scalars=lambda: iter(()), mappings=lambda: SimpleNamespace(fetchone=lambda: {
                 "validation_json": '{"passed": true}',
                 "validated_at": "checked",
                 "staging_path": str(staging),

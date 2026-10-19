@@ -80,6 +80,7 @@ from mediaforce.remote import HostReadinessError, execution_mode_for_host, host_
 from mediaforce.web.runtime.encode_scheduler import HOST_WINDOW_IMPOSSIBLE_MARKER, HOST_WINDOW_TOO_SHORT_REASON, \
     SCHEDULE_CLOSE_WAITING_REASON
 from mediaforce.web.runtime.host_runtime import host_config_for_key
+from mediaforce.library.motion_keep_state import any_motion_keep_decision, library_item_ids_kept_original
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
 
@@ -2909,6 +2910,41 @@ def _encode_job_estimate_items(
     ]
 
 
+KEPT_ORIGINAL_TERMINAL_REASON = "kept_original"
+
+
+def _stop_job_for_kept_originals(
+        connection: DBClient,
+        job: dict[str, Any],
+        deps: EncodeQueueRuntimeDeps,
+        *,
+        manifest_items_cache: dict[Path, list[dict[str, Any]] | None],
+) -> bool:
+    """Stop a queued job that would make a file the owner kept original; True when it was stopped.
+
+    Keeping refuses files with queued work, so this is the backstop: the owner's choice wins over a
+    job that reached the queue anyway, and requeueing leaves the kept file out.
+    """
+    item_ids = {
+        int_value(item.get("library_item_id"))
+        for item in _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache)
+    } - {0}
+    kept_ids = library_item_ids_kept_original(connection, item_ids)
+    if not kept_ids:
+        return False
+    now_iso = deps.now_iso()
+    job.update({
+        "status": "stopped",
+        "terminal_reason": KEPT_ORIGINAL_TERMINAL_REASON,
+        "error": "Stopped before it started: you chose to keep this file original for its motion pattern.",
+        "waiting_reason": None,
+        "finished_at": now_iso,
+        "updated_at": now_iso,
+    })
+    save_encode_job(connection, job)
+    return True
+
+
 def _encode_reserve_items(
         connection: DBClient,
         items: list[dict[str, Any]],
@@ -3647,6 +3683,8 @@ def load_next_runnable_encode_job(
     duration_samples = load_encode_duration_samples(connection) if duration_estimation_relevant else ()
     globally_blocked_hosts = _globally_backed_off_encode_hosts(connection, deps, now=now) if rows else {}
     manifest_items_cache: dict[Path, list[dict[str, Any]] | None] = {}
+    # Only read a job's files for the keep-original backstop when some file is kept at all.
+    any_kept_original = bool(rows) and any_motion_keep_decision(connection)
     shared_capacity_cache = capacity_cache if capacity_cache is not None else {}
     running_reserve_state = _running_encode_reserve_state(
         connection,
@@ -3751,6 +3789,11 @@ def load_next_runnable_encode_job(
                 job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
                 save_encode_job(connection, job)
                 defer_parent_sync(job)
+            continue
+        if any_kept_original and _stop_job_for_kept_originals(
+                connection, job, deps, manifest_items_cache=manifest_items_cache,
+        ):
+            defer_parent_sync(job)
             continue
         estimate_items = (
             _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache)

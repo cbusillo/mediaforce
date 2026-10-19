@@ -13,6 +13,7 @@ from mediaforce.core.db_tables import evidence_queue_state, library_item_evidenc
 from mediaforce.core.evidence import stable_source_id
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.core.utils import timestamp
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.evidence_acquisition import DEFAULT_UNCERTAINTY_FRONTIER_LIMIT, \
     FingerprintAcquisitionPlan, load_fingerprint_acquisition_items, plan_fingerprint_acquisition
@@ -20,6 +21,7 @@ from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANA
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EvidenceKind
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
+from mediaforce.library.motion_keep_state import kept_original_clause
 
 DEFAULT_EVIDENCE_QUEUE_NAME = "evidence"
 DEFAULT_EVIDENCE_BATCH_LIMIT = 25
@@ -651,6 +653,8 @@ def claim_next_evidence_work(
         if running_count:
             connection.rollback()
             return None
+        # A check queued before its file was kept original would only measure what no one will encode.
+        _release_kept_motion_work(connection, batch_id=batch_id, updated_at=now_iso)
         candidate = connection.execute(
             select(
                 library_item_evidence_state.c.library_item_id,
@@ -1035,6 +1039,11 @@ def _evidence_work_candidates(
             library_item_evidence_state.c.evidence_kind.in_(tuple(evidence_kinds)),
             LIBRARY_ITEM_PRESENT,
             scope_rel_path_filter(library_items.c.rel_path, scope),
+            # A file the owner kept original for its current source needs no motion-pattern check.
+            or_(
+                library_item_evidence_state.c.evidence_kind != CADENCE_EVIDENCE_KIND,
+                ~kept_original_clause(library_items.c.id),
+            ),
         )
         .order_by(
             library_item_evidence_state.c.library_item_id,
@@ -1242,6 +1251,62 @@ def _save_evidence_queue_state(connection: DBClient, payload: dict[str, Any]) ->
             },
         )
     )
+
+
+def release_kept_motion_work(connection: DBClient, *, updated_at: str | None = None) -> int:
+    """Take unstarted motion-pattern checks for files kept original out of the current batch."""
+    batch_id = str(load_evidence_queue_state(connection).get("batch_id") or "")
+    if not batch_id:
+        return 0
+    return _release_kept_motion_work(connection, batch_id=batch_id, updated_at=updated_at or timestamp())
+
+
+def _release_kept_motion_work(connection: DBClient, *, batch_id: str, updated_at: str) -> int:
+    kept_ids = [
+        int(item_id)
+        for item_id in connection.execute(
+            select(library_item_evidence_state.c.library_item_id)
+            .select_from(
+                library_item_evidence_state.join(
+                    library_items, library_items.c.id == library_item_evidence_state.c.library_item_id,
+                )
+            )
+            .where(
+                library_item_evidence_state.c.work_batch_id == batch_id,
+                library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+                library_item_evidence_state.c.work_status.in_(EVIDENCE_WORK_CLAIMABLE_STATUSES),
+                kept_original_clause(library_items.c.id),
+            )
+        ).scalars()
+    ]
+    if not kept_ids:
+        return 0
+    connection.execute(
+        update(library_item_evidence_state)
+        .where(
+            library_item_evidence_state.c.library_item_id.in_(kept_ids),
+            library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+            library_item_evidence_state.c.work_batch_id == batch_id,
+        )
+        .values(
+            work_batch_id=None,
+            work_status=None,
+            work_reason=None,
+            work_source_fingerprint=None,
+            retry_not_before=None,
+            updated_at=updated_at,
+        )
+    )
+    connection.execute(
+        update(evidence_queue_state)
+        .where(
+            evidence_queue_state.c.queue_name == DEFAULT_EVIDENCE_QUEUE_NAME,
+            evidence_queue_state.c.batch_id == batch_id,
+        )
+        .values(item_count=func.max(0, evidence_queue_state.c.item_count - len(kept_ids)))
+    )
+    _refresh_evidence_queue_state(connection, batch_id=batch_id, updated_at=updated_at)
+    return len(kept_ids)
 
 
 def _refresh_evidence_queue_state(

@@ -102,6 +102,8 @@ SHOW_JOB_HOLD_HELD_PREFIX = "tv/Show Job Hold/Season 2"
 MOTION_HELD_PREFIX = "tv/Motion Held/Season 1"
 MOTION_HELD_SAMPLE_PREFIX = "tv/Motion Held/Season 2"
 MOTION_HELD_SERIES_PREFIX = "tv/Motion Held"
+# A season of the same show with one episode to compress and one held, so its ready page lists the held one.
+MOTION_HELD_MIXED_PREFIX = "tv/Motion Held/Season 3"
 # A season whose one unpublished episode the owner kept original for its motion pattern, so it is finished.
 MOTION_KEPT_PREFIX = "tv/Motion Kept/Season 1"
 # A season part-way through, with an episode in each stage the season page's episode list shows.
@@ -156,6 +158,7 @@ FIXTURE_PREFIXES = (
     SHOW_JOB_HOLD_HELD_PREFIX,
     EPISODE_PROGRESS_PREFIX,
     MOTION_HELD_SERIES_PREFIX,
+    MOTION_HELD_MIXED_PREFIX,
     MOTION_KEPT_PREFIX,
 )
 
@@ -1595,6 +1598,21 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 _library_item(
                     project_root=project_root,
                     media_root="tv",
+                    rel_path=f"{MOTION_HELD_MIXED_PREFIX}/Episode {index:02d}.mkv",
+                    size_bytes=4 * 1024**3,
+                    status="discovered",
+                    video_codec="h264",
+                    priority_score=60,
+                    recommendation="priority_encode",
+                    recommendation_reason="Fixture season with one episode to compress and one held.",
+                    age_days=400,
+                )
+                for index in (1, 2)
+            ),
+            *(
+                _library_item(
+                    project_root=project_root,
+                    media_root="tv",
                     rel_path=f"{MOTION_KEPT_PREFIX}/Episode {index:02d}.mkv",
                     size_bytes=4 * 1024**3,
                     status=status,
@@ -1969,7 +1987,10 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 row["cadence_summary_json"] = _ambiguous_cadence_summary_json(
                     str(row["cadence_summary_json"]), tff_frames=30
                 )
-            elif row["rel_path"] == f"{MOTION_KEPT_PREFIX}/Episode 02.mkv":
+            elif row["rel_path"] in {
+                f"{MOTION_KEPT_PREFIX}/Episode 02.mkv",
+                f"{MOTION_HELD_MIXED_PREFIX}/Episode 02.mkv",
+            }:
                 row["cadence_summary_json"] = _ambiguous_cadence_summary_json(
                     str(row["cadence_summary_json"]), tff_frames=30
                 )

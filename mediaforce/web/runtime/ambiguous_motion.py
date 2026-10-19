@@ -27,7 +27,7 @@ from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, accept_cadence_as
 from mediaforce.library.evidence_state import sync_library_item_evidence_state
 from mediaforce.encoding.encode_queue import list_encode_runs_for_prefix
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
-from mediaforce.library.motion_holds import kept_original_item_ids
+from mediaforce.library.motion_keep_state import kept_original_item_ids
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.web.runtime.left_out_files import LeftOutFile
