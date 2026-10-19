@@ -582,15 +582,38 @@ def test_retry_connection_route_posts_and_reads_stay_check_free(
 def _button_labels() -> set[str]:
     import re
 
+    workstation = Path(__file__).parents[1] / "frontend/src/lib/components/workstation"
     sources = [
-        Path(__file__).parents[1] / "frontend/src/lib/components/workstation/OpsWorkstationView.svelte",
+        workstation / "OpsWorkstationView.svelte",
+        workstation / "OperatorWorkConsole.svelte",
         Path(__file__).parents[1] / "frontend/src/lib/components/shell/ShellWarnings.svelte",
     ]
-    return {
-        label.strip()
-        for source in sources
-        for label in re.findall(r">\s*([A-Z][^<>{}]*?)\s*</button", source.read_text())
-    }
+    labels: set[str] = set()
+    for source in sources:
+        text = source.read_text()
+        labels |= {label.strip() for label in re.findall(r">\s*([A-Z][^<>{}]*?)\s*</button", text)}
+        # Labels that change with state, such as {busy ? 'Starting…' : 'Start analysis'}.
+        for expression in re.findall(r"\{([^{}]*)\}\s*</button", text):
+            labels |= set(re.findall(r"'([A-Z][^']*)'", expression))
+    return labels
+
+
+def _named_buttons(message: str) -> list[str]:
+    """The button names a message tells people to use, without the words that follow them."""
+    import re
+
+    return [
+        re.sub(r"\s+(?:to|for|on|in|before|after|again|then|once|and|if)\b.*", "", phrase)
+        for phrase in re.findall(r"\b(?i:use|click|select|press) ([A-Z][\w ]*)", message)
+    ]
+
+
+def _assert_named_buttons_exist(messages: list[str]) -> None:
+    labels = _button_labels()
+    named = [(message, button) for message in messages for button in _named_buttons(message)]
+    assert named, "the messages tell people which button to use"
+    for message, button in named:
+        assert button in labels, message
 
 
 def _computer_action_messages(config: MediaforceConfig) -> list[str]:
@@ -628,17 +651,43 @@ def _computer_action_messages(config: MediaforceConfig) -> list[str]:
 
 
 def test_computer_messages_name_buttons_that_exist(config: MediaforceConfig) -> None:
-    import re
+    assert {"Set up computer", "Retry connection"} <= _button_labels()
+    _assert_named_buttons_exist(_computer_action_messages(config))
 
-    labels = _button_labels()
-    assert {"Set up computer", "Retry connection"} <= labels
-    named = [
-        (message, match) for message in _computer_action_messages(config)
-        for match in re.findall(r"\b(?:use|click) ([A-Z][\w ]*)", message)
-    ]
-    assert named, "the messages tell people which button to use"
-    for message, phrase in named:
-        assert any(phrase.startswith(label) for label in labels), message
+
+def _motion_pattern_messages() -> list[str]:
+    from unittest.mock import MagicMock
+
+    from mediaforce.web.runtime import decision_evidence
+    from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
+    from mediaforce.web.runtime.left_out_files import cadence_left_out_files
+
+    work_states: list[dict[str, Any]] = [{"is_paused": True}, {"status": "running"}, {"status": "queued"}]
+    messages: list[str] = []
+    for count in (1, 2):
+        for preparation in [{"terminal_failure_count": count}, *({"work": work} for work in work_states)]:
+            with patch.object(decision_evidence, "_queue_cadence_evidence_work", return_value=[
+                {"required_count": count, **preparation},
+            ]):
+                blocker = decision_evidence.cadence_evidence_blocker(
+                    MagicMock(), MagicMock(), "tv/Show", library_item_ids=[1], decision_label="queueing this sample",
+                    work_reason="sample_safety", synchronize=False,
+                )
+            assert blocker is not None
+            messages.append(blocker["message"])
+    for work in work_states:
+        partition = CadenceQueuePartition(
+            cleared_item_ids=frozenset(), blocked_item_ids=frozenset(), analysis_queued_item_ids=frozenset({1}),
+            analysis_failed_item_ids=frozenset({2}), analysis_unavailable_item_ids=frozenset(),
+            analysis_unavailable_reason=None, evidence_work=work,
+        )
+        messages += [left_out.reason for left_out in cadence_left_out_files(partition, {})]
+    return messages
+
+
+def test_motion_pattern_messages_name_buttons_that_exist() -> None:
+    assert {"Prepare analysis", "Start analysis"} <= _button_labels()
+    _assert_named_buttons_exist(_motion_pattern_messages())
 
 
 def test_host_alert_reads_as_sentences(config: MediaforceConfig, empty_host_status_cache: None) -> None:

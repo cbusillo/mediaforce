@@ -169,13 +169,14 @@ def cadence_evidence_blocker(
         {},
     )
     if terminal_failure_count:
-        file_label = "file" if terminal_failure_count == 1 else "files"
+        file_label, folder_label = ("file", "its") if terminal_failure_count == 1 else ("files", "their")
         return {
             "ok": False,
             "code": "cadence_analysis_failed",
             "message": (
-                f"Motion-pattern analysis previously failed for {terminal_failure_count} selected {file_label}. "
-                f"Open Activity and use Prepare item to retry explicitly before {decision_label}."
+                f"Motion-pattern analysis failed earlier for {terminal_failure_count} selected {file_label}. "
+                f"Open Activity, use Prepare analysis for {folder_label} folder, then select Start analysis. "
+                f"Once it finishes, try {decision_label} again."
             ),
             "affected_item_count": terminal_failure_count,
             "evidence_work": work,
