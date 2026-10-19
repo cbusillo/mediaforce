@@ -25,7 +25,9 @@ reserve on every configured storage volume involved in the operation.
   failed move is reported with its reason, and the other files still publish.
 - Missing reserve inputs, a missing mount, a failed local probe, or a failed
   remote probe is a waiting blocker. Mediaforce does not dispatch, delete,
-  archive, or promote files in that case.
+  archive, or promote files in that case. A worker that does not answer its
+  remote probe in time waits for that pass with a reason naming it; the
+  scheduler pass carries on with other work and asks again next pass.
 - Remote encode staging is measured on the selected worker. Archive and final
   promotion capacity are measured on the controller, where promotion runs.
 
@@ -48,4 +50,5 @@ full source as the rollback copy; same-volume moves are renames and require no
 second copy. A job at or above `large_job_gib` serializes with existing running
 encode work using the current persisted queue state. Capacity probes are reused
 within one scheduler pass, including best-fit retries and running-job reserve
-reconstruction.
+reconstruction. A probe that timed out is reused the same way, so one pass
+waits on an unreachable worker once rather than once per file.

@@ -11,6 +11,7 @@ import pytest
 from mediaforce.core.config import MediaforceConfig, _validate_free_space_reserve
 from mediaforce.core.db import DBClient
 from mediaforce.encoding.free_space import (
+    CapacityCache,
     FreeSpaceReservePolicy,
     ReservePreflight,
     SpaceRequirement,
@@ -366,6 +367,48 @@ def test_shared_custom_probe_requires_stable_cache_key(tmp_path: Path) -> None:
     assert not result.measurable
     assert result.waiting_reason is not None
     assert "stable volume_probe_key" in result.waiting_reason
+
+
+def test_remote_encode_waits_once_when_host_stops_answering_free_space_check(tmp_path: Path) -> None:
+    config = _Config(tmp_path)
+    source = tmp_path / "movies" / "source.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"x" * 100)
+    remote_staging_root = tmp_path / "remote-staging"
+    remote_staging_root.mkdir()
+    host = {
+        "key": "mini",
+        "label": "M1 mini",
+        "host": "mini.local",
+        "mode": "ssh",
+        "media_access": "mounted",
+        "staging_root": str(remote_staging_root),
+    }
+    capacity_cache: CapacityCache = {}
+
+    with (
+        patch(
+            "mediaforce.encoding.free_space.run_remote_command",
+            side_effect=subprocess.TimeoutExpired(cmd=["ssh", "mini.local"], timeout=10),
+        ) as run_command,
+        patch(
+            "mediaforce.encoding.free_space.local_volume_capacity",
+            side_effect=lambda path: VolumeCapacity("controller", path, 10 * 1024 ** 3),
+        ),
+    ):
+        first = encode_reserve_preflight(
+            cast(MediaforceConfig, config), [_item(source)], host=host, capacity_cache=capacity_cache,
+        )
+        second = encode_reserve_preflight(
+            cast(MediaforceConfig, config), [_item(source)], host=host, capacity_cache=capacity_cache,
+        )
+
+    for result in (first, second):
+        assert not result.allowed
+        assert not result.measurable
+        assert result.waiting_reason is not None
+        assert "M1 mini did not answer" in result.waiting_reason
+    assert run_command.call_count == 1
 
 
 def test_remote_volume_capacity_walks_to_existing_parent() -> None:

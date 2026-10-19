@@ -23368,6 +23368,110 @@ raise SystemExit(0)
         self.assertEqual(aggregated["progress"]["progress_state"], "quality_search")
         self.assertEqual(aggregated["progress"]["phase_label"], "Searching quality")
 
+    def test_season_progress_holds_when_a_child_is_worked_again(self) -> None:
+        manifest_path = self._write_manifest(
+            "manifest-parent-retry-progress.json",
+            [
+                {"library_item_id": index + 1, "duration_seconds": 100.0, "source_size_bytes": 1000}
+                for index in range(4)
+            ],
+        )
+        now = web_app._now_iso()
+        base = {
+            "prefix": "tv/show",
+            "manifest_path": str(manifest_path),
+            "item_count": 1,
+            "saved_profile_path": None,
+            "last_host": {},
+            "notes": "",
+            "bypass_schedule": False,
+            "attempt_count": 1,
+            "process_pid": None,
+            "error": None,
+            "leased_at": None,
+            "lease_expires_at": None,
+            "heartbeat_at": None,
+            "worker_id": None,
+            "retry_not_before": None,
+            "waiting_reason": None,
+            "terminal_reason": None,
+            "last_failure_kind": None,
+            "last_failure_at": None,
+            "host_cooldown_until": None,
+            "created_at": now,
+            "started_at": now,
+            "finished_at": None,
+            "updated_at": now,
+        }
+
+        def child(job_id: str, index: int, status: str, out_seconds: float, state: str) -> dict[str, Any]:
+            return {
+                **base,
+                "job_id": job_id,
+                "job_kind": "shard",
+                "parent_job_id": "folder-retry-progress",
+                "status": status,
+                "manifest_indexes": [index],
+                "host": {"key": f"remote-{index}", "label": f"Remote {index}", "mode": "ssh"},
+                "progress": {
+                    "total_item_count": 1,
+                    "completed_item_count": 0,
+                    "total_duration_seconds": 100.0,
+                    "overall_completed_duration_seconds": out_seconds,
+                    "progress_state": state,
+                },
+            }
+
+        deps = web_app._encode_queue_runtime_deps()
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    **base,
+                    "job_id": "folder-retry-progress",
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "running",
+                    "manifest_indexes": None,
+                    "item_count": 4,
+                    "host": {},
+                },
+            )
+            # One episode is nearly encoded; the other was interrupted when its computer restarted.
+            save_encode_job(connection, child("near-done", 0, "running", 90.0, "encoding"))
+            save_encode_job(connection, child("interrupted", 1, "retry_backoff", 20.0, "encoding"))
+            save_encode_job(connection, child("waiting-a", 2, "queued", 0.0, "queued"))
+            save_encode_job(connection, child("waiting-b", 3, "queued", 0.0, "queued"))
+            first_child = load_encode_job(connection, "near-done")
+            assert first_child is not None
+            first = encode_runtime.sync_encode_job_parent(connection, first_child, deps)
+            assert first is not None
+            before = float(first["progress"]["percent_complete"])
+
+            # The near-done episode missed its size and is encoded again; the interrupted one restarts.
+            save_encode_job(connection, child("near-done", 0, "running", 0.0, "quality_search"))
+            save_encode_job(connection, child("interrupted", 1, "running", 0.0, "starting"))
+            during_child = load_encode_job(connection, "interrupted")
+            assert during_child is not None
+            during = encode_runtime.sync_encode_job_parent(connection, during_child, deps)
+            assert during is not None
+            # The dashboard lists the parent from its saved row, so resolve it the same way.
+            stored = load_encode_job(connection, "folder-retry-progress")
+            displayed = encode_runtime.resolve_encode_job_for_display(connection, stored, deps)
+            assert displayed is not None
+
+            # Once the redo passes the earlier mark, the season climbs from there.
+            save_encode_job(connection, child("near-done", 0, "running", 95.0, "encoding"))
+            after_child = load_encode_job(connection, "near-done")
+            assert after_child is not None
+            after = encode_runtime.sync_encode_job_parent(connection, after_child, deps)
+            assert after is not None
+
+        self.assertAlmostEqual(before, 110.0 / 400.0 * 100.0)
+        self.assertAlmostEqual(float(during["progress"]["percent_complete"]), before)
+        self.assertAlmostEqual(float(displayed["progress"]["percent_complete"]), before)
+        self.assertAlmostEqual(float(after["progress"]["percent_complete"]), 115.0 / 400.0 * 100.0)
+
     def test_aggregate_encode_parent_job_groups_every_unfinished_child_by_reason(self) -> None:
         children = [
             ("completed", None, None),
