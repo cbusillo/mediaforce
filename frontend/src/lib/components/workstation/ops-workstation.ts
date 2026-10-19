@@ -6,6 +6,7 @@ import type {
 	ReviewReadySample
 } from '$lib/api/types';
 import { folderRoutePath } from '$lib/folder-display';
+import { formatClockMoment } from '$lib/format';
 import {
 	hostSchedulePresentation,
 	jobSchedulePresentation,
@@ -589,10 +590,41 @@ export function workerCapabilitiesSummary(capabilities: string[]): string {
 	return labels.length ? labels.join(' · ') : 'No work assigned to this computer';
 }
 
+function hostRecoveryAction(host: HostRuntime) {
+	return !host.available && host.recovery?.status === 'action_required' ? host.recovery : null;
+}
+
+export function hostRecoveryCopy(host: HostRuntime, now = new Date()): string | null {
+	const recovery = host.available ? null : host.recovery;
+	if (!recovery || recovery.status === 'ready') return null;
+	if (recovery.status === 'action_required') {
+		const reason = recovery.reason || host.message;
+		const lastCheck = formatClockMoment(recovery.last_check_at, null, now);
+		return lastCheck ? `${reason} Last checked ${lastCheck}.` : reason;
+	}
+	const nextCheck =
+		Date.parse(String(recovery.next_retry_at ?? '')) > now.getTime()
+			? formatClockMoment(recovery.next_retry_at, null, now)
+			: null;
+	const parts = [nextCheck ? `Retrying, next check ${nextCheck}.` : 'Retrying now.'];
+	const since = formatClockMoment(recovery.first_failure_at, null, now);
+	const failures = numberValue(recovery.failure_count);
+	if (since && failures > 0) {
+		parts.push(
+			`First failed at ${since}; ${failures.toLocaleString('en-US')} ${failures === 1 ? 'try' : 'tries'} so far.`
+		);
+	}
+	if (host.storage_recovery_available !== true && host.message) {
+		parts.unshift(/[.!?]$/.test(host.message) ? host.message : `${host.message}.`);
+	}
+	return parts.join(' ');
+}
+
 export function hostWorkReason(
 	host: HostRuntime,
 	hosts: HostsPayload | null | undefined,
-	dashboard: DashboardSummaryPayload | null | undefined
+	dashboard: DashboardSummaryPayload | null | undefined,
+	now = new Date()
 ): string {
 	const schedule = activitySchedulePresentationCopy(
 		hostSchedulePresentation(host, dashboard?.encode_queue),
@@ -634,6 +666,8 @@ export function hostWorkReason(
 	if (host.available && host.queue_active === false) {
 		return host.active_reason || host.message || 'Reachable but not accepting Mediaforce work.';
 	}
+	const recovery = hostRecoveryCopy(host, now);
+	if (recovery) return recovery;
 	if (host.setup_supported === false) {
 		return host.message || 'Unavailable and cannot be prepared from this screen.';
 	}
@@ -1434,6 +1468,7 @@ export function hostStateCopy(
 	host: HostRuntime,
 	dashboard?: DashboardSummaryPayload | null
 ): string {
+	if (hostRecoveryAction(host)) return 'Needs attention';
 	if (host.storage_recovery_available === true) return 'Reconnecting storage';
 	if (!host.available) return 'Unavailable';
 	const schedule = activitySchedulePresentationCopy(

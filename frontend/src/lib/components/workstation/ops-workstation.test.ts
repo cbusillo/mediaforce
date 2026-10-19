@@ -1442,7 +1442,7 @@ describe('Ops workstation mapping', () => {
 			queue_active: false,
 			active_encode_count: 0,
 			storage_recovery_available: true,
-			message: 'Storage will reconnect when work starts'
+			message: 'Storage is reconnecting in the background'
 		};
 		const hosts = { compact: true, hosts: [recoverable] };
 
@@ -1455,6 +1455,61 @@ describe('Ops workstation mapping', () => {
 		});
 		expect(hostTone(recoverable)).toBe('wait');
 		expect(hostStateCopy(recoverable)).toBe('Reconnecting storage');
+	});
+
+	it('shows background storage recovery state on the computer card', () => {
+		const now = new Date('2026-10-19T14:30:00Z');
+		const retrying = {
+			...hostsFixture().hosts[0],
+			available: false,
+			queue_active: false,
+			active_encode_count: 0,
+			storage_recovery_available: true,
+			message: 'Storage is reconnecting in the background',
+			recovery: {
+				status: 'retrying' as const,
+				reason: 'Missing required paths',
+				first_failure_at: '2026-10-19T13:58:00Z',
+				last_check_at: '2026-10-19T14:28:00Z',
+				next_retry_at: '2026-10-19T14:42:00Z',
+				failure_count: 4
+			}
+		};
+		const hosts = { compact: true, hosts: [retrying] };
+		const at = (iso: string) =>
+			new Intl.DateTimeFormat('en-US', {
+				hour: 'numeric',
+				minute: '2-digit',
+				timeZoneName: 'short'
+			}).format(new Date(iso));
+
+		expect(hostStateCopy(retrying)).toBe('Reconnecting storage');
+		expect(hostWorkReason(retrying, hosts, null, now)).toBe(
+			`Retrying, next check ${at('2026-10-19T14:42:00Z')}. First failed at ${at('2026-10-19T13:58:00Z')}; 4 tries so far.`
+		);
+		expect(
+			hostWorkReason(
+				{ ...retrying, recovery: { ...retrying.recovery, next_retry_at: '2026-10-19T14:29:00Z' } },
+				hosts,
+				null,
+				now
+			)
+		).toMatch(/^Retrying now\./);
+
+		const needsSomeone = {
+			...retrying,
+			message: 'Worker needs its share password saved.',
+			recovery: {
+				...retrying.recovery,
+				status: 'action_required' as const,
+				reason: 'Worker needs its share password saved.'
+			}
+		};
+		expect(hostTone(needsSomeone)).toBe('wait');
+		expect(hostStateCopy(needsSomeone)).toBe('Needs attention');
+		expect(hostWorkReason(needsSomeone, hosts, null, now)).toBe(
+			`Worker needs its share password saved. Last checked ${at('2026-10-19T14:28:00Z')}.`
+		);
 	});
 
 	it('shows running encode telemetry instead of stale restart errors', () => {
