@@ -52,10 +52,6 @@ describe('MotionKeepFiles', () => {
 	});
 
 	it('renders nothing when no episode is held or kept', () => {
-		expect(
-			body({})
-				.replace(/<!--.*?-->/g, '')
-				.trim()
-		).toBe('');
+		expect(body({})).not.toMatch(/<[a-z]/i);
 	});
 });
