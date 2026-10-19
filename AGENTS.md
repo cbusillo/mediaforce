@@ -51,17 +51,10 @@ in an `AGENTS.md` too.
 
 ## Tests
 
-- A test must fail when the product is broken and pass when someone makes an
-  intended change.
-- Do not assert a literal that is defined elsewhere (versions, toolchains, URLs,
-  hashes, config values); check agreement with the one source of truth instead.
-- Do not assert workflow or config text (`.github/`, `github.json`, IDE
-  profiles); enforce those rules where they execute (the workflow itself,
-  `actionlint`, or a helper script with its own behavior test).
-- Tests and verification code must not depend on working-tree or host state:
-  no `git ls-files`, generated IDE files, the developer's `~/.ssh`, the host
-  platform, installed tools, or real SSH hosts. Pin or stub them.
-- Keep byte-exact and hash checks on real artifacts and immutable evidence.
+Follow the shared Tests rules in the global agent instructions
+([`instructions/global.md`](https://github.com/cbusillo/codex-skills/blob/main/instructions/global.md#tests)).
+Here that also means tests pin or stub the host platform, the developer's
+`~/.ssh` and remote encode hosts; they never reach a real one.
 
 ## See also
 
