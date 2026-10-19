@@ -141,6 +141,15 @@ export function formatScheduleMoment(
 	return `${dateCopy} at ${timeCopy}`;
 }
 
+export function formatClockMoment(
+	value: string | null | undefined,
+	timeZone?: string | null,
+	now = new Date()
+): string | null {
+	const moment = formatScheduleMoment(value, timeZone, now);
+	return moment?.startsWith('today at ') ? moment.slice('today at '.length) : moment;
+}
+
 export function formatScheduleCountdown(
 	value: string | null | undefined,
 	now = new Date()

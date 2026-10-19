@@ -197,6 +197,46 @@ def test_host_card_says_what_to_do_when_reconnecting_waits_for_someone(
     assert card["message"] == needs_password.action
 
 
+def test_retrying_host_card_carries_background_recovery_state(
+        config: MediaforceConfig, empty_host_status_cache: None,
+) -> None:
+    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+        recovery, "probe_host_status", return_value=status(),
+    ), patch.object(recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False)):
+        clock.now.return_value = NOW
+        recovery.process_host_recovery_once(config)
+    record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
+    card = _host_cards(config)["user@worker"]
+    assert card["recovery"] == {
+        "status": "retrying",
+        "reason": status().message,
+        "first_failure_at": NOW.isoformat(),
+        "last_check_at": NOW.isoformat(),
+        "next_retry_at": record["next_retry_at"],
+        "failure_count": 1,
+    }
+    assert datetime.fromisoformat(card["recovery"]["next_retry_at"]) > NOW
+    assert "when work starts" not in card["message"]
+    assert "when work starts" not in card["active_reason"]
+
+
+def test_action_required_host_card_carries_recovery_state(
+        config: MediaforceConfig, empty_host_status_cache: None,
+) -> None:
+    needs_password = NoUiMountResult(ok=False, action="Worker needs its share password saved.", retry=False)
+    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+        recovery, "probe_host_status", return_value=status(),
+    ), patch.object(recovery, "recover_remote_host_mounts_no_ui", return_value=needs_password):
+        clock.now.return_value = NOW
+        recovery.process_host_recovery_once(config)
+    card = _host_cards(config)["user@worker"]
+    assert card["recovery"]["status"] == "action_required"
+    assert card["recovery"]["reason"] == needs_password.action
+    assert card["recovery"]["first_failure_at"] == NOW.isoformat()
+    assert card["recovery"]["last_check_at"] == NOW.isoformat()
+    assert card["recovery"]["failure_count"] == 1
+
+
 def test_controller_card_follows_its_storage_after_a_restart(
         config: MediaforceConfig, empty_host_status_cache: None,
 ) -> None:

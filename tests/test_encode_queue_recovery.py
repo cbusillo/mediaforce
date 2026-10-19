@@ -5385,8 +5385,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertTrue(rows[0]["storage_recovery_available"])
         self.assertTrue(rows[0]["probe_available"])
-        self.assertEqual(rows[0]["message"], "Storage will reconnect when work starts")
-        self.assertEqual(rows[0]["active_reason"], "shared storage will reconnect when work starts")
+        self.assertEqual(rows[0]["message"], "Storage is reconnecting in the background")
+        self.assertEqual(rows[0]["active_reason"], "shared storage is reconnecting in the background")
 
     def test_select_encode_host_can_choose_startable_unavailable_host(self) -> None:
         host = {
