@@ -674,8 +674,8 @@ def _apply_lifecycle(
 def _eligible_for_estimate(status: str, decision: CandidateDecision | None, motion_holds: MotionHolds) -> bool:
     if status not in ENCODE_CANDIDATE_STATUSES:
         return True
-    # A file held for its motion pattern stays original, so it saves nothing.
-    return decision is None or (decision.eligible and decision.item_id not in motion_holds.held)
+    # A file held for its motion pattern, or kept original by the owner, stays original, so it saves nothing.
+    return decision is None or (decision.eligible and decision.item_id not in motion_holds.held | motion_holds.kept)
 
 
 def _decision_age_days(decision: CandidateDecision | None) -> float | None:

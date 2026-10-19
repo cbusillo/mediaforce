@@ -13,6 +13,7 @@
 	import WaitingReasons from '$lib/components/season/WaitingReasons.svelte';
 	import SeasonEpisodes from '$lib/components/season/SeasonEpisodes.svelte';
 	import SizeHeldQuestions from '$lib/components/season/SizeHeldQuestions.svelte';
+	import MotionKeepFiles from '$lib/components/season/MotionKeepFiles.svelte';
 	import TargetDefaultEvidence from '$lib/components/TargetDefaultEvidence.svelte';
 	import StateBadge from '$lib/components/workstation/StateBadge.svelte';
 	import type {
@@ -53,6 +54,7 @@
 		exactReviewSizeFacts,
 		expectedSizeChange,
 		folderSizeTargetAnalysis,
+		finishedEpisodesNote,
 		folderHref,
 		formatDecimalFileSize,
 		formatDuration,
@@ -62,6 +64,7 @@
 		measuredFollowupRequest,
 		motionHoldNotes,
 		motionHolds,
+		showsMotionKeepFiles,
 		overlappingCalibrationActivity,
 		queueAdmission,
 		predictedEpisodeSize,
@@ -1205,6 +1208,30 @@
 		});
 	}
 
+	async function keepMotionOriginal(libraryItemIds: number[]) {
+		await runAction('deciding', 'We couldn’t keep these episodes original.', async () => {
+			const response = ensureOk(
+				await postJson<ActionResponse>(endpoint('keep-motion-original'), {
+					library_item_ids: libraryItemIds
+				}),
+				'We couldn’t keep these episodes original.'
+			);
+			actionMessage = response.message || '';
+		});
+	}
+
+	async function undoMotionKeep(libraryItemIds: number[]) {
+		await runAction('deciding', 'We couldn’t undo that choice.', async () => {
+			const response = ensureOk(
+				await postJson<ActionResponse>(endpoint('undo-keep-motion-original'), {
+					library_item_ids: libraryItemIds
+				}),
+				'We couldn’t undo that choice.'
+			);
+			actionMessage = response.message || '';
+		});
+	}
+
 	function episodeFileName(relPath: string): string {
 		return relPath.split('/').at(-1) ?? relPath;
 	}
@@ -1913,6 +1940,20 @@
 						{actionPhase === 'deciding' ? 'Recording…' : 'Encode as-is'}
 					</button>
 				{/if}
+			</section>
+		{/if}
+
+		{#if !folder.pending && isSeriesScope && showsMotionKeepFiles(scopeMotionHolds)}
+			<section class="lifecycle-notice" aria-label="Episodes held for their motion pattern">
+				<span aria-hidden="true">◆</span>
+				<MotionKeepFiles
+					held={scopeMotionHolds.heldItems}
+					kept={scopeMotionHolds.keptItems}
+					busy={actionPending}
+					finishes="seasons"
+					onKeep={keepMotionOriginal}
+					onUndo={undoMotionKeep}
+				/>
 			</section>
 		{/if}
 
@@ -3002,20 +3043,6 @@
 							: 'New files stay separate until they pass their checks.'}
 						{motionHoldSentences.join(' ')} Nothing is queued until you choose the action below.
 					</p>
-					{#if scopeMotionHolds.heldFiles.length > 0}
-						<details class="motion-held-files">
-							<summary>
-								{scopeMotionHolds.heldFiles.length === 1
-									? 'Show the episode that stays original'
-									: `Show the ${scopeMotionHolds.heldFiles.length} episodes that stay original`}
-							</summary>
-							<ul>
-								{#each scopeMotionHolds.heldFiles as relPath (relPath)}
-									<li>{episodeFileName(relPath)}</li>
-								{/each}
-							</ul>
-						</details>
-					{/if}
 				{/if}
 				<div class="ready-summary">
 					{#if checksOnly}
@@ -3146,20 +3173,6 @@
 							: `The show page can encode ${admission.asIsCount === motionHeldEpisodeCount ? (motionHeldEpisodeCount === 1 ? 'it' : 'them') : admission.asIsCount} as-is.`
 						: ''}
 				</p>
-				{#if !isExactItemScope && scopeMotionHolds.heldFiles.length > 0}
-					<details class="motion-held-files">
-						<summary>
-							{scopeMotionHolds.heldFiles.length === 1
-								? 'Show the episode that stays original'
-								: `Show the ${scopeMotionHolds.heldFiles.length} episodes that stay original`}
-						</summary>
-						<ul>
-							{#each scopeMotionHolds.heldFiles as relPath (relPath)}
-								<li>{episodeFileName(relPath)}</li>
-							{/each}
-						</ul>
-					</details>
-				{/if}
 				{#if motionDecisionPending && folder.series_context && !isSeriesScope}
 					<div class="motion-held-actions">
 						<a class="primary-button" href={resolve(folderRoutePath(folder.series_context.prefix))}
@@ -3364,8 +3377,10 @@
 				<h1>{scopeName} is ready.</h1>
 				<p class="lede">
 					{isExactItemScope
-						? 'The smaller episode is in your library. The original remains in the cleanup folder until you choose to delete it.'
-						: `All ${episodeCount} smaller episodes are in your library. The originals remain in the cleanup folder until you choose to delete them.`}
+						? scopeMotionHolds.keptItems.length > 0
+							? 'This episode stays original by your choice.'
+							: 'The smaller episode is in your library. The original remains in the cleanup folder until you choose to delete it.'
+						: finishedEpisodesNote(episodeCount, scopeMotionHolds.keptItems.length)}
 				</p>
 				<div class="finished-actions">
 					<a class="primary-button" href={resolve('/')}
@@ -3550,6 +3565,18 @@
 					</div>
 				</div>
 			</div>
+		{/if}
+
+		<!-- Held and kept episodes keep their decision in every state, as the show page lists them above. -->
+		{#if !folder.pending && !isSeriesScope && showsMotionKeepFiles(scopeMotionHolds)}
+			<MotionKeepFiles
+				held={scopeMotionHolds.heldItems}
+				kept={scopeMotionHolds.keptItems}
+				busy={actionPending}
+				finishes={isExactItemScope ? 'episode' : 'season'}
+				onKeep={keepMotionOriginal}
+				onUndo={undoMotionKeep}
+			/>
 		{/if}
 
 		<!-- A held file's question stays on screen in every season state, not only while checking or replacing. -->
@@ -5474,19 +5501,6 @@
 	.motion-decision__action {
 		align-self: center;
 		flex: none;
-	}
-
-	.motion-held-files {
-		color: var(--mf-fg-secondary);
-		font-size: 13px;
-		margin-top: 14px;
-		max-width: 720px;
-		text-align: left;
-	}
-
-	.motion-held-files ul {
-		margin: 6px 0 0;
-		padding-left: 18px;
 	}
 
 	.motion-held-actions {

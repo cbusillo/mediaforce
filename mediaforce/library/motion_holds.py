@@ -2,6 +2,10 @@
 
 `cadence_safety_partition` is the gate itself; `queue_motion_holds` reads it without changing
 anything, for pages, library cards and the movie library to count and offer only what queueing takes.
+
+A file the owner chose to keep original (`motion_keep_decisions`) is kept apart from every other
+group while its source is the one the choice was made for: queueing, checks and the held-files sweep
+leave it alone until the owner undoes the choice or the source changes.
 """
 
 import json
@@ -19,7 +23,7 @@ from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, 
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, project_library_item_evidence_state, \
     sync_library_item_evidence_state
 from mediaforce.library.item_presence import library_item_is_missing
-
+from mediaforce.library.motion_keep_state import kept_original_item_ids
 
 @dataclass(frozen=True, slots=True)
 class CadenceSafetyPartition:
@@ -28,10 +32,12 @@ class CadenceSafetyPartition:
     evidence_required_item_ids: frozenset[int]
     # The evidence-required files a check can be queued for; a folder queue holds these back for it.
     check_needed_item_ids: frozenset[int] = frozenset()
+    # Files the owner chose to keep original for their current source; they are in no other group.
+    kept_item_ids: frozenset[int] = frozenset()
 
     @property
     def excluded_item_ids(self) -> frozenset[int]:
-        return self.blocked_item_ids | self.evidence_required_item_ids
+        return self.blocked_item_ids | self.evidence_required_item_ids | self.kept_item_ids
 
     @property
     def queueable_item_ids(self) -> frozenset[int]:
@@ -88,11 +94,14 @@ def cadence_safety_partition(
                 "decision_status": projection.decision_status,
             }
     present_item_ids = {int(item["id"]) for item in items if not library_item_is_missing(item)}
+    kept_item_ids = kept_original_item_ids(connection, items, forget_lapsed=synchronize)
     cleared_item_ids: set[int] = set()
     blocked_item_ids: set[int] = set()
     evidence_required_item_ids: set[int] = set()
     check_needed_item_ids: set[int] = set()
     for item_id in normalized_ids:
+        if item_id in kept_item_ids:
+            continue
         row = state_by_item_id.get(item_id)
         state = str(row.get("state") or "") if row is not None else ""
         decision_status = str(row.get("decision_status") or "") if row is not None else ""
@@ -109,6 +118,7 @@ def cadence_safety_partition(
         blocked_item_ids=frozenset(blocked_item_ids),
         evidence_required_item_ids=frozenset(evidence_required_item_ids),
         check_needed_item_ids=frozenset(check_needed_item_ids),
+        kept_item_ids=kept_item_ids,
     )
 
 
@@ -132,16 +142,22 @@ def queue_motion_holds(connection: DBClient, decisions: Sequence[CandidateDecisi
                 library_items.c.id.in_(sorted(partition.blocked_item_ids)),
             )
         ).fetchall()
-        as_is = {int(item_id) for item_id, summary_json in rows if cadence_awaits_as_is_decision(_summary(summary_json))}
+        as_is = {
+            int(item_id)
+            for item_id, summary_json in rows
+            if cadence_awaits_as_is_decision(cadence_summary_payload(summary_json))
+        }
     return MotionHolds(
         held=partition.blocked_item_ids,
         check_needed=partition.check_needed_item_ids,
         unchecked=partition.evidence_required_item_ids - partition.check_needed_item_ids,
         as_is=frozenset(as_is),
+        kept=partition.kept_item_ids,
     )
 
 
-def _summary(summary_json: Any) -> dict[str, Any]:
+def cadence_summary_payload(summary_json: Any) -> dict[str, Any]:
+    """A stored cadence summary as a dict; empty when it is missing or unreadable."""
     try:
         payload = json.loads(str(summary_json or "{}"))
     except json.JSONDecodeError:

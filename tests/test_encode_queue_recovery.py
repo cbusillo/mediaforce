@@ -49,6 +49,7 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_item_evidence_state
 from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import motion_keep_decisions
 from mediaforce.core.db_tables import production_holds
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
@@ -106,12 +107,14 @@ from mediaforce.web.runtime import completed_runtime, dashboard_payloads, encode
 from mediaforce.web.runtime import folder_cards as folder_cards_runtime
 from mediaforce.web.runtime import ambiguous_motion as ambiguous_motion_runtime
 from mediaforce.web.runtime import production_holds as production_holds_runtime
+from mediaforce.web.runtime import motion_keep as motion_keep_runtime
 from mediaforce.web.runtime import host_status as web_host_status_runtime
 from mediaforce.library import workflow_state as workflow_state_runtime
 from mediaforce.web.runtime.episode_progress import folder_episodes_payload
-from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
+from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition, motion_hold_files_payload
 from mediaforce.library.motion_holds import queue_motion_holds
-from mediaforce.library.evidence_state import sync_library_item_evidence_state
+from mediaforce.library.evidence_state import library_item_source_fingerprint, sync_library_item_evidence_state
+from mediaforce.library.evidence_queue import claim_next_evidence_work, resume_evidence_queue, start_evidence_work
 from mediaforce.web.runtime.page_state import PageStateSources, folder_page_state
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
@@ -26601,6 +26604,323 @@ raise SystemExit(0)
         self.assertEqual(season.lifecycle["motion_as_is_candidate_count"], 0)
         self.assertEqual(season.status["page_state"]["key"], "motion_held")
         self.assertEqual(season.status["page_state"]["tone"], "quiet")
+
+    @staticmethod
+    def _keep_original(show: SimpleNamespace, prefix: str, *names: str, undo: bool = False) -> dict[str, Any]:
+        action = motion_keep_runtime.undo_motion_keep if undo else motion_keep_runtime.keep_motion_held_originals
+        return action(show.config, prefix, [show.item_ids[name] for name in names], now_iso=web_app._now_iso())
+
+    def _motion_files(self, show: SimpleNamespace, prefix: str) -> dict[str, Any] | None:
+        """The held and kept files the page lists, read the way the folder page reads them."""
+        with open_db(self.config.paths.db_path) as connection:
+            decisions = encode_candidate_decisions(connection, show.config, prefixes=[prefix])
+            return motion_hold_files_payload(connection, decisions, queue_motion_holds(connection, decisions))
+
+    def _kept_rows(self) -> set[int]:
+        with open_db(self.config.paths.db_path) as connection:
+            return set(connection.execute(select(motion_keep_decisions.c.library_item_id)).scalars())
+
+    def test_keeping_a_seasons_motion_held_episodes_original_lets_it_finish(self) -> None:
+        season = "tv/show/Season 1"
+        show = self._motion_show({
+            "Season 1/Published.mkv": "published",
+            "Season 1/Mixed.mkv": "held",
+            "Season 1/Partly.mkv": "partly",
+            "Season 1/Unclear.mkv": "as_is",
+        })
+        held_names = ("Season 1/Mixed.mkv", "Season 1/Partly.mkv", "Season 1/Unclear.mkv")
+        before = self._motion_page(show, season)
+        self.assertEqual(before.state["key"], "motion_held")
+
+        kept = self._keep_original(show, season, *held_names)
+
+        self.assertTrue(kept["ok"], kept)
+        self.assertEqual(kept["kept_count"], 3)
+        page = self._motion_page(show, season)
+        # A season whose remaining episodes are all published or kept original is finished, on its page and card.
+        self.assertEqual(page.status["workflow_state"]["state"], "complete")
+        self.assertEqual(page.state["key"], "finished")
+        self.assertEqual(page.card.page_state, page.state)
+        self.assertEqual(page.lifecycle["motion_held_candidate_count"], 0)
+        self.assertEqual(page.lifecycle["motion_kept_candidate_count"], 3)
+        self.assertEqual(page.lifecycle["motion_as_is_candidate_count"], 0)
+        # Each kept episode keeps its reason on the page.
+        files = self._motion_files(show, season)
+        self.assertIsNotNone(files)
+        self.assertEqual(files["held"], [])
+        self.assertEqual(
+            {entry["rel_path"]: entry["reason"] for entry in files["kept"]},
+            {
+                "tv/show/Season 1/Mixed.mkv": "mixed",
+                "tv/show/Season 1/Partly.mkv": "partly_interlaced",
+                "tv/show/Season 1/Unclear.mkv": "unclear",
+            },
+        )
+        for name in held_names:
+            episode = page.episodes[Path(name).name]
+            self.assertEqual(episode["stage"], "kept_original")
+            self.assertIn("motion pattern", episode["detail"])
+        # The queue agrees with the page: it takes none of them, checks none and holds none.
+        queued = self._motion_queue(show, season)
+        self.assertFalse(queued.result["ok"], queued.result)
+        self.assertEqual(
+            queued.left_out, Counter({"cadence_kept_original": page.lifecycle["motion_kept_candidate_count"]}),
+        )
+        self.assertEqual(self._hold_rows(), {})
+        # The decision is recorded per file with its source, and audited.
+        with open_db(self.config.paths.db_path) as connection:
+            rows = connection.execute(select(motion_keep_decisions)).mappings().fetchall()
+            events = connection.execute(
+                select(item_events.c.library_item_id).where(item_events.c.event_type == "motion_kept_original")
+            ).scalars().all()
+            fingerprints = {
+                int(item_id): fingerprint
+                for item_id, fingerprint in connection.execute(select(library_items.c.id, library_items.c.fingerprint))
+            }
+        self.assertEqual({int(row["library_item_id"]) for row in rows}, {show.item_ids[name] for name in held_names})
+        for row in rows:
+            self.assertEqual(row["source_fingerprint"], fingerprints[int(row["library_item_id"])])
+        self.assertEqual(sorted(events), sorted(show.item_ids[name] for name in held_names))
+
+    def test_undoing_keep_original_returns_the_episodes_to_held(self) -> None:
+        season = "tv/show/Season 1"
+        show = self._motion_show({"Season 1/Published.mkv": "published", "Season 1/Mixed.mkv": "held"})
+        self.assertTrue(self._keep_original(show, season, "Season 1/Mixed.mkv")["ok"])
+        self.assertEqual(self._motion_page(show, season).state["key"], "finished")
+
+        undone = self._keep_original(show, season, "Season 1/Mixed.mkv", undo=True)
+
+        self.assertTrue(undone["ok"], undone)
+        self.assertEqual(undone["undone_count"], 1)
+        page = self._motion_page(show, season)
+        self.assertEqual(page.state["key"], "motion_held")
+        self.assertEqual(page.lifecycle["motion_held_candidate_count"], 1)
+        self.assertEqual(page.lifecycle["motion_kept_candidate_count"], 0)
+        self.assertEqual(page.episodes["Mixed.mkv"]["stage"], "held")
+        self.assertEqual(self._kept_rows(), set())
+        with open_db(self.config.paths.db_path) as connection:
+            events = connection.execute(
+                select(item_events.c.event_type).where(
+                    item_events.c.library_item_id == show.item_ids["Season 1/Mixed.mkv"],
+                )
+            ).scalars().all()
+        self.assertIn("motion_keep_original_undone", events)
+
+    def test_keeping_original_refuses_a_file_not_held_for_its_motion_pattern(self) -> None:
+        season = "tv/show/Season 1"
+        show = self._motion_show({"Season 1/Clear.mkv": "clear", "Season 1/Mixed.mkv": "held"})
+
+        refused = self._keep_original(show, season, "Season 1/Clear.mkv", "Season 1/Mixed.mkv")
+        outside = self._keep_original(show, "tv/show/Season 2", "Season 1/Mixed.mkv")
+
+        self.assertFalse(refused["ok"], refused)
+        self.assertIn("Clear.mkv", refused["message"])
+        self.assertFalse(outside["ok"], outside)
+        self.assertEqual(self._kept_rows(), set())
+
+    def test_a_changed_source_lapses_keep_original_and_is_checked_again(self) -> None:
+        season = "tv/show/Season 1"
+        show = self._motion_show({"Season 1/Published.mkv": "published", "Season 1/Mixed.mkv": "held"})
+        item_id = show.item_ids["Season 1/Mixed.mkv"]
+        self.assertTrue(self._keep_original(show, season, "Season 1/Mixed.mkv")["ok"])
+        self._replace_source_after_measuring(item_id)
+
+        page = self._motion_page(show, season)
+        queued = self._motion_queue(show, season)
+
+        # The new source is not the one the owner kept, so it needs a motion-pattern check like any other file.
+        self.assertEqual(page.lifecycle["motion_kept_candidate_count"], 0)
+        self.assertEqual(page.lifecycle["motion_check_candidate_count"], 1)
+        self.assertNotEqual(page.state["key"], "finished")
+        self.assertEqual(queued.left_out, Counter({"cadence_analysis_required": 1}))
+        # Queueing forgets the lapsed choice, so the old source coming back does not revive it.
+        self.assertEqual(self._kept_rows(), set())
+        with open_db(self.config.paths.db_path) as connection:
+            events = connection.execute(
+                select(item_events.c.event_type).where(item_events.c.library_item_id == item_id)
+            ).scalars().all()
+        self.assertIn("motion_keep_original_lapsed", events)
+
+    def test_the_held_files_sweep_never_readmits_a_kept_file_until_the_owner_undoes_it(self) -> None:
+        season = "tv/show/Season 1"
+        show = self._motion_show({"Season 1/Clear.mkv": "clear", "Season 1/Mixed.mkv": "held"})
+        item_id = show.item_ids["Season 1/Mixed.mkv"]
+        first = self._motion_queue(show, season)
+        self.assertTrue(first.result["ok"], first.result)
+        hold = self._hold_rows()[item_id]
+        self.assertTrue(self._keep_original(show, season, "Season 1/Mixed.mkv")["ok"])
+        # The kept file's motion pattern later clears, as a classifier change could make it.
+        with open_db(self.config.paths.db_path) as connection:
+            cleared = connection.execute(
+                select(library_items.c.cadence_summary_json).where(
+                    library_items.c.id == show.item_ids["Season 1/Clear.mkv"],
+                )
+            ).scalar_one()
+            connection.execute(update(library_items).where(library_items.c.id == item_id).values(
+                cadence_summary_json=cleared,
+            ))
+        joined: list[tuple[int, ...]] = []
+
+        def sweep() -> list[dict[str, Any]]:
+            return production_holds_runtime.join_cleared_held_files(
+                lambda: open_db(self.config.paths.db_path),
+                current_approval=lambda _prefix: hold["approval_identity"],
+                queue_held_files=lambda group: joined.append(group.library_item_ids) or {"ok": True},
+                now_iso=web_app._now_iso,
+            )
+
+        self.assertEqual(sweep(), [])
+        self.assertEqual(joined, [])
+        self.assertEqual(self._hold_rows()[item_id]["status"], "waiting")
+
+        self.assertTrue(self._keep_original(show, season, "Season 1/Mixed.mkv", undo=True)["ok"])
+        sweep()
+
+        self.assertEqual(joined, [(item_id,)])
+
+    def _queued_job_for(self, job_id: str, item_id: int, rel_path: str) -> None:
+        manifest = self._write_manifest(f"{job_id}.json", [{"library_item_id": item_id, "rel_path": rel_path}])
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(connection, job_id=job_id, manifest_name=manifest.name, host={}, status="queued",
+                           attempt_count=0)
+
+    def _record_keep(self, item_id: int) -> None:
+        """A keep decision recorded directly, as if the file had reached work some other way."""
+        with open_db(self.config.paths.db_path) as connection:
+            item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
+            connection.execute(motion_keep_decisions.insert().values(
+                library_item_id=item_id, source_fingerprint=library_item_source_fingerprint(item),
+                reason_code="mixed", prefix="tv/show", kept_at=web_app._now_iso(),
+            ))
+
+    def test_keeping_original_refuses_a_file_with_queued_work_or_an_unpublished_copy(self) -> None:
+        season = "tv/show/Season 1"
+        show = self._motion_show({"Season 1/Queued.mkv": "held", "Season 1/Staged.mkv": "held"})
+        self._queued_job_for("queued-held", show.item_ids["Season 1/Queued.mkv"], "tv/show/Season 1/Queued.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(staged_artifacts.insert().values(
+                library_item_id=show.item_ids["Season 1/Staged.mkv"], staging_path=str(self.root / "staged.mkv"),
+                validation_json=json.dumps({"passed": True}), updated_at=web_app._now_iso(),
+            ))
+
+        queued = self._keep_original(show, season, "Season 1/Queued.mkv")
+        staged = self._keep_original(show, season, "Season 1/Staged.mkv")
+
+        self.assertFalse(queued["ok"], queued)
+        self.assertIn("Queued.mkv", queued["message"])
+        self.assertFalse(staged["ok"], staged)
+        self.assertIn("Staged.mkv", staged["message"])
+        self.assertEqual(self._kept_rows(), set())
+
+    def test_dispatch_stops_a_queued_job_for_a_kept_file_instead_of_making_it(self) -> None:
+        show = self._motion_show({"Season 1/Kept.mkv": "held", "Season 1/Clear.mkv": "clear"})
+        kept_id = show.item_ids["Season 1/Kept.mkv"]
+        self._record_keep(kept_id)
+        self._queued_job_for("kept-job", kept_id, "tv/show/Season 1/Kept.mkv")
+        self._queued_job_for("clear-job", show.item_ids["Season 1/Clear.mkv"], "tv/show/Season 1/Clear.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[self._encode_host_row("worker", schedule_closes_at=None)])
+            selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+            kept_job = load_encode_job(connection, "kept-job")
+            clear_job = load_encode_job(connection, "clear-job")
+
+        assert kept_job is not None and clear_job is not None
+        self.assertEqual((kept_job["status"], kept_job["terminal_reason"]), ("stopped", "kept_original"))
+        self.assertNotEqual(clear_job["status"], "stopped")
+        self.assertNotEqual(object_dict(selected).get("job_id"), "kept-job")
+
+    def test_publishing_refuses_a_kept_file_even_when_forced(self) -> None:
+        source_path, staging_path, item = self._promotion_with_other_active_encode("episode-kept")
+        self._record_keep(int(item["library_item_id"]))
+
+        for force in (False, True):
+            with self.subTest(force=force), open_db(self.config.paths.db_path) as connection, \
+                    self.assertRaisesRegex(staging_runtime.PromotionWaiting, "keep this file original"):
+                staging_runtime.promote_one_item(
+                    connection, self.config, item, force=force, probe_media=Mock(), file_fingerprint=Mock(),
+                    timestamp=web_app._now_iso, record_event=Mock(),
+                    reserve_preflight=lambda *_args, **_kwargs: ReservePreflight(True, None, {}),
+                )
+
+        self.assertTrue(source_path.exists())
+        self.assertTrue(staging_path.exists())
+
+    def test_evidence_work_never_starts_a_motion_check_for_a_kept_file(self) -> None:
+        season = "tv/show/Season 1"
+        show = self._motion_show({"Season 1/Kept.mkv": "held", "Season 1/Other.mkv": "held"})
+        kept_id, other_id = show.item_ids["Season 1/Kept.mkv"], show.item_ids["Season 1/Other.mkv"]
+        self.assertTrue(self._keep_original(show, season, "Season 1/Kept.mkv")["ok"])
+        # A classifier change asks both to be classified again.
+        with open_db(self.config.paths.db_path) as connection:
+            for item_id in (kept_id, other_id):
+                item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
+                sync_library_item_evidence_state(connection, item, CADENCE_EVIDENCE_KIND)
+            connection.execute(
+                update(library_item_evidence_state)
+                .where(library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND)
+                .values(state="classification_required")
+            )
+
+        def work_status(connection: DBClient, item_id: int) -> str | None:
+            return connection.execute(
+                select(library_item_evidence_state.c.work_status).where(
+                    library_item_evidence_state.c.library_item_id == item_id,
+                    library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+                )
+            ).scalar_one()
+
+        with open_db(self.config.paths.db_path) as connection:
+            start_evidence_work(connection, show.config, season, evidence_kinds=[CADENCE_EVIDENCE_KIND])
+            selected = (work_status(connection, kept_id), work_status(connection, other_id))
+            # Work queued for it before it was kept is released when a worker claims, not run.
+            batch_id = connection.execute(
+                select(library_item_evidence_state.c.work_batch_id).where(
+                    library_item_evidence_state.c.library_item_id == other_id,
+                )
+            ).scalars().first()
+            connection.execute(
+                update(library_item_evidence_state)
+                .where(
+                    library_item_evidence_state.c.library_item_id == kept_id,
+                    library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+                )
+                .values(work_batch_id=batch_id, work_status="queued")
+            )
+            connection.commit()
+            resume_evidence_queue(connection)
+            claim = claim_next_evidence_work(connection, worker_id="worker", lease_seconds=30)
+            released = work_status(connection, kept_id)
+
+        self.assertEqual(selected, (None, "queued"))
+        assert claim is not None
+        self.assertEqual(claim.library_item_id, other_id)
+        self.assertIsNone(released)
+
+    def test_a_kept_episode_is_not_offered_or_accepted_as_is_on_the_show_page(self) -> None:
+        show = self._motion_show({"Season 1/Unclear.mkv": "as_is", "Season 1/Other.mkv": "as_is"})
+        self.assertTrue(self._keep_original(show, "tv/show", "Season 1/Unclear.mkv")["ok"])
+
+        with open_db(self.config.paths.db_path) as connection:
+            offered = ambiguous_motion_runtime.ambiguous_motion_files(
+                connection, "tv/show", library_types=show.config.library_type_map,
+            )
+        accepted = ambiguous_motion_runtime.accept_ambiguous_motion_action(
+            show.config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: None,
+        )
+        page = self._motion_page(show, "tv/show")
+
+        self.assertEqual([row["rel_path"] for row in offered.eligible], ["tv/show/Season 1/Other.mkv"])
+        self.assertEqual(accepted["accepted_count"], 1)
+        self.assertEqual(page.lifecycle["motion_kept_candidate_count"], 1)
+        with open_db(self.config.paths.db_path) as connection:
+            summary = json.loads(str(connection.execute(
+                select(library_items.c.cadence_summary_json).where(
+                    library_items.c.id == show.item_ids["Season 1/Unclear.mkv"],
+                )
+            ).scalar_one()))
+        self.assertNotIn("owner_acceptance", summary)
 
     def test_a_protected_season_held_for_motion_offers_no_override_that_queueing_would_refuse(self) -> None:
         show = self._motion_show(

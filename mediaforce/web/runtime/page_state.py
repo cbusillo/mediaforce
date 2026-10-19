@@ -16,7 +16,9 @@ Order, first match wins:
    ``test`` for a sample that stopped, ``ready_to_compare`` for a sample awaiting review. A sample
    outranks validating, finishing and finished because it is the owner's newest request for the
    scope, and approving it changes which settings its files are published under.
-5. ``ready_to_check``, ``finish_blocked`` / ``ready_to_finish``, ``finished``: the workflow lanes.
+5. ``ready_to_check``, ``finish_blocked`` / ``ready_to_finish``, ``finished``: the workflow lanes. A
+   file the owner kept original for its motion pattern is settled, so a scope whose remaining files
+   are all published or kept original is ``finished``.
 6. ``ready_to_make``: the approval governing the scope (the nearest folder holding one, see
    ``production_approval``) is current, records its contract, and the review evidence still allows
    production. Under such an approval a scope where neither queueing nor an override the page

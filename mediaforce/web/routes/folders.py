@@ -16,6 +16,15 @@ def _request_flag(body: object, key: str) -> bool:
     return isinstance(body, dict) and body.get(key) is True
 
 
+def _request_item_ids(body: dict[str, Any]) -> list[int]:
+    """The ``library_item_ids`` a per-file decision names: a non-empty list of positive ids."""
+    item_ids = body.get("library_item_ids")
+    if (not isinstance(item_ids, list) or not item_ids
+            or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in item_ids)):
+        raise HTTPException(status_code=400, detail="Name the files with library_item_ids.")
+    return item_ids
+
+
 async def _request_body(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
@@ -48,6 +57,8 @@ def register_folder_routes(
         checked_output_preview_payload: Callable[[str], dict[str, Any]] | None = None,
         checked_output_preview_stream_action: Callable[[str, str | None], Response] | None = None,
         accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
+        keep_motion_held_originals_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
+        undo_motion_keep_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
         decide_size_held_action: Callable[[str, int | Collection[int], bool], dict[str, Any]] | None = None,
         folder_episodes_payload: Callable[[str], dict[str, Any]] | None = None,
         use_show_settings_action: Callable[[str], dict[str, Any]] | None = None,
@@ -210,6 +221,24 @@ def register_folder_routes(
         @app.post("/api/folders/{prefix:path}/accept-ambiguous-motion")
         async def api_folder_accept_ambiguous_motion(prefix: str) -> JSONResponse:
             result = await run_in_threadpool(accept_ambiguous_motion, prefix.strip("/"))
+            return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    if keep_motion_held_originals_action is not None:
+        keep_originals = keep_motion_held_originals_action
+
+        @app.post("/api/folders/{prefix:path}/keep-motion-original")
+        async def api_folder_keep_motion_original(prefix: str, request: Request) -> JSONResponse:
+            item_ids = _request_item_ids(await _request_body(request))
+            result = await run_in_threadpool(keep_originals, prefix.strip("/"), item_ids)
+            return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    if undo_motion_keep_action is not None:
+        undo_keep = undo_motion_keep_action
+
+        @app.post("/api/folders/{prefix:path}/undo-keep-motion-original")
+        async def api_folder_undo_keep_motion_original(prefix: str, request: Request) -> JSONResponse:
+            item_ids = _request_item_ids(await _request_body(request))
+            result = await run_in_threadpool(undo_keep, prefix.strip("/"), item_ids)
             return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/queue-older-seasons")

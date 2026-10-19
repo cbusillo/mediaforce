@@ -29,6 +29,7 @@ from mediaforce.core.type_defs import object_list
 from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.encoding.free_space import ReservePreflight, promotion_reserve_preflight
 from mediaforce.library.media_scopes import logical_library_rel_path
+from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.tuning.compression_intent import compression_intent_from_item
 from mediaforce.tuning.production_lineage import validated_target_identity
 from mediaforce.tuning.production_outcomes import append_target_production_outcome, prepare_target_production_outcome
@@ -694,6 +695,12 @@ def promote_one_item(
         raise FileNotFoundError(f"No staged artifact found for item {item['library_item_id']}")
     if stage_row.get("promoted_at") is not None:
         return Path(str(stage_row["promoted_path"]))
+    # The owner's choice to keep the original wins over any copy made before or despite it, even forced.
+    if library_item_ids_kept_original(connection, [int(item["library_item_id"])]):
+        raise PromotionWaiting(
+            "You chose to keep this file original for its motion pattern. Undo that on its page to publish this copy.",
+            reason_code="kept_original",
+        )
     validation = json.loads(stage_row["validation_json"] or "{}")
     if not force and not validation.get("passed"):
         raise RuntimeError(f"Item {item['library_item_id']} must be validated before promotion")

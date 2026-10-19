@@ -19,7 +19,8 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
-from mediaforce.library.evidence_state import sync_library_item_evidence_states
+from mediaforce.library.evidence_state import library_item_source_fingerprint, sync_library_item_evidence_states
+from mediaforce.library.motion_keep_state import reconcile_motion_keep_with_source
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_is_missing
 from mediaforce.library.media_scopes import logical_library_rel_path, path_matches_scope
 from mediaforce.library.planner import recommend_item
@@ -204,19 +205,28 @@ def _execute_scan_library(
                     )
                 )
                 if not row.get("content_version_fingerprint") and content_fingerprint:
+                    rebound_item = {
+                        **dict(row),
+                        "fingerprint": file_fingerprint(
+                            file_path=file_path,
+                            stat_result=stat_result,
+                            duration_seconds=float_value(row.get("duration_seconds")),
+                        ),
+                        "content_version_fingerprint": content_fingerprint,
+                    }
                     sync_library_item_evidence_states(
                         connection,
-                        {
-                            **dict(row),
-                            "fingerprint": file_fingerprint(
-                                file_path=file_path,
-                                stat_result=stat_result,
-                                duration_seconds=float_value(row.get("duration_seconds")),
-                            ),
-                            "content_version_fingerprint": content_fingerprint,
-                        },
+                        rebound_item,
                         preserve_source_identity=False,
                         updated_at=started_at,
+                    )
+                    # The same content under its first content fingerprint keeps the owner's choice.
+                    reconcile_motion_keep_with_source(
+                        connection,
+                        rebound_item,
+                        same_content=True,
+                        previous_source_fingerprint=library_item_source_fingerprint(row),
+                        now_iso=started_at,
                     )
                 stats.unchanged += 1
                 files_since_progress = _flush_scan_progress(
@@ -332,6 +342,15 @@ def _execute_scan_library(
             item = connection.execute(
                 select(library_items).where(library_items.c.id == library_item_id)
             ).mappings().one()
+            if row is not None:
+                # A new source lapses the owner's keep-original choice in this same transaction.
+                reconcile_motion_keep_with_source(
+                    connection,
+                    item,
+                    same_content=False,
+                    previous_source_fingerprint=library_item_source_fingerprint(row),
+                    now_iso=started_at,
+                )
             sync_library_item_evidence_states(
                 connection,
                 item,

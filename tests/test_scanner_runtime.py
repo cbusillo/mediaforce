@@ -11,14 +11,15 @@ from sqlalchemy import select, update
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
-from mediaforce.core.db_tables import library_item_evidence_state, library_items, scan_runs
+from mediaforce.core.db_tables import library_item_evidence_state, library_items, motion_keep_decisions, scan_runs
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
 from mediaforce.library.evidence_state import EVIDENCE_REASON_POLICY_CHANGED, EVIDENCE_REASON_SOURCE_CHANGED, \
     EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, \
-    sync_library_item_evidence_states
+    library_item_source_fingerprint, sync_library_item_evidence_states
+from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.scanner import (
     _content_version_changed,
     _failed_probe_summary,
@@ -1067,6 +1068,53 @@ class ScannerRuntimeTests(unittest.TestCase):
             cadence_summary_json=json.dumps(cadence, separators=(",", ":"), sort_keys=True),
             media_fingerprint_json=json.dumps(fingerprint, separators=(",", ":"), sort_keys=True),
         )
+
+    def test_a_replaced_source_lapses_keep_original_even_if_the_old_source_returns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            media_root = project_root / "movies"
+            media_root.mkdir()
+            movie = media_root / "Feature.mkv"
+            movie.write_bytes(b"source A")
+            original = movie.stat()
+            config = self._config(project_root, {"movies": media_root})
+            probe = patch(
+                "mediaforce.library.scanner.probe_media",
+                return_value=_failed_probe_summary(RuntimeError("fixture probe")),
+            )
+            try:
+                with open_db(config.paths.db_path) as connection, probe:
+                    scan_library(connection, config)
+                    item = connection.execute(select(library_items)).mappings().one()
+                    kept_fingerprint = library_item_source_fingerprint(item)
+                    connection.execute(motion_keep_decisions.insert().values(
+                        library_item_id=item["id"], source_fingerprint=kept_fingerprint, reason_code="mixed",
+                        prefix="movies", kept_at="2026-10-18T00:00:00+00:00",
+                    ))
+                    connection.commit()
+                    # An unchanged rescan keeps the choice.
+                    scan_library(connection, config)
+                    self.assertEqual(self._kept(connection), {item["id"]})
+
+                    movie.write_bytes(b"source B, longer")
+                    os.utime(movie, ns=(original.st_atime_ns, original.st_mtime_ns + 5_000_000_000))
+                    scan_library(connection, config)
+                    self.assertEqual(self._kept(connection), set())
+
+                    # Source A comes back exactly; the lapsed choice must not come back with it.
+                    movie.write_bytes(b"source A")
+                    os.utime(movie, ns=(original.st_atime_ns, original.st_mtime_ns))
+                    scan_library(connection, config)
+                    restored = connection.execute(select(library_items)).mappings().one()
+                    self.assertEqual(library_item_source_fingerprint(restored), kept_fingerprint)
+                    self.assertEqual(self._kept(connection), set())
+                    self.assertEqual(library_item_ids_kept_original(connection, [item["id"]]), frozenset())
+            finally:
+                reset_engine_cache()
+
+    @staticmethod
+    def _kept(connection: Any) -> set[int]:
+        return set(connection.execute(select(motion_keep_decisions.c.library_item_id)).scalars())
 
 
 if __name__ == "__main__":

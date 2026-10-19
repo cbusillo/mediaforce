@@ -158,6 +158,11 @@ def _episode(
             percent = float_value(progress.get("percent_complete"))
             episode["percent_complete"] = max(0, min(100, round(percent))) if percent > 0 else None
         return episode
+    if item.state == "kept_original":
+        # The owner settled it; a run stopped for that choice is not a question for them.
+        episode["stage"] = "kept_original"
+        episode["detail"] = item.blocker
+        return episode
     if run is not None and run_status in _OWNER_RUN_STATUSES | {"queued", "retry_backoff"}:
         reason, label, needs_owner = unfinished_child_reason(run)
         if reason == "size_exception_declined":

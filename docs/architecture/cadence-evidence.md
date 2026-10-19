@@ -75,6 +75,31 @@ with `owner_accepted_as_is`, so the queue gates, the manifest, and the filter
 compiler agree. A new measurement or a different source drops the acceptance.
 Files above 2% stay blocked and are listed on the show page.
 
+No transform handles a mixed or partly interlaced file, so there is no
+"encode anyway" for them. The owner can instead choose `Keep original` for any
+file held for its motion pattern, including one `Encode as-is` could accept. The
+choice is stored per file in `motion_keep_decisions`, bound to the source
+fingerprint the evidence uses, and audited in `item_events`. While the source is
+unchanged, the queue's motion-pattern gate puts the file in its own kept group:
+no queue, check, or held-files sweep takes it, `Encode as-is` leaves it out, and
+pages count it as settled rather than as work, with its reason still listed. A
+season whose remaining files are all published or kept original is finished.
+Undoing the choice returns the file to held, and an earlier production hold
+lets it join once its motion pattern clears.
+
+Keeping is refused, naming the files, while any of them has encode work queued,
+running or retrying, or a copy not yet published; the owner lets that work
+finish or stops it first. As a backstop, dispatch stops a queued job that would
+make a kept file (`terminal_reason: kept_original`) and publishing refuses a
+kept file even when forced. Evidence work never selects a kept file for a
+motion-pattern check, and a worker claiming the batch releases a check queued
+before the file was kept.
+
+A changed source lapses the choice: the scanner removes it in the same
+transaction that records the new source, so the old source coming back cannot
+revive it, and every reader treats a different fingerprint as lapsed.
+`library/motion_keep_state` holds those reads for every caller.
+
 A stored decision is also compared with what the current classifier makes of the
 stored measurements. When they differ, because the classifier changed after the
 file was measured, the file needs only reclassification. The evidence worker

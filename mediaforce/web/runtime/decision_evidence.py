@@ -6,12 +6,12 @@ from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_item_evidence_state, library_items
-from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
+from mediaforce.core.db_tables import library_item_evidence_state, library_items, motion_keep_decisions
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, cadence_hold_reason
 from mediaforce.library.candidate_selection import CandidateDecision, MotionHolds, OlderSeasonOverrideSelection
 from mediaforce.library.evidence_queue import EvidenceQueueConflict, queue_decision_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_STATE_CURRENT, sync_library_item_evidence_state
-from mediaforce.library.motion_holds import CadenceSafetyPartition, cadence_safety_partition
+from mediaforce.library.motion_holds import CadenceSafetyPartition, cadence_safety_partition, cadence_summary_payload
 
 
 def older_season_cadence_payload(
@@ -28,27 +28,61 @@ def older_season_cadence_payload(
 
 
 def motion_hold_files_payload(
+        connection: DBClient,
         decisions: Sequence[CandidateDecision],
         motion_holds: MotionHolds,
 ) -> dict[str, Any] | None:
     """The files a page names as left out of its queue for their motion pattern, or None when there are none.
 
     Protected files count too, since an override would leave them out the same way. ``as_is_count`` is
-    how many held files the show's one encode-as-is decision could accept.
+    how many held files the show's one encode-as-is decision could accept. ``held`` and ``kept`` name
+    each held file and each file the owner kept original with its id and why it is held, so the page can
+    offer keeping it original and undoing that.
     """
     rel_paths = {
         decision.item_id: str(decision.row["rel_path"] or "")
         for decision in decisions
         if decision.workflow_lane == "encode"
     }
-    held = sorted(rel_paths[item_id] for item_id in motion_holds.held if item_id in rel_paths)
+    held_ids = sorted((item_id for item_id in motion_holds.held if item_id in rel_paths), key=rel_paths.__getitem__)
+    kept_ids = sorted((item_id for item_id in motion_holds.kept if item_id in rel_paths), key=rel_paths.__getitem__)
     check_needed = sorted(rel_paths[item_id] for item_id in motion_holds.check_needed if item_id in rel_paths)
-    if not held and not check_needed:
+    if not held_ids and not check_needed and not kept_ids:
         return None
+    summaries = {
+        int(item_id): summary_json
+        for item_id, summary_json in connection.execute(
+            select(library_items.c.id, library_items.c.cadence_summary_json).where(library_items.c.id.in_(held_ids))
+        )
+    } if held_ids else {}
+    kept_rows = {
+        int(row["library_item_id"]): row
+        for row in connection.execute(
+            select(motion_keep_decisions).where(motion_keep_decisions.c.library_item_id.in_(kept_ids))
+        ).mappings().fetchall()
+    } if kept_ids else {}
     return {
-        "held_files": held,
+        "held_files": [rel_paths[item_id] for item_id in held_ids],
         "check_files": check_needed,
         "as_is_count": sum(item_id in rel_paths for item_id in motion_holds.as_is),
+        "held": [
+            {
+                "library_item_id": item_id,
+                "rel_path": rel_paths[item_id],
+                "reason": cadence_hold_reason(cadence_summary_payload(summaries.get(item_id))),
+                "as_is": item_id in motion_holds.as_is,
+            }
+            for item_id in held_ids
+        ],
+        "kept": [
+            {
+                "library_item_id": item_id,
+                "rel_path": rel_paths[item_id],
+                "reason": str(kept_rows[item_id]["reason_code"]) if item_id in kept_rows else "unclear",
+                "kept_at": str(kept_rows[item_id]["kept_at"]) if item_id in kept_rows else None,
+            }
+            for item_id in kept_ids
+        ],
     }
 
 
@@ -218,6 +252,8 @@ class CadenceQueuePartition:
     analysis_unavailable_item_ids: frozenset[int]
     analysis_unavailable_reason: str | None
     evidence_work: dict[str, Any]
+    # Files the owner chose to keep original; nothing queues them or checks them.
+    kept_item_ids: frozenset[int] = frozenset()
 
 
 def cadence_queue_partition(
@@ -287,4 +323,5 @@ def cadence_queue_partition(
         analysis_unavailable_item_ids=evidence_id_set if unavailable_reason is not None else frozenset(),
         analysis_unavailable_reason=unavailable_reason,
         evidence_work=work,
+        kept_item_ids=partition.kept_item_ids,
     )

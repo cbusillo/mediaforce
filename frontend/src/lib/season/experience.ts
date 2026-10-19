@@ -8,6 +8,9 @@ import type {
 	EncodeUnfinishedGroup,
 	FolderPayload,
 	FolderStatusPayload,
+	MotionHeldFile,
+	MotionHoldReason,
+	MotionKeptFile,
 	CompressionIntentOptionPayload,
 	CompressionIntentRequestPayload,
 	OperatorIntentRequestPayload,
@@ -2087,6 +2090,10 @@ export interface MotionHolds {
 	checkFiles: string[];
 	/** How many held episodes the show's encode-as-is decision could accept. */
 	asIsCount: number;
+	/** The held episodes with their ids and reasons, which the owner can keep original. */
+	heldItems: MotionHeldFile[];
+	/** The episodes the owner kept original, which the owner can undo. */
+	keptItems: MotionKeptFile[];
 }
 
 /** The episodes queueing leaves out of this scope for their motion pattern. */
@@ -2095,8 +2102,41 @@ export function motionHolds(folder: FolderPayload): MotionHolds {
 	return {
 		heldFiles: files?.held_files ?? [],
 		checkFiles: files?.check_files ?? [],
-		asIsCount: files?.as_is_count ?? 0
+		asIsCount: files?.as_is_count ?? 0,
+		heldItems: files?.held ?? [],
+		keptItems: files?.kept ?? []
 	};
+}
+
+/** Whether a page lists any episode to keep original or to undo; it does in every page state. */
+export function showsMotionKeepFiles(holds: MotionHolds): boolean {
+	return holds.heldItems.length > 0 || holds.keptItems.length > 0;
+}
+
+const MOTION_HOLD_REASON_LABELS: Record<MotionHoldReason, string> = {
+	mixed: 'Mixed motion pattern',
+	partly_interlaced: 'Partly interlaced',
+	unclear: 'Unclear motion pattern'
+};
+
+/** Why an episode is held for its motion pattern, in a few plain words. */
+export function motionHoldReasonLabel(reason: MotionHoldReason | string): string {
+	return MOTION_HOLD_REASON_LABELS[reason as MotionHoldReason] ?? MOTION_HOLD_REASON_LABELS.unclear;
+}
+
+/** What the finished page says about its episodes, counting the ones the owner kept original. */
+export function finishedEpisodesNote(episodeCount: number, keptCount: number): string {
+	if (keptCount <= 0) {
+		return `All ${episodeCount} smaller episodes are in your library. The originals remain in the cleanup folder until you choose to delete them.`;
+	}
+	const published = Math.max(0, episodeCount - keptCount);
+	const kept = `${episodeCountLabel(keptCount)} ${keptCount === 1 ? 'stays' : 'stay'} original by your choice.`;
+	if (published === 0) return kept;
+	const smaller =
+		published === 1
+			? '1 smaller episode is in your library, and its original remains in the cleanup folder.'
+			: `${published} smaller episodes are in your library, and their originals remain in the cleanup folder.`;
+	return `${smaller} ${kept}`;
 }
 
 function episodeCountLabel(count: number): string {

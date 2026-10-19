@@ -120,6 +120,8 @@ export interface SeasonLifecycleState {
 	protected_motion_held_candidate_count?: number;
 	protected_motion_check_candidate_count?: number;
 	motion_as_is_candidate_count?: number;
+	/** Episodes the owner chose to keep original for their motion pattern; they are no longer work. */
+	motion_kept_candidate_count?: number;
 	/** Episodes whose motion pattern is measured and resolved, as an older-seasons queue requires. */
 	motion_cleared_candidate_count?: number;
 	/** Of those, the ones a lifecycle hold protects. */
@@ -152,6 +154,8 @@ export interface LifecycleState {
 	protected_motion_check_candidate_count?: number;
 	/** Held episodes the show's encode-as-is decision could accept. */
 	motion_as_is_candidate_count?: number;
+	/** Episodes the owner chose to keep original for their motion pattern; they are no longer work. */
+	motion_kept_candidate_count?: number;
 	/** A show's older-seasons action, narrowed to files whose motion pattern is resolved. */
 	older_seasons?: OlderSeasonOverridePayload | null;
 	hold_reason_counts?: Record<string, number>;
@@ -167,12 +171,34 @@ export interface AmbiguousMotionPayload {
 	partly_interlaced_files: string[];
 }
 
+/** Why a file is held for its motion pattern. */
+export type MotionHoldReason = 'mixed' | 'partly_interlaced' | 'unclear';
+
+/** A file held for its motion pattern, which the owner can keep original. */
+export interface MotionHeldFile {
+	library_item_id: number;
+	rel_path: string;
+	reason: MotionHoldReason;
+	/** Whether the show's encode-as-is decision could accept it instead. */
+	as_is: boolean;
+}
+
+/** A file the owner chose to keep original for its motion pattern, with the reason it was held. */
+export interface MotionKeptFile {
+	library_item_id: number;
+	rel_path: string;
+	reason: MotionHoldReason;
+	kept_at: string | null;
+}
+
 /** The files a season or episode page names as left out of its queue for their motion pattern. */
 export interface MotionHoldFilesPayload {
 	held_files: string[];
 	check_files: string[];
 	/** How many of them the show page's motion decision could encode as-is. */
 	as_is_count?: number;
+	held?: MotionHeldFile[];
+	kept?: MotionKeptFile[];
 }
 
 export interface OlderSeasonOverridePayload {

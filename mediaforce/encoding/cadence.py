@@ -412,6 +412,28 @@ def cadence_awaits_as_is_decision(summary: Mapping[str, Any]) -> bool:
     )
 
 
+CadenceHoldReason = Literal["mixed", "partly_interlaced", "unclear"]
+
+
+def cadence_hold_reason(summary: Mapping[str, Any]) -> CadenceHoldReason:
+    """Why a file is held for its motion pattern, in the terms the owner sees it listed under."""
+    payload = object_dict(summary)
+    decision = object_dict(reclassify_cadence_summary(payload).get("decision"))
+    if decision.get("classification") == "mixed":
+        return "mixed"
+    analysis = object_dict(payload.get("analysis"))
+    sampled_frames = int_value(analysis.get("sampled_frames"))
+    interlaced_frames = int_value(analysis.get("tff_frames")) + int_value(analysis.get("bff_frames"))
+    if (
+            decision.get("classification") == "unknown"
+            and cadence_measurement_complete(analysis)
+            and sampled_frames > 0
+            and interlaced_frames / sampled_frames > AS_IS_MAX_INTERLACED_SHARE
+    ):
+        return "partly_interlaced"
+    return "unclear"
+
+
 def accept_cadence_as_is(
         summary: Mapping[str, Any],
         *,
