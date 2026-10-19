@@ -286,11 +286,17 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
         host = object_dict(job.get("host"))
         host_key = str(host.get("host") or host.get("key") or stable_json_hash(host))
         progress = object_dict(job.get("progress"))
+        restart_stop = job["status"] == "stopped" and job.get("terminal_reason") == CONTROLLER_RESTART_STOP_REASON
         if execution_mode_for_host(host) != "ssh" or host_media_access_for_host(host) == "stream":
+            if not restart_stop:
+                continue
+            _settle_restart_stop_without_remote_writer(connection, job, snapshot, deps)
             continue
+        selected_items: list[Any] = []
         try:
             items = object_list(json.loads(Path(job["manifest_path"]).read_text()).get("items"))
             indexes = _manifest_indexes_for_job(job, [object_dict(item) for item in items])
+            selected_items = [items[index] for index in indexes]
             receipt = stable_json_hash({
                 "job_id": job["job_id"], "started_at": job.get("started_at"),
                 "attempt_count": job.get("attempt_count"), "host": host,
@@ -335,14 +341,27 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
                     continue
         except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError, subprocess.SubprocessError) as exc:
             message = f"Waiting to end its earlier remote encode before making this file again. {exc}"
-            if job["status"] == "stopped":
+            if restart_stop:
+                # Ask once and wait: an encode that may still be writing is never started again blindly.
+                episode, host_label = _restart_stop_names(job, selected_items)
+                job["error"] = _restart_stop_unconfirmed_message(episode, host_label)
+                progress["restart_cleanup_detail"] = str(exc)[:2000]
+                job["progress"] = progress
+            elif job["status"] == "stopped":
                 job["error"] = f"Stopped; {message}"
             else:
                 job["waiting_reason"] = message
         else:
             progress["remote_cleanup_verified"] = receipt
+            progress.pop("restart_cleanup_detail", None)
             job["progress"] = progress
-            if job["status"] == "stopped":
+            if restart_stop:
+                if int_value(job.get("attempt_count")) < deps.encode_job_max_attempts:
+                    _requeue_restart_stopped_job(job, deps)
+                else:
+                    job["error"] = _restart_stop_last_attempt_message(_restart_stop_names(job, selected_items)[0])
+                    progress["restart_stop_last_attempt"] = True
+            elif job["status"] == "stopped":
                 job["error"] = "Encode queue job was stopped; its remote processes have ended."
             else:
                 job["waiting_reason"] = None
@@ -356,6 +375,35 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
         save_encode_job(connection, job)
         sync_encode_job_parent(connection, job, deps)
         connection.commit()
+
+
+def _settle_restart_stop_without_remote_writer(
+        connection: DBClient, job: dict[str, Any], snapshot: str, deps: EncodeQueueRuntimeDeps,
+) -> None:
+    """Requeue or ask about a restart-stopped child whose output no remote encoder wrote.
+
+    A streamed encode's output is written by the Mediaforce process that shut down, so that writer
+    has ended. A local encoder was that process's own child, which a new process cannot confirm ended.
+    """
+    episode, host_label = _restart_stop_names(job)
+    if execution_mode_for_host(object_dict(job.get("host"))) == "ssh":
+        if int_value(job.get("attempt_count")) < deps.encode_job_max_attempts:
+            _requeue_restart_stopped_job(job, deps)
+        else:
+            job["error"] = _restart_stop_last_attempt_message(episode)
+            job["progress"] = {**object_dict(job.get("progress")), "restart_stop_last_attempt": True}
+    else:
+        job["error"] = _restart_stop_unconfirmed_message(episode, host_label)
+    connection.commit()
+    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    current = load_encode_job(connection, str(job["job_id"]))
+    if current is None or stable_json_hash(current) != snapshot or current == job:
+        connection.rollback()
+        return
+    job["updated_at"] = deps.now_iso()
+    save_encode_job(connection, job)
+    sync_encode_job_parent(connection, job, deps)
+    connection.commit()
 
 
 def reconcile_encode_jobs(
@@ -552,6 +600,65 @@ STALE_LEASE_RECLAIM_MESSAGE = "Encode queue job stopped heartbeating and was rec
 
 class ReclaimCancelledError(ProcessCancelledError):
     """The lease reclaim ended this worker; the job retries instead of stopping for the owner."""
+
+
+class ControllerShutdownCancelledError(ProcessCancelledError):
+    """Mediaforce itself is shutting down; the owner did not ask for this stop."""
+
+
+# A child stopped only because Mediaforce shut down keeps this terminal reason until the next
+# start confirms its earlier encode ended and queues it again. An owner's Stop never sets it.
+CONTROLLER_RESTART_STOP_REASON = "controller_restart"
+CONTROLLER_RESTART_REQUEUE_REASON = "Queued again after Mediaforce restarted; removing its unfinished file first."
+
+
+def _restart_stop_names(job: Mapping[str, Any], items: list[Any] | None = None) -> tuple[str, str]:
+    """The episode and the computer an owner-facing restart message names."""
+    host_label = str(object_dict(job.get("host")).get("label") or "").strip() or "the computer that was encoding it"
+    names = [
+        Path(str(object_dict(item).get("rel_path") or "")).stem
+        for item in (items or [])
+        if str(object_dict(item).get("rel_path") or "").strip()
+    ]
+    if not names:
+        current = str(object_dict(job.get("progress")).get("current_item_rel_path") or "").strip()
+        names = [Path(current).stem] if current else []
+    return (", ".join(names) or "this file"), host_label
+
+
+def _restart_stop_unconfirmed_message(episode: str, host_label: str) -> str:
+    return (
+        f"Stopped when Mediaforce restarted. Mediaforce could not confirm that the earlier encode of "
+        f"{episode} on {host_label} has ended, so it will not start it again by itself. "
+        f"Check {host_label}, then retry this episode."
+    )
+
+
+def _restart_stop_last_attempt_message(episode: str) -> str:
+    return (
+        f"Stopped when Mediaforce restarted, during the last automatic attempt at {episode}. "
+        f"Its earlier encode has ended; retry this episode to make it again."
+    )
+
+
+def _requeue_restart_stopped_job(job: dict[str, Any], deps: EncodeQueueRuntimeDeps) -> None:
+    """Send a restart-stopped child back through retry cleanup, which removes its unfinished file first.
+
+    The attempt it was on stays counted, so restarts during an episode still end at the attempt cap.
+    """
+    now_iso = deps.now_iso()
+    job.update(
+        {
+            "status": "retry_backoff",
+            "finished_at": None,
+            "retry_not_before": now_iso,
+            "waiting_reason": CONTROLLER_RESTART_REQUEUE_REASON,
+            "terminal_reason": None,
+            "last_failure_kind": "worker_restart",
+            "last_failure_at": now_iso,
+            "error": None,
+        }
+    )
 
 
 def _renew_lease_for_live_worker(
@@ -1348,6 +1455,13 @@ def unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str, bool]:
         return f"waiting:{waiting_reason}", waiting_reason, False
     if status == "retry_backoff":
         return "retrying", _UNFINISHED_REASON_LABELS["retrying"], False
+    if status == "stopped" and child.get("terminal_reason") == CONTROLLER_RESTART_STOP_REASON:
+        # Still stopped after a restart: its earlier encode is not confirmed ended, or it was on its
+        # last attempt. Each computer gets its own line so the owner knows where to look.
+        if object_dict(child.get("progress")).get("restart_stop_last_attempt"):
+            return "restart_stopped_last_attempt", "stopped by a restart on its last try", True
+        host_label = _restart_stop_names(child)[1]
+        return f"restart_stopped:{host_label}", f"stopped by a restart; check {host_label}", True
     reason = "stopped" if status == "stopped" else _attention_child_reason(child)
     return reason, _UNFINISHED_REASON_LABELS[reason], reason != "size_exception_declined"
 
@@ -4200,6 +4314,8 @@ def run_encode_job(
         )
         schedule_deadline_thread.start()
     final_status: str | None = None
+    # Set when Mediaforce's own shutdown, not the owner, stopped this encode.
+    restart_stop = False
     schedule_interrupted = False
     failure_kind: str | None = None
     error: str | None = None
@@ -4240,12 +4356,13 @@ def run_encode_job(
         else:
             failure_kind = "stale_lease"
             error = STALE_LEASE_RECLAIM_MESSAGE
-    except ProcessCancelledError:
+    except ProcessCancelledError as cancel_error:
         if _encode_job_outputs_completed_by_id(config, job_id):
             final_status = "completed"
             error = None
         else:
             final_status = "stopped"
+            restart_stop = isinstance(cancel_error, ControllerShutdownCancelledError)
             with open_db(config.paths.db_path) as connection:
                 cleanup = _cleanup_encode_retry_artifacts(
                     connection, manifest_path=manifest_path, indexes=indexes,
@@ -4318,6 +4435,17 @@ def run_encode_job(
                             "updated_at": deps.now_iso(),
                         }
                     )
+                    if (final_status == "stopped" and restart_stop
+                            and not load_queue_state(connection).get("stop_requested")):
+                        # An owner's Stop that raced the shutdown stays an owner's Stop.
+                        episode, host_label = _restart_stop_names(job)
+                        job.update({
+                            "terminal_reason": CONTROLLER_RESTART_STOP_REASON,
+                            "error": (
+                                f"Stopped when Mediaforce restarted; {episode} will be queued again once "
+                                f"its earlier encode on {host_label} is confirmed to have ended."
+                            ),
+                        })
                     save_encode_job(connection, job)
                     sync_encode_job_parent(connection, job, deps)
                 elif error is not None:
