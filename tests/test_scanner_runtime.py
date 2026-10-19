@@ -1122,12 +1122,19 @@ class ScannerRuntimeTests(unittest.TestCase):
                 reset_engine_cache()
 
     def test_a_new_download_over_a_published_file_is_compressed_again(self) -> None:
+        for gone_between_scans in (False, True):
+            with self.subTest(gone_between_scans=gone_between_scans):
+                self._assert_replaced_publish_is_compressed_again(gone_between_scans=gone_between_scans)
+
+    def _assert_replaced_publish_is_compressed_again(self, *, gone_between_scans: bool) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project_root = Path(temp_dir)
             media_root = project_root / "shows"
             media_root.mkdir()
             episode = media_root / "S01E01.mkv"
             episode.write_bytes(b"original download")
+            # Another episode keeps the folder from looking unexpectedly empty when this one is gone.
+            (media_root / "S01E02.mkv").write_bytes(b"next episode")
             config = self._config(project_root, {"shows": media_root})
             probe = patch(
                 "mediaforce.library.scanner.probe_media",
@@ -1136,7 +1143,9 @@ class ScannerRuntimeTests(unittest.TestCase):
             try:
                 with open_db(config.paths.db_path) as connection, probe:
                     scan_library(connection, config)
-                    item_id = connection.execute(select(library_items.c.id)).scalar_one()
+                    item_id = connection.execute(
+                        select(library_items.c.id).where(library_items.c.source_path == str(episode))
+                    ).scalar_one()
                     # Our publish leaves the compressed copy at the path and stamps it at the publish time.
                     episode.write_bytes(b"compressed")
                     published_at = "2026-10-18T00:00:00+00:00"
@@ -1155,6 +1164,10 @@ class ScannerRuntimeTests(unittest.TestCase):
                     scan_library(connection, config)
                     self.assertEqual(self._lane(connection, item_id), "complete")
 
+                    if gone_between_scans:
+                        episode.unlink()
+                        scan_library(connection, config)
+                        self.assertEqual(self._lane(connection, item_id), "none")
                     episode.write_bytes(b"a better download, replacing the published copy")
                     scan_library(connection, config)
                     self.assertEqual(self._lane(connection, item_id), "encode")

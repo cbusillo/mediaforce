@@ -512,7 +512,9 @@ def _reopen_replaced_publishes(connection: DBClient, *, updated_at: str) -> None
     """A new original downloaded over a published file starts over, as a new file does.
 
     Our own publish stamps the item's content change at its publish time, so only a
-    content change recorded after the publish is a replacement.
+    content change recorded after the publish is a replacement. A file that went
+    missing and came back as new content is already discovered, but its publish
+    record would still hold it complete, so the record decides, not the status.
     """
     rows = connection.execute(
         select(
@@ -524,7 +526,6 @@ def _reopen_replaced_publishes(connection: DBClient, *, updated_at: str) -> None
         )
         .join(staged_artifacts, staged_artifacts.c.library_item_id == library_items.c.id)
         .where(LIBRARY_ITEM_PRESENT)
-        .where(library_items.c.status == "promoted")
         .where(library_items.c.content_version_changed_at > staged_artifacts.c.promoted_at)
     ).mappings().all()
     for row in rows:
@@ -546,6 +547,7 @@ def _reopen_replaced_publishes(connection: DBClient, *, updated_at: str) -> None
         connection.execute(
             update(library_items)
             .where(library_items.c.id == row["id"])
+            .where(library_items.c.status == "promoted")
             .values(status="discovered", updated_at=updated_at)
         )
 
