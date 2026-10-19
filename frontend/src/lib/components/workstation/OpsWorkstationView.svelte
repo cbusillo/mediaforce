@@ -23,6 +23,7 @@
 		buildOpsQueueRows,
 		buildOpsReadinessSummary,
 		buildOpsStatusTiles,
+		hostConnectionRetryAvailable,
 		hostPrepareDisabled,
 		hostPrepareTitle,
 		hostStateCopy,
@@ -163,6 +164,7 @@
 		'stop-calibration': '/api/calibration-queue/stop',
 		'start-host': '/api/hosts/start',
 		'prepare-host': '/api/hosts/prepare',
+		'retry-host-connection': '/api/hosts/retry-connection',
 		'reset-host-trust': '/api/hosts/reset-trust'
 	};
 
@@ -180,6 +182,8 @@
 		if (action === 'resume-encode') return 'Resume processing and clear stop request';
 		if (action === 'start-host') return 'Start or wake this computer';
 		if (action === 'prepare-host') return 'Set up this computer for Mediaforce work';
+		if (action === 'retry-host-connection')
+			return 'Check this computer and try to reconnect its storage now, without opening any window on it';
 		return 'Reset stored trust for this computer';
 	}
 
@@ -278,12 +282,14 @@
 			return hostPrepareDisabled(host, hostPasswords[host.key] ?? '');
 		}
 		if (action === 'reset-host-trust') return !host.trust_reset_supported;
+		if (action === 'retry-host-connection') return !hostConnectionRetryAvailable(host);
 		return false;
 	}
 
 	function hostHasVisibleActions(host: HostRuntime): boolean {
 		return (
 			!hostActionDisabled('start-host', host) ||
+			!hostActionDisabled('retry-host-connection', host) ||
 			!hostActionDisabled('prepare-host', host) ||
 			!hostActionDisabled('reset-host-trust', host) ||
 			Boolean(host.setup_supported && host.setup_requires_password)
@@ -652,6 +658,17 @@
 													class="control control--compact"
 													title={actionTitle('start-host')}
 													onclick={() => runAction('start-host', host)}>Start computer</button
+												>
+											{/if}
+											{#if hostConnectionRetryAvailable(host)}
+												<button
+													type="button"
+													class="control control--compact"
+													disabled={hostActionDisabled('retry-host-connection', host)}
+													title={actionTitle('retry-host-connection')}
+													aria-busy={actionPending === 'retry-host-connection'}
+													onclick={() => runAction('retry-host-connection', host)}
+													>Retry connection</button
 												>
 											{/if}
 											{#if !hostActionDisabled('prepare-host', host) || (host.setup_supported && host.setup_requires_password)}

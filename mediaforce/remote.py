@@ -312,7 +312,7 @@ def _mount_recovery_block(
                 return HostSetupResult(
                     ok=False,
                     message=f"{_mount_recovery_label(host)} needs a signed-in macOS desktop session to connect shared storage.",
-                    detail="Sign in to the desktop, then use Prepare to retry storage recovery.",
+                    detail="Sign in to the desktop, then use Set up computer to connect storage again.",
                     failure_kind="host_unavailable",
                 )
             cooldown_until = _MOUNT_RECOVERY_COOLDOWNS.get(key, 0.0)
@@ -320,7 +320,7 @@ def _mount_recovery_block(
                 return HostSetupResult(
                     ok=False,
                     message=f"{_mount_recovery_label(host)} is cooling down after a shared-storage recovery attempt.",
-                    detail="Mediaforce will retry automatically after the bounded cooldown, or use Prepare to retry now.",
+                    detail="Mediaforce will retry automatically after the bounded cooldown, or use Set up computer to try now.",
                     failure_kind="host_unavailable",
                 )
     return None

@@ -23904,7 +23904,7 @@ raise SystemExit(0)
             "Waiting for the active large encode job to release its free-space reserve.",
             "Waiting for a measurable free-space reserve: cannot measure /Volumes/Media. Mount or repair it.",
             "Waiting for complete free-space reserve inputs. Rebuild the production plan or rescan the folder.",
-            "Controller storage: Unexpected volume at /Volumes/Media. Reconnect storage with Finder or Prepare; "
+            "Controller storage: Unexpected volume at /Volumes/Media. Reconnect storage in Finder or with Set up computer; "
             "readiness checks continue.",
             "Mediaforce cannot access /Volumes/Media/staging on this computer. Mount the storage to continue.",
             "Encode host is warming up.",

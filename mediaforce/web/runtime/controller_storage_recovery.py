@@ -254,7 +254,7 @@ def controller_storage_admission_issue(
     if snapshot.state_error:
         return (
             f"Controller storage: {snapshot.state_error} "
-            "Reconnect storage with Finder or Prepare; readiness checks continue."
+            "Reconnect storage in Finder or with Set up computer; readiness checks continue."
         )
     by_mount = {Path(state.mount_point): state for state in snapshot.mounts}
     now = _utc_now()
@@ -268,7 +268,7 @@ def controller_storage_admission_issue(
             message = state.reason or f"Storage at {root} is unavailable."
             if state.status == "action_required":
                 return (
-                    f"Controller storage: {message} Reconnect storage with Finder or Prepare; "
+                    f"Controller storage: {message} Reconnect storage in Finder or with Set up computer; "
                     "readiness checks continue."
                 )
             retry = f" Retry at {state.next_retry_at}." if state.next_retry_at else ""

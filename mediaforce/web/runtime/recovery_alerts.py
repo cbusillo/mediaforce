@@ -6,12 +6,14 @@ from typing import Any
 from mediaforce.core.config import MediaforceConfig, load_runtime_settings, save_runtime_settings
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_recovery_snapshot
 from mediaforce.web.runtime.host_recovery import host_recovery_snapshot
+from mediaforce.web.runtime.host_status import checked_host_statuses
 
 LOGGER = logging.getLogger(__name__)
 _HOST_OUTAGE_GRACE = timedelta(minutes=5)
 
 
 def recovery_alerts(config: MediaforceConfig) -> list[dict[str, str]]:
+    """Current warnings, read from saved state only; reading them never checks or connects anything."""
     storage = controller_storage_recovery_snapshot(config)
     hosts = host_recovery_snapshot(config)
     alerts: list[dict[str, str]] = []
@@ -22,7 +24,7 @@ def recovery_alerts(config: MediaforceConfig) -> list[dict[str, str]]:
         if mount["status"] == "ready":
             continue
         retry = (
-            "Mediaforce will keep checking. Reconnect storage with Finder or Prepare."
+            "Mediaforce will keep checking. Reconnect storage in Finder or with Set up computer."
             if mount["status"] == "action_required"
             else "Mediaforce is retrying automatically."
         )
@@ -32,6 +34,8 @@ def recovery_alerts(config: MediaforceConfig) -> list[dict[str, str]]:
             "detail": f"{mount['reason'] or 'Storage is not ready.'} {retry}",
         })
     now = datetime.now(timezone.utc)
+    configured_keys = {str(host.get("host") or "") for host in config.remote_hosts} - {""}
+    checked = {status.key: status.available for status in checked_host_statuses(config)}
     for key, host in hosts["hosts"].items():
         if host["status"] == "ready":
             continue
@@ -43,12 +47,30 @@ def recovery_alerts(config: MediaforceConfig) -> list[dict[str, str]]:
         if host["status"] != "action_required" and not prolonged:
             continue
         retry = "Mediaforce will keep checking." if host["status"] == "action_required" else "Mediaforce is retrying automatically. Check this computer's network and storage if it stays unavailable."
+        others = _other_computers_copy(configured_keys - {key}, checked)
         alerts.append({
             "id": f"host:{key}:{host['first_failure_at']}",
             "title": f"{host['label']} is unavailable",
-            "detail": f"{host['reason']} {retry}",
+            "detail": " ".join(part for part in (_sentence(host["reason"]), retry, others) if part),
+            "host_key": key,
         })
     return alerts
+
+
+def _sentence(text: str | None) -> str | None:
+    text = (text or "").strip()
+    return text if not text or text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _other_computers_copy(other_keys: set[str], checked: dict[str, bool]) -> str | None:
+    """Say whether work goes on elsewhere, from the last checks the computer cards show."""
+    if not other_keys:
+        return "No other computer is set up, so work waits for this one."
+    working = sum(1 for key in other_keys if checked.get(key))
+    if not working:
+        # Until every other computer has been checked, "none" might not be true.
+        return "No other computer is working, so work waits for this one." if other_keys <= checked.keys() else None
+    return f"{working} other {'computer is' if working == 1 else 'computers are'} still working."
 
 
 def record_recovery_alerts(config: MediaforceConfig) -> None:

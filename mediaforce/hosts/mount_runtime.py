@@ -346,7 +346,7 @@ def _no_ui_failure(
             ok=False,
             action=(
                 f"{label} has an empty {mount.mount_point} folder left from an earlier connection, so the "
-                f"{share} share cannot connect there. Restart {label} to clear it, then use Prepare."
+                f"{share} share cannot connect there. Restart {label} to clear it, then use Retry connection."
             ),
             retry=False,
         )
@@ -363,7 +363,7 @@ def _no_ui_failure(
             ok=False,
             action=(
                 f"{label} needs the password for the {share} share saved: on {label}, connect to {share} "
-                "once in Finder and tick Remember this password, then use Prepare."
+                "once in Finder and tick Remember this password, then use Retry connection."
             ),
             retry=False,
         )
@@ -734,14 +734,14 @@ def _failed_mount_result(
     share = mount.share_name
     markers = _helper_markers(result)
     still_waiting_detail = (
-        f"It may be showing a dialog on {label}'s screen. Answer or cancel it there, then use Prepare "
-        "to retry. Mediaforce won't send another request for this share while that one waits."
+        f"It may be showing a dialog on {label}'s screen. Answer or cancel it there, then use Set up "
+        "computer to try again. Mediaforce won't send another request for this share while that one waits."
     )
     if result.returncode == _NO_GUI_SESSION_EXIT:
         return HostSetupResult(
             ok=False,
             message=f"{label} needs a signed-in macOS desktop session to connect shared storage.",
-            detail=f"Sign in to {label} as {login_account}, then use Prepare to retry storage recovery.",
+            detail=f"Sign in to {label} as {login_account}, then use Set up computer to connect storage again.",
             failure_kind="host_unavailable",
         )
     if result.returncode == _MOUNT_BUSY_EXIT:
@@ -765,7 +765,7 @@ def _failed_mount_result(
             message=f"{label} has a share connected at {elsewhere} instead of {mount.mount_point}.",
             detail=(
                 f"Finder uses a name like that when {mount.mount_point} is still taken, often by a stale "
-                f"earlier connection. Eject {elsewhere} on {label}, then use Prepare to retry."
+                f"earlier connection. Eject {elsewhere} on {label}, then use Set up computer to try again."
             ),
             failure_kind="host_configuration",
         )
@@ -785,7 +785,7 @@ def _failed_mount_result(
             message=f"{label} could not connect the {share} share.",
             detail=(
                 f"The storage connection request ended unexpectedly (exit {result.returncode}). "
-                "Use Prepare to retry."
+                "Use Set up computer to try again."
             ),
             failure_kind="host_configuration",
         )
@@ -809,7 +809,7 @@ def _finder_error_result(label: str, share: str, error: str, *, attempt_seconds:
             ok=False,
             message=f"{label} did not connect the {share} share within {attempt_seconds} seconds.",
             detail=(
-                f"Finder gave no reason. Use Prepare to retry; if it keeps failing, connect {share} "
+                f"Finder gave no reason. Use Set up computer to try again; if it keeps failing, connect {share} "
                 f"in Finder on {label} to see what happens."
             ),
             failure_kind="host_configuration",
@@ -820,7 +820,7 @@ def _finder_error_result(label: str, share: str, error: str, *, attempt_seconds:
         return HostSetupResult(
             ok=False,
             message=f"The request to connect the {share} share on {label} was cancelled.",
-            detail=f"Someone cancelled the connection dialog on {label}. Use Prepare to try again.",
+            detail=f"Someone cancelled the connection dialog on {label}. Use Set up computer to try again.",
             failure_kind="host_configuration",
         )
     if any(marker in lowered for marker in _FINDER_AUTHENTICATION_MARKERS):
@@ -829,7 +829,7 @@ def _finder_error_result(label: str, share: str, error: str, *, attempt_seconds:
             message=f"{label} could not sign in to the {share} share.",
             detail=(
                 f"{reported}. On {label}, connect to {share} once in Finder and save the password to "
-                "Keychain, then use Prepare to retry."
+                "Keychain, then use Set up computer to try again."
             ),
             failure_kind="host_configuration",
         )
@@ -837,13 +837,13 @@ def _finder_error_result(label: str, share: str, error: str, *, attempt_seconds:
         return HostSetupResult(
             ok=False,
             message=f"{label} could not reach the server for the {share} share.",
-            detail=f"{reported}. Check that the server is on and reachable from {label}, then use Prepare to retry.",
+            detail=f"{reported}. Check that the server is on and reachable from {label}, then use Set up computer to try again.",
             failure_kind="host_unavailable",
         )
     return HostSetupResult(
         ok=False,
         message=f"{label} could not connect the {share} share with Finder.",
-        detail=f"{reported}. Use Prepare to retry.",
+        detail=f"{reported}. Use Set up computer to try again.",
         failure_kind="host_configuration",
     )
 
