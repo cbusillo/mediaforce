@@ -11,7 +11,8 @@ from sqlalchemy import select, update
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
-from mediaforce.core.db_tables import library_item_evidence_state, library_items, motion_keep_decisions, scan_runs
+from mediaforce.core.db_tables import item_events, library_item_evidence_state, library_items, \
+    motion_keep_decisions, scan_runs, staged_artifacts
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
@@ -20,6 +21,7 @@ from mediaforce.library.evidence_state import EVIDENCE_REASON_POLICY_CHANGED, EV
     EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, \
     library_item_source_fingerprint, sync_library_item_evidence_states
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
+from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.scanner import (
     _content_version_changed,
     _failed_probe_summary,
@@ -36,6 +38,13 @@ class _FakeCursor:
     @staticmethod
     def fetchone() -> None:
         return None
+
+    def mappings(self) -> "_FakeCursor":
+        return self
+
+    @staticmethod
+    def all() -> list[Any]:
+        return []
 
 
 class _FakeConnection:
@@ -1111,6 +1120,69 @@ class ScannerRuntimeTests(unittest.TestCase):
                     self.assertEqual(library_item_ids_kept_original(connection, [item["id"]]), frozenset())
             finally:
                 reset_engine_cache()
+
+    def test_a_new_download_over_a_published_file_is_compressed_again(self) -> None:
+        for gone_between_scans in (False, True):
+            with self.subTest(gone_between_scans=gone_between_scans):
+                self._assert_replaced_publish_is_compressed_again(gone_between_scans=gone_between_scans)
+
+    def _assert_replaced_publish_is_compressed_again(self, *, gone_between_scans: bool) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            media_root = project_root / "shows"
+            media_root.mkdir()
+            episode = media_root / "S01E01.mkv"
+            episode.write_bytes(b"original download")
+            # Another episode keeps the folder from looking unexpectedly empty when this one is gone.
+            (media_root / "S01E02.mkv").write_bytes(b"next episode")
+            config = self._config(project_root, {"shows": media_root})
+            probe = patch(
+                "mediaforce.library.scanner.probe_media",
+                return_value=_failed_probe_summary(RuntimeError("fixture probe")),
+            )
+            try:
+                with open_db(config.paths.db_path) as connection, probe:
+                    scan_library(connection, config)
+                    item_id = connection.execute(
+                        select(library_items.c.id).where(library_items.c.source_path == str(episode))
+                    ).scalar_one()
+                    # Our publish leaves the compressed copy at the path and stamps it at the publish time.
+                    episode.write_bytes(b"compressed")
+                    published_at = "2026-10-18T00:00:00+00:00"
+                    connection.execute(update(library_items).where(library_items.c.id == item_id).values(
+                        status="promoted", size_bytes=episode.stat().st_size,
+                        content_version_fingerprint=content_version_fingerprint(episode, episode.stat()),
+                        content_version_changed_at=published_at,
+                    ))
+                    connection.execute(staged_artifacts.insert().values(
+                        library_item_id=item_id, staging_path=str(project_root / "staging" / "S01E01.mkv"),
+                        promoted_at=published_at, promoted_path=str(episode),
+                        archived_source_path=str(project_root / "archive" / "S01E01.mkv"), updated_at=published_at,
+                    ))
+                    connection.commit()
+
+                    scan_library(connection, config)
+                    self.assertEqual(self._lane(connection, item_id), "complete")
+
+                    if gone_between_scans:
+                        episode.unlink()
+                        scan_library(connection, config)
+                        self.assertEqual(self._lane(connection, item_id), "none")
+                    episode.write_bytes(b"a better download, replacing the published copy")
+                    scan_library(connection, config)
+                    self.assertEqual(self._lane(connection, item_id), "encode")
+                    replaced = json.loads(connection.execute(
+                        select(item_events.c.details_json).where(item_events.c.event_type == "published_copy_replaced")
+                    ).scalar_one())
+                    self.assertEqual(replaced["promoted_at"], published_at)
+                    self.assertEqual(replaced["archived_source_path"], str(project_root / "archive" / "S01E01.mkv"))
+            finally:
+                reset_engine_cache()
+
+    @staticmethod
+    def _lane(connection: Any, item_id: int) -> str:
+        items = build_folder_workflow_state(connection, "shows").items
+        return next(item.lane for item in items if item.item_id == item_id)
 
     @staticmethod
     def _kept(connection: Any) -> set[int]:
