@@ -104,7 +104,7 @@ def test_sign_in_failure_asks_once_and_stops_reconnecting_until_storage_returns(
         assert mount.call_count == 1
         assert probe.call_count == 4, "the computer is still checked, only reconnecting waits"
         assert recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["reason"] == needs_password.action
-        # Someone connected the share in Finder or used Prepare: the next check clears the request.
+        # Someone connected the share in Finder or used Set up computer: the next check clears the request.
         probe.return_value = status(available=True)
         clock.now.return_value += timedelta(hours=1)
         recovery.process_host_recovery_once(config)
@@ -396,3 +396,259 @@ def test_connection_locks_contend_only_for_the_same_computer(config: MediaforceC
             assert other_acquired
         with controller_mount_lock(config.paths.runtime_settings_path, host_key="user@worker") as duplicate_acquired:
             assert not duplicate_acquired
+
+
+def _other(key: str, *, available: bool) -> HostStatus:
+    row = status(available=available)
+    row.key, row.label = key, key.split("@")[-1].title()
+    return row
+
+
+def _host_alert(config: MediaforceConfig) -> dict[str, str]:
+    [alert] = [item for item in alerts.recovery_alerts(config) if item["id"].startswith("host:")]
+    return alert
+
+
+def test_host_alert_says_how_many_other_computers_are_still_working(
+        config: MediaforceConfig, empty_host_status_cache: None,
+) -> None:
+    config.raw["remote_hosts"] = [
+        *config.raw["remote_hosts"],
+        {"host": "user@den", "label": "Den", "media_access": "mounted"},
+        {"host": "user@attic", "label": "Attic", "media_access": "mounted"},
+    ]
+    needs_password = NoUiMountResult(ok=False, action="Worker needs its share password saved.", retry=False)
+
+    def probe(_config: MediaforceConfig, host: dict[str, Any]) -> HostStatus:
+        return status() if host["host"] == "user@worker" else _other(host["host"], available=True)
+
+    with patch.object(recovery, "probe_host_status", side_effect=probe), patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", return_value=needs_password,
+    ):
+        recovery.process_host_recovery_once(config)
+    # The same pass checked the other computers.
+    assert _host_alert(config)["detail"].endswith("2 other computers are still working.")
+
+    def cards(*, den: bool, attic: bool) -> None:
+        with patch.object(host_status, "collect_host_statuses", return_value=[
+            status(), _other("user@den", available=den), _other("user@attic", available=attic),
+        ]):
+            host_status.refresh_host_status_cache(config)
+
+    cards(den=True, attic=True)
+    assert _host_alert(config)["detail"].endswith("2 other computers are still working.")
+    cards(den=True, attic=False)
+    assert _host_alert(config)["detail"].endswith("1 other computer is still working.")
+    cards(den=False, attic=False)
+    assert _host_alert(config)["detail"].endswith("No other computer is working, so work waits for this one.")
+    assert needs_password.action in _host_alert(config)["detail"]
+
+
+def test_host_alert_does_not_say_none_are_working_before_they_are_checked(
+        config: MediaforceConfig, empty_host_status_cache: None,
+) -> None:
+    config.raw["remote_hosts"] = [
+        *config.raw["remote_hosts"], {"host": "user@den", "label": "Den", "media_access": "mounted"},
+    ]
+    save_runtime_settings(recovery.host_recovery_path(config), {"schema_version": 1, "hosts": {"user@worker": {
+        "label": "Worker", "status": "action_required", "reason": "Log in on Worker.",
+        "first_failure_at": NOW.isoformat(), "failure_count": 1, "mount_uncertain": False,
+    }}})
+    assert _host_alert(config)["detail"] == "Log in on Worker. Mediaforce will keep checking."
+
+
+def test_only_computer_alert_says_work_waits_for_it(config: MediaforceConfig, empty_host_status_cache: None) -> None:
+    with patch.object(recovery, "probe_host_status", return_value=status()), patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False, uncertain=True),
+    ):
+        recovery.process_host_recovery_once(config)
+    assert _host_alert(config)["detail"].endswith("No other computer is set up, so work waits for this one.")
+
+
+def test_retry_connection_runs_one_no_dialog_pass_now(config: MediaforceConfig, empty_host_status_cache: None) -> None:
+    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+        recovery, "probe_host_status", return_value=status(),
+    ) as probe, patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False),
+    ) as mount, patch("mediaforce.remote.recover_remote_host_mounts", side_effect=AssertionError("Finder dialog")):
+        clock.now.return_value = NOW
+        recovery.process_host_recovery_once(config)
+        assert _host_alert(config)["host_key"] == "user@worker"
+        # The background pass is waiting out its retry delay; Retry connection does not wait.
+        recovery.process_host_recovery_once(config)
+        assert mount.call_count == 1
+        mount.return_value = NoUiMountResult(ok=True)
+        probe.side_effect = [status(), status(available=True)]
+        ok, message = recovery.retry_host_connection(config, "user@worker")
+    assert (ok, message) == (True, "Worker is connected.")
+    assert mount.call_count == 2
+    assert recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["status"] == "ready"
+    assert _host_cards(config)["user@worker"]["available"]
+
+
+def test_retry_connection_tries_again_after_waiting_for_someone_at_the_computer(config: MediaforceConfig) -> None:
+    needs_password = NoUiMountResult(ok=False, action="Worker needs its share password saved", retry=False)
+    with patch.object(recovery, "probe_host_status", return_value=status()), patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", return_value=needs_password,
+    ) as mount:
+        recovery.process_host_recovery_once(config)
+        ok, message = recovery.retry_host_connection(config, "user@worker")
+    assert mount.call_count == 2, "the person says it is fixed, so connecting is tried again"
+    assert not ok
+    assert message == f"Worker is still unavailable. {needs_password.action}."
+    assert recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["retry_paused"]
+
+
+def test_retry_connection_does_not_repeat_an_unconfirmed_request(config: MediaforceConfig) -> None:
+    with patch.object(recovery, "probe_host_status", return_value=status()), patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False, uncertain=True),
+    ) as mount:
+        recovery.process_host_recovery_once(config)
+        ok, _message = recovery.retry_host_connection(config, "user@worker")
+    assert not ok
+    assert mount.call_count == 1
+
+
+def test_retry_connection_refuses_while_an_attempt_is_running(config: MediaforceConfig) -> None:
+    from mediaforce.hosts.controller_mount import controller_mount_lock
+
+    with patch.object(recovery, "probe_host_status") as probe, controller_mount_lock(
+        config.paths.runtime_settings_path, host_key="user@worker",
+    ) as held:
+        assert held
+        ok, message = recovery.retry_host_connection(config, "user@worker")
+    assert not ok
+    assert message == "Worker is already being checked or connected. Try again when that finishes."
+    probe.assert_not_called()
+    assert recovery.retry_host_connection(config, "user@gone") == (
+        False, "That computer is no longer set up for Mediaforce.",
+    )
+
+
+def test_background_pass_keeps_a_retry_that_finished_while_it_ran(config: MediaforceConfig) -> None:
+    config.raw["remote_hosts"] = [
+        {"host": "user@den", "label": "Den", "media_access": "mounted"},
+        *config.raw["remote_hosts"],
+    ]
+    retried: list[tuple[bool, str]] = []
+
+    def probe(_config: MediaforceConfig, host: dict[str, Any]) -> HostStatus:
+        if host["host"] == "user@den" and not retried:
+            # Someone presses Retry connection on Worker while the background pass checks Den.
+            retried.append(recovery.retry_host_connection(config, "user@worker"))
+        return status() if host["host"] == "user@worker" else _other(host["host"], available=True)
+
+    with patch.object(recovery, "probe_host_status", side_effect=probe), patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False),
+    ) as mount:
+        recovery.process_host_recovery_once(config)
+    assert retried and not retried[0][0]
+    hosts = recovery.host_recovery_snapshot(config)["hosts"]
+    assert hosts["user@den"]["status"] == "ready"
+    assert hosts["user@worker"]["failure_count"] == 1, "the retry's record survives and its delay is honored"
+    assert mount.call_count == 1
+
+
+def test_retry_connection_route_posts_and_reads_stay_check_free(
+        config: MediaforceConfig, empty_host_status_cache: None,
+) -> None:
+    import asyncio
+
+    with patch.object(web_app, "load_config", return_value=config):
+        app = web_app.create_app(config.paths.config_path)
+    routes = {
+        (route.path, method): route.endpoint for route in app.router.routes
+        if isinstance(route, APIRoute) for method in route.methods
+    }
+    assert ("/api/hosts/retry-connection", "GET") not in routes
+
+    class Request:
+        @staticmethod
+        async def json() -> dict[str, str]:
+            return {"host_key": "user@worker"}
+
+    with patch.object(recovery, "probe_host_status", side_effect=[status(), status(available=True)]), patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=True),
+    ), patch.object(web_app, "release_host_cooldowns", return_value=0) as release:
+        response = asyncio.run(routes[("/api/hosts/retry-connection", "POST")](Request()))
+    assert json.loads(response.body) == {"ok": True, "message": "Worker is connected.", "kind": "success"}
+    release.assert_called_once()
+    with patch("subprocess.run", side_effect=AssertionError("read launched a check")), patch.object(
+        recovery, "probe_host_status", side_effect=AssertionError("read launched a check"),
+    ):
+        routes[("/api/recovery-alerts", "GET")]()
+
+
+def _button_labels() -> set[str]:
+    import re
+
+    sources = [
+        Path(__file__).parents[1] / "frontend/src/lib/components/workstation/OpsWorkstationView.svelte",
+        Path(__file__).parents[1] / "frontend/src/lib/components/shell/AppShell.svelte",
+    ]
+    return {
+        label.strip()
+        for source in sources
+        for label in re.findall(r">\s*([A-Z][^<>{}]*?)\s*</button", source.read_text())
+    }
+
+
+def _computer_action_messages(config: MediaforceConfig) -> list[str]:
+    import subprocess
+
+    from mediaforce.hosts import mount_runtime
+    from mediaforce.hosts.mount_runtime import RemoteSmbMount
+
+    host = {"host": "user@worker", "label": "Worker", "user": "worker"}
+    mounts = [RemoteSmbMount(Path("/Volumes/media"), "media", "smb://nas/media")]
+
+    def helper(exit_code: int, output: str = "") -> Any:
+        return lambda _script, _timeout: subprocess.CompletedProcess([], exit_code, output, "")
+
+    messages: list[str] = []
+    for code, stdout in [
+        (41, ""), (44, ""), (45, ""), (46, "MEDIAFORCE_MOUNT_AT=/Volumes/media-1"), (99, ""),
+        (42, "MEDIAFORCE_MOUNT_JOB=running"), (42, ""), (42, "MEDIAFORCE_MOUNT_ERR=User canceled (-128)"),
+        (42, "MEDIAFORCE_MOUNT_ERR=Authentication failed"), (42, "MEDIAFORCE_MOUNT_ERR=Server could not be found"),
+        (42, "MEDIAFORCE_MOUNT_ERR=Something else"),
+    ]:
+        result = mount_runtime.mount_smb_shares(host, mounts, run_mount_script=helper(code, stdout), transport="ssh")
+        messages += [result.message, result.detail or ""]
+    for code, stdout in [(46, ""), (48, ""), (47, 'MEDIAFORCE_MOUNT_NETFS={"status": 80}')]:
+        result = mount_runtime.mount_smb_shares_no_ui(host, mounts, run_mount_script=helper(code, stdout))
+        messages.append(result.action or "")
+    with patch.object(recovery, "probe_host_status", return_value=status()), patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False, uncertain=True),
+    ):
+        recovery.process_host_recovery_once(config)
+        messages.append(recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["reason"])
+        recovery.process_host_recovery_once(config)
+    messages += [alert["detail"] for alert in alerts.recovery_alerts(config)]
+    return messages
+
+
+def test_computer_messages_name_buttons_that_exist(config: MediaforceConfig) -> None:
+    import re
+
+    labels = _button_labels()
+    assert {"Set up computer", "Retry connection"} <= labels
+    named = [
+        (message, match) for message in _computer_action_messages(config)
+        for match in re.findall(r"\b(?:use|click) ([A-Z][\w ]*)", message)
+    ]
+    assert named, "the messages tell people which button to use"
+    for message, phrase in named:
+        assert any(phrase.startswith(label) for label in labels), message
+
+
+def test_host_alert_reads_as_sentences(config: MediaforceConfig, empty_host_status_cache: None) -> None:
+    unreachable = status()
+    unreachable.platform = "unknown"
+    unreachable.missing_mounts = []
+    unreachable.message = "Fix hostname or DNS first"
+    with patch.object(recovery, "probe_host_status", return_value=unreachable), patch.object(
+        alerts, "datetime", wraps=datetime,
+    ) as alert_clock:
+        recovery.process_host_recovery_once(config)
+        alert_clock.now.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
+        assert _host_alert(config)["detail"].startswith("Fix hostname or DNS first. Mediaforce is retrying")

@@ -32,7 +32,7 @@ as paths on the controller. Archive creation remains part of promotion.
 
 Recovery state persists in `controller-storage-recovery.json` beside runtime
 settings. `GET /api/hosts` exposes it as `controller_storage` without attempting
-a connection. A manual reconnect through Finder or the existing Prepare action
+a connection. A manual reconnect through Finder or the existing Set up computer action
 is accepted after a fresh readiness check; no server restart is needed to clear
 the incident. Automatic and explicit controller connection attempts share a
 nonblocking process lock.
@@ -60,22 +60,35 @@ follows before the computer becomes usable. No Finder fallback runs in this work
 When the share's password is not saved, or a leftover folder or a share connected
 under a suffixed name is in the way, the computer needs attention: one warning
 names the computer and says what to do there, and automatic connections stop
-until a check finds the storage connected, for example after Prepare. When no one
+until a check finds the storage connected, for example after Retry connection or
+Set up computer. When no one
 is logged in at the computer, the warning asks for a login, and connections keep
 retrying so storage returns on its own after that.
 These checks also update the computer cards, and each controller storage pass
 re-checks the controller's own card when its storage changed, so the cards stay
 current with an idle queue while web reads stay check-free.
-Explicit Prepare retains its existing Finder behavior and shares that computer's
-recovery process lock. Remote probes and connections cannot hold the controller
-readiness lock or delay its background checks. An interrupted/ambiguous remote mount is persisted before SSH
+Explicit Set up computer retains its existing Finder behavior and shares that
+computer's recovery process lock. Remote probes and connections cannot hold the
+controller readiness lock or delay its background checks. An interrupted/ambiguous remote mount is persisted before SSH
 and remains suppressed across service restarts until fresh readiness succeeds.
+
+Retry connection, on a computer's card and on its warning, runs one of these
+recovery passes for that computer now (`POST /api/hosts/retry-connection`). It
+skips the retry delay and tries again after a pause for someone at that
+computer, but uses the same no-UI connection, so it never opens a dialog, and
+it never repeats a request whose result is unconfirmed. It is refused while a
+check or connection for that computer is running. Each pass saves only its own
+computer's record, so a background pass and Retry connection never overwrite
+each other.
 
 `GET /api/recovery-alerts` reads current warnings without probing or mounting.
 The application shell polls it every 30 seconds and shows one warning per
 incident beneath navigation, linking to Activity's computers. Missing controller
 storage warns immediately, even with an empty queue. Remote computers warn after
-five minutes, or immediately when an ambiguous mount needs attention. New
+five minutes, or immediately when an ambiguous mount needs attention. A
+computer's warning also says how many other computers are still working, from
+the last checks the computer cards show; it says none only once every other
+computer has been checked. New
 incidents and recovery are logged once, with the active notification IDs in
 `recovery-alerts.json`; a restart does not emit the same outage again. Recovered
 warnings disappear. These are in-app/log notifications; no email, chat or system

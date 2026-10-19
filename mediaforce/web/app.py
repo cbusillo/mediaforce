@@ -217,7 +217,7 @@ from mediaforce.web.runtime.encode_runtime import mark_host_cooldowns, release_h
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle, run_supervised_worker_loop
-from mediaforce.web.runtime.host_recovery import process_host_recovery_once
+from mediaforce.web.runtime.host_recovery import process_host_recovery_once, retry_host_connection
 from mediaforce.web.runtime.host_status import refresh_current_machine_host_statuses
 from mediaforce.web.runtime.recovery_alerts import recovery_alerts, record_recovery_alerts
 from mediaforce.web.runtime.controller_storage_recovery import (
@@ -1115,6 +1115,12 @@ def create_app(
         _release_ready_host_cooldowns(host_key)
         return _host_action_result(HostSetupResult(ok=True, message=message))
 
+    def _retry_host_connection_action(host_key: str) -> dict[str, Any]:
+        ok, message = retry_host_connection(config, host_key)
+        if ok:
+            _release_ready_host_cooldowns(host_key)
+        return {"ok": ok, "message": message, "kind": "success" if ok else "error"}
+
     def _reset_host_trust_action(host_key: str) -> dict[str, Any]:
         nonlocal config
         result = reset_remote_host_trust(config, host_key)
@@ -1180,6 +1186,7 @@ def create_app(
         start_host_action=_start_host_action,
         prepare_host_action=_prepare_host_action,
         reset_host_trust_action=_reset_host_trust_action,
+        retry_host_connection_action=_retry_host_connection_action,
     )
 
     def _operator_work_payload(

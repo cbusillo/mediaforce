@@ -352,7 +352,7 @@ def _wait_for_remote_xcode_install(
         time.sleep(poll_interval_seconds)
 
     return HostSetupResult(ok=False, message="Waiting for Xcode Command Line Tools to finish on the remote Mac.",
-                           detail="The installer was requested. Finish it in the remote Mac's GUI; host preparation will continue automatically if it completes before this wait window ends, otherwise click Prepare Host again.",
+                           detail="The installer was requested. Finish it in the remote Mac's GUI; host preparation will continue automatically if it completes before this wait window ends, otherwise use Set up computer again.",
                            performed_steps=[requested_step])
 
 

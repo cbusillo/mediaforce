@@ -4075,14 +4075,26 @@ async function checkRecoveryAlerts(baseUrl, timeoutMs) {
       await page.clock.install();
       let alerts = [
         { id: "storage:fixture", title: "Controller storage unavailable: /Volumes/media", detail: "The share is not mounted. Mediaforce is retrying automatically." },
-        { id: "host:fixture", title: "Bedroom computer is unavailable", detail: "Check this computer's network and storage. Mediaforce will keep checking." },
+        { id: "host:fixture", title: "Bedroom computer is unavailable", detail: "Check this computer's network and storage. Mediaforce will keep checking. 1 other computer is still working.", host_key: "user@bedroom" },
       ];
+      const retries = [];
       await page.route("**/api/recovery-alerts", (route) => route.fulfill({ json: { alerts } }));
+      await page.route("**/api/hosts/retry-connection", (route) => {
+        retries.push(route.request().postDataJSON());
+        return route.fulfill({ json: { ok: false, message: "Bedroom computer is still unavailable. Log in on Bedroom computer.", kind: "error" } });
+      });
       await page.goto(baseUrl, { waitUntil: "networkidle" });
       await expect(page.getByRole("alert").filter({ hasText: alerts[0].title })).toBeVisible();
       await page.getByRole("link", { name: "View computers" }).first().click();
       await page.waitForURL("**/ops");
-      await expect(page.getByRole("alert").filter({ hasText: alerts[1].title })).toBeVisible();
+      const hostAlert = page.getByRole("alert").filter({ hasText: alerts[1].title });
+      await expect(hostAlert).toBeVisible();
+      await expect(page.getByRole("alert").filter({ hasText: alerts[0].title }).getByRole("button")).toHaveCount(0);
+      await hostAlert.getByRole("button", { name: "Retry connection" }).click();
+      await expect(hostAlert.getByRole("status")).toHaveText("Bedroom computer is still unavailable. Log in on Bedroom computer.");
+      if (JSON.stringify(retries) !== JSON.stringify([{ host_key: "user@bedroom" }])) {
+        throw new Error(`Retry connection sent ${JSON.stringify(retries)}`);
+      }
       await page.clock.fastForward(31_000);
       await expect(page.getByRole("link", { name: "View computers" })).toHaveCount(alerts.length);
       await checkActivityQueueFirst(page, "Activity with recovery warnings");
