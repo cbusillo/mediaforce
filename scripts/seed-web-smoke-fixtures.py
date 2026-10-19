@@ -23,6 +23,7 @@ from mediaforce.core.db_tables import (
     evidence_queue_state,
     item_events,
     library_items,
+    motion_keep_decisions,
     scan_runs,
     series_metadata,
     staged_artifacts,
@@ -30,7 +31,7 @@ from mediaforce.core.db_tables import (
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
 from mediaforce.encoding.cadence import reclassify_cadence_summary
 from mediaforce.library.evidence_queue import start_evidence_work
-from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
+from mediaforce.library.evidence_state import library_item_source_fingerprint, rebuild_library_item_evidence_states
 from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.representatives import select_representatives
 from mediaforce.tuning.size_goals import operator_intent_from_policy
@@ -101,6 +102,8 @@ SHOW_JOB_HOLD_HELD_PREFIX = "tv/Show Job Hold/Season 2"
 MOTION_HELD_PREFIX = "tv/Motion Held/Season 1"
 MOTION_HELD_SAMPLE_PREFIX = "tv/Motion Held/Season 2"
 MOTION_HELD_SERIES_PREFIX = "tv/Motion Held"
+# A season whose one unpublished episode the owner kept original for its motion pattern, so it is finished.
+MOTION_KEPT_PREFIX = "tv/Motion Kept/Season 1"
 # A season part-way through, with an episode in each stage the season page's episode list shows.
 EPISODE_PROGRESS_PREFIX = "tv/Episode Progress/Season 1"
 # The smoke server reclaims running work when it starts, so no episode here is mid-compression.
@@ -153,6 +156,7 @@ FIXTURE_PREFIXES = (
     SHOW_JOB_HOLD_HELD_PREFIX,
     EPISODE_PROGRESS_PREFIX,
     MOTION_HELD_SERIES_PREFIX,
+    MOTION_KEPT_PREFIX,
 )
 
 
@@ -1171,6 +1175,11 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 )
             )
             connection.execute(
+                motion_keep_decisions.delete().where(
+                    motion_keep_decisions.c.library_item_id.in_(fixture_ids)
+                )
+            )
+            connection.execute(
                 library_items.delete().where(library_items.c.id.in_(fixture_ids))
             )
         connection.execute(
@@ -1582,6 +1591,21 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 )
                 for index in (1, 2)
             ),
+            *(
+                _library_item(
+                    project_root=project_root,
+                    media_root="tv",
+                    rel_path=f"{MOTION_KEPT_PREFIX}/Episode {index:02d}.mkv",
+                    size_bytes=4 * 1024**3,
+                    status=status,
+                    video_codec="h264",
+                    priority_score=60,
+                    recommendation="priority_encode",
+                    recommendation_reason="Fixture season finished with one episode kept original.",
+                    age_days=400,
+                )
+                for index, status in ((1, "promoted"), (2, "discovered"))
+            ),
             _library_item(
                 project_root=project_root,
                 media_root="tv",
@@ -1945,6 +1969,10 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 row["cadence_summary_json"] = _ambiguous_cadence_summary_json(
                     str(row["cadence_summary_json"]), tff_frames=30
                 )
+            elif row["rel_path"] == f"{MOTION_KEPT_PREFIX}/Episode 02.mkv":
+                row["cadence_summary_json"] = _ambiguous_cadence_summary_json(
+                    str(row["cadence_summary_json"]), tff_frames=30
+                )
             elif row["rel_path"].startswith(f"{MOTION_HELD_PREFIX}/"):
                 # One the show's motion decision could encode as-is, one partly interlaced.
                 row["cadence_summary_json"] = _ambiguous_cadence_summary_json(
@@ -1958,6 +1986,16 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         for row, item_id in zip(rows, inserted_ids, strict=True):
             row["id"] = item_id
         rebuild_library_item_evidence_states(connection, library_item_ids=inserted_ids)
+        kept_row = next(row for row in rows if row["rel_path"] == f"{MOTION_KEPT_PREFIX}/Episode 02.mkv")
+        connection.execute(
+            motion_keep_decisions.insert().values(
+                library_item_id=kept_row["id"],
+                source_fingerprint=library_item_source_fingerprint(kept_row),
+                reason_code="partly_interlaced",
+                prefix=MOTION_KEPT_PREFIX,
+                kept_at=_now(),
+            )
+        )
         scan_timestamp = _now()
         connection.execute(
             scan_runs.insert().values(
@@ -2870,6 +2908,18 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/tv/Motion%20Held/Season%201",
                 "marker": "Motion Held",
                 "stageMarker": "The remaining episodes stay original.",
+            },
+            {
+                "label": "Folder Studio motion-held keep-original choice",
+                "route": "/folders/tv/Motion%20Held/Season%201",
+                "marker": "Motion Held",
+                "stageMarker": "Keep all 2 original",
+            },
+            {
+                "label": "Folder Studio motion-kept finished fixture",
+                "route": "/folders/tv/Motion%20Kept/Season%201",
+                "marker": "Motion Kept",
+                "stageMarker": "stays original by your choice",
             },
             {
                 "label": "Folder Studio unclear motion decision fixture",

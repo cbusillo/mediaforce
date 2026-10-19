@@ -22,6 +22,8 @@ WorkflowItemState = Literal[
     "missing",
     "encode_candidate",
     "held",
+    # The owner chose to keep it original for its motion pattern; it is settled, not work.
+    "kept_original",
     "encoding",
     "ready_to_validate",
     "ready_to_promote",
@@ -83,6 +85,8 @@ class EncodeEligibility:
     blocked: bool = False
     # Left out by the queue's motion-pattern gate rather than by policy.
     motion_held: bool = False
+    # Kept original by the owner's choice for its motion pattern.
+    kept_original: bool = False
 
 
 class ScopeJobLane(NamedTuple):
@@ -104,8 +108,8 @@ class ScopeJobStates:
 
 
 NO_SCOPE_JOBS = ScopeJobStates(overlapping=None, own=None)
-# Files no job from a wider scope can still be working on: held, finished, or gone from disk.
-OUT_OF_WIDER_JOB_STATES = frozenset({"held", "complete", "missing"})
+# Files no job from a wider scope can still be working on: held, kept original, finished, or gone from disk.
+OUT_OF_WIDER_JOB_STATES = frozenset({"held", "kept_original", "complete", "missing"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +259,7 @@ def derive_item_workflow_state(
         policy_blocker: str | None = None,
         encode_blocked: bool = False,
         motion_held: bool = False,
+        kept_original: bool = False,
 ) -> ItemWorkflowState:
     status = str(row["status"] or "idle")
     # A remake that already removed its finished copy waits to be queued, not on that copy's old check.
@@ -284,6 +289,10 @@ def derive_item_workflow_state(
             if validation == "size_held"
             else "A finished file didn't pass its check."
         )
+    elif kept_original:
+        state = "kept_original"
+        lane = "none"
+        blocker = policy_blocker
     elif not encode_eligible:
         state = "blocked" if encode_blocked else "held"
         lane = "blocked" if encode_blocked else "none"
@@ -333,6 +342,7 @@ def _derive_item_workflow_state(
         policy_blocker=eligibility.blocker,
         encode_blocked=eligibility.blocked,
         motion_held=eligibility.motion_held,
+        kept_original=eligibility.kept_original,
     )
 
 
@@ -406,6 +416,7 @@ def _build_folder_state(
         "encode_candidates": state_counts.get("encode_candidate", 0),
         "held": state_counts.get("held", 0),
         "motion_held": sum(item.motion_held for item in items),
+        "kept_original": state_counts.get("kept_original", 0),
         "ready_to_validate": state_counts.get("ready_to_validate", 0),
         "ready_to_promote": state_counts.get("ready_to_promote", 0),
         "processing": lane_counts.get("processing", 0),
@@ -547,7 +558,9 @@ def _folder_summary(
         "complete",
         "Complete",
         "success",
-        "No remaining workflow action is available for this scope.",
+        f"{counts['kept_original']} item(s) stay original by your choice; nothing else is left to do."
+        if counts["kept_original"]
+        else "No remaining workflow action is available for this scope.",
         WorkflowNextAction("none", "No action", False, prefix),
     )
 
@@ -574,8 +587,8 @@ def _mixed_next_action(prefix: str, lane: WorkflowLane) -> WorkflowNextAction:
 
 
 def _settled_paths(items: Iterable[ItemWorkflowState]) -> frozenset[str]:
-    """Files no run's problem can still be about: published, or gone from disk."""
-    return frozenset(item.rel_path for item in items if item.state in {"complete", "missing"})
+    """Files no run's problem can still be about: published, kept original, or gone from disk."""
+    return frozenset(item.rel_path for item in items if item.state in {"complete", "kept_original", "missing"})
 
 
 def _load_encode_job_state(

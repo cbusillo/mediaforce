@@ -146,6 +146,12 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   counts, active-series metadata, the `Auto` policy, and current/acquisition hold
   reasons without hiding either season. The Season 2 route must require explicit
   confirmation before its manual override can queue work.
+- Keep original: the `tv/Motion Held/Season 1` route lists each held episode
+  with its reason and offers `Keep original` per episode and for all. Keeping
+  both finishes the season, the kept episodes stay listed with their reason and
+  an undo, and undoing returns the season to its held state. `tv/Motion
+  Kept/Season 1` has one published episode and one kept original, so it reads as
+  finished and names the kept episode.
 - Unclear motion decision: `tv/Unclear Motion` has one fully measured episode
   whose motion pattern stays ambiguous and one that looks partly interlaced. The
   show route must offer one `Encode as-is` decision naming the episode to

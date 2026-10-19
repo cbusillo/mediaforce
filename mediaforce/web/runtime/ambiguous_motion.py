@@ -27,6 +27,7 @@ from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, accept_cadence_as
 from mediaforce.library.evidence_state import sync_library_item_evidence_state
 from mediaforce.encoding.encode_queue import list_encode_runs_for_prefix
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
+from mediaforce.library.motion_holds import kept_original_item_ids
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.web.runtime.left_out_files import LeftOutFile
@@ -61,7 +62,8 @@ def ambiguous_motion_files(
     """Files the current classifier leaves ambiguous after full measurement, read from their stored summaries.
 
     Stored evidence-state rows are refreshed only when something re-projects them, so the decision is
-    offered from the measurements themselves rather than waiting for that refresh.
+    offered from the measurements themselves rather than waiting for that refresh. Files the owner kept
+    original are left out.
     """
     scope = resolve_media_scope(connection, prefix, library_types=library_types)
     rows = connection.execute(
@@ -75,7 +77,11 @@ def ambiguous_motion_files(
     ).mappings().fetchall()
     eligible: list[Mapping[str, Any]] = []
     partly_interlaced: list[Mapping[str, Any]] = []
+    # A file the owner kept original is settled; encoding it as-is is not offered or applied.
+    kept = kept_original_item_ids(connection, rows, forget_lapsed=False)
     for row in rows:
+        if int(row["id"]) in kept:
+            continue
         summary = _summary(row)
         if cadence_awaits_as_is_decision(summary):
             eligible.append(row)

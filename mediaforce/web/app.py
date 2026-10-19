@@ -207,6 +207,7 @@ from mediaforce.web.runtime.folder_actions import child_recovery_approval, child
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
     production_approval_identity, production_calibration
 from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
+from mediaforce.web.runtime.motion_keep import keep_motion_held_originals, undo_motion_keep
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
 from mediaforce.web.runtime.episode_progress import folder_episodes_payload
@@ -1468,7 +1469,7 @@ def create_app(
             )
             if lifecycle is not None:
                 # The files this scope's queue leaves out for their motion pattern, named on its page.
-                motion_hold_files = motion_hold_files_payload(lifecycle_decisions, motion_holds)
+                motion_hold_files = motion_hold_files_payload(connection, lifecycle_decisions, motion_holds)
             if media_scope.kind == "tv_series" and lifecycle is not None:
                 older_season_override = lifecycle.get("older_seasons")
                 ambiguous_motion = ambiguous_motion_files(
@@ -2007,6 +2008,24 @@ def create_app(
             config, normalized_prefix, now_iso=_now_iso(), current_approval=_held_files_current_approval,
         )
 
+    def _keep_motion_held_originals_action(normalized_prefix: str, library_item_ids: list[int]) -> ActionPayload:
+        blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
+        result = keep_motion_held_originals(config, normalized_prefix, library_item_ids, now_iso=_now_iso())
+        # Library cards count kept files as settled, so they must not show the old count.
+        _reset_folder_card_cache()
+        return result
+
+    def _undo_motion_keep_action(normalized_prefix: str, library_item_ids: list[int]) -> ActionPayload:
+        blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
+        result = undo_motion_keep(config, normalized_prefix, library_item_ids, now_iso=_now_iso())
+        # Library cards count kept files as settled, so they must not show the old count.
+        _reset_folder_card_cache()
+        return result
+
     def _approve_measured_encode_recovery_action(
             normalized_prefix: str,
             scope_membership_token: str = "",
@@ -2424,6 +2443,8 @@ def create_app(
         dismiss_audio_preset_suggestion_action=_dismiss_audio_preset_suggestion_action,
         approve_measured_encode_recovery_action=_approve_measured_encode_recovery_action,
         accept_ambiguous_motion_action=_accept_ambiguous_motion_action,
+        keep_motion_held_originals_action=_keep_motion_held_originals_action,
+        undo_motion_keep_action=_undo_motion_keep_action,
         queue_folder_encode_action=_queue_folder_encode_action,
         queue_older_seasons_encode_action=_queue_older_seasons_encode_action,
         validate_folder_outputs_action=_validate_folder_outputs_action,

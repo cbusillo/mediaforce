@@ -178,6 +178,11 @@ Guidance:
     - the owner's sound choice and planning (series lifecycle) stay outside
       what a sample approves: approving and queueing apply the owner's
       current ones over the sample's snapshot and keep the folder's planning
+  - `motion_keep.py`
+    - the owner's `Keep original` choice for files held for their motion
+      pattern and its undo, per file and bound to the source fingerprint;
+      `library/motion_holds` reads it, so queueing, checks, the held-files
+      sweep and the pages all treat a kept file as settled
   - `page_state.py`
     - the one `page_state` a folder page and its library card lead with: a
       state key, tone, recovery kind, primary action, failure kind and the job

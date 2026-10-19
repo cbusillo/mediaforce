@@ -1760,6 +1760,29 @@ async function checkSeriesSeasonIndex(baseUrl, timeoutMs) {
   }
 }
 
+// Keeping a season's motion-held episodes original finishes it, and undoing that holds them again.
+async function checkMotionKeepOriginal(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  try {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+    page.setDefaultTimeout(timeoutMs);
+    await openRoute(page, baseUrl, "/folders/tv/Motion%20Held/Season%201", timeoutMs);
+    const held = page.getByRole("region", { name: "Held for their motion pattern" });
+    await expect(held).toBeVisible();
+    await expect(held.getByRole("button", { name: "Keep Episode 01.mkv original", exact: true })).toBeVisible();
+    await held.getByRole("button", { name: "Keep all 2 original", exact: true }).click();
+    await expect(page.getByText("2 episodes stay original by your choice.", { exact: true })).toBeVisible();
+    const kept = page.getByRole("region", { name: "Kept original" });
+    await expect(kept.getByText("Partly interlaced")).toBeVisible();
+    await kept.getByRole("button", { name: "Undo all 2", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "The remaining episodes stay original." })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Kept original" })).toHaveCount(0);
+    console.log("motion keep-original ok: kept, finished and undone");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function checkHeldSeasonUnderShowJob(baseUrl, timeoutMs) {
   const browser = await launchSmokeBrowser();
   try {
@@ -4195,6 +4218,7 @@ async function main() {
       await checkSeriesSeasonIndex(targetUrl, args.routeTimeoutMs);
       await checkSeasonEpisodeList(targetUrl, args.routeTimeoutMs);
       await checkHeldSeasonUnderShowJob(targetUrl, args.routeTimeoutMs);
+      await checkMotionKeepOriginal(targetUrl, args.routeTimeoutMs);
       await checkSeriesSeasonContextFailures(targetUrl, args.routeTimeoutMs);
       await checkCompletedCleanupLanguage(targetUrl, args.routeTimeoutMs);
     }

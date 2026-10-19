@@ -66,7 +66,9 @@ import {
 	approvalStartPlan,
 	type QueueAdmission,
 	productionScope,
+	finishedEpisodesNote,
 	motionHoldNotes,
+	motionHoldReasonLabel,
 	motionHolds,
 	queueAdmission,
 	targetConstraintSummary,
@@ -2672,5 +2674,57 @@ describe('finished-file recovery', () => {
 			canKeepStagedCopy(file({ remake: { reason: 'settings_history', blocked_reason: '' } }))
 		).toBe(false);
 		expect(canKeepStagedCopy(file({}))).toBe(false);
+	});
+});
+
+describe('keeping motion-held episodes original', () => {
+	const heldFile = {
+		library_item_id: 4,
+		rel_path: 'tv/Show/Season 1/A.mkv',
+		reason: 'mixed' as const,
+		as_is: false
+	};
+	const keptFile = {
+		library_item_id: 5,
+		rel_path: 'tv/Show/Season 1/B.mkv',
+		reason: 'partly_interlaced' as const,
+		kept_at: '2026-10-18T20:00:00Z'
+	};
+
+	it('passes on the held and kept episodes the page can decide about', () => {
+		const holds = motionHolds(
+			folder({
+				motion_hold_files: {
+					held_files: [heldFile.rel_path],
+					check_files: [],
+					held: [heldFile],
+					kept: [keptFile]
+				}
+			})
+		);
+
+		expect(holds.heldItems).toEqual([heldFile]);
+		expect(holds.keptItems).toEqual([keptFile]);
+	});
+
+	it('lists nothing to decide when the server names no held or kept episode', () => {
+		const holds = motionHolds(folder({ motion_hold_files: { held_files: [], check_files: [] } }));
+		expect(holds.heldItems).toEqual([]);
+		expect(holds.keptItems).toEqual([]);
+	});
+
+	it('names each reason a file is held in plain words', () => {
+		const labels = (['mixed', 'partly_interlaced', 'unclear'] as const).map(motionHoldReasonLabel);
+		expect(new Set(labels).size).toBe(3);
+		// A reason the page does not know yet still reads as a motion pattern, not as a code.
+		expect(motionHoldReasonLabel('telecine_low_confidence')).toBe(motionHoldReasonLabel('unclear'));
+	});
+
+	it('says how many finished episodes were kept original rather than made smaller', () => {
+		expect(finishedEpisodesNote(39, 0)).toContain('All 39 smaller episodes');
+		const mixed = finishedEpisodesNote(39, 6);
+		expect(mixed).toContain('33 smaller episodes');
+		expect(mixed).toContain('6 episodes stay original by your choice');
+		expect(finishedEpisodesNote(1, 1)).toBe('1 episode stays original by your choice.');
 	});
 });

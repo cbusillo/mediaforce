@@ -3296,6 +3296,8 @@ def child_recovery_candidate_evidence(
     cadence = cadence_safety_partition(connection, library_item_ids=sorted(item_ids - set(blocked)), synchronize=False)
     for item_id in cadence.blocked_item_ids:
         blocked[item_id] = "Its motion pattern needs a decision before it can be encoded."
+    for item_id in cadence.kept_item_ids:
+        blocked[item_id] = "You chose to keep it original for its motion pattern."
     for item_id in cadence.evidence_required_item_ids:
         blocked[item_id] = "Its motion pattern needs to be measured first."
     return {

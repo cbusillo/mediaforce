@@ -220,7 +220,7 @@ def sync_library_item_evidence_states(
         if preserve_source_identity or preserve_policy_identity
         else {}
     )
-    source_fingerprint = _item_source_fingerprint(item)
+    source_fingerprint = library_item_source_fingerprint(item)
     projections = [
         project_evidence_state(
             evidence_kind,
@@ -290,7 +290,7 @@ def project_library_item_evidence_state(
     return project_evidence_state(
         evidence_kind,
         item.get(_evidence_spec(evidence_kind).column_name),
-        source_fingerprint=_item_source_fingerprint(item),
+        source_fingerprint=library_item_source_fingerprint(item),
         previous_state=previous_state,
         preserve_source_identity=preserve_source_identity,
         preserve_policy_identity=preserve_policy_identity,
@@ -406,7 +406,7 @@ def _project_item_batch(
     values: list[dict[str, Any]] = []
     for item in items:
         library_item_id = int(item["id"])
-        source_fingerprint = _item_source_fingerprint(item)
+        source_fingerprint = library_item_source_fingerprint(item)
         for evidence_kind in EVIDENCE_KINDS:
             projection = project_evidence_state(
                 evidence_kind,
@@ -619,7 +619,8 @@ def _evidence_spec(evidence_kind: EvidenceKind) -> _EvidenceSpec:
         raise ValueError(f"Unsupported evidence kind: {evidence_kind}") from exc
 
 
-def _item_source_fingerprint(item: Mapping[str, Any]) -> str | None:
+def library_item_source_fingerprint(item: Mapping[str, Any]) -> str | None:
+    """The fingerprint evidence and owner decisions about this file are bound to."""
     return (
         _optional_text(item.get("content_version_fingerprint"))
         or _optional_text(item.get("fingerprint"))

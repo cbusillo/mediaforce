@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mediaforce.core.type_defs import object_dict
-from mediaforce.library.candidate_selection import MOTION_HELD_DETAIL
+from mediaforce.library.candidate_selection import MOTION_HELD_DETAIL, MOTION_KEPT_DETAIL
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 
 # Short plural-aware phrases for the summary line, keyed by left-out code.
@@ -18,6 +18,10 @@ _SUMMARY_PHRASES: dict[str, tuple[str, str]] = {
     "cadence_unresolved": (
         "has a motion pattern Mediaforce cannot convert safely on its own",
         "have a motion pattern Mediaforce cannot convert safely on its own",
+    ),
+    "cadence_kept_original": (
+        "is kept original by your choice for its motion pattern",
+        "are kept original by your choice for their motion pattern",
     ),
     "cadence_analysis_required": ("is waiting for a motion-pattern check", "are waiting for a motion-pattern check"),
     "cadence_analysis_failed": ("had its motion-pattern check fail", "had their motion-pattern check fail"),
@@ -79,6 +83,7 @@ def cadence_left_out_files(
             "cadence_unresolved",
             MOTION_HELD_DETAIL,
         ),
+        (partition.kept_item_ids, "cadence_kept_original", MOTION_KEPT_DETAIL),
         (partition.analysis_queued_item_ids, "cadence_analysis_required", queued_reason),
         (
             partition.analysis_failed_item_ids,

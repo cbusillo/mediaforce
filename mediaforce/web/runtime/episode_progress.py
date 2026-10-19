@@ -179,6 +179,9 @@ def _episode(
         episode["stage"] = "checking"
     elif item.state == "encoding":
         episode["stage"] = "compressing"
+    elif item.state == "kept_original":
+        episode["stage"] = "kept_original"
+        episode["detail"] = item.blocker
     elif item.state == "held":
         episode["stage"] = "held"
         episode["detail"] = item.blocker

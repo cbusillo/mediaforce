@@ -12,6 +12,7 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items
 from mediaforce.encoding.cadence import analyze_cadence
+from mediaforce.library.motion_holds import CadenceSafetyPartition
 from mediaforce.web.runtime import folder_actions
 from mediaforce.web.runtime.production_approval import production_approval_contract
 
@@ -41,8 +42,9 @@ def test_recovery_names_policy_and_cadence_blockers_per_item_without_writes(
         SimpleNamespace(item_id=1, eligible=eligible, override_applied=False, hold_reasons=[]),
         SimpleNamespace(item_id=2, eligible=True, override_applied=False, hold_reasons=[]),
     ]
-    partition = SimpleNamespace(
-        cleared_item_ids=cleared | {2}, blocked_item_ids=set(), evidence_required_item_ids=evidence_required,
+    partition = CadenceSafetyPartition(
+        cleared_item_ids=frozenset(cleared | {2}), blocked_item_ids=frozenset(),
+        evidence_required_item_ids=frozenset(evidence_required),
     )
     with patch.object(folder_actions, "project_candidates", return_value=decisions), \
             patch.object(folder_actions, "cadence_safety_partition", return_value=partition) as cadence:
@@ -60,8 +62,8 @@ def test_recovery_only_reuses_original_in_scope_override() -> None:
         "manual_override": True, "override_applied": True, "season_prefix": "tv/Show/Season 1", "is_current_season": False,
     }}
     with patch.object(folder_actions, "project_candidates", return_value=[decision]) as candidates, \
-            patch.object(folder_actions, "cadence_safety_partition", return_value=SimpleNamespace(
-                cleared_item_ids={1}, blocked_item_ids=set(), evidence_required_item_ids=set(),
+            patch.object(folder_actions, "cadence_safety_partition", return_value=CadenceSafetyPartition(
+                cleared_item_ids=frozenset({1}), blocked_item_ids=frozenset(), evidence_required_item_ids=frozenset(),
             )):
         evidence = folder_actions.child_recovery_candidate_evidence(Mock(), Mock(), {"prefix": "tv/Show"}, [item])
         assert evidence["cadence_cleared"] == [1]

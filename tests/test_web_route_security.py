@@ -80,6 +80,39 @@ class WebRouteSecurityTests(unittest.TestCase):
             self.assertEqual(raised.exception.status_code, 400)
         self.assertEqual(len(calls), 1)
 
+    def test_keep_motion_original_routes_take_a_file_list_and_reject_invalid_ids(self) -> None:
+        app = FastAPI()
+        calls: list[tuple[str, str, object]] = []
+        register_folder_routes(
+            app, folder_status_payload=lambda _prefix: {},
+            folder_content_payload=lambda _prefix: ({}, 200),
+            download_review_compare_action=_empty_file_response,
+            folder_ai_tune_action=lambda *_args: {}, folder_ai_tune_preview_action=lambda *_args: {},
+            folder_ai_tune_confirm_action=lambda *_args: {}, clear_folder_tuning_action=lambda *_args: {},
+            save_series_lifecycle_action=lambda *_args: {}, save_audio_preset_action=lambda *_args: {},
+            audio_preset_payload=lambda _prefix: None, dismiss_audio_preset_suggestion_action=lambda *_args: {},
+            approve_measured_encode_recovery_action=lambda *_args: {},
+            queue_folder_encode_action=lambda *_args: {}, queue_older_seasons_encode_action=lambda *_args: {},
+            validate_folder_outputs_action=lambda *_args: {}, promote_folder_outputs_action=lambda *_args: {},
+            save_profile_action=lambda *_args: {},
+            keep_motion_held_originals_action=lambda prefix, ids: calls.append(("keep", prefix, ids)) or {"ok": True},
+            undo_motion_keep_action=lambda prefix, ids: calls.append(("undo", prefix, ids)) or {"ok": False},
+        )
+        keep = _route_endpoint(app, "/api/folders/{prefix:path}/keep-motion-original", "POST")
+        undo = _route_endpoint(app, "/api/folders/{prefix:path}/undo-keep-motion-original", "POST")
+
+        self.assertEqual(asyncio.run(keep("/tv/Show/", _json_request({"library_item_ids": [7, 8]}))).status_code, 200)
+        # A refused undo is a conflict the page shows, not a server error.
+        self.assertEqual(asyncio.run(undo("tv/Show", _json_request({"library_item_ids": [7]}))).status_code, 409)
+        self.assertEqual(calls, [("keep", "tv/Show", [7, 8]), ("undo", "tv/Show", [7])])
+        for payload in ({}, {"library_item_ids": []}, {"library_item_ids": [True]}, {"library_item_ids": [0]},
+                        {"library_item_ids": ["7"]}, {"library_item_ids": 7}):
+            for endpoint in (keep, undo):
+                with self.subTest(payload=payload), self.assertRaises(HTTPException) as raised:
+                    asyncio.run(endpoint("tv/Show", _json_request(payload)))
+                self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(len(calls), 2)
+
     def test_sound_choice_read_is_not_taken_by_the_folder_route(self) -> None:
         app = FastAPI()
         reads: list[str] = []

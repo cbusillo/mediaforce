@@ -75,6 +75,20 @@ with `owner_accepted_as_is`, so the queue gates, the manifest, and the filter
 compiler agree. A new measurement or a different source drops the acceptance.
 Files above 2% stay blocked and are listed on the show page.
 
+No transform handles a mixed or partly interlaced file, so there is no
+"encode anyway" for them. The owner can instead choose `Keep original` for any
+file held for its motion pattern, including one `Encode as-is` could accept. The
+choice is stored per file in `motion_keep_decisions`, bound to the source
+fingerprint the evidence uses, and audited in `item_events`. While the source is
+unchanged, the queue's motion-pattern gate puts the file in its own kept group:
+no queue, check, or held-files sweep takes it, `Encode as-is` leaves it out, and
+pages count it as settled rather than as work, with its reason still listed. A
+season whose remaining files are all published or kept original is finished.
+Undoing the choice returns the file to held, and an earlier production hold
+lets it join once its motion pattern clears. A changed source lapses the choice:
+the new source needs a check like any other file, and the next synchronized
+queue partition removes the lapsed row.
+
 A stored decision is also compared with what the current classifier makes of the
 stored measurements. When they differ, because the classifier changed after the
 file was measured, the file needs only reclassification. The evidence worker
