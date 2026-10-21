@@ -21,8 +21,21 @@ _SSH_CLIENT_FAILURE_PREFIXES = (
 )
 
 
+# Of those, the ones that say an established or attempted link went away, which a later try can fix.
+_SSH_CONNECTION_DROP_MARKERS = (
+    "killed by signal",
+    "closed by remote host",
+    "connection closed by",
+    "connection reset",
+    "broken pipe",
+    "timed out",
+    "timeout, server",
+    "packet_write_wait:",
+)
+
+
 def ssh_connection_lost(returncode: int, stderr: str | None) -> bool:
-    """The SSH client, not the command it ran, ended the run.
+    """The SSH client, not the command it ran, ended the run, for any reason including refused access.
 
     The client exits 255 and says why when its connection fails or it is told to stop. A negative
     status means the client itself was killed by a signal before it could say anything.
@@ -31,10 +44,25 @@ def ssh_connection_lost(returncode: int, stderr: str | None) -> bool:
         return True
     if returncode != 255:
         return False
-    return any(
-        line.strip().lower().startswith(_SSH_CLIENT_FAILURE_PREFIXES)
-        for line in (stderr or "").splitlines()
-    )
+    return bool(_ssh_client_lines(stderr))
+
+
+def ssh_connection_dropped(returncode: int, stderr: str | None) -> bool:
+    """The SSH link itself went away, as opposed to the computer refusing access.
+
+    Refused logins and changed host keys also end the run as an SSH failure, but trying again
+    cannot fix them, so they are not a dropped link.
+    """
+    if returncode < 0:
+        return True
+    if returncode != 255:
+        return False
+    return any(marker in line for line in _ssh_client_lines(stderr) for marker in _SSH_CONNECTION_DROP_MARKERS)
+
+
+def _ssh_client_lines(stderr: str | None) -> list[str]:
+    lines = [line.strip().lower() for line in (stderr or "").splitlines()]
+    return [line for line in lines if line.startswith(_SSH_CLIENT_FAILURE_PREFIXES)]
 
 
 def ssh_client_options(*, batch_mode: bool = True, connect_timeout_seconds: int = 5) -> list[str]:

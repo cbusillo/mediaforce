@@ -998,12 +998,14 @@ class TargetSizeProductionTests(unittest.TestCase):
                 [],
             )
 
-    def test_remote_encode_reports_lost_connection_only_when_ssh_ended_the_run(self) -> None:
+    def test_remote_encode_reports_lost_connection_only_when_the_ssh_link_dropped(self) -> None:
         host = {"key": "encoder.example", "label": "Encoder", "mode": "ssh"}
         cases = (
             ("ssh client told to stop", 255, "frame=  812 fps=40\nKilled by signal 15.", EncodeConnectionLostError),
             ("ssh client killed outright", -9, "frame=  812 fps=40", EncodeConnectionLostError),
             ("link reset", 255, "client_loop: send disconnect: Broken pipe", EncodeConnectionLostError),
+            ("access refused", 255, "ssh: connect to host encoder.example port 22: Permission denied", RuntimeError),
+            ("host key changed", 255, "Host key verification failed.", RuntimeError),
             ("encoder error", 1, "Invalid data found when processing input", RuntimeError),
             ("encoder exit 255", 255, "Conversion failed!", RuntimeError),
         )

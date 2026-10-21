@@ -3431,38 +3431,54 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "ssh_transport")
 
     def test_lost_connection_to_encode_computer_retries_with_a_plain_reason(self) -> None:
-        source_path = self._create_source_file("job-lost-link.mkv")
         lost = staging_runtime.EncodeConnectionLostError("Lost the connection to Remote A. It will be tried again.")
+
+        updated = self._remote_job_failing_at_attempt_cap("job-lost-link", lost)
+
+        self.assertEqual(updated["last_failure_kind"], "ssh_transport")
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertEqual(updated["error"], str(lost))
+
+    def test_refused_ssh_access_stops_at_the_attempt_cap_with_its_own_reason(self) -> None:
+        for job_id, diagnostic in (
+                ("job-access-refused", "ssh: connect to host remote-a port 22: Permission denied"),
+                ("job-host-key", "Host key verification failed."),
+        ):
+            with self.subTest(diagnostic):
+                updated = self._remote_job_failing_at_attempt_cap(job_id, RuntimeError(diagnostic))
+
+                self.assertEqual(updated["last_failure_kind"], "ssh_transport")
+                self.assertNotEqual(updated["status"], "retry_backoff")
+                self.assertEqual(updated["error"], diagnostic)
+
+    def _remote_job_failing_at_attempt_cap(self, job_id: str, exc: Exception) -> dict[str, Any]:
+        source_path = self._create_source_file(f"{job_id}.mkv")
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="encoding")
             self._write_manifest(
-                "job-lost-link.json",
-                [{"library_item_id": item_id, "staging_path": str(self._staging_path("job-lost-link.mkv"))}],
+                f"{job_id}.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{job_id}.mkv"))}],
             )
             self._save_job(
                 connection,
-                job_id="job-lost-link",
-                manifest_name="job-lost-link.json",
+                job_id=job_id,
+                manifest_name=f"{job_id}.json",
                 host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
                 status="running",
                 attempt_count=web_app.ENCODE_JOB_MAX_ATTEMPTS,
             )
-            job = load_encode_job(connection, "job-lost-link")
+            job = load_encode_job(connection, job_id)
             assert job is not None
-            failure_kind = encode_runtime._classify_encode_failure(lost, job)
             web_app._transition_encode_job_failure(
                 connection,
                 self.config,
                 job,
-                failure_kind=failure_kind,
-                error_message=str(lost),
+                failure_kind=encode_runtime._classify_encode_failure(exc, job),
+                error_message=str(exc),
             )
-            updated = load_encode_job(connection, "job-lost-link")
-
+            updated = load_encode_job(connection, job_id)
         assert updated is not None
-        self.assertEqual(updated["last_failure_kind"], "ssh_transport")
-        self.assertEqual(updated["status"], "retry_backoff")
-        self.assertEqual(updated["error"], str(lost))
+        return updated
 
     def test_quality_temp_setup_plain_failure_retries_as_unknown(self) -> None:
         job = {

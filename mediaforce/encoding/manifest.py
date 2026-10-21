@@ -11,7 +11,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host
-from mediaforce.hosts.transport import ssh_connection_lost
+from mediaforce.hosts.transport import ssh_connection_dropped
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
@@ -779,7 +779,7 @@ def encode_one_item(
                 details = (result.stdout or "").strip()
                 if (result.stderr or "").strip():
                     details = f"{details}\n{(result.stderr or '').strip()}".strip()
-                if execution_mode_for_host(host) == "ssh" and ssh_connection_lost(result.returncode, result.stderr):
+                if execution_mode_for_host(host) == "ssh" and ssh_connection_dropped(result.returncode, result.stderr):
                     computer = _host_text(host, "label", fallback_key="key") or "the encode computer"
                     lost = EncodeConnectionLostError(f"Lost the connection to {computer}. It will be tried again.")
                     if details:
