@@ -1636,7 +1636,13 @@ async function checkLibraryStateReachability(baseUrl, timeoutMs) {
         state: "visible",
         timeout: timeoutMs,
       });
-      await page.waitForTimeout(250);
+      // Segments render from structure, then change once details arrive; read
+      // them only after the library reports it has settled.
+      await expect(page.locator(".library-layout .workspace")).toHaveAttribute(
+        "aria-busy",
+        "false",
+        { timeout: timeoutMs },
+      );
       const segments = await page
         .locator("button.work-segment[data-state][data-count]")
         .evaluateAll((elements) =>
@@ -1656,7 +1662,27 @@ async function checkLibraryStateReachability(baseUrl, timeoutMs) {
         await page
           .locator(`button.work-segment[data-state="${segment.key}"]`)
           .click();
-        await page.waitForTimeout(100);
+        // Wait for the filter to apply; on timeout the read below reports why.
+        await page
+          .waitForFunction(
+            ({ key, count }) => {
+              const rows = Array.from(
+                document.querySelectorAll("[data-library-state]"),
+              );
+              return (
+                document
+                  .querySelector(`button.work-segment[data-state="${key}"]`)
+                  ?.getAttribute("aria-pressed") === "true" &&
+                rows.length === count &&
+                rows.every(
+                  (row) => row.getAttribute("data-library-state") === key,
+                )
+              );
+            },
+            { key: segment.key, count: segment.count },
+            { timeout: timeoutMs },
+          )
+          .catch(() => {});
         const rowState = await page.evaluate((key) => {
           const rows = Array.from(
             document.querySelectorAll("[data-library-state]"),
