@@ -1276,7 +1276,8 @@ def _remove_remote_stale_staging_path(
     if result.returncode == 0:
         return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANED)
     detail = (result.stderr or result.stdout or f"remote cleanup exited with status {result.returncode}").strip()
-    if result.returncode == 255:
+    # 255 is the SSH client's own failure; a negative status means the client was killed by a signal.
+    if result.returncode == 255 or result.returncode < 0:
         unreachable = ssh_host_unreachable(result.returncode, result.stderr)
         return _StagingPathCleanupResult(
             _StagingPathCleanupOutcome.CLEANUP_DEFERRED,

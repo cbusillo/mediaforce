@@ -31125,6 +31125,14 @@ raise SystemExit(0)
 
         self._assert_pending_retry_still_waits(output_unreachable)
 
+    def test_pending_retry_keeps_waiting_when_the_removal_client_is_killed(self) -> None:
+        def killed_during_removal(host: dict[str, Any], command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if command[:2] == ["sh", "-lc"] and command[2].startswith("rm -f "):
+                return subprocess.CompletedProcess(["ssh"], -15, "", "")
+            return _remote_cleanup_succeeds(host, command, **kwargs)
+
+        self._assert_pending_retry_still_waits(killed_during_removal)
+
     def test_retry_into_a_running_season_waits_for_a_sleeping_computer(self) -> None:
         queue_config = self._complete_queue_config()
         awake_host: dict[str, object] = {"key": "mini", "host": "mini.example", "label": "Mac mini", "mode": "ssh"}
