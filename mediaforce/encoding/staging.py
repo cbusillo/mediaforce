@@ -65,6 +65,10 @@ class FinishedOutputNotVisibleError(RuntimeError):
         self.encoder_log_tail = encoder_log_tail
 
 
+class EncodeConnectionLostError(RuntimeError):
+    """The SSH connection to the encode computer ended before the encode finished."""
+
+
 class PromotionWaiting(RuntimeError):
     """A temporary condition holds this file back; nothing moved and it can be published later."""
 

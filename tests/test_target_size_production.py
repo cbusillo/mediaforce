@@ -23,6 +23,7 @@ from mediaforce.core.process_control import (
     ScheduleWindowClosedError,
 )
 from mediaforce.encoding import manifest as manifest_module
+from mediaforce.encoding.staging import EncodeConnectionLostError
 from mediaforce.encoding.quality import (
     QualitySearchError,
     QualitySearchResult,
@@ -996,6 +997,46 @@ class TargetSizeProductionTests(unittest.TestCase):
                 connection.execute(select(quality_search_observations.c.observation_id)).all(),
                 [],
             )
+
+    def test_remote_encode_reports_lost_connection_only_when_ssh_ended_the_run(self) -> None:
+        host = {"key": "encoder.example", "label": "Encoder", "mode": "ssh"}
+        cases = (
+            ("ssh client told to stop", 255, "frame=  812 fps=40\nKilled by signal 15.", EncodeConnectionLostError),
+            ("ssh client killed outright", -9, "frame=  812 fps=40", EncodeConnectionLostError),
+            ("link reset", 255, "client_loop: send disconnect: Broken pipe", EncodeConnectionLostError),
+            ("encoder error", 1, "Invalid data found when processing input", RuntimeError),
+            ("encoder exit 255", 255, "Conversion failed!", RuntimeError),
+        )
+        for label, returncode, stderr, expected_error in cases:
+            with self.subTest(label), open_db(self.config.paths.db_path) as connection:
+                name = f"episode-{label.replace(' ', '-')}.mkv"
+                source_path = self._source_file(name)
+                staging_path = self._staging_path(name)
+                item_id = self._insert_item(connection, source_path)
+                item = self._manifest_item(item_id, source_path, staging_path)
+                self._attach_stream_budget(item)
+                quality = QualitySearchResult(crf=28.0, metric="VMAF", target=85.0, score=86.0, stdout="")
+                failed_process = subprocess.CompletedProcess(["ssh"], returncode, "", stderr)
+                with patch("mediaforce.execution.resolve_item_source_path", return_value=source_path), patch(
+                    "mediaforce.execution.resolve_item_staging_path", return_value=staging_path
+                ), patch("mediaforce.execution._search_quality", return_value=quality), patch(
+                    "mediaforce.execution._build_ffmpeg_command",
+                    return_value=["ffmpeg", "-i", str(source_path), str(staging_path)],
+                ), patch("mediaforce.execution._run_encode_command", return_value=failed_process):
+                    with self.assertRaises(RuntimeError) as raised:
+                        execution.encode_one_item(
+                            connection,
+                            self.config,
+                            self.root / "runs" / "manifest.json",
+                            {"run_id": f"lost-connection-{returncode}", "items": [item]},
+                            0,
+                            item,
+                            overwrite=False,
+                            host=host,
+                        )
+                self.assertIs(type(raised.exception), expected_error)
+                if expected_error is EncodeConnectionLostError:
+                    self.assertIn("Encoder", str(raised.exception))
 
     def test_warm_assigned_encode_failure_persists_acceptance_event_context(self) -> None:
         source_path = self._source_file("episode-warm-encode-failure.mkv")

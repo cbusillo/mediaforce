@@ -58,8 +58,8 @@ from mediaforce.encoding.staged_host import StagedScratchError, host_scratch_roo
 from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.cadence import CadenceResolutionError
 from mediaforce.encoding.free_space import ReserveInputError
-from mediaforce.encoding.staging import FinishedOutputNotVisibleError, StagedOutputHeldForReviewError, \
-    UnreadableEncodeOutputError, partial_output_path, safe_unlink
+from mediaforce.encoding.staging import EncodeConnectionLostError, FinishedOutputNotVisibleError, \
+    StagedOutputHeldForReviewError, UnreadableEncodeOutputError, partial_output_path, safe_unlink
 from mediaforce.encoding.remote_cleanup import end_remote_output_writers
 from mediaforce.encoding.dispatch_coordination import STANDALONE_CLI_ENCODE_ORIGINS, locked_encode_dispatch as _locked_encode_dispatch
 from mediaforce.encoding.helpers import resolve_item_staging_path
@@ -4983,6 +4983,8 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "unreadable_output"
     if isinstance(exc, FinishedOutputNotVisibleError):
         return OUTPUT_NOT_VISIBLE_FAILURE_KIND
+    if isinstance(exc, EncodeConnectionLostError):
+        return "ssh_transport"
     if isinstance(exc, StagedScratchError):
         return "host_scratch"
     if isinstance(exc, PermissionError):

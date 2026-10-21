@@ -4,6 +4,7 @@ from pathlib import Path
 
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.hosts.config import ssh_target_for_host
+from mediaforce.hosts.transport import ssh_connection_lost
 from mediaforce.remote import run_remote_command
 
 REMOTE_FFMPEG_VERSION_TIMEOUT_SECONDS = 20
@@ -12,14 +13,6 @@ REMOTE_STAT_TIMEOUT_SECONDS = 20
 _REMOTE_STAT_SCRIPT = 'stat -f "%z %m" "$1" 2>/dev/null || stat -c "%s %Y" "$1"'
 # The SSH connection itself takes time on top of what the measurement is allowed.
 REMOTE_CONNECT_ALLOWANCE_SECONDS = 10
-_SSH_FAILURE_PREFIXES = (
-    "ssh:",
-    "client_loop:",
-    "kex_exchange_identification:",
-    "connection closed by",
-    "connection to ",
-    "timeout, server",
-)
 
 
 class RemoteMediaHostUnavailableError(RuntimeError):
@@ -52,7 +45,7 @@ class RemoteMediaCommands:
             math.ceil(timeout_seconds) + REMOTE_CONNECT_ALLOWANCE_SECONDS,
             process_controller=process_controller,
         )
-        if _ssh_connection_failed(result):
+        if ssh_connection_lost(result.returncode, result.stderr):
             # A lost connection says nothing about the file, so it must not be recorded as a failed measurement.
             raise RemoteMediaHostUnavailableError(f"The connection to {self.host_label} was lost.")
         return result
@@ -105,11 +98,3 @@ class RemoteMediaCommands:
             "host_label": self.host_label,
         }
 
-
-def _ssh_connection_failed(result: subprocess.CompletedProcess[str]) -> bool:
-    if result.returncode != 255:
-        return False
-    return any(
-        line.strip().lower().startswith(_SSH_FAILURE_PREFIXES)
-        for line in (result.stderr or "").splitlines()
-    )

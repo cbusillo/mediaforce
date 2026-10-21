@@ -7,6 +7,35 @@ from mediaforce.core.process_control import ManagedProcessController, ScheduleWi
 from mediaforce.core.schedule_deadline import guard_shell_script_for_schedule_deadline, \
     managed_schedule_close_deadline, process_result_reached_schedule_deadline
 
+# Lines the OpenSSH client prints itself when the connection fails or is ended, as opposed to the
+# remote command's own output.
+_SSH_CLIENT_FAILURE_PREFIXES = (
+    "ssh:",
+    "client_loop:",
+    "kex_exchange_identification:",
+    "connection closed by",
+    "connection to ",
+    "timeout, server",
+    "killed by signal",
+    "packet_write_wait:",
+)
+
+
+def ssh_connection_lost(returncode: int, stderr: str | None) -> bool:
+    """The SSH client, not the command it ran, ended the run.
+
+    The client exits 255 and says why when its connection fails or it is told to stop. A negative
+    status means the client itself was killed by a signal before it could say anything.
+    """
+    if returncode < 0:
+        return True
+    if returncode != 255:
+        return False
+    return any(
+        line.strip().lower().startswith(_SSH_CLIENT_FAILURE_PREFIXES)
+        for line in (stderr or "").splitlines()
+    )
+
 
 def ssh_client_options(*, batch_mode: bool = True, connect_timeout_seconds: int = 5) -> list[str]:
     options = [
