@@ -75,6 +75,7 @@ if [ "$mediaforce_now" -ge "$mediaforce_deadline" ]; then
     exit {SCHEDULE_DEADLINE_EXIT_CODE}
 fi
 rm -f "$mediaforce_deadline_marker"
+mediaforce_shell_pid=$$
 mediaforce_expire_deadline() {{
     : > "$mediaforce_deadline_marker"
     kill -TERM 0 2>/dev/null || true
@@ -84,6 +85,8 @@ mediaforce_expire_deadline() {{
 (
     trap '' TERM HUP INT
     while :; do
+        # Stop can kill the outer shell before its EXIT trap ends this loop.
+        kill -0 "$mediaforce_shell_pid" 2>/dev/null || exit 0
         mediaforce_now="$(date -u +%s)" || {{
             mediaforce_expire_deadline
             exit 125
