@@ -15936,7 +15936,11 @@ raise SystemExit(0)
             job = load_encode_job(connection, "job-unseen")
             assert job is not None
             deps = web_app._encode_queue_runtime_deps()
-            with patch("mediaforce.web.runtime.encode_runtime.run_remote_command"), patch(
+            # Cleanup on the mounted host fails as an ordinary command failure, not an SSH failure.
+            with patch(
+                    "mediaforce.web.runtime.encode_runtime.run_remote_command",
+                    return_value=subprocess.CompletedProcess(["ssh"], 1, "", "rm: cannot remove"),
+            ), patch(
                     "mediaforce.web.runtime.encode_runtime.end_remote_output_writers"
             ):
                 encode_runtime.transition_encode_job_failure(
