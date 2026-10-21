@@ -30,6 +30,7 @@ from mediaforce.web.runtime.scratch_reservations import calibration_scratch_rese
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
+from mediaforce.hosts.transport import SSH_ACCESS_REFUSED_MARKERS
 from mediaforce.core.db import DBClient, is_database_busy_failure, open_db
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import calibration_jobs
@@ -58,8 +59,8 @@ from mediaforce.encoding.staged_host import StagedScratchError, host_scratch_roo
 from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.cadence import CadenceResolutionError
 from mediaforce.encoding.free_space import ReserveInputError
-from mediaforce.encoding.staging import FinishedOutputNotVisibleError, StagedOutputHeldForReviewError, \
-    UnreadableEncodeOutputError, partial_output_path, safe_unlink
+from mediaforce.encoding.staging import EncodeConnectionLostError, FinishedOutputNotVisibleError, \
+    StagedOutputHeldForReviewError, UnreadableEncodeOutputError, partial_output_path, safe_unlink
 from mediaforce.encoding.remote_cleanup import end_remote_output_writers
 from mediaforce.encoding.dispatch_coordination import STANDALONE_CLI_ENCODE_ORIGINS, locked_encode_dispatch as _locked_encode_dispatch
 from mediaforce.encoding.helpers import resolve_item_staging_path
@@ -358,7 +359,7 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
                 progress["restart_cleanup_detail"] = str(exc)[:2000]
                 job["progress"] = progress
             elif job["status"] == "stopped":
-                job["error"] = f"Stopped; {message}"
+                job["error"] = f"{STOPPED_CLEANUP_PENDING_MESSAGE} {exc}"
             else:
                 job["waiting_reason"] = message
         else:
@@ -630,6 +631,11 @@ class ControllerShutdownCancelledError(ProcessCancelledError):
 # A child stopped only because Mediaforce shut down keeps this terminal reason until the next
 # start confirms its earlier encode ended and queues it again. An owner's Stop never sets it.
 CONTROLLER_RESTART_STOP_REASON = "controller_restart"
+# An owner's Stop is final until the owner retries the episode, even while its cleanup is unfinished.
+STOPPED_CLEANUP_PENDING_MESSAGE = (
+    "Stopped. It stays stopped until you retry it; before it runs again, its earlier encode is ended "
+    "and its unfinished file removed."
+)
 CONTROLLER_RESTART_REQUEUE_REASON = "Queued again after Mediaforce restarted; removing its unfinished file first."
 
 
@@ -4392,7 +4398,7 @@ def run_encode_job(
             error = (
                 "Encode queue job was stopped and cleaned up."
                 if cleanup.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANED
-                else "Stopped; waiting to end its earlier encode and remove its unfinished file before retrying."
+                else STOPPED_CLEANUP_PENDING_MESSAGE
             )
     except Exception as exc:
         deps.logger.exception("Encode job %s failed before terminal transition.", job_id)
@@ -4718,8 +4724,7 @@ def _encode_failure_retries_after_attempt_cap(
     if not _encode_failure_is_host_related(failure_kind, error_message, host_payload):
         return False
     lowered = error_message.lower()
-    non_transient_markers = ("permission denied", "host key verification failed")
-    return not any(marker in lowered for marker in non_transient_markers)
+    return not any(marker in lowered for marker in SSH_ACCESS_REFUSED_MARKERS)
 
 
 def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) -> str:
@@ -4885,7 +4890,7 @@ def _cleanup_encode_retry_artifacts_locked(
                 and _staged_output_is_complete({**dict(stage_row), "status": library_status})
             )
         )
-        partial_cleanup_deferred = False
+        partial_cleanup_deferred_details: list[str] = []
         partial_paths = {
             partial_output_path(Path(str(value)))
             for value in (staging_value, manifest_staging_value)
@@ -4907,15 +4912,18 @@ def _cleanup_encode_retry_artifacts_locked(
                         detail=partial_cleanup_result.detail,
                     )
                 if partial_cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_DEFERRED:
-                    partial_cleanup_deferred = True
-            if partial_cleanup_deferred:
+                    partial_cleanup_deferred_details.append(partial_cleanup_result.detail or "")
+            if partial_cleanup_deferred_details:
+                # Keep what blocked the check: "reachable" is only the most common reason.
+                reasons = "; ".join(detail for detail in partial_cleanup_deferred_details if detail)
                 return _EncodeRetryArtifactCleanupResult(
                     _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
-                    detail="The earlier output could not be checked; retry when its host is reachable.",
+                    detail="The earlier output could not be checked; retry when its host is reachable."
+                    + (f" Details: {reasons}" if reasons else ""),
                 )
         if library_item_id is None or promoted or complete:
             continue
-        cleanup_succeeded = not partial_cleanup_deferred
+        cleanup_succeeded = True
         if staging_path is not None:
             cleanup_result = _remove_stale_staging_path(
                 staging_path,
@@ -4983,6 +4991,8 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "unreadable_output"
     if isinstance(exc, FinishedOutputNotVisibleError):
         return OUTPUT_NOT_VISIBLE_FAILURE_KIND
+    if isinstance(exc, EncodeConnectionLostError):
+        return "ssh_transport"
     if isinstance(exc, StagedScratchError):
         return "host_scratch"
     if isinstance(exc, PermissionError):

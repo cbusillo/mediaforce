@@ -212,7 +212,10 @@ encoder ran locally under the old process, the episode stays stopped with one
 message naming the episode and the computer, and is not retried in a loop. An
 owner's Stop, including one pressed just before the shutdown, stays stopped,
 and a Stop pressed while a restart-stopped episode waits makes it an owner's
-Stop too.
+Stop too. An episode the owner stopped stays stopped until the owner retries
+it. Stop ends every running episode at once, so one episode's cleanup can still
+be waiting on another's; its reason then says it stays stopped until retried,
+and the retry ends the earlier encode and removes the unfinished file first.
 
 This recovery is for mounted remote outputs. Scratch-host lifetime protection
 remains described in [staged encode hosts](../architecture/staged-encode-hosts.md).

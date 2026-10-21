@@ -20,7 +20,7 @@ import unittest
 from collections import Counter
 from collections.abc import Collection, Iterator, Mapping
 from concurrent.futures import Future
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -3429,6 +3429,56 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         exc = quality.QualityTempSetupError("mkdir: /Volumes/media/transcode: Operation timed out")
 
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "ssh_transport")
+
+    def test_lost_connection_to_encode_computer_retries_with_a_plain_reason(self) -> None:
+        lost = staging_runtime.EncodeConnectionLostError("Lost the connection to Remote A. It will be tried again.")
+
+        updated = self._remote_job_failing_at_attempt_cap("job-lost-link", lost)
+
+        self.assertEqual(updated["last_failure_kind"], "ssh_transport")
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertEqual(updated["error"], str(lost))
+
+    def test_refused_ssh_access_stops_at_the_attempt_cap_with_its_own_reason(self) -> None:
+        for job_id, diagnostic in (
+                ("job-access-refused", "ssh: connect to host remote-a port 22: Permission denied"),
+                ("job-host-key", "Host key verification failed."),
+        ):
+            with self.subTest(diagnostic):
+                updated = self._remote_job_failing_at_attempt_cap(job_id, RuntimeError(diagnostic))
+
+                self.assertEqual(updated["last_failure_kind"], "ssh_transport")
+                self.assertNotEqual(updated["status"], "retry_backoff")
+                self.assertEqual(updated["error"], diagnostic)
+
+    def _remote_job_failing_at_attempt_cap(self, job_id: str, exc: Exception) -> dict[str, Any]:
+        source_path = self._create_source_file(f"{job_id}.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                f"{job_id}.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{job_id}.mkv"))}],
+            )
+            self._save_job(
+                connection,
+                job_id=job_id,
+                manifest_name=f"{job_id}.json",
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="running",
+                attempt_count=web_app.ENCODE_JOB_MAX_ATTEMPTS,
+            )
+            job = load_encode_job(connection, job_id)
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind=encode_runtime._classify_encode_failure(exc, job),
+                error_message=str(exc),
+            )
+            updated = load_encode_job(connection, job_id)
+        assert updated is not None
+        return updated
 
     def test_quality_temp_setup_plain_failure_retries_as_unknown(self) -> None:
         job = {
@@ -22395,6 +22445,7 @@ raise SystemExit(0)
 
     def _run_job_cancelled_by(
             self, job_id: str, error: ProcessCancelledError | None, *, owner_stop_requested: bool = False,
+            cleanup_busy: bool = False,
     ) -> dict[str, Any]:
         source_path = self._create_source_file(f"{job_id}.mkv")
         with open_db(self.config.paths.db_path) as connection:
@@ -22416,15 +22467,22 @@ raise SystemExit(0)
         deps.load_config = Mock(return_value=self.config)
         deps.ensure_encode_host_ready = Mock(return_value=False)
 
+        other_worker_cleanup = ExitStack()
+
         def encode_until_cancelled(*_args: Any, **_kwargs: Any) -> list[Any]:
+            if cleanup_busy:
+                # Stop ends every running episode at once; another one's cleanup holds the lock.
+                lock_connection = other_worker_cleanup.enter_context(open_db(self.config.paths.db_path))
+                other_worker_cleanup.enter_context(encode_runtime._locked_encode_dispatch(lock_connection))
             controller.cancel(error)
             controller.throw_if_cancelled()
             return []
 
         deps.encode_manifest_items = Mock(side_effect=encode_until_cancelled)
-        encode_runtime.run_encode_job(
-            config_path=self.config.paths.config_path, job_id=job_id, process_controller=controller, deps=deps,
-        )
+        with other_worker_cleanup:
+            encode_runtime.run_encode_job(
+                config_path=self.config.paths.config_path, job_id=job_id, process_controller=controller, deps=deps,
+            )
         with open_db(self.config.paths.db_path) as connection:
             job = load_encode_job(connection, job_id)
         assert job is not None
@@ -22449,6 +22507,13 @@ raise SystemExit(0)
 
                 self.assertEqual(job["status"], "stopped")
                 self.assertIsNone(job["terminal_reason"])
+
+    def test_owner_stop_with_unfinished_cleanup_stays_stopped_until_retried(self) -> None:
+        job = self._run_job_cancelled_by("job-stop-cleanup-busy", None, owner_stop_requested=True, cleanup_busy=True)
+
+        self.assertEqual(job["status"], "stopped")
+        self.assertIsNone(job["retry_not_before"])
+        self.assertEqual(job["error"], encode_runtime.STOPPED_CLEANUP_PENDING_MESSAGE)
 
     def _run_job_ended_by_reclaim(self, job_id: str, *, reclaim_first: bool) -> tuple[dict[str, Any], int]:
         source_path = self._create_source_file(f"{job_id}.mkv")
@@ -30726,8 +30791,49 @@ raise SystemExit(0)
                     )
             self.assertEqual(raised.exception.status_code, 409)
             self.assertIn("Waiting to end", raised.exception.detail)
+            # The reason the earlier output could not be checked reaches the owner.
+            self.assertIn(_remote_host_unreachable().stderr, raised.exception.detail)
             self.assertEqual(load_encode_job(connection, "orphan")["status"], "stopped")
             self.assertEqual(self._library_item_value(connection, item_id, library_items.c.status)["status"], "encoding")
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_cleanup_succeeds)
+    def test_retry_requeues_episodes_the_owner_stopped_once_their_computers_answer(self) -> None:
+        computers = {
+            "E05": ({"key": "mini", "host": "mini.example", "label": "Mac mini", "mode": "ssh"},
+                    encode_runtime.STOPPED_CLEANUP_PENDING_MESSAGE),
+            "E08": ({"key": "linux", "host": "linux.example", "label": "Linux", "mode": "ssh",
+                     "media_access": "stream"}, encode_runtime.STOPPED_CLEANUP_PENDING_MESSAGE),
+            "E14": ({"key": "m2", "host": "m2.example", "label": "MacBook", "mode": "ssh"},
+                    "Encode queue job was stopped and cleaned up."),
+        }
+        with open_db(self.config.paths.db_path) as connection:
+            items = []
+            for episode, (_host, _error) in computers.items():
+                source = self._create_source_file(f"Show.S03{episode}.mkv")
+                item_id = self._insert_library_item(connection, source, status="encoding")
+                items.append({"library_item_id": item_id, "rel_path": f"tv/show/Show.S03{episode}.mkv",
+                              "staging_path": str(self._staging_path(f"Show.S03{episode}.mkv"))})
+            self._write_manifest("season-stopped.json", items)
+            self._save_job(connection, job_id="season", manifest_name="season-stopped.json", host={},
+                           status="stopped", attempt_count=0)
+            save_encode_job(connection, {**load_encode_job(connection, "season"), "job_kind": "folder", "item_count": 3})
+            for index, (episode, (host, error)) in enumerate(computers.items()):
+                self._save_job(connection, job_id=f"episode-{episode}", manifest_name="season-stopped.json",
+                               host=host, status="stopped", attempt_count=1)
+                save_encode_job(connection, {
+                    **load_encode_job(connection, f"episode-{episode}"), "job_kind": "shard",
+                    "parent_job_id": "season", "manifest_indexes": [index], "error": error,
+                })
+            connection.commit()
+
+            encode_runtime.prepare_terminal_encode_job_for_requeue(
+                connection, load_encode_job(connection, "season"), deps=web_app._encode_queue_runtime_deps(),
+                config=self.config,
+            )
+
+            statuses = {self._library_item_value(connection, item["library_item_id"], library_items.c.status)["status"]
+                        for item in items}
+        self.assertEqual(statuses, {"planned"})
 
     def test_retained_sweep_preserves_newer_standalone_cli_writer(self) -> None:
         self._assert_retained_cleanup_preserves_cli_writer(retry=False)
