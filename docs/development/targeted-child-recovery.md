@@ -190,6 +190,11 @@ to the log rather than the reason. The retry pass above then wakes it only
 inside its work window, removes the file once the computer confirms nothing
 still writes it, and queues the episode without another retry. A refused login,
 a surviving writer, or an active encode of that episode still refuses the retry.
+If the computer comes back but refuses the sign-in, fails its host key, or
+cannot confirm its earlier encode ended, the waiting episode stops waiting and
+needs attention, with the computer's own reason under Details; it is not
+retried again until the owner retries it. Only a computer that does not answer
+at all keeps the episode waiting.
 The retry also leaves that episode's file alone in its stale-encoding reset.
 Retry through the same supported action in the other cases; no manual file
 deletion is needed. Startup and Stop also inspect retained stopped-job manifests when

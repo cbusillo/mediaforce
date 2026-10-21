@@ -30983,6 +30983,113 @@ raise SystemExit(0)
         self.assertFalse(sleeping_partial.exists())
         self.assertEqual(episode_status, "planned")
 
+    def _pending_retry_meets(
+            self, answers: Callable[..., subprocess.CompletedProcess[str]],
+    ) -> tuple[dict[str, Any], list[list[list[str]]]]:
+        """Retry while the computer sleeps, then run two in-window queue passes against these answers.
+
+        Returns the episode's queue part and the remote commands each pass sent.
+        """
+        queue_config = self._complete_queue_config()
+        sleeping_host: dict[str, object] = {"key": "m2", "host": "m2.example", "label": "M2 MBP", "mode": "ssh"}
+        computer = _SleepingComputer(str(sleeping_host["host"]))
+        item_ids, _partials = self._stopped_season_on_two_computers(queue_config, [sleeping_host])
+        with patch.object(encode_runtime, "run_remote_command", new=computer.run_remote_command):
+            self.assertTrue(self._retry_stopped_season(queue_config)["ok"])
+        episode = next(iter(item_ids.values()))
+        passes: list[list[list[str]]] = []
+
+        def recorded(host: dict[str, Any], command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            passes[-1].append(command)
+            return answers(host, command, **kwargs)
+
+        deps = replace(web_app._encode_queue_runtime_deps(), ensure_encode_host_ready=Mock(return_value=False),
+                       scheduler_allows_encode_run=Mock(return_value=True), scratch_ready_hosts={})
+        for _ in range(2):
+            passes.append([])
+            part = self._retried_part_for(episode)
+            if part["status"] == "retry_backoff":
+                # Its backoff has passed.
+                with open_db(self.config.paths.db_path) as connection:
+                    save_encode_job(connection, {**part, "retry_not_before": "2000-01-01T00:00:00+00:00"})
+            with patch.object(encode_runtime, "run_remote_command", new=recorded), \
+                    open_db(self.config.paths.db_path) as connection:
+                encode_runtime.reconcile_encode_jobs(connection, queue_config, deps)
+        return self._retried_part_for(episode), passes
+
+    def _assert_pending_retry_needs_attention(
+            self, answers: Callable[..., subprocess.CompletedProcess[str]], refusal: str,
+    ) -> None:
+        part, passes = self._pending_retry_meets(answers)
+        self.assertEqual(part["status"], "needs_attention")
+        self.assertIsNone(part["waiting_reason"])
+        self.assertIsNone(part["retry_not_before"])
+        self.assertIn("M2 MBP", part["error"])
+        self.assertIn(refusal, part["error"])
+        with open_db(self.config.paths.db_path) as connection:
+            season = encode_runtime.aggregate_encode_parent_job(
+                connection, load_encode_job(connection, part["parent_job_id"]), web_app._encode_queue_runtime_deps())
+        self.assertEqual([group["needs_owner"] for group in season["progress"]["unfinished_breakdown"]], [True])
+        # Once it asks the owner it is no longer retried: the next pass sends the computer nothing.
+        self.assertTrue(passes[0])
+        self.assertEqual(passes[1], [])
+
+    def test_pending_retry_asks_when_its_computer_returns_but_refuses_the_sign_in(self) -> None:
+        refusal = "fixture@m2.example: Permission denied (publickey)."
+
+        def refuse(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(["ssh"], 255, "", refusal)
+
+        self._assert_pending_retry_needs_attention(refuse, refusal)
+
+    def test_pending_retry_asks_when_the_final_removal_is_refused(self) -> None:
+        refusal = "Host key verification failed."
+
+        def refuse_removal(host: dict[str, Any], command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if command[:2] == ["sh", "-lc"] and command[2].startswith("rm -f "):
+                return subprocess.CompletedProcess(["ssh"], 255, "", refusal)
+            return _remote_cleanup_succeeds(host, command, **kwargs)
+
+        self._assert_pending_retry_needs_attention(refuse_removal, refusal)
+
+    def test_pending_retry_asks_when_the_finished_output_removal_is_refused(self) -> None:
+        refusal = "fixture@m2.example: Permission denied (publickey)."
+
+        def refuse_output(host: dict[str, Any], command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            removing = command[:2] == ["sh", "-lc"] and command[2].startswith("rm -f ")
+            if removing and ".partial." not in command[2]:
+                return subprocess.CompletedProcess(["ssh"], 255, "", refusal)
+            return _remote_cleanup_succeeds(host, command, **kwargs)
+
+        self._assert_pending_retry_needs_attention(refuse_output, refusal)
+
+    def _assert_pending_retry_still_waits(self, answers: Callable[..., subprocess.CompletedProcess[str]]) -> None:
+        part, passes = self._pending_retry_meets(answers)
+        self.assertEqual(part["status"], "retry_backoff")
+        self.assertIn("M2 MBP", part["waiting_reason"])
+        self.assertNotIn("ssh:", part["waiting_reason"])
+        self.assertTrue(all(passes))
+        with open_db(self.config.paths.db_path) as connection:
+            season = encode_runtime.aggregate_encode_parent_job(
+                connection, load_encode_job(connection, part["parent_job_id"]), web_app._encode_queue_runtime_deps())
+        # The season lists it as waiting for that computer, not as something for the owner.
+        self.assertEqual([("M2 MBP" in group["label"], group["needs_owner"])
+                          for group in season["progress"]["unfinished_breakdown"]], [(True, False)])
+
+    def test_pending_retry_keeps_waiting_while_its_computer_does_not_answer(self) -> None:
+        self._assert_pending_retry_still_waits(_SleepingComputer("m2.example").run_remote_command)
+
+    def test_pending_retry_keeps_waiting_when_its_computer_drops_before_the_output_removal(self) -> None:
+        asleep = _SleepingComputer("m2.example")
+
+        def output_unreachable(host: dict[str, Any], command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            removing = command[:2] == ["sh", "-lc"] and command[2].startswith("rm -f ")
+            if removing and ".partial." not in command[2]:
+                return asleep.run_remote_command(host, command, **kwargs)
+            return _remote_cleanup_succeeds(host, command, **kwargs)
+
+        self._assert_pending_retry_still_waits(output_unreachable)
+
     def test_retry_into_a_running_season_waits_for_a_sleeping_computer(self) -> None:
         queue_config = self._complete_queue_config()
         awake_host: dict[str, object] = {"key": "mini", "host": "mini.example", "label": "Mac mini", "mode": "ssh"}

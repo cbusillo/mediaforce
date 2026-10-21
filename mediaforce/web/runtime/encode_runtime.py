@@ -104,6 +104,8 @@ class _StagingPathCleanupResult:
     detail: str | None = None
     # The computer that holds the file did not answer, for example because it is asleep.
     host_unreachable: bool = False
+    # The computer answered, but refused the sign-in or could not confirm the file is free.
+    check_failed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +114,12 @@ class _EncodeRetryArtifactCleanupResult:
     detail: str | None = None
     # Deferred only because the computer that made the unfinished file did not answer.
     waiting_for_computer: bool = False
+    # Deferred because that computer answered but its check did not get through; waiting will not fix it.
+    check_failed: bool = False
+
+
+class _CleanupOwnershipDeferral(RuntimeError):
+    """Mediaforce's own records say the file is in use again; the computer itself was not at fault."""
 
 
 class EncodeRetryWaitsForComputerError(HTTPException):
@@ -155,6 +163,46 @@ def owner_retry_waiting_for_computer_fields(host: Mapping[str, Any], *, now_iso:
         "waiting_reason": encode_retry_waiting_for_computer_reason(host),
         "progress": {WAITING_FOR_COMPUTER_PROGRESS_KEY: _computer_label(host)},
     }
+
+
+def _pending_retry_check_failed_message(host: Mapping[str, Any], detail: str | None) -> str:
+    """Why a retry that waited for its computer now needs the owner: the computer answered but the check failed."""
+    label = _computer_label(host)
+    if any(marker in (detail or "").lower() for marker in SSH_ACCESS_REFUSED_MARKERS):
+        lead = (
+            f"{label} is back but refused Mediaforce's sign-in, so the unfinished file it left could not be "
+            f"checked. Fix the sign-in on {label}, then retry this episode."
+        )
+    else:
+        lead = (
+            f"{label} is back but Mediaforce could not confirm its earlier encode ended, so the unfinished "
+            f"file it left was kept. Check {label}, then retry this episode."
+        )
+    return f"{lead} Details: {detail}" if detail else lead
+
+
+def _deferred_cleanup_result(
+        results: list[_StagingPathCleanupResult], host: Mapping[str, Any], deps: "EncodeQueueRuntimeDeps",
+        *, fallback_detail: str | None = None,
+) -> _EncodeRetryArtifactCleanupResult:
+    """One deferred result for these file checks: waiting only when the computer did not answer at all."""
+    reasons = "; ".join(result.detail for result in results if result.detail)
+    if results and all(result.host_unreachable for result in results):
+        # The owner reads which computer it waits for; the SSH text is for diagnosis.
+        deps.logger.info("Retry cleanup is waiting for its computer to answer: %s", reasons)
+        return _EncodeRetryArtifactCleanupResult(
+            _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
+            detail=encode_retry_waiting_for_computer_reason(host),
+            waiting_for_computer=True,
+        )
+    detail = reasons or None
+    if fallback_detail is not None:
+        detail = fallback_detail + (f" Details: {reasons}" if reasons else "")
+    return _EncodeRetryArtifactCleanupResult(
+        _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
+        detail=detail,
+        check_failed=any(result.check_failed for result in results),
+    )
 
 
 def encode_retry_refused_for_computer_message(host: Mapping[str, Any]) -> str:
@@ -607,6 +655,24 @@ def reconcile_encode_jobs(
                 error_message=(
                     "Encode retry manifest is missing, unreadable, or invalid. "
                     "Retry the item to create a fresh manifest."
+                ),
+            )
+            continue
+        pending_owner_retry = WAITING_FOR_COMPUTER_PROGRESS_KEY in object_dict(payload.get("progress"))
+        if (cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED
+                and cleanup_outcome.check_failed and pending_owner_retry):
+            # The computer is back, but its check failed; waiting longer cannot fix that, so the owner hears why.
+            progress = object_dict(payload.get("progress"))
+            progress.pop(WAITING_FOR_COMPUTER_PROGRESS_KEY, None)
+            payload["progress"] = progress
+            transition_encode_job_failure(
+                connection,
+                config,
+                payload,
+                deps,
+                failure_kind="deterministic",
+                error_message=_pending_retry_check_failed_message(
+                    object_dict(payload.get("host")), cleanup_outcome.detail,
                 ),
             )
             continue
@@ -1177,28 +1243,41 @@ def _remove_remote_stale_staging_path(
             f"if [ $status -eq 0 ] && [ -d {quoted_parent} ]; then "
             f"rmdir {quoted_parent} >/dev/null 2>&1 || true; fi; exit $status"
         )
-    try:
-        end_remote_output_writers(host, path, run_command=run_remote_command, ownership_check=ownership_check)
-        if ownership_check is not None:
+    def check_ownership() -> None:
+        if ownership_check is None:
+            return
+        try:
             ownership_check()
+        except RuntimeError as exc:
+            raise _CleanupOwnershipDeferral(str(exc)) from exc
+
+    try:
+        end_remote_output_writers(host, path, run_command=run_remote_command, ownership_check=check_ownership)
+        check_ownership()
         result = run_remote_command(host, ["sh", "-lc", script], timeout=10, wake_before_connect=False)
     except RemoteHostUnreachableError as exc:
         return _StagingPathCleanupResult(
             _StagingPathCleanupOutcome.CLEANUP_DEFERRED, detail=f"{path}: {exc}", host_unreachable=True,
         )
+    except _CleanupOwnershipDeferral as exc:
+        return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANUP_DEFERRED, detail=f"{path}: {exc}")
     except Exception as exc:
+        # The computer answered (or hung), but did not confirm the file is free.
         return _StagingPathCleanupResult(
             _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
             detail=f"{path}: {exc}",
+            check_failed=True,
         )
     if result.returncode == 0:
         return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANED)
     detail = (result.stderr or result.stdout or f"remote cleanup exited with status {result.returncode}").strip()
     if result.returncode == 255:
+        unreachable = ssh_host_unreachable(result.returncode, result.stderr)
         return _StagingPathCleanupResult(
             _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
             detail=f"{path}: {detail}",
-            host_unreachable=ssh_host_unreachable(result.returncode, result.stderr),
+            host_unreachable=unreachable,
+            check_failed=not unreachable,
         )
     return _StagingPathCleanupResult(
         _StagingPathCleanupOutcome.CLEANUP_FAILED,
@@ -4915,6 +4994,7 @@ def _cleanup_encode_retry_artifacts_locked(
     active_items, active_paths = active
     now_iso = deps.now_iso()
     cleanup_succeeded_for_all = True
+    staging_cleanup_deferrals: list[_StagingPathCleanupResult] = []
     manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
     selected_indexes = indexes if isinstance(indexes, list) else list(range(len(manifest_items)))
     for index in selected_indexes:
@@ -4986,19 +5066,9 @@ def _cleanup_encode_retry_artifacts_locked(
                     partial_cleanup_deferrals.append(partial_cleanup_result)
             if partial_cleanup_deferrals:
                 # Keep what blocked the check: "reachable" is only the most common reason.
-                reasons = "; ".join(result.detail for result in partial_cleanup_deferrals if result.detail)
-                if all(result.host_unreachable for result in partial_cleanup_deferrals):
-                    # The owner reads which computer it waits for; the SSH text is for diagnosis.
-                    deps.logger.info("Retry cleanup is waiting for its computer to answer: %s", reasons)
-                    return _EncodeRetryArtifactCleanupResult(
-                        _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
-                        detail=encode_retry_waiting_for_computer_reason(object_dict(host)),
-                        waiting_for_computer=True,
-                    )
-                return _EncodeRetryArtifactCleanupResult(
-                    _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
-                    detail="The earlier output could not be checked; retry when its host is reachable."
-                    + (f" Details: {reasons}" if reasons else ""),
+                return _deferred_cleanup_result(
+                    partial_cleanup_deferrals, object_dict(host), deps,
+                    fallback_detail="The earlier output could not be checked; retry when its host is reachable.",
                 )
         if library_item_id is None or promoted or complete:
             continue
@@ -5019,6 +5089,7 @@ def _cleanup_encode_retry_artifacts_locked(
                 )
             if cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_DEFERRED:
                 cleanup_succeeded = False
+                staging_cleanup_deferrals.append(cleanup_result)
         if not cleanup_succeeded:
             cleanup_succeeded_for_all = False
             deps.logger.warning(
@@ -5037,11 +5108,9 @@ def _cleanup_encode_retry_artifacts_locked(
             )
         if commit_between_items:
             connection.commit()
-    return (
-        _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANED)
-        if cleanup_succeeded_for_all
-        else _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED)
-    )
+    if cleanup_succeeded_for_all:
+        return _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANED)
+    return _deferred_cleanup_result(staging_cleanup_deferrals, object_dict(host), deps)
 
 
 def _encode_retry_artifact_cleanup_error_message(
