@@ -1006,6 +1006,12 @@ class TargetSizeProductionTests(unittest.TestCase):
             ("link reset", 255, "client_loop: send disconnect: Broken pipe", EncodeConnectionLostError),
             ("access refused", 255, "ssh: connect to host encoder.example port 22: Permission denied", RuntimeError),
             ("host key changed", 255, "Host key verification failed.", RuntimeError),
+            (
+                "jump host refused, then closed",
+                255,
+                "Permission denied (publickey).\nkex_exchange_identification: Connection closed by remote host",
+                RuntimeError,
+            ),
             ("encoder error", 1, "Invalid data found when processing input", RuntimeError),
             ("encoder exit 255", 255, "Conversion failed!", RuntimeError),
         )

@@ -30,6 +30,7 @@ from mediaforce.web.runtime.scratch_reservations import calibration_scratch_rese
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
+from mediaforce.hosts.transport import SSH_ACCESS_REFUSED_MARKERS
 from mediaforce.core.db import DBClient, is_database_busy_failure, open_db
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import calibration_jobs
@@ -4723,8 +4724,7 @@ def _encode_failure_retries_after_attempt_cap(
     if not _encode_failure_is_host_related(failure_kind, error_message, host_payload):
         return False
     lowered = error_message.lower()
-    non_transient_markers = ("permission denied", "host key verification failed")
-    return not any(marker in lowered for marker in non_transient_markers)
+    return not any(marker in lowered for marker in SSH_ACCESS_REFUSED_MARKERS)
 
 
 def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) -> str:

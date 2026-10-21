@@ -21,6 +21,11 @@ _SSH_CLIENT_FAILURE_PREFIXES = (
 )
 
 
+# Refusals that a later try cannot fix. They win over any drop line in the same output, because a
+# failed jump-host login is often followed by the connection closing.
+SSH_ACCESS_REFUSED_MARKERS = ("permission denied", "host key verification failed")
+
+
 # Of those, the ones that say an established or attempted link went away, which a later try can fix.
 _SSH_CONNECTION_DROP_MARKERS = (
     "killed by signal",
@@ -56,6 +61,8 @@ def ssh_connection_dropped(returncode: int, stderr: str | None) -> bool:
     if returncode < 0:
         return True
     if returncode != 255:
+        return False
+    if any(marker in (stderr or "").lower() for marker in SSH_ACCESS_REFUSED_MARKERS):
         return False
     return any(marker in line for line in _ssh_client_lines(stderr) for marker in _SSH_CONNECTION_DROP_MARKERS)
 
