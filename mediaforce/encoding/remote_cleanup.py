@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from mediaforce.hosts.transport import ssh_host_unreachable
 from mediaforce.remote import run_remote_command
 
 REMOTE_PROCESS_IDENTITY_SHELL = 'ps -ww -p "$pid" -o lstart=,args= | awk \'{$1=$1;print}\''
@@ -16,6 +17,15 @@ REMOTE_PROCESS_SIGNAL_SHELL = (
     f'observed=$({REMOTE_PROCESS_IDENTITY_SHELL}); '
     '[ "$observed" != "$expected" ] || kill -"$signal" "$pid" 2>/dev/null || true'
 )
+
+
+class RemoteHostUnreachableError(RuntimeError):
+    """The computer did not answer over SSH, for example because it is asleep, so nothing was checked."""
+
+
+def _raise_if_unreachable(result: subprocess.CompletedProcess[str]) -> None:
+    if ssh_host_unreachable(result.returncode, result.stderr):
+        raise RemoteHostUnreachableError(result.stderr.strip())
 
 
 @dataclass(frozen=True)
@@ -29,6 +39,7 @@ class _RemoteProcess:
 
 def _inventory(host: dict[str, Any], run_command: Callable[..., subprocess.CompletedProcess[str]]) -> dict[int, _RemoteProcess]:
     result = run_command(host, ["ps", "-ww", "-axo", "pid=,ppid=,stat=,lstart=,args="], timeout=10, wake_before_connect=False)
+    _raise_if_unreachable(result)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "Remote process inventory failed.")
     if not result.stdout.strip():
@@ -90,6 +101,7 @@ def _signal(host: dict[str, Any], processes: dict[int, _RemoteProcess], signal: 
     arguments = [signal, *[value for process in processes.values() for value in (str(process.pid), process.identity)]]
     input_text = "set -- " + " ".join(shlex.quote(value) for value in arguments) + "\n" + script
     result = run_command(host, ["sh", "-s"], input_text=input_text, timeout=10, wake_before_connect=False)
+    _raise_if_unreachable(result)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "Remote encoder could not be ended.")
 
@@ -99,6 +111,7 @@ def _output_writers(host: dict[str, Any], path: Path,
     # Query by the file itself; ps can escape non-ASCII argv in an SSH locale.
     input_text = "set -- " + shlex.quote(str(path)) + '\nif [ -e "$1" ]; then lsof -Fpa -- "$1"; fi'
     result = run_command(host, ["sh", "-s"], input_text=input_text, timeout=10, wake_before_connect=False)
+    _raise_if_unreachable(result)
     if result.returncode not in {0, 1} or result.stderr.strip():
         raise RuntimeError(result.stderr.strip() or "Remote output ownership could not be checked.")
     writers: set[int] = set()
