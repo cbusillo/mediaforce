@@ -20,7 +20,7 @@ import unittest
 from collections import Counter
 from collections.abc import Collection, Iterator, Mapping
 from concurrent.futures import Future
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22429,6 +22429,7 @@ raise SystemExit(0)
 
     def _run_job_cancelled_by(
             self, job_id: str, error: ProcessCancelledError | None, *, owner_stop_requested: bool = False,
+            cleanup_busy: bool = False,
     ) -> dict[str, Any]:
         source_path = self._create_source_file(f"{job_id}.mkv")
         with open_db(self.config.paths.db_path) as connection:
@@ -22450,15 +22451,22 @@ raise SystemExit(0)
         deps.load_config = Mock(return_value=self.config)
         deps.ensure_encode_host_ready = Mock(return_value=False)
 
+        other_worker_cleanup = ExitStack()
+
         def encode_until_cancelled(*_args: Any, **_kwargs: Any) -> list[Any]:
+            if cleanup_busy:
+                # Stop ends every running episode at once; another one's cleanup holds the lock.
+                lock_connection = other_worker_cleanup.enter_context(open_db(self.config.paths.db_path))
+                other_worker_cleanup.enter_context(encode_runtime._locked_encode_dispatch(lock_connection))
             controller.cancel(error)
             controller.throw_if_cancelled()
             return []
 
         deps.encode_manifest_items = Mock(side_effect=encode_until_cancelled)
-        encode_runtime.run_encode_job(
-            config_path=self.config.paths.config_path, job_id=job_id, process_controller=controller, deps=deps,
-        )
+        with other_worker_cleanup:
+            encode_runtime.run_encode_job(
+                config_path=self.config.paths.config_path, job_id=job_id, process_controller=controller, deps=deps,
+            )
         with open_db(self.config.paths.db_path) as connection:
             job = load_encode_job(connection, job_id)
         assert job is not None
@@ -22483,6 +22491,13 @@ raise SystemExit(0)
 
                 self.assertEqual(job["status"], "stopped")
                 self.assertIsNone(job["terminal_reason"])
+
+    def test_owner_stop_with_unfinished_cleanup_stays_stopped_until_retried(self) -> None:
+        job = self._run_job_cancelled_by("job-stop-cleanup-busy", None, owner_stop_requested=True, cleanup_busy=True)
+
+        self.assertEqual(job["status"], "stopped")
+        self.assertIsNone(job["retry_not_before"])
+        self.assertEqual(job["error"], encode_runtime.STOPPED_CLEANUP_PENDING_MESSAGE)
 
     def _run_job_ended_by_reclaim(self, job_id: str, *, reclaim_first: bool) -> tuple[dict[str, Any], int]:
         source_path = self._create_source_file(f"{job_id}.mkv")

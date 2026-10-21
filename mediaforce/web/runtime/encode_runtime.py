@@ -358,7 +358,7 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
                 progress["restart_cleanup_detail"] = str(exc)[:2000]
                 job["progress"] = progress
             elif job["status"] == "stopped":
-                job["error"] = f"Stopped; {message}"
+                job["error"] = f"{STOPPED_CLEANUP_PENDING_MESSAGE} {exc}"
             else:
                 job["waiting_reason"] = message
         else:
@@ -630,6 +630,11 @@ class ControllerShutdownCancelledError(ProcessCancelledError):
 # A child stopped only because Mediaforce shut down keeps this terminal reason until the next
 # start confirms its earlier encode ended and queues it again. An owner's Stop never sets it.
 CONTROLLER_RESTART_STOP_REASON = "controller_restart"
+# An owner's Stop is final until the owner retries the episode, even while its cleanup is unfinished.
+STOPPED_CLEANUP_PENDING_MESSAGE = (
+    "Stopped. It stays stopped until you retry it; before it runs again, its earlier encode is ended "
+    "and its unfinished file removed."
+)
 CONTROLLER_RESTART_REQUEUE_REASON = "Queued again after Mediaforce restarted; removing its unfinished file first."
 
 
@@ -4392,7 +4397,7 @@ def run_encode_job(
             error = (
                 "Encode queue job was stopped and cleaned up."
                 if cleanup.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANED
-                else "Stopped; waiting to end its earlier encode and remove its unfinished file before retrying."
+                else STOPPED_CLEANUP_PENDING_MESSAGE
             )
     except Exception as exc:
         deps.logger.exception("Encode job %s failed before terminal transition.", job_id)
