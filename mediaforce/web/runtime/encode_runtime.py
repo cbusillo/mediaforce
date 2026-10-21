@@ -135,6 +135,9 @@ class EncodeRetryWaitsForComputerError(HTTPException):
 
 # Progress key naming the computer a retry waits for, so the season lists that wait by computer.
 WAITING_FOR_COMPUTER_PROGRESS_KEY = "waiting_for_computer"
+# Progress key marking an owner's retry the queue finishes once its computer is back. It outlives
+# temporary waits and goes only when cleanup gets through or the retry asks the owner.
+PENDING_OWNER_RETRY_PROGRESS_KEY = "pending_owner_retry"
 
 
 def _computer_label(host: Mapping[str, Any]) -> str:
@@ -161,7 +164,7 @@ def owner_retry_waiting_for_computer_fields(host: Mapping[str, Any], *, now_iso:
         "host": dict(host),
         "retry_not_before": now_iso,
         "waiting_reason": encode_retry_waiting_for_computer_reason(host),
-        "progress": {WAITING_FOR_COMPUTER_PROGRESS_KEY: _computer_label(host)},
+        "progress": {WAITING_FOR_COMPUTER_PROGRESS_KEY: _computer_label(host), PENDING_OWNER_RETRY_PROGRESS_KEY: True},
     }
 
 
@@ -658,12 +661,13 @@ def reconcile_encode_jobs(
                 ),
             )
             continue
-        pending_owner_retry = WAITING_FOR_COMPUTER_PROGRESS_KEY in object_dict(payload.get("progress"))
+        pending_owner_retry = bool(object_dict(payload.get("progress")).get(PENDING_OWNER_RETRY_PROGRESS_KEY))
         if (cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED
                 and cleanup_outcome.check_failed and pending_owner_retry):
             # The computer is back, but its check failed; waiting longer cannot fix that, so the owner hears why.
             progress = object_dict(payload.get("progress"))
             progress.pop(WAITING_FOR_COMPUTER_PROGRESS_KEY, None)
+            progress.pop(PENDING_OWNER_RETRY_PROGRESS_KEY, None)
             payload["progress"] = progress
             transition_encode_job_failure(
                 connection,
@@ -721,6 +725,7 @@ def reconcile_encode_jobs(
         # The cleanup got through, so a later outage starts its backoff from the beginning.
         progress.pop("cleanup_deferrals", None)
         progress.pop(WAITING_FOR_COMPUTER_PROGRESS_KEY, None)
+        progress.pop(PENDING_OWNER_RETRY_PROGRESS_KEY, None)
         payload.update(
             {
                 "status": "queued",

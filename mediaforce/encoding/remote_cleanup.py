@@ -25,7 +25,7 @@ class RemoteHostUnreachableError(RuntimeError):
 
 def _raise_if_unreachable(result: subprocess.CompletedProcess[str]) -> None:
     if ssh_host_unreachable(result.returncode, result.stderr):
-        raise RemoteHostUnreachableError(result.stderr.strip())
+        raise RemoteHostUnreachableError(result.stderr.strip() or "The computer did not answer over SSH.")
 
 
 @dataclass(frozen=True)
@@ -148,6 +148,7 @@ def end_remote_output_writers(
         if Path(process.command.split()[0]).name != "ffmpeg":
             continue
         opened = run_command(host, ["lsof", "-a", "-p", str(process.pid), "-Ffan"], timeout=10, wake_before_connect=False)
+        _raise_if_unreachable(opened)
         writable = False
         owns_output = False
         for field in opened.stdout.splitlines():
@@ -207,6 +208,7 @@ def encode_host_file_sizes(
         + '\nfor path; do if [ -f "$path" ]; then wc -c < "$path"; else echo -; fi; done'
     )
     result = run_command(host, ["sh", "-s"], input_text=input_text, timeout=10, wake_before_connect=False)
+    _raise_if_unreachable(result)
     answers = result.stdout.split()
     if result.returncode or len(answers) != len(paths):
         raise RuntimeError(result.stderr.strip() or "The encode host could not list its output.")

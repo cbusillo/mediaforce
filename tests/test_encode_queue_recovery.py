@@ -30984,10 +30984,11 @@ raise SystemExit(0)
         self.assertEqual(episode_status, "planned")
 
     def _pending_retry_meets(
-            self, answers: Callable[..., subprocess.CompletedProcess[str]],
+            self, answers: Callable[..., subprocess.CompletedProcess[str]], *, first_pass_cleanup_busy: bool = False,
     ) -> tuple[dict[str, Any], list[list[list[str]]]]:
-        """Retry while the computer sleeps, then run two in-window queue passes against these answers.
+        """Retry while the computer sleeps, then run in-window queue passes against these answers.
 
+        With first_pass_cleanup_busy, another cleanup holds the season's plan during an extra first pass.
         Returns the episode's queue part and the remote commands each pass sent.
         """
         queue_config = self._complete_queue_config()
@@ -31005,22 +31006,29 @@ raise SystemExit(0)
 
         deps = replace(web_app._encode_queue_runtime_deps(), ensure_encode_host_ready=Mock(return_value=False),
                        scheduler_allows_encode_run=Mock(return_value=True), scratch_ready_hosts={})
-        for _ in range(2):
+        for busy in ([True] if first_pass_cleanup_busy else []) + [False, False]:
             passes.append([])
             part = self._retried_part_for(episode)
             if part["status"] == "retry_backoff":
                 # Its backoff has passed.
                 with open_db(self.config.paths.db_path) as connection:
                     save_encode_job(connection, {**part, "retry_not_before": "2000-01-01T00:00:00+00:00"})
-            with patch.object(encode_runtime, "run_remote_command", new=recorded), \
-                    open_db(self.config.paths.db_path) as connection:
+            with ExitStack() as stack:
+                if busy:
+                    stack.enter_context(encode_runtime._locked_manifest_cleanup(Path(part["manifest_path"])))
+                stack.enter_context(patch.object(encode_runtime, "run_remote_command", new=recorded))
+                connection = stack.enter_context(open_db(self.config.paths.db_path))
                 encode_runtime.reconcile_encode_jobs(connection, queue_config, deps)
         return self._retried_part_for(episode), passes
 
     def _assert_pending_retry_needs_attention(
             self, answers: Callable[..., subprocess.CompletedProcess[str]], refusal: str,
+            *, first_pass_cleanup_busy: bool = False,
     ) -> None:
-        part, passes = self._pending_retry_meets(answers)
+        part, passes = self._pending_retry_meets(answers, first_pass_cleanup_busy=first_pass_cleanup_busy)
+        if first_pass_cleanup_busy:
+            # The busy pass checked nothing on the computer and kept the retry waiting.
+            self.assertEqual(passes.pop(0), [])
         self.assertEqual(part["status"], "needs_attention")
         self.assertIsNone(part["waiting_reason"])
         self.assertIsNone(part["retry_not_before"])
@@ -31041,6 +31049,33 @@ raise SystemExit(0)
             return subprocess.CompletedProcess(["ssh"], 255, "", refusal)
 
         self._assert_pending_retry_needs_attention(refuse, refusal)
+
+    def test_pending_retry_still_asks_after_a_busy_cleanup_when_the_sign_in_is_refused(self) -> None:
+        refusal = "Host key verification failed."
+
+        def refuse(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(["ssh"], 255, "", refusal)
+
+        self._assert_pending_retry_needs_attention(refuse, refusal, first_pass_cleanup_busy=True)
+
+    def test_pending_retry_keeps_waiting_when_its_computer_drops_while_checking_a_writer(self) -> None:
+        partial = staging_runtime.partial_output_path(resolve_item_staging_path(
+            self._complete_queue_config(), {"rel_path": "tv/show/Season 1/Episode 1.mkv"},
+            host={"key": "m2", "host": "m2.example", "mode": "ssh"},
+            host_media_access_for_host=remote.host_media_access_for_host,
+        ))
+
+        def drops_at_writer_check(host: dict[str, Any], command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if command[0] == "ps":
+                return subprocess.CompletedProcess(
+                    command, 0, f"4242 1 S Fri Oct 9 14:00:00 2026 ffmpeg -i source.mkv {partial}\n", "")
+            if command[:2] == ["sh", "-s"] and "lsof -Fpa" in str(kwargs.get("input_text")):
+                return subprocess.CompletedProcess(command, 0, "p4242\naw\n", "")
+            if command[0] == "lsof":
+                return subprocess.CompletedProcess(["ssh"], 255, "", "ssh: connect to host m2.example port 22: Host is down")
+            return _remote_cleanup_succeeds(host, command, **kwargs)
+
+        self._assert_pending_retry_still_waits(drops_at_writer_check)
 
     def test_pending_retry_asks_when_the_final_removal_is_refused(self) -> None:
         refusal = "Host key verification failed."
