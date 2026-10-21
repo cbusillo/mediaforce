@@ -75,18 +75,28 @@ if [ "$mediaforce_now" -ge "$mediaforce_deadline" ]; then
     exit {SCHEDULE_DEADLINE_EXIT_CODE}
 fi
 rm -f "$mediaforce_deadline_marker"
-mediaforce_shell_pid=$$
-mediaforce_expire_deadline() {{
-    : > "$mediaforce_deadline_marker"
+# $$ names the outermost shell even inside a subshell, as when a connection watcher wraps this
+# script; the exec'd child reports the shell actually running it.
+mediaforce_shell_pid="$(exec sh -c 'echo "$PPID"')"
+[ -n "$mediaforce_shell_pid" ] || mediaforce_shell_pid=$$
+mediaforce_end_process_group() {{
     kill -TERM 0 2>/dev/null || true
     sleep 2
     kill -KILL 0 2>/dev/null || true
 }}
+mediaforce_expire_deadline() {{
+    : > "$mediaforce_deadline_marker"
+    mediaforce_end_process_group
+}}
 (
     trap '' TERM HUP INT
     while :; do
-        # Stop can kill the outer shell before its EXIT trap ends this loop.
-        kill -0 "$mediaforce_shell_pid" 2>/dev/null || exit 0
+        # The shell can be killed before its EXIT trap ends this loop. End what is left of the
+        # command now rather than at the deadline; no deadline was reached, so leave no marker.
+        if ! kill -0 "$mediaforce_shell_pid" 2>/dev/null; then
+            mediaforce_end_process_group
+            exit 0
+        fi
         mediaforce_now="$(date -u +%s)" || {{
             mediaforce_expire_deadline
             exit 125

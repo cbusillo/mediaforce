@@ -72,13 +72,23 @@ class ScheduleDeadlineTests(TestCase):
         self.assertEqual(result.stdout, "done\n")
         self.assertLess(time.monotonic() - started, 2.0)
 
-    def test_watchdog_exits_when_outer_shell_is_killed_before_its_exit_trap(self) -> None:
+    def test_killing_the_guard_shell_ends_its_command_and_watchdog_without_a_deadline_marker(self) -> None:
+        self._assert_guard_shell_loss_ends_command(wrapped=False)
+
+    def test_guard_inside_a_wrapper_shell_watches_its_own_shell(self) -> None:
+        # A connection watcher runs the guard in a subshell, where $$ still names the wrapper.
+        self._assert_guard_shell_loss_ends_command(wrapped=True)
+
+    def _assert_guard_shell_loss_ends_command(self, *, wrapped: bool) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            watchdog_pid_path = Path(temp_dir) / "watchdog.pid"
+            pids = Path(temp_dir)
             script = guard_shell_script_for_schedule_deadline(
-                f'printf \'%s\\n\' "$mediaforce_watchdog_pid" > {watchdog_pid_path}; sleep 30',
-                datetime.now(tz=UTC) + timedelta(seconds=30),
+                f'printf \'%s\\n\' "$mediaforce_watchdog_pid" > {pids / "watchdog.pid"}; '
+                f'sleep 60 & printf \'%s\\n\' "$!" > {pids / "child.pid"}; wait',
+                datetime.now(tz=UTC) + timedelta(seconds=60),
             )
+            if wrapped:
+                script = f'(\n{script}\n) &\nprintf \'%s\\n\' "$!" > {pids / "guard.pid"}\nwait\nsleep 60'
             outer_shell = subprocess.Popen(
                 ["/bin/sh", "-c", script],
                 env={**os.environ, "TMPDIR": temp_dir},
@@ -87,19 +97,24 @@ class ScheduleDeadlineTests(TestCase):
                 start_new_session=True,
             )
             try:
-                watchdog_pid = _wait_for_pid_file(watchdog_pid_path)
-                self.assertTrue(_process_is_alive(watchdog_pid))
+                watchdog_pid = _wait_for_pid_file(pids / "watchdog.pid")
+                child_pid = _wait_for_pid_file(pids / "child.pid")
+                guard_pid = _wait_for_pid_file(pids / "guard.pid") if wrapped else outer_shell.pid
 
-                outer_shell.send_signal(signal.SIGKILL)
-                outer_shell.wait(timeout=5)
+                os.kill(guard_pid, signal.SIGKILL)
+                if not wrapped:
+                    outer_shell.wait(timeout=5)
 
-                self.assertTrue(_wait_until_process_exits(watchdog_pid, timeout_seconds=2.0))
+                self.assertTrue(_wait_until_process_exits(child_pid, timeout_seconds=5.0))
+                self.assertTrue(_wait_until_process_exits(watchdog_pid, timeout_seconds=5.0))
                 self.assertEqual(list(Path(temp_dir).glob(".mediaforce-deadline-*")), [])
             finally:
                 try:
                     os.killpg(outer_shell.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
+                    # Gone already, or only the unreaped group leader is left.
                     pass
+                outer_shell.wait(timeout=5)
 
     def test_success_after_deadline_is_rejected_even_if_watchdog_disappears(self) -> None:
         script = guard_shell_script_for_schedule_deadline(
