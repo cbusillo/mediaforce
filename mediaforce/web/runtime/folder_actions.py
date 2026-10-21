@@ -56,7 +56,9 @@ from mediaforce.web.runtime.production_approval import NEARER_APPROVAL_CODE, app
 from mediaforce.web.runtime.left_out_files import LeftOutFile, cadence_left_out_files, drop_manifest_items, \
     left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response, queue_result_without_files
 from mediaforce.web.runtime.encode_runtime import (
-    remove_stale_staging_path, staged_output_cleanup_blocker, staged_output_cleanup_target,
+    EncodeRetryWaitsForComputerError, encode_retry_waiting_for_computer_reason,
+    owner_retry_waiting_for_computer_fields, remove_stale_staging_path, staged_output_cleanup_blocker,
+    staged_output_cleanup_target,
 )
 from mediaforce.web.runtime.folder_tuning_helpers import (
     allows_measured_size_quality_tradeoff,
@@ -1318,14 +1320,21 @@ def queue_folder_encode_action(
                 "message": str(reserve.waiting_reason or "Waiting for a measurable free-space reserve."),
                 "queued_count": 0,
             }
+        waiting_for_computer: dict[int, JobPayload] = {}
         if terminal_job_needs_requeue and latest_encode_job is not None:
-            _prepare_terminal_job_except(
+            waiting_for_computer = _prepare_terminal_job_except(
                 connection,
                 latest_encode_job,
                 set(retry_outside_policy) | set(final_size_miss_indexes),
                 prepare_terminal_encode_job_for_requeue_fn,
             )
-            _reset_stale_prefix_encoding_items_for_requeue(connection, config, normalized_prefix, now_iso=now_iso)
+            queued_item_ids = {int(item.get("library_item_id") or 0) for item in manifest["items"]}
+            if unplanned := waiting_for_computer.keys() - queued_item_ids:
+                # Only a queued file can wait for its computer; any other keeps the owner's retry refused.
+                raise EncodeRetryWaitsForComputerError(waiting_for_computer[min(unplanned)])
+            # A file waiting for its computer keeps its unfinished file until that computer confirms it.
+            _reset_stale_prefix_encoding_items_for_requeue(connection, config, normalized_prefix, now_iso=now_iso,
+                                                           keep_item_ids=waiting_for_computer.keys())
         attach_target_lineage(
             connection, manifest=manifest, calibration=calibration_payload,
             advice_state=advice_state, approval_contract=queued_contract,
@@ -1376,26 +1385,37 @@ def queue_folder_encode_action(
         finish_remake_intents(connection, [int(item["library_item_id"]) for item in manifest["items"]],
                               prefix=normalized_prefix, mode=hold_mode, approval=expected_approval_contract)
         release_holds(connection, [int(item.get("library_item_id") or 0) for item in manifest["items"]])
+        waiting_notes: list[str] = []
         for shard_indexes in _build_manifest_shards(refreshed_config, manifest):
-            save_encode_job(
-                connection,
-                {
-                    **queue_job,
-                    "job_id": uuid.uuid4().hex[:12],
-                    "job_kind": "shard",
-                    "parent_job_id": parent_job_id,
-                    "manifest_indexes": shard_indexes,
-                    "item_count": len(shard_indexes),
-                },
-            )
+            shard: JobPayload = {
+                **queue_job,
+                "job_id": uuid.uuid4().hex[:12],
+                "job_kind": "shard",
+                "parent_job_id": parent_job_id,
+                "manifest_indexes": shard_indexes,
+                "item_count": len(shard_indexes),
+            }
+            shard_items = [object_dict(manifest["items"][index]) for index in shard_indexes]
+            waiting_host = next((
+                waiting_for_computer[item_id] for item in shard_items
+                if (item_id := int(item.get("library_item_id") or 0)) in waiting_for_computer
+            ), None)
+            if waiting_host is not None:
+                shard.update(owner_retry_waiting_for_computer_fields(waiting_host, now_iso=created_at))
+                waiting_notes.extend(
+                    f"{Path(str(item.get('rel_path') or '')).stem or 'One file'}: "
+                    f"{encode_retry_waiting_for_computer_reason(waiting_host)}"
+                    for item in shard_items
+                )
+            save_encode_job(connection, shard)
     return {
         "ok": True,
-        "message": _folder_encode_queue_message(
+        "message": " ".join([_folder_encode_queue_message(
             older_season_selection,
             older_season_cadence_partition,
             queued_item_count=int(queue_job["item_count"]),
             left_out=left_out,
-        ),
+        ), *waiting_notes]),
         "job": queue_job,
         "queued_library_item_ids": [int(item["library_item_id"]) for item in manifest["items"]],
         "left_out": left_out_payload(left_out),
@@ -2409,12 +2429,22 @@ def _recover_active_folder_encode_job(
     recoverable_children, recoverable_indexes = resolved_plan
 
     created_at = now_iso()
+    waiting_hosts: dict[int, JobPayload] = {}
     for child in recoverable_children:
-        prepare_terminal_encode_job_for_requeue_fn(connection, child)
+        try:
+            prepare_terminal_encode_job_for_requeue_fn(connection, child)
+        except EncodeRetryWaitsForComputerError as waiting_error:
+            # Its new queue part waits for that computer instead of refusing the whole retry.
+            waiting_hosts.update({
+                index: waiting_error.host
+                for index in object_list(child.get("manifest_indexes"))
+                if isinstance(index, int)
+            })
         connection.execute(delete(encode_jobs).where(encode_jobs.c.job_id == str(child.get("job_id") or "")))
 
     recovery_notes = notes.strip() or str(active_encode_job.get("notes") or "").strip()
     for manifest_index in recoverable_indexes:
+        waiting_host = waiting_hosts.get(manifest_index)
         save_encode_job(
             connection,
             {
@@ -2448,14 +2478,22 @@ def _recover_active_folder_encode_job(
                 "started_at": None,
                 "finished_at": None,
                 "updated_at": created_at,
+                **(owner_retry_waiting_for_computer_fields(waiting_host, now_iso=created_at)
+                   if waiting_host is not None else {}),
             },
         )
 
     file_label = "file" if len(recoverable_indexes) == 1 else "files"
+    waiting_notes = list(dict.fromkeys(
+        encode_retry_waiting_for_computer_reason(host) for host in waiting_hosts.values()
+    ))
     return {
         "ok": True,
         "action": "recovered",
-        "message": f"Recovered {len(recoverable_indexes)} failed {file_label} back into the active folder encode.",
+        "message": " ".join([
+            f"Recovered {len(recoverable_indexes)} failed {file_label} back into the active folder encode.",
+            *waiting_notes,
+        ]),
         "job": active_encode_job,
         "recovered_item_count": len(recoverable_indexes),
     }
@@ -2466,24 +2504,39 @@ def _prepare_terminal_job_except(
         job: JobPayload,
         excluded_indexes: set[int],
         prepare_fn: PrepareTerminalEncodeJobForRequeueFn,
-) -> None:
-    """Clean up a failed job for retry without touching the artifacts of files left out of it."""
-    if not excluded_indexes:
-        prepare_fn(connection, job)
-        return
-    selected_indexes = [index for index in object_list(job.get("manifest_indexes")) if isinstance(index, int)]
+) -> dict[int, JobPayload]:
+    """Clean up a failed job for retry without touching the artifacts of files left out of it.
+
+    Returns, by library item, the files whose cleanup waits only for the computer that made them to
+    answer, with that computer. Each child is cleaned on its own so one sleeping computer holds only
+    its own files.
+    """
     if str(job.get("job_kind") or "") == "folder":
         children = list_child_encode_jobs(connection, str(job.get("job_id") or ""))
         if children:
+            waiting: dict[int, JobPayload] = {}
             for child in children:
                 if str(child.get("status") or "") != "completed":
-                    _prepare_terminal_job_except(connection, child, excluded_indexes, prepare_fn)
-            return
-    if not selected_indexes:
-        selected_indexes = list(range(len(_manifest_items(job))))
-    kept_indexes = sorted(set(selected_indexes) - excluded_indexes)
-    if kept_indexes:
-        prepare_fn(connection, {**job, "job_kind": "single", "manifest_indexes": kept_indexes})
+                    waiting.update(_prepare_terminal_job_except(connection, child, excluded_indexes, prepare_fn))
+            return waiting
+    target = job
+    if excluded_indexes:
+        selected_indexes = [index for index in object_list(job.get("manifest_indexes")) if isinstance(index, int)]
+        if not selected_indexes:
+            selected_indexes = list(range(len(_manifest_items(job))))
+        kept_indexes = sorted(set(selected_indexes) - excluded_indexes)
+        if not kept_indexes:
+            return {}
+        target = {**job, "job_kind": "single", "manifest_indexes": kept_indexes}
+    try:
+        prepare_fn(connection, target)
+    except EncodeRetryWaitsForComputerError as waiting_error:
+        target_indexes = [index for index in object_list(target.get("manifest_indexes")) if isinstance(index, int)]
+        item_ids = _manifest_library_item_ids(target, target_indexes or list(range(len(_manifest_items(target)))))
+        if not item_ids:
+            raise
+        return {item_id: waiting_error.host for item_id in item_ids}
+    return {}
 
 
 def _partition_active_recovery_plan(
@@ -2774,12 +2827,15 @@ def _reset_stale_prefix_encoding_items_for_requeue(
         prefix: str,
         *,
         now_iso: NowIsoFn,
+        keep_item_ids: Collection[int] = (),
 ) -> None:
     rows = _stale_prefix_encoding_rows_for_requeue(connection, config, prefix)
     if not rows:
         return
     updated_at = now_iso()
     for row in rows:
+        if int(row["id"]) in keep_item_ids:
+            continue
         if row["promoted_at"] is not None or str(row["status"] or "") in {"encoded", "validated"}:
             continue
         if (
