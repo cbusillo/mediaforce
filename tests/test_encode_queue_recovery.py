@@ -30775,8 +30775,49 @@ raise SystemExit(0)
                     )
             self.assertEqual(raised.exception.status_code, 409)
             self.assertIn("Waiting to end", raised.exception.detail)
+            # The reason the earlier output could not be checked reaches the owner.
+            self.assertIn(_remote_host_unreachable().stderr, raised.exception.detail)
             self.assertEqual(load_encode_job(connection, "orphan")["status"], "stopped")
             self.assertEqual(self._library_item_value(connection, item_id, library_items.c.status)["status"], "encoding")
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_cleanup_succeeds)
+    def test_retry_requeues_episodes_the_owner_stopped_once_their_computers_answer(self) -> None:
+        computers = {
+            "E05": ({"key": "mini", "host": "mini.example", "label": "Mac mini", "mode": "ssh"},
+                    encode_runtime.STOPPED_CLEANUP_PENDING_MESSAGE),
+            "E08": ({"key": "linux", "host": "linux.example", "label": "Linux", "mode": "ssh",
+                     "media_access": "stream"}, encode_runtime.STOPPED_CLEANUP_PENDING_MESSAGE),
+            "E14": ({"key": "m2", "host": "m2.example", "label": "MacBook", "mode": "ssh"},
+                    "Encode queue job was stopped and cleaned up."),
+        }
+        with open_db(self.config.paths.db_path) as connection:
+            items = []
+            for episode, (_host, _error) in computers.items():
+                source = self._create_source_file(f"Show.S03{episode}.mkv")
+                item_id = self._insert_library_item(connection, source, status="encoding")
+                items.append({"library_item_id": item_id, "rel_path": f"tv/show/Show.S03{episode}.mkv",
+                              "staging_path": str(self._staging_path(f"Show.S03{episode}.mkv"))})
+            self._write_manifest("season-stopped.json", items)
+            self._save_job(connection, job_id="season", manifest_name="season-stopped.json", host={},
+                           status="stopped", attempt_count=0)
+            save_encode_job(connection, {**load_encode_job(connection, "season"), "job_kind": "folder", "item_count": 3})
+            for index, (episode, (host, error)) in enumerate(computers.items()):
+                self._save_job(connection, job_id=f"episode-{episode}", manifest_name="season-stopped.json",
+                               host=host, status="stopped", attempt_count=1)
+                save_encode_job(connection, {
+                    **load_encode_job(connection, f"episode-{episode}"), "job_kind": "shard",
+                    "parent_job_id": "season", "manifest_indexes": [index], "error": error,
+                })
+            connection.commit()
+
+            encode_runtime.prepare_terminal_encode_job_for_requeue(
+                connection, load_encode_job(connection, "season"), deps=web_app._encode_queue_runtime_deps(),
+                config=self.config,
+            )
+
+            statuses = {self._library_item_value(connection, item["library_item_id"], library_items.c.status)["status"]
+                        for item in items}
+        self.assertEqual(statuses, {"planned"})
 
     def test_retained_sweep_preserves_newer_standalone_cli_writer(self) -> None:
         self._assert_retained_cleanup_preserves_cli_writer(retry=False)

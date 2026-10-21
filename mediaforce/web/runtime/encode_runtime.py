@@ -4890,7 +4890,7 @@ def _cleanup_encode_retry_artifacts_locked(
                 and _staged_output_is_complete({**dict(stage_row), "status": library_status})
             )
         )
-        partial_cleanup_deferred = False
+        partial_cleanup_deferred_details: list[str] = []
         partial_paths = {
             partial_output_path(Path(str(value)))
             for value in (staging_value, manifest_staging_value)
@@ -4912,15 +4912,18 @@ def _cleanup_encode_retry_artifacts_locked(
                         detail=partial_cleanup_result.detail,
                     )
                 if partial_cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_DEFERRED:
-                    partial_cleanup_deferred = True
-            if partial_cleanup_deferred:
+                    partial_cleanup_deferred_details.append(partial_cleanup_result.detail or "")
+            if partial_cleanup_deferred_details:
+                # Keep what blocked the check: "reachable" is only the most common reason.
+                reasons = "; ".join(detail for detail in partial_cleanup_deferred_details if detail)
                 return _EncodeRetryArtifactCleanupResult(
                     _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
-                    detail="The earlier output could not be checked; retry when its host is reachable.",
+                    detail="The earlier output could not be checked; retry when its host is reachable."
+                    + (f" Details: {reasons}" if reasons else ""),
                 )
         if library_item_id is None or promoted or complete:
             continue
-        cleanup_succeeded = not partial_cleanup_deferred
+        cleanup_succeeded = True
         if staging_path is not None:
             cleanup_result = _remove_stale_staging_path(
                 staging_path,
