@@ -67,6 +67,16 @@ def ssh_connection_dropped(returncode: int, stderr: str | None) -> bool:
     return any(marker in line for line in _ssh_client_lines(stderr) for marker in _SSH_CONNECTION_DROP_MARKERS)
 
 
+def ssh_host_unreachable(returncode: int, stderr: str | None) -> bool:
+    """The SSH client could not reach the computer or lost it, for example because it is asleep.
+
+    A refused login also fails in the client, but the computer answered, so it is not this.
+    """
+    if not ssh_connection_lost(returncode, stderr):
+        return False
+    return not any(marker in (stderr or "").lower() for marker in SSH_ACCESS_REFUSED_MARKERS)
+
+
 def _ssh_client_lines(stderr: str | None) -> list[str]:
     lines = [line.strip().lower() for line in (stderr or "").splitlines()]
     return [line for line in lines if line.startswith(_SSH_CLIENT_FAILURE_PREFIXES)]
