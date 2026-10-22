@@ -37,16 +37,16 @@ class WaitCase:
 
 CASES = (
     WaitCase("closed_profile", True, profile="fixture_night"),
-    WaitCase("window_reason", True, reason="Waiting for a host schedule window."),
+    WaitCase("window_reason", True, reason="Waiting for the next work window."),
     WaitCase("interrupted", True, interrupted=True),
     WaitCase("interrupted_storage", False, reason="Waiting for shared storage.", interrupted=True),
-    WaitCase("interrupted_host", False, reason="waiting for an available encode host", interrupted=True),
-    WaitCase("short_window", True, reason="waiting for a host window with enough time remaining"),
+    WaitCase("interrupted_host", False, reason="waiting for an available computer", interrupted=True),
+    WaitCase("short_window", True, reason="waiting for a work window with enough time left"),
     WaitCase("retry", False, status="retry_backoff", reason="waiting before retrying"),
     WaitCase("storage", False, reason="Waiting for shared storage."),
     WaitCase("host", False, reason="Waiting for an encode computer."),
-    WaitCase("impossible_fit", False, reason="Estimated runtime longer than every configured host schedule window"),
-    WaitCase("bypass", False, profile="never", reason="Waiting for a host schedule window.", bypass=True),
+    WaitCase("impossible_fit", False, reason="Estimated runtime longer than every work window"),
+    WaitCase("bypass", False, profile="never", reason="Waiting for the next work window.", bypass=True),
     WaitCase("ready", False),
 )
 PARENT_STATUSES = ("needs_attention", "queued", "running")

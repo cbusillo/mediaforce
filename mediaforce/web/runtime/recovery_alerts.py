@@ -19,7 +19,16 @@ def recovery_alerts(config: MediaforceConfig) -> list[dict[str, str]]:
     alerts: list[dict[str, str]] = []
     for source, payload in (("storage", storage), ("hosts", hosts)):
         if payload.get("state_error"):
-            alerts.append({"id": f"{source}:state", "title": "Storage recovery needs attention", "detail": payload["state_error"]})
+            whose = "this Mac's" if source == "storage" else "a computer's"
+            alerts.append({
+                "id": f"{source}:state",
+                "title": "Storage reconnecting is paused",
+                "detail": (
+                    f"Mediaforce lost track of an earlier try to reconnect {whose} storage, so it will not try again "
+                    "on its own. Check the storage in Finder, then use Retry connection."
+                ),
+                "technical": payload["state_error"],
+            })
     for mount in storage["mounts"]:
         if mount["status"] == "ready":
             continue
@@ -28,10 +37,12 @@ def recovery_alerts(config: MediaforceConfig) -> list[dict[str, str]]:
             if mount["status"] == "action_required"
             else "Mediaforce is retrying automatically."
         )
+        # The share and its mount point are for whoever fixes it, so they sit behind Details.
         alerts.append({
             "id": f"storage:{mount['mount_point']}:{mount['first_failure_at']}",
-            "title": f"Controller storage unavailable: {mount['mount_point']}",
-            "detail": f"{mount['reason'] or 'Storage is not ready.'} {retry}",
+            "title": "This Mac can't see the media library",
+            "detail": f"Some shared storage is not connected. {retry}",
+            "technical": ": ".join(part for part in (mount["mount_point"], mount["reason"]) if part),
         })
     now = datetime.now(timezone.utc)
     configured_keys = {str(host.get("host") or "") for host in config.remote_hosts} - {""}
@@ -84,7 +95,7 @@ def record_recovery_alerts(config: MediaforceConfig) -> None:
     current_ids = {alert["id"] for alert in alerts}
     for alert in alerts:
         if alert["id"] not in previous_ids:
-            LOGGER.warning("%s. %s", alert["title"], alert["detail"])
+            LOGGER.warning("%s. %s %s", alert["title"], alert["detail"], alert.get("technical", ""))
     for alert in previous.get("alerts", []):
         if alert["id"] not in current_ids:
             LOGGER.info("Recovered: %s", alert["title"])

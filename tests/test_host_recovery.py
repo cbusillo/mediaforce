@@ -830,3 +830,100 @@ def test_two_computer_outage_keeps_work_on_the_other_and_readmits_after_a_fresh_
         assert _host_cards(config)["user@worker"]["available"]
         assert warning.call_count == 1
         recovered.assert_called_once()
+
+
+# How the client reports each way a check can fail. The address is in the output, as it is in real
+# output, so the tests can show it stays out of the words people read.
+_ADDRESS = "chris@m2-mbp.local"
+_CHECK_FAILURES = {
+    "asleep_timeout": f"ssh: connect to host {_ADDRESS} port 22: Operation timed out",
+    "asleep_no_route": f"ssh: connect to host {_ADDRESS} port 22: No route to host",
+    "asleep_dropped": f"ssh: connect to host {_ADDRESS} port 22: Connection timed out",
+    "identity_changed": "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.",
+    "remote_login_off": f"ssh: connect to host {_ADDRESS} port 22: Connection refused",
+    "not_found": f"ssh: Could not resolve hostname {_ADDRESS}: nodename nor servname provided, or not known",
+    "password_needed": f"{_ADDRESS}: Permission denied (publickey,password).",
+}
+
+
+def _assert_plain_words(text: str, label: str) -> None:
+    assert label in text
+    lowered = text.lower()
+    for jargon in ("ssh", "host", "dns", "known_hosts", "fingerprint", _ADDRESS, "/"):
+        assert jargon not in lowered, (jargon, text)
+
+
+def _checked(config: MediaforceConfig, stderr: str) -> HostStatus:
+    import subprocess
+
+    from mediaforce import remote
+
+    host = {"host": _ADDRESS, "label": "M2 MBP", "capabilities": ["encode_queue"]}
+    failed = subprocess.CompletedProcess(args=["ssh"], returncode=255, stdout="", stderr=stderr)
+    with patch("mediaforce.remote._run_remote_ssh", return_value=failed), patch("mediaforce.remote.time.sleep"):
+        return remote._remote_host_status(
+config, host,
+        )
+
+
+@pytest.mark.parametrize("case", sorted(_CHECK_FAILURES))
+def test_failed_computer_check_names_the_computer_in_plain_words(config: MediaforceConfig, case: str) -> None:
+    checked = _checked(config, _CHECK_FAILURES[case])
+    assert not checked.available
+    for text in (checked.message, *checked.issues):
+        _assert_plain_words(text, "M2 MBP")
+
+
+def test_a_computer_that_does_not_answer_may_be_off_or_asleep(config: MediaforceConfig) -> None:
+    asleep = [_checked(config, _CHECK_FAILURES[case]) for case in ("asleep_timeout", "asleep_no_route", "asleep_dropped")]
+    remote_login_off = _checked(config, _CHECK_FAILURES["remote_login_off"])
+    for checked in asleep:
+        assert "asleep" in " ".join(checked.issues)
+        assert checked.message == asleep[0].message
+    # A computer that turns Mediaforce away is awake, so it is not told to wake up.
+    assert remote_login_off.message != asleep[0].message
+    assert "asleep" not in " ".join(remote_login_off.issues)
+    # The raw output stays available behind Details.
+    assert _ADDRESS in (asleep[0].detail or "")
+
+
+def test_a_check_that_never_finishes_reads_as_off_or_asleep(config: MediaforceConfig) -> None:
+    import subprocess
+
+    from mediaforce import remote
+
+    host = {"host": _ADDRESS, "label": "M2 MBP", "capabilities": ["encode_queue"]}
+    with patch("mediaforce.remote._run_remote_ssh", side_effect=subprocess.TimeoutExpired(["ssh"], 8)), patch(
+            "mediaforce.remote.time.sleep",
+    ):
+        checked = remote._remote_host_status(
+config, host,
+        )
+    assert checked.message == _checked(config, _CHECK_FAILURES["asleep_timeout"]).message
+
+
+def test_failed_check_keeps_the_same_buttons_and_says_which_to_use(config: MediaforceConfig) -> None:
+    identity = _checked(config, _CHECK_FAILURES["identity_changed"])
+    password = _checked(config, _CHECK_FAILURES["password_needed"])
+    assert identity.trust_reset_supported and not identity.setup_supported and identity.detail is None
+    assert password.setup_supported and password.setup_requires_password
+    _assert_named_buttons_exist([
+        issue for case in sorted(_CHECK_FAILURES) for issue in _checked(config, _CHECK_FAILURES[case]).issues
+    ])
+
+
+def test_storage_warning_keeps_the_mount_point_behind_details(config: MediaforceConfig) -> None:
+    storage = {"mounts": [{
+        "mount_point": "/Volumes/media", "status": "retrying", "reason": "The required SMB share is not mounted.",
+        "first_failure_at": NOW.isoformat(),
+    }], "state_error": "Controller storage recovery state at /tmp/state.json is unreadable."}
+    with patch.object(alerts, "controller_storage_recovery_snapshot", return_value=storage), patch.object(
+            alerts, "host_recovery_snapshot", return_value={"hosts": {}},
+    ):
+        warnings = alerts.recovery_alerts(config)
+    assert len(warnings) == 2
+    for warning in warnings:
+        for text in (warning["title"], warning["detail"]):
+            assert "/" not in text and "smb" not in text.lower() and "controller" not in text.lower()
+        assert "/" in warning["technical"]
+    _assert_named_buttons_exist([warning["detail"] for warning in warnings])

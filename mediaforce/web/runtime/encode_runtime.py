@@ -78,8 +78,8 @@ from mediaforce.tuning.size_goals import SizeGoalIntent, size_goal_from_policy
 from mediaforce.tuning.stream_budget import StreamBudgetIdentityError, StreamBudgetInfeasibleError, \
     resolve_stream_budget_ledger
 from mediaforce.remote import HostReadinessError, execution_mode_for_host, host_media_access_for_host, run_remote_command
-from mediaforce.web.runtime.encode_scheduler import HOST_WINDOW_IMPOSSIBLE_MARKER, HOST_WINDOW_TOO_SHORT_REASON, \
-    SCHEDULE_CLOSE_WAITING_REASON
+from mediaforce.web.runtime.encode_scheduler import COMPUTER_WORK_WINDOW_WAITING_REASON, HOST_WINDOW_IMPOSSIBLE_MARKER, \
+    HOST_WINDOW_TOO_SHORT_REASON, SCHEDULE_CLOSE_WAITING_REASON
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.library.motion_keep_state import any_motion_keep_decision, library_item_ids_kept_original
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
@@ -1610,9 +1610,13 @@ _WAITING_REASON_PATTERNS: tuple[tuple[str, str, bool, tuple[str, ...]], ...] = (
     ("storage_repair", "storage to mount or repair", True, ("cannot measure", "mount or repair")),
     ("storage_reconnect", "storage to reconnect", True, ("reconnect storage", "mount the storage")),
     ("waiting_free_space", "waiting for free space", False, ("free-space reserve",)),
-    ("waiting_schedule", "waiting for a scheduled time", False, ("schedule window", "window with enough time")),
-    ("waiting_cooldown", "waiting for a computer to recover", False, ("cooldown",)),
-    ("waiting_computer", "waiting for a free computer", False, ("host capacity", "available encode host", "host allowed")),
+    ("waiting_schedule", "waiting for a scheduled time", False, (
+        COMPUTER_WORK_WINDOW_WAITING_REASON, SCHEDULE_CLOSE_WAITING_REASON.casefold(), HOST_WINDOW_TOO_SHORT_REASON,
+    )),
+    ("waiting_cooldown", "waiting for a computer to recover", False, ("to recover from repeated failures",)),
+    ("waiting_computer", "waiting for a free computer", False, (
+        "finish its current work", "an available computer", "a computer allowed to",
+    )),
     ("waiting_cleanup", "waiting to clean up a failed attempt", False, ("header-only output", "unfinished file it left")),
 )
 _OWNER_CHILD_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
@@ -2863,7 +2867,7 @@ def select_encode_host(
         and _schedule_open(host)
     ]
     if not encode_capable_hosts and not startable_host_candidates:
-        return None, "waiting for an available encode host"
+        return None, "waiting for an available computer"
 
     storage_issues: list[str] = []
 
@@ -2908,7 +2912,7 @@ def select_encode_host(
             pass
         elif had_blocked_candidate:
             blocked_host_name = _blocked_host_wait_name(globally_blocked_hosts)
-            return None, f"waiting for host cooldown to expire on {blocked_host_name}"
+            return None, f"waiting for {blocked_host_name} to recover from repeated failures"
 
     if scratch_admission_issue is not None:
         scratch_issues: list[str] = []
@@ -2953,8 +2957,8 @@ def select_encode_host(
             return object_dict(admitted_startable_hosts[0]), None
         if host_admission is not None and (eligible_active_hosts or eligible_startable_hosts):
             return None, HOST_WINDOW_TOO_SHORT_REASON
-        host_name = str(last_host.get("label") or last_host.get("key") or "the last host")
-        return None, f"waiting for host cooldown to expire on {host_name}"
+        host_name = str(last_host.get("label") or last_host.get("key") or "the last computer")
+        return None, f"waiting for {host_name} to recover from repeated failures"
     admitted_active_hosts = _admitted(active_hosts)
     if admitted_active_hosts:
         return object_dict(admitted_active_hosts[0]), None
@@ -2967,7 +2971,7 @@ def select_encode_host(
             int(host.get("active_encode_count") or 0) >= int(host.get("max_parallel_encodes") or 1)
             for host in encode_capable_hosts
     ):
-        return None, "waiting for host capacity to free up"
+        return None, "waiting for a computer to finish its current work"
     if any(
             not deps.scheduler_allows_encode_run(
                 deps.schedule_profile_policy_for_host(config, host),
@@ -2976,10 +2980,10 @@ def select_encode_host(
             )
             for host in encode_capable_hosts
     ):
-        return None, "waiting for a host schedule window"
+        return None, COMPUTER_WORK_WINDOW_WAITING_REASON
     if library_key and encode_capable_hosts:
-        return None, f"waiting for a host allowed to encode {library_key}"
-    return None, "waiting for an available encode host"
+        return None, f"waiting for a computer allowed to compress {library_key}"
+    return None, "waiting for an available computer"
 
 
 def _globally_backed_off_encode_hosts(
@@ -3645,14 +3649,14 @@ def _duration_aware_encode_waiting_reason(
         )
         return (
             f"Estimated runtime {impossible_estimate_copy}{estimate_host_copy} is {HOST_WINDOW_IMPOSSIBLE_MARKER} "
-            f"(longest {longest_copy}{window_host_copy}). Widen a host window or use Bypass scheduler."
+            f"(longest {longest_copy}{window_host_copy}). Widen a computer's work window or intentionally bypass the work schedule."
         )
     if impossible_only:
         return None
     estimate_host_copy = f" on {best_estimate_host}" if best_estimate_host else ""
     return (
         f"Estimated runtime {estimate_copy}{estimate_host_copy}; "
-        "waiting for a host window with enough time remaining."
+        f"{HOST_WINDOW_TOO_SHORT_REASON}."
     )
 
 
