@@ -1,6 +1,6 @@
 import type { EpisodeProgress, EpisodeStage } from '$lib/api/types';
 
-import { formatDecimalFileSize } from './experience';
+import { formatDecimalFileSize, sizeQuestionFinding } from './experience';
 
 type Tone = 'active' | 'ready' | 'wait' | 'fail' | 'idle';
 
@@ -61,6 +61,9 @@ export function episodeDetail(episode: EpisodeProgress): string {
 		case 'needs_you':
 			if (episode.size_question) {
 				const question = episode.size_question;
+				if (question.reason === 'no_setting_fits') {
+					return sizeQuestionFinding(question).replace(/\.$/, '');
+				}
 				return `Keeping the picture quality needs ${formatDecimalFileSize(question.smallest_quality_safe_bytes)}, over its ${formatDecimalFileSize(question.goal_bytes)} goal`;
 			}
 			return sentence(episode.detail ?? '');

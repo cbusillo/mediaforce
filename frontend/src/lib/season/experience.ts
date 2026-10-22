@@ -1,5 +1,6 @@
 import { resolveMetricLabel } from '$lib/folders/studio';
 import type {
+	EncodeSizeQuestion,
 	CalibrationJobPayload,
 	CalibrationScopeActivityPayload,
 	CalibrationTargetContract,
@@ -776,6 +777,14 @@ export function formatFileSize(bytes: number | null | undefined): string {
 
 export function formatDecimalFileSize(bytes: number | null | undefined): string {
 	return formatOperatorFileSize(bytes, '0 MB');
+}
+
+/** What a one-file size question tells the owner about why its goal does not fit. */
+export function sizeQuestionFinding(question: EncodeSizeQuestion): string {
+	const size = formatDecimalFileSize(question.smallest_quality_safe_bytes);
+	return question.reason === 'no_setting_fits'
+		? `No setting lands in the size range. The closest one that keeps the picture right is ${size}.`
+		: `Keeping the picture quality needs ${size}.`;
 }
 
 export function expectedSizeChange(
