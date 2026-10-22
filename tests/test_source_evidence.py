@@ -4,30 +4,35 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
-from mediaforce.core.db_tables import library_item_source_evidence, library_items, staged_artifacts
+from mediaforce.core.db_tables import item_events, library_item_source_evidence, library_items, staged_artifacts
 from mediaforce.core.models import ProbeSummary
 from mediaforce.encoding import staging as staging_module
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
 from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EvidenceKind, evidence_summary_column, \
-    sync_library_item_evidence_state, sync_library_item_evidence_states
+    library_item_source_fingerprint, sync_library_item_evidence_state, sync_library_item_evidence_states
 from mediaforce.library.scanner import scan_library
 from mediaforce.library.source_evidence import canonical_summary_json, load_source_evidence_summaries, \
-    record_source_evidence_before_publish, restore_published_source_evidence
+    restore_published_source_evidence
 
 SOURCE_SUMMARIES: dict[EvidenceKind, dict[str, Any]] = {
     CADENCE_EVIDENCE_KIND: {"decision": {"classification": "telecine"}, "schema_version": 1},
     MEDIA_FINGERPRINT_EVIDENCE_KIND: {"analysis": {"aggregate": {"luma_mean": 38.5}}, "schema_version": 1},
 }
-OUTPUT_SUMMARIES: dict[EvidenceKind, dict[str, Any]] = {
-    CADENCE_EVIDENCE_KIND: {"decision": {"classification": "progressive"}, "schema_version": 1},
-    MEDIA_FINGERPRINT_EVIDENCE_KIND: {"analysis": {"aggregate": {"luma_mean": 61.0}}, "schema_version": 1},
-}
+NO_SUMMARIES: dict[str, None] = dict.fromkeys(EVIDENCE_KINDS)
+
+
+def _output_summaries(generation: int) -> dict[EvidenceKind, dict[str, Any]]:
+    return {
+        CADENCE_EVIDENCE_KIND: {"decision": {"classification": f"progressive-{generation}"}, "schema_version": 1},
+        MEDIA_FINGERPRINT_EVIDENCE_KIND: {"analysis": {"aggregate": {"luma_mean": 60.0 + generation}},
+                                          "schema_version": 1},
+    }
 
 
 def _probe(video_codec: str) -> ProbeSummary:
@@ -77,6 +82,11 @@ def _scan_config(root: Path) -> MediaforceConfig:
 def _scan(connection: DBClient, config: MediaforceConfig, video_codec: str) -> None:
     with patch("mediaforce.library.scanner.probe_media", return_value=_probe(video_codec)):
         scan_library(connection, config)
+    connection.commit()
+
+
+def _item(connection: DBClient, item_id: int) -> dict[str, Any]:
+    return dict(connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one())
 
 
 def _store_measurements(connection: DBClient, item_id: int, summaries: dict[EvidenceKind, dict[str, Any]]) -> None:
@@ -87,17 +97,26 @@ def _store_measurements(connection: DBClient, item_id: int, summaries: dict[Evid
             .where(library_items.c.id == item_id)
             .values({evidence_summary_column(evidence_kind): canonical_summary_json(summary)})
         )
-        item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
         sync_library_item_evidence_state(
-            connection, item, evidence_kind, preserve_source_identity=False, preserve_policy_identity=False,
+            connection, _item(connection, item_id), evidence_kind,
+            preserve_source_identity=False, preserve_policy_identity=False,
         )
+    connection.commit()
 
 
-def _publish(connection: DBClient, root: Path, item_id: int) -> Path:
-    source = root / "tv" / "Show" / "S01E01.mkv"
+def _record_event(connection: DBClient, item_id: int, event_type: str, details: dict[str, Any]) -> None:
+    connection.execute(item_events.insert().values(
+        library_item_id=item_id, event_type=event_type, details_json=json.dumps(details),
+        created_at="2026-10-22T10:05:00+00:00",
+    ))
+
+
+def _publish(connection: DBClient, root: Path, item_id: int, output_bytes: bytes) -> None:
+    """Encode and publish the item's current file, as a first publish or a remake of a published one."""
     output = root / "staging" / "S01E01.mkv"
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(b"encoded output")
+    output.write_bytes(output_bytes)
+    connection.execute(delete(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id))
     connection.execute(staged_artifacts.insert().values(
         library_item_id=item_id,
         staging_path=str(output),
@@ -106,21 +125,17 @@ def _publish(connection: DBClient, root: Path, item_id: int) -> Path:
         updated_at="2026-10-22T10:00:00+00:00",
     ))
     connection.commit()
-    config = SimpleNamespace(
-        output_container="mkv",
-        archive_root=root / "archive",
-        source_root_map={"tv": root / "tv"},
-    )
-    return staging_module.promote_one_item(
+    config = SimpleNamespace(output_container="mkv", archive_root=root / "archive", source_root_map={"tv": root / "tv"})
+    staging_module.promote_one_item(
         connection,
         cast(MediaforceConfig, config),
-        {"library_item_id": item_id, "source_path": str(source), "rel_path": "tv/Show/S01E01.mkv",
-         "media_root": "tv"},
+        {"library_item_id": item_id, "source_path": str(root / "tv" / "Show" / "S01E01.mkv"),
+         "rel_path": "tv/Show/S01E01.mkv", "media_root": "tv"},
         force=False,
         probe_media=lambda _path: _probe("av1"),
-        file_fingerprint=lambda *_args: "output-stat",
+        file_fingerprint=lambda *_args: f"output-stat-{len(output_bytes)}",
         timestamp=lambda: "2026-10-22T10:05:00+00:00",
-        record_event=lambda *_args: None,
+        record_event=_record_event,
         active_reserve_waiting_reason=lambda *_args: None,
         reserve_preflight=lambda *_args, **_kwargs: ReservePreflight(
             allowed=True, waiting_reason=None, required_by_volume={}
@@ -135,58 +150,101 @@ def _source_summaries(connection: DBClient, item_id: int) -> dict[str, dict[str,
     }
 
 
-def test_source_measurements_survive_publish_output_measurement_and_rescan(tmp_path: Path) -> None:
-    config = _scan_config(tmp_path)
+def _source_rows(connection: DBClient) -> list[dict[str, Any]]:
+    return [dict(row) for row in connection.execute(
+        select(library_item_source_evidence).order_by(
+            library_item_source_evidence.c.library_item_id, library_item_source_evidence.c.evidence_kind,
+        )
+    ).mappings()]
+
+
+def _scanned_episode(tmp_path: Path, connection: DBClient, config: MediaforceConfig) -> tuple[Path, int]:
     episode = tmp_path / "tv" / "Show" / "S01E01.mkv"
     episode.parent.mkdir(parents=True)
     episode.write_bytes(b"original source")
+    _scan(connection, config, "h264")
+    return episode, connection.execute(select(library_items.c.id)).scalar_one()
+
+
+def test_source_measurements_survive_publish_output_measurement_and_rescan(tmp_path: Path) -> None:
+    config = _scan_config(tmp_path)
     try:
         with open_db(config.paths.db_path) as connection:
-            _scan(connection, config, "h264")
-            item_id = connection.execute(select(library_items.c.id)).scalar_one()
+            episode, item_id = _scanned_episode(tmp_path, connection, config)
             _store_measurements(connection, item_id, SOURCE_SUMMARIES)
-            connection.commit()
             assert _source_summaries(connection, item_id) == SOURCE_SUMMARIES
 
-            assert _publish(connection, tmp_path, item_id) == episode
+            _publish(connection, tmp_path, item_id, b"encoded output")
             # The evidence worker later measures the output into the catalog row, and the catalog is rescanned.
-            _store_measurements(connection, item_id, OUTPUT_SUMMARIES)
-            connection.commit()
+            _store_measurements(connection, item_id, _output_summaries(1))
             _scan(connection, config, "av1")
 
             assert _source_summaries(connection, item_id) == SOURCE_SUMMARIES
-            current = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
+            current = _item(connection, item_id)
             assert {
                 evidence_kind: json.loads(current[evidence_summary_column(evidence_kind)])
                 for evidence_kind in EVIDENCE_KINDS
-            } == OUTPUT_SUMMARIES
+            } == _output_summaries(1)
 
             # A new original downloaded over the published copy is a new source with nothing measured yet.
             episode.write_bytes(b"a better download replacing the published copy")
             _scan(connection, config, "h264")
-            assert _source_summaries(connection, item_id) == dict.fromkeys(EVIDENCE_KINDS)
+            assert _source_summaries(connection, item_id) == NO_SUMMARIES
     finally:
         reset_engine_cache()
 
 
-def test_publishing_over_our_own_output_keeps_the_original_source(tmp_path: Path) -> None:
+def test_each_publish_over_our_output_keeps_the_source_and_moves_the_output_forward(tmp_path: Path) -> None:
     config = _scan_config(tmp_path)
-    episode = tmp_path / "tv" / "Show" / "S01E01.mkv"
-    episode.parent.mkdir(parents=True)
-    episode.write_bytes(b"original source")
     try:
         with open_db(config.paths.db_path) as connection:
-            _scan(connection, config, "h264")
-            item_id = connection.execute(select(library_items.c.id)).scalar_one()
+            _, item_id = _scanned_episode(tmp_path, connection, config)
             _store_measurements(connection, item_id, SOURCE_SUMMARIES)
-            _publish(connection, tmp_path, item_id)
-            _store_measurements(connection, item_id, OUTPUT_SUMMARIES)
+            for generation, output_bytes in enumerate((b"output A", b"output B, remade", b"output C, remade again"),
+                                                      start=1):
+                _publish(connection, tmp_path, item_id, output_bytes)
+                _store_measurements(connection, item_id, _output_summaries(generation))
+                _scan(connection, config, "av1")
 
-            record_source_evidence_before_publish(
-                connection, item_id, published_fingerprint="second-output", recorded_at="2026-10-22T11:00:00+00:00",
-            )
+                rows = _source_rows(connection)
+                assert _source_summaries(connection, item_id) == SOURCE_SUMMARIES
+                assert {row["published_fingerprint"] for row in rows} == {
+                    library_item_source_fingerprint(_item(connection, item_id))
+                }
+    finally:
+        reset_engine_cache()
 
-            assert _source_summaries(connection, item_id) == SOURCE_SUMMARIES
+
+def test_a_publish_over_an_unrecorded_earlier_output_keeps_no_measurements(tmp_path: Path) -> None:
+    config = _scan_config(tmp_path)
+    try:
+        with open_db(config.paths.db_path) as connection:
+            _, item_id = _scanned_episode(tmp_path, connection, config)
+            # Published before source measurements were kept: the catalog now holds the output's measurements.
+            _record_event(connection, item_id, "promotion_completed", {})
+            _store_measurements(connection, item_id, _output_summaries(1))
+
+            _publish(connection, tmp_path, item_id, b"remade output")
+
+            assert _source_summaries(connection, item_id) == NO_SUMMARIES
+            assert {row["published_fingerprint"] for row in _source_rows(connection)} == {
+                library_item_source_fingerprint(_item(connection, item_id))
+            }
+    finally:
+        reset_engine_cache()
+
+
+def test_a_publish_over_an_unscanned_new_download_keeps_no_measurements(tmp_path: Path) -> None:
+    config = _scan_config(tmp_path)
+    try:
+        with open_db(config.paths.db_path) as connection:
+            episode, item_id = _scanned_episode(tmp_path, connection, config)
+            _store_measurements(connection, item_id, SOURCE_SUMMARIES)
+            episode.write_bytes(b"a new download that no scan has seen")
+
+            _publish(connection, tmp_path, item_id, b"encoded output")
+
+            assert _source_summaries(connection, item_id) == NO_SUMMARIES
     finally:
         reset_engine_cache()
 
@@ -196,10 +254,11 @@ def _insert_published_item(
         item_id: int,
         *,
         stored: dict[EvidenceKind, dict[str, Any]],
-        measured_fingerprint: str,
-        manifest_path: Path | None = None,
+        measured_on: str,
+        manifest_path: Path | None,
+        publish_count: int = 1,
 ) -> None:
-    """A published item whose catalog row holds ``stored``, measured on the file named ``measured_fingerprint``."""
+    """A published item whose catalog row holds ``stored``, measured on the file ``measured_on``."""
     connection.execute(library_items.insert().values(
         id=item_id,
         source_path=f"/library/tv/Show/S01E0{item_id}.mkv",
@@ -211,7 +270,7 @@ def _insert_published_item(
         size_bytes=100,
         mtime_ns=1,
         fingerprint=f"source-stat-{item_id}",
-        content_version_fingerprint=measured_fingerprint,
+        content_version_fingerprint=measured_on,
         audio_summary_json="[]",
         subtitle_summary_json="[]",
         status="validated",
@@ -221,8 +280,7 @@ def _insert_published_item(
         updated_at="2026-10-01T00:00:00+00:00",
         **{evidence_summary_column(kind): canonical_summary_json(summary) for kind, summary in stored.items()},
     ))
-    item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
-    sync_library_item_evidence_states(connection, item, preserve_source_identity=False)
+    sync_library_item_evidence_states(connection, _item(connection, item_id), preserve_source_identity=False)
     connection.execute(
         update(library_items)
         .where(library_items.c.id == item_id)
@@ -238,38 +296,42 @@ def _insert_published_item(
         promoted_at="2026-10-02T00:00:00+00:00",
         updated_at="2026-10-02T00:00:00+00:00",
     ))
+    for _ in range(publish_count):
+        _record_event(connection, item_id, "promotion_completed", {})
 
 
-def _source_rows(connection: DBClient) -> list[dict[str, Any]]:
-    return [dict(row) for row in connection.execute(
-        select(library_item_source_evidence).order_by(
-            library_item_source_evidence.c.library_item_id, library_item_source_evidence.c.evidence_kind,
-        )
-    ).mappings()]
-
-
-def test_restore_recovers_source_measurements_once_from_run_plans_and_the_catalog(tmp_path: Path) -> None:
-    plan_path = tmp_path / "runs" / "run-1.json"
-    plan_path.parent.mkdir()
-    plan_path.write_text(json.dumps({"run_id": "1", "items": [{
-        "library_item_id": 1,
-        "source_fingerprint": "source-stat-1",
-        "content_version_fingerprint": "source-1",
-        "cadence_summary": SOURCE_SUMMARIES[CADENCE_EVIDENCE_KIND],
-        "media_fingerprint": SOURCE_SUMMARIES[MEDIA_FINGERPRINT_EVIDENCE_KIND],
+def _run_plan(path: Path, item_id: int, summaries: dict[EvidenceKind, dict[str, Any]]) -> Path:
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({"run_id": path.stem, "items": [{
+        "library_item_id": item_id,
+        "source_fingerprint": f"source-stat-{item_id}",
+        "content_version_fingerprint": f"source-{item_id}",
+        "cadence_summary": summaries[CADENCE_EVIDENCE_KIND],
+        "media_fingerprint": summaries[MEDIA_FINGERPRINT_EVIDENCE_KIND],
     }]}))
+    return path
+
+
+def test_restore_keeps_only_source_measurements_proven_by_the_publish_run_plan(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
     try:
         with open_db(tmp_path / "library.sqlite3") as connection:
+            # Proven: published once, the catalog is still bound to the source, and the run plan encoded it.
+            _insert_published_item(connection, 1, stored=SOURCE_SUMMARIES, measured_on="source-1",
+                                   manifest_path=_run_plan(runs / "run-1.json", 1, SOURCE_SUMMARIES))
+            # The run plan was pruned, so nothing proves the bound file was the original that was encoded.
+            _insert_published_item(connection, 2, stored=SOURCE_SUMMARIES, measured_on="source-2",
+                                   manifest_path=runs / "pruned.json")
             # The run plan survives, but the catalog already holds the output's measurements.
-            _insert_published_item(connection, 1, stored=OUTPUT_SUMMARIES, measured_fingerprint="output-1",
-                                   manifest_path=plan_path)
-            # The run plan was pruned, but the catalog row still holds measurements of the source.
-            _insert_published_item(connection, 2, stored=SOURCE_SUMMARIES, measured_fingerprint="source-2",
-                                   manifest_path=tmp_path / "runs" / "pruned.json")
-            # Nothing of the source survives anywhere.
-            _insert_published_item(connection, 3, stored=OUTPUT_SUMMARIES, measured_fingerprint="output-3")
-            for item_id in (1, 3):
-                _store_measurements(connection, item_id, OUTPUT_SUMMARIES)
+            _insert_published_item(connection, 3, stored=_output_summaries(1), measured_on="output-3",
+                                   manifest_path=_run_plan(runs / "run-3.json", 3, SOURCE_SUMMARIES))
+            # The run plan carries other measurements than the ones bound to the encoded file.
+            _insert_published_item(connection, 4, stored=SOURCE_SUMMARIES, measured_on="source-4",
+                                   manifest_path=_run_plan(runs / "run-4.json", 4, _output_summaries(2)))
+            # A remake: the file the last plan encoded may itself have been an earlier output.
+            _insert_published_item(connection, 5, stored=SOURCE_SUMMARIES, measured_on="source-5",
+                                   manifest_path=_run_plan(runs / "run-5.json", 5, SOURCE_SUMMARIES),
+                                   publish_count=2)
             connection.commit()
 
             counted = restore_published_source_evidence(connection, recorded_at="2026-10-22T12:00:00+00:00",
@@ -280,23 +342,24 @@ def test_restore_recovers_source_measurements_once_from_run_plans_and_the_catalo
             rows = _source_rows(connection)
             repeated = restore_published_source_evidence(connection, recorded_at="2026-10-22T13:00:00+00:00")
 
-            per_kind = dict.fromkeys(EVIDENCE_KINDS, 1)
             assert counted.to_payload() == restored.to_payload() == {
-                "published_item_count": 3,
-                "restored_from_run_plan": per_kind,
-                "restored_from_catalog": per_kind,
+                "published_item_count": 5,
+                "restored_from_run_plan": dict.fromkeys(EVIDENCE_KINDS, 1),
                 "already_recorded": {},
-                "unrecoverable": per_kind,
+                "unrecoverable": dict.fromkeys(EVIDENCE_KINDS, {
+                    "catalog_not_bound_to_source": 1,
+                    "no_run_plan": 1,
+                    "published_more_than_once": 1,
+                    "run_plan_mismatch": 1,
+                }),
             }
-            assert repeated.already_recorded == dict.fromkeys(EVIDENCE_KINDS, 2)
-            assert repeated.restored_from_run_plan == repeated.restored_from_catalog == {}
+            assert repeated.already_recorded == dict.fromkeys(EVIDENCE_KINDS, 1)
+            assert repeated.restored_from_run_plan == {}
             assert _source_rows(connection) == rows
-            assert {(row["library_item_id"], row["origin"], row["source_fingerprint"]) for row in rows} == {
-                (1, "run_plan", "source-1"),
-                (2, "catalog", "source-2"),
-            }
-            for item_id in (1, 2):
-                assert _source_summaries(connection, item_id) == SOURCE_SUMMARIES
-            assert _source_summaries(connection, 3) == dict.fromkeys(EVIDENCE_KINDS)
+            assert {(row["library_item_id"], row["source_fingerprint"], row["published_fingerprint"])
+                    for row in rows} == {(1, "source-1", "output-1")}
+            assert _source_summaries(connection, 1) == SOURCE_SUMMARIES
+            for item_id in (2, 3, 4, 5):
+                assert _source_summaries(connection, item_id) == NO_SUMMARIES
     finally:
         reset_engine_cache()

@@ -713,7 +713,7 @@ library_item_source_evidence = Table(
     metadata,
     Column("library_item_id", Integer, ForeignKey("library_items.id", ondelete="CASCADE"), primary_key=True),
     Column("evidence_kind", Text, primary_key=True),
-    Column("summary_json", Text, nullable=False),
+    Column("summary_json", Text),
     Column("source_fingerprint", Text),
     Column("published_fingerprint", Text),
     Column("origin", Text, nullable=False),

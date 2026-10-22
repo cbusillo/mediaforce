@@ -782,6 +782,7 @@ def promote_one_item(
         record_source_evidence_before_publish(
             connection,
             int(item["library_item_id"]),
+            replaced_fingerprint=_replaced_content_fingerprint(archive_path) if source_archived else None,
             published_fingerprint=promoted_content_fingerprint or promoted_fingerprint,
             recorded_at=now,
         )
@@ -878,6 +879,14 @@ def promote_one_item(
         except Exception as rollback_error:
             LOGGER.warning("Failed to roll back promotion event transaction: %s", rollback_error)
     return destination_path
+
+
+def _replaced_content_fingerprint(archive_path: Path) -> str | None:
+    """The content identity of the file a publish replaced, read from its archived copy."""
+    try:
+        return content_version_fingerprint(archive_path, archive_path.stat())
+    except OSError:
+        return None
 
 
 def _active_encode_promotion_waiting_reason(

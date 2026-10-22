@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 # noinspection PyPackageRequirements
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine
 from sqlalchemy import inspect
 from sqlalchemy import make_url
@@ -58,7 +59,16 @@ from mediaforce.web.runtime_lock import (
 )
 from mediaforce.web import runtime_lock as runtime_lock_module
 
-CURRENT_DB_REVISION = "20261022_0027"
+
+
+def _migration_head() -> str:
+    with _alembic_script_location() as script_location:
+        head = ScriptDirectory(script_location).get_current_head()
+    assert head is not None
+    return head
+
+
+CURRENT_DB_REVISION = _migration_head()
 
 
 def _fixture_database_custody(db_path: Path) -> DatabaseFileCustody:

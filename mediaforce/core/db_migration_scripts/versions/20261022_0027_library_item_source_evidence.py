@@ -21,7 +21,7 @@ def upgrade() -> None:
                 primary_key=True,
             ),
             sa.Column("evidence_kind", sa.Text(), primary_key=True),
-            sa.Column("summary_json", sa.Text(), nullable=False),
+            sa.Column("summary_json", sa.Text()),
             sa.Column("source_fingerprint", sa.Text()),
             sa.Column("published_fingerprint", sa.Text()),
             sa.Column("origin", sa.Text(), nullable=False),

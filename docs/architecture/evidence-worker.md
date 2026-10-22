@@ -48,26 +48,42 @@ library now. A publish moves that row to the AV1 output, so its evidence becomes
 `source_changed` and a later batch measures the output there. Grouping shows by
 what their sources look like needs the source's measurements, so revision
 `20261022_0027` adds `library_item_source_evidence`, one row per
-`(library_item_id, evidence_kind)`:
+`(library_item_id, evidence_kind)`.
 
-- `promote_one_item` records the item's current summary in the publish
-  transaction, before the row moves, when its evidence state binds that exact
-  summary to the file being replaced. Otherwise the kind has no record.
-- `published_fingerprint` names the output that replaced the source. Publishing
-  again over that output keeps the original source's record.
-- A new original downloaded over a published copy retires the record, since it
+Measurements are kept only when they are proven to describe the item's
+original file, never a Mediaforce output. Once kept they never change; when
+nothing proves them, the kind stays without measurements.
+
+- `promote_one_item` reads the content identity of the file it actually
+  replaced from the archived copy, in the publish transaction, before the
+  catalog row moves.
+- When an existing record names that file as its output, the publish keeps the
+  summary and provenance and moves `published_fingerprint` to the new output.
+- Otherwise the publish keeps measurements only for a provable original:
+  there was no earlier publish of the item since a new original last replaced
+  it (`promotion_completed` and `published_copy_replaced` events), the replaced
+  file is the one the catalog names, and the evidence state binds exactly that
+  summary to it. An unscanned new download or an unrecorded earlier output
+  therefore keeps nothing.
+- Every publish leaves a row per kind. A row with no summary still records the
+  current output, so a later publish over it is not mistaken for an original.
+- A new original downloaded over a published copy deletes the rows, since it
   is a new source.
-- `load_source_evidence_summaries()` answers a published item from the record
+- `load_source_evidence_summaries()` answers a published item from its record
   and an unpublished item from its current, still-bound summary. A published
-  item without a record is left out instead of answered with its output.
+  item without recorded measurements is left out instead of answered with its
+  output.
 
 Items published before this table existed are restored once with
 `mediaforce evidence restore-source`. Without `--apply` it only counts, through
-a read-only database connection. It takes the item's run plan first (found
-through `staged_artifacts.manifest_path`), then a catalog summary whose evidence
-state is still bound to an earlier file than the output, and leaves existing
-records alone, so repeating it changes nothing. Run plans are pruned over time,
-so run it soon after upgrading.
+a read-only database connection. A restore needs all of: the item was
+published exactly once; its evidence state still binds the catalog summary to a
+file other than the output; and the publish's own run plan (found through
+`staged_artifacts.manifest_path`, matching `staged_artifacts.source_fingerprint`)
+encoded exactly that file and carries exactly that summary. Everything else is
+counted as unrecoverable with a reason. Existing rows are left alone, so
+repeating it changes nothing. Run plans are pruned over time, so run it soon
+after upgrading.
 
 ## Batch lifecycle
 
