@@ -12,6 +12,7 @@ from mediaforce.tuning.compression_intent import (
     authorize_compression_change,
 )
 from mediaforce.tuning.size_goals import SizeGoalIntent
+from mediaforce.web.runtime import encode_runtime
 from mediaforce.tuning.stream_budget import StreamBudgetLedger, resolve_stream_budget_ledger
 from mediaforce.tuning import target_size_search
 from mediaforce.tuning.target_size_search import (
@@ -934,8 +935,16 @@ class TargetSizeSearchTests(unittest.TestCase):
         bracket = result.trace["quality_safe_bracket"]
         self.assertEqual(bracket["larger_candidate"]["crf"], 61.0)
         self.assertEqual(bracket["smaller_candidate"]["crf"], 62.0)
-        self.assertIn(f"larger_quality_safe={bracket['larger_candidate']['predicted_whole_episode_bytes']} bytes", str(result))
-        self.assertIn(f"smaller_quality_safe={bracket['smaller_candidate']['predicted_whole_episode_bytes']} bytes", str(result))
+        # Encode recovery reads the search's own message back into the sizes the trace measured.
+        analysis = encode_runtime._quality_safe_bracket_miss_analysis(str(result))
+        assert analysis is not None
+        self.assertEqual(analysis["target_size_bytes"], result.trace["target"]["total_target_bytes"])
+        self.assertEqual(
+            analysis["proposed_target_size_bytes"], bracket["larger_candidate"]["predicted_whole_episode_bytes"],
+        )
+        self.assertEqual(
+            analysis["smaller_quality_safe_bytes"], bracket["smaller_candidate"]["predicted_whole_episode_bytes"],
+        )
 
     def test_bracket_below_the_quality_floor_is_not_filled(self) -> None:
         measured, result = self._bracket_search({61: 83_600_000, 62: 78_800_000}, bracket_smaller_score=79.0)

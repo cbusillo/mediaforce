@@ -2539,6 +2539,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "rel_path": "tv/show/floor-conflict-question.mkv",
                 "goal_bytes": 200_000_000,
                 "smallest_quality_safe_bytes": 400_000_000,
+                "reason": encode_runtime.SIZE_QUESTION_QUALITY_NEEDS_MORE,
             },
         )
 
@@ -2641,8 +2642,43 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "rel_path": "tv/show/bracket-question.mkv",
                 "goal_bytes": 200_000_000,
                 "smallest_quality_safe_bytes": 212_000_000,
+                "reason": encode_runtime.SIZE_QUESTION_NO_SETTING_FITS,
             },
         )
+
+    def test_bracket_miss_after_a_warm_start_final_size_miss_still_asks_the_owner(self) -> None:
+        bracket_miss = TargetSizeSearchError(
+            self._quality_safe_bracket_miss_message(
+                goal_bytes=200_000_000, larger_bytes=212_000_000, smaller_bytes=186_000_000,
+            ),
+            status="needs_review",
+            trace={},
+        )
+        speculative_miss = target_size_search.FinalSizeVerification(
+            status="over_target",
+            target_size_bytes=200_000_000,
+            lower_bound_bytes=190_000_000,
+            upper_bound_bytes=210_000_000,
+            actual_output_bytes=260_000_000,
+            tolerance_percent=5.0,
+            retry_allowed=True,
+            retry_reason=None,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            updated, _manifest_path = self._quality_floor_conflict_job(
+                connection,
+                "bracket-after-warm-start",
+                error_message=manifest_runtime._final_size_miss_after_failed_baseline_message(
+                    speculative_miss, bracket_miss,
+                ),
+            )
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        question = encode_runtime.size_exception_question(updated)
+        assert question is not None
+        self.assertEqual(question["smallest_quality_safe_bytes"], 212_000_000)
+        self.assertEqual(question["reason"], encode_runtime.SIZE_QUESTION_NO_SETTING_FITS)
 
     def test_owner_allowing_a_bracket_miss_records_only_the_owner_as_evidence(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

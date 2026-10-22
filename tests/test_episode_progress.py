@@ -2,6 +2,7 @@ import unittest
 from typing import Any
 
 from mediaforce.library.workflow_state import ItemWorkflowState
+from mediaforce.web.runtime.encode_runtime import SIZE_QUESTION_QUALITY_NEEDS_MORE
 from mediaforce.web.runtime.episode_progress import season_episode_progress
 
 SEASON = "tv/Show/Season 1"
@@ -138,6 +139,7 @@ class SeasonEpisodeProgressTests(unittest.TestCase):
                 "rel_path": item.rel_path,
                 "goal_bytes": 191_800_000,
                 "smallest_quality_safe_bytes": 358_900_000,
+                "reason": SIZE_QUESTION_QUALITY_NEEDS_MORE,
             },
         )
 

@@ -306,6 +306,8 @@ QUALITY_SAFE_BRACKET_MISS_RE = re.compile(
     r"target=(?P<target>\d+) bytes, larger_quality_safe=(?P<larger>\d+) bytes, "
     r"smaller_quality_safe=(?P<smaller>\d+) bytes\."
 )
+SIZE_QUESTION_QUALITY_NEEDS_MORE = "quality_needs_more"
+SIZE_QUESTION_NO_SETTING_FITS = "no_setting_fits"
 # A measured quality-floor conflict may raise one item's size goal this far without an operator.
 QUALITY_FLOOR_EXCEPTION_MAX_GROWTH = 1.5
 
@@ -1682,6 +1684,13 @@ def size_exception_question(child: Mapping[str, Any]) -> dict[str, Any] | None:
         "rel_path": rel_path,
         "goal_bytes": goal_bytes,
         "smallest_quality_safe_bytes": safe_bytes,
+        # Why the goal does not fit: every size inside it breaks the quality floor, or no setting lands
+        # inside it while a slightly larger and a slightly smaller one both keep the picture right.
+        "reason": (
+            SIZE_QUESTION_NO_SETTING_FITS
+            if str(analysis.get("reason") or "") == QUALITY_SAFE_BRACKET_MISS_REASON
+            else SIZE_QUESTION_QUALITY_NEEDS_MORE
+        ),
     }
 
 
@@ -2176,7 +2185,12 @@ def _encode_failure_analysis(
     indexes = _manifest_indexes_for_job(job, manifest_items)
     if not indexes:
         return None
-    final_size_analysis = _final_size_failure_analysis(error_message)
+    # A speculative output can miss its final size and the fresh baseline search that follows can then
+    # measure every setting between two quality-safe ones. That newer measurement is a one-file size
+    # question, so it leads over the miss instead of asking for a fresh goal and sample.
+    final_size_analysis = (
+        None if QUALITY_SAFE_BRACKET_MISS_RE.search(error_message) else _final_size_failure_analysis(error_message)
+    )
     if final_size_analysis is not None:
         valid_indexes = [index for index in indexes if 0 <= index < len(manifest_items)]
         if len(valid_indexes) != 1:

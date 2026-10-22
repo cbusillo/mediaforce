@@ -854,9 +854,8 @@ def encode_one_item(
                         baseline_duration_seconds=baseline_seconds,
                     )
                     final_trace = object_dict(quality_result.target_size_trace) or final_trace
-                    kept_final_size_miss = (
-                        f"{_final_size_miss_message(final_verification)} "
-                        f"The fresh baseline search also failed: {quality_error_message(baseline_error)}"
+                    kept_final_size_miss = _final_size_miss_after_failed_baseline_message(
+                        final_verification, baseline_error,
                     )
                     break
                 baseline_seconds = max(time.monotonic() - baseline_started, 0.0)
@@ -1639,6 +1638,16 @@ def _final_size_miss_message(verification: FinalSizeVerification) -> str:
         f"status={verification.status}, actual={verification.actual_output_bytes}, "
         f"target={verification.target_size_bytes}, lower={verification.lower_bound_bytes}, "
         f"upper={verification.upper_bound_bytes}."
+    )
+
+
+def _final_size_miss_after_failed_baseline_message(
+        verification: FinalSizeVerification,
+        baseline_error: BaseException,
+) -> str:
+    return (
+        f"{_final_size_miss_message(verification)} "
+        f"The fresh baseline search also failed: {quality_error_message(baseline_error)}"
     )
 
 
