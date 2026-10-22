@@ -418,6 +418,9 @@ Guidance:
   - append-only approved/rejected content-by-intent size boundaries,
     correction-safe persistence, compatibility identities, and deterministic
     local item/folder/content-class/`operator` replay
+- `content_intent_backfill.py`
+  - rebuilds dropped approval boundaries from saved approval files through the
+    live builder, with counted skip reasons and no invented measurements
 - `av1_cold_start.py`
   - request/runtime compatibility, compatible local content-intent replay,
     bounded passive CRF prediction, narrow-to-broad scope eligibility,

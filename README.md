@@ -215,6 +215,17 @@ backfills historical promotions. Output identity uses sampled content bytes,
 size, and metadata, not a full-file digest. See the
 [production lineage contract](docs/architecture/content-intent-boundary-evidence.md#production-outcome-lineage).
 
+Record approvals that never reached the learning tables, rebuilt from the
+saved approval files:
+
+```bash
+uv run mediaforce backfill-approval-boundaries
+uv run mediaforce backfill-approval-boundaries --apply
+```
+
+Without `--apply` it only reports what it would record and why each other
+approval is skipped. See [backfill](docs/architecture/content-intent-boundary-evidence.md#backfill-from-saved-approvals).
+
 Run a sample scan:
 
 ```bash
