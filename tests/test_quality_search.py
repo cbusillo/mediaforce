@@ -561,7 +561,9 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
 
         assert isinstance(exc, RemoteQualityTimeoutError)
         self.assertTrue(exc.remote_process_contained)
-        containment = next(shlex.split(script.split("\n", 1)[1]) for script in scripts if REMOTE_QUALITY_CONTAINED_MARKER in script)
+        script = next(script for script in scripts if REMOTE_QUALITY_CONTAINED_MARKER in script)
+        # The command follows the transport's own setup lines.
+        containment = shlex.split(script[script.index("\nsh -c ") + 1:])
         self.assertEqual(containment[:4], ["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh"])
         self.assertEqual(Path(containment[4]).parent, temp_root)
         self.assertEqual(len(containment), 5)
