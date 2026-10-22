@@ -1,7 +1,7 @@
 import hashlib
 import json
 import os
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -74,7 +74,8 @@ def json_text(payload: object) -> str:
 def normalize_codec(codec: object) -> str:
     value = str(codec or "").strip().casefold()
     return {"h265": "hevc", "h.265": "hevc", "h.264": "h264", "avc": "h264", "libx265": "hevc",
-            "libx264": "h264", "libsvtav1": "av1", "av1_videotoolbox": "av1"}.get(value, value)
+            "libx264": "h264", "libsvtav1": "av1", "av1_videotoolbox": "av1", "libaom-av1": "av1",
+            "librav1e": "av1"}.get(value, value)
 
 
 def observe_file(path: Path, *, full_digest: bool = False,
@@ -169,10 +170,14 @@ def record_current_measurement(connection: DBClient, item: Mapping[str, Any] | D
 def record_generated_output(connection: DBClient, item_id: int, *, identity: Mapping[str, Any],
                             profile: Mapping[str, Any], operation_key: Mapping[str, Any], recorded_at: str) -> str:
     item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
+    same_identity = (bool(operation_key.get("input_sample"))
+                     and operation_key["input_sample"] == item["content_version_fingerprint"]
+                     and operation_key.get("input_size_bytes") == item["size_bytes"])
     if (operation_key.get("input_size_bytes", item["size_bytes"]) != item["size_bytes"]
             or (operation_key.get("input_sample") and item["content_version_fingerprint"]
                 and operation_key["input_sample"] != item["content_version_fingerprint"])
-            or (operation_key.get("source_revision") is not None and operation_key["source_revision"] != item["source_revision"])):
+            or (operation_key.get("source_revision") is not None and operation_key["source_revision"] != item["source_revision"]
+                and not same_identity)):
         raise RuntimeError("Encode input changed before output commit")
     before = ensure_active_source_version(connection, item)
     generation = connection.execute(select(source_versions.c.generation_id).where(source_versions.c.version_id == before)).scalar_one()
@@ -189,43 +194,101 @@ def record_generated_output(connection: DBClient, item_id: int, *, identity: Map
 
 
 def version_location(connection: DBClient, version: Mapping[str, Any] | DBRow) -> str | None:
-    moves = connection.execute(select(source_moves.c.to_path, source_transitions.c.outcome).join(source_transitions)
-                               .where(source_moves.c.version_id == version["version_id"])
+    return version_locations(connection, [version])[version["version_id"]]
+
+
+def version_locations(connection: DBClient, versions: Sequence[Mapping[str, Any] | DBRow]) -> dict[str, str | None]:
+    locations = {}
+    for version in versions:
+        identity = json.loads(version["identity_json"])
+        locations[version["version_id"]] = None if identity.get("unavailability") else identity.get("path")
+    if not locations:
+        return locations
+    moves = connection.execute(select(source_moves.c.version_id, source_moves.c.to_path, source_transitions.c.outcome).join(source_transitions)
+                               .where(source_moves.c.version_id.in_(locations))
                                .order_by(source_transitions.c.recorded_at.desc(), source_transitions.c.expected_revision.desc(),
                                          source_moves.c.ordinal.desc())).mappings().all()
+    resolved = set()
     for move in moves:
+        version_id = move["version_id"]
+        if version_id in resolved:
+            continue
         if move["outcome"] in {"prepared", "unresolved"}:
-            return None
-        if move["outcome"] == "committed":
-            return str(move["to_path"]) or None
-    identity = json.loads(version["identity_json"])
-    return None if identity.get("unavailability") else identity.get("path")
+            locations[version_id] = None
+        elif move["outcome"] == "committed":
+            locations[version_id] = str(move["to_path"]) or None
+        else:
+            continue
+        resolved.add(version_id)
+    return locations
 
 
-def historical_rule_conflict(connection: DBClient) -> bool:
+@dataclass(frozen=True, slots=True)
+class SourceEvidenceContext:
+    conflicting_output_codecs: frozenset[str]
+    outputs: tuple[Mapping[str, Any], ...]
+    sampled_outputs: Mapping[tuple[str, int], tuple[Mapping[str, Any], ...]]
+
+    def rule_conflicts(self, codec: object) -> bool:
+        return normalize_codec(codec) in self.conflicting_output_codecs
+
+    def output_check(self, candidate: Mapping[str, Any] | DBRow) -> str:
+        outputs = self.outputs if candidate.get("sha256") else self.sampled_outputs.get(
+            (candidate.get("sample_fingerprint"), candidate.get("size_bytes")), (),
+        )
+        return known_output_check(candidate, outputs)
+
+
+def _library_output(origin: object) -> bool:
+    return str(origin or "").strip().casefold() in {"", "cli", "cli-production", "queue"}
+
+
+def load_source_evidence_context(connection: DBClient) -> SourceEvidenceContext:
+    """One pass-local snapshot of output identities and the codec exclusions they establish."""
+    outputs: tuple[Mapping[str, Any], ...] = ()
+    conflicts: set[str] = set()
     if inspect(connection).has_table("source_versions"):
-        codecs = connection.execute(select(source_versions.c.video_codec).where(source_versions.c.role == "output")).scalars()
-        if any(normalize_codec(codec) not in HISTORICAL_OUTPUT_PROFILES["codecs"] for codec in codecs if codec):
-            return True
-    commands = list(connection.execute(select(staged_artifacts.c.encode_command_json)).scalars())
+        outputs = tuple(connection.execute(select(source_versions).where(source_versions.c.role == "output")).mappings().all())
+        library_outputs = set()
+        for row in connection.execute(select(source_transitions.c.after_version_id, source_transitions.c.evidence_json).where(
+            source_transitions.c.kind.in_(("encode", "publish", "historical-encode", "historical-publish")),
+            source_transitions.c.outcome == "committed",
+        )).mappings():
+            try:
+                evidence = json.loads(row["evidence_json"])
+            except (ValueError, TypeError):
+                continue
+            if isinstance(evidence, dict) and _library_output(evidence.get("encode_origin")):
+                library_outputs.add(row["after_version_id"])
+        conflicts.update(normalize_codec(row["video_codec"]) for row in outputs
+                         if row["version_id"] in library_outputs and row["video_codec"])
+    commands = [row["encode_command_json"] for row in connection.execute(select(
+        staged_artifacts.c.encode_command_json, staged_artifacts.c.encode_origin,
+    ).where(staged_artifacts.c.encode_completed_at.is_not(None))).mappings() if _library_output(row["encode_origin"])]
     for receipt in connection.execute(select(target_production_outcomes.c.payload_json, target_production_outcomes.c.payload_sha256)).mappings():
         try:
             payload = json.loads(receipt["payload_json"])
-            if stable_json_hash(payload) == receipt["payload_sha256"]:
+            if (isinstance(payload, dict) and stable_json_hash(payload) == receipt["payload_sha256"]
+                    and _library_output(payload.get("encode_origin"))):
                 commands.append(payload.get("encode_command_json"))
         except (ValueError, TypeError):
             continue
     for raw in commands:
         try:
             command = json.loads(raw or "[]")
-        except ValueError:
+        except (ValueError, TypeError):
             continue
         if not isinstance(command, list):
             continue
-        if any(str(argument) in {"-c:v", "-codec:v", "-vcodec", "-c:v:0"}
-               and normalize_codec(command[index + 1]) != "av1" for index, argument in enumerate(command[:-1])):
-            return True
-    return False
+        conflicts.update(normalize_codec(command[index + 1]) for index, argument in enumerate(command[:-1])
+                         if str(argument) in {"-c:v", "-codec:v", "-vcodec", "-c:v:0"}
+                         and normalize_codec(command[index + 1]) in HISTORICAL_OUTPUT_PROFILES["known_input_codecs"])
+    sampled: dict[tuple[str, int], list[Mapping[str, Any]]] = defaultdict(list)
+    for output in outputs:
+        if output["sample_fingerprint"] and output["size_bytes"] is not None:
+            sampled[(output["sample_fingerprint"], output["size_bytes"])].append(output)
+    return SourceEvidenceContext(frozenset(conflicts - set(HISTORICAL_OUTPUT_PROFILES["codecs"])), outputs,
+                                 {key: tuple(rows) for key, rows in sampled.items()})
 
 
 def known_output_check(candidate: Mapping[str, Any] | DBRow,
@@ -250,7 +313,7 @@ def known_output_check(candidate: Mapping[str, Any] | DBRow,
     return "clear" if candidate.get("sha256") else "unavailable"
 
 
-def load_source_evidence(connection: DBClient, item_id: int) -> SourceEvidence:
+def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceEvidenceContext | None = None) -> SourceEvidence:
     item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one_or_none()
     active = str((item or {}).get("active_source_version_id") or "") or None
     traits: dict[EvidenceKind, SourceTrait] = {kind: SourceTrait(kind) for kind in EVIDENCE_KINDS}
@@ -281,9 +344,9 @@ def load_source_evidence(connection: DBClient, item_id: int) -> SourceEvidence:
                   and checks.get("encode_link") and checks.get("unavailability"))
     reason = str(checks.get("reason") or "original_not_assessed")
     if historical:
-        reason = "historical_output_conflict" if historical_rule_conflict(connection) else ""
-        outputs = connection.execute(select(source_versions).where(source_versions.c.role == "output")).mappings()
-        output_check = known_output_check(original, outputs)
+        context = context or load_source_evidence_context(connection)
+        reason = "historical_output_conflict" if context.rule_conflicts(original["video_codec"]) else ""
+        output_check = context.output_check(original)
         if output_check in {"match", "unresolved"}:
             reason = "known_output_match" if output_check == "match" else "possible_output_match"
     # Protected owner confirmation and strict binding are owned by #999. Application-DB rows alone confer no authority.

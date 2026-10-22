@@ -24,7 +24,7 @@ from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection,
 from mediaforce.library.media_scopes import resolve_media_scope, resolve_media_scopes, scope_rel_path_filter
 from mediaforce.library.planner import build_manifest_item, recommend_item
 from mediaforce.library.scanner import scan_library
-from mediaforce.library.source_evidence import load_source_evidence
+from mediaforce.library.source_evidence import load_source_evidence, load_source_evidence_context
 from mediaforce.tuning.target_provenance import ExactItemTargetProvenanceBlocked, exact_item_target_provenance_blocker
 
 
@@ -108,10 +108,11 @@ def select_candidates(
         rows = [row for _, row in ranked]
         if limit is not None:
             rows = rows[:limit]
+        context = load_source_evidence_context(connection) if rows else None
         for position, row in enumerate(rows, start=1):
             decision = row.pop("_selection_decision")
             row["selection_provenance"] = decision.provenance(rank_position=position)
-            row["original_source_evidence"] = load_source_evidence(connection, int(row["id"])).to_reference()
+            row["original_source_evidence"] = load_source_evidence(connection, int(row["id"]), context=context).to_reference()
         return rows
 
     joined_tables = outerjoin(
@@ -149,8 +150,9 @@ def select_candidates(
     rows = [object_dict(row) for row in connection.execute(query).mappings().fetchall()]
     if buckets:
         rows = [row for row in rows if recommend_item(row, config).bucket in buckets]
+    context = load_source_evidence_context(connection) if rows else None
     for row in rows:
-        row["original_source_evidence"] = load_source_evidence(connection, int(row["id"])).to_reference()
+        row["original_source_evidence"] = load_source_evidence(connection, int(row["id"]), context=context).to_reference()
     return rows
 
 

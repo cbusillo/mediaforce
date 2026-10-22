@@ -19,7 +19,7 @@ from mediaforce.library.candidate_selection import SEASON_PATTERN, encode_candid
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.planner import build_manifest_item
-from mediaforce.library.source_evidence import load_source_evidence
+from mediaforce.library.source_evidence import load_source_evidence, load_source_evidence_context
 
 REPRESENTATIVE_SELECTION_TOOL = "mediaforce.representative_selection"
 REPRESENTATIVE_SELECTION_TOOL_VERSION = "1"
@@ -170,10 +170,11 @@ def load_representative_candidates(
 ) -> tuple[MediaScope, list[dict[str, Any]], RepresentativePopulation]:
     scope, candidate_rows, population = load_representative_population(connection, config, prefix, now=now)
     items: list[dict[str, Any]] = []
+    context = load_source_evidence_context(connection) if candidate_rows else None
     for row in candidate_rows:
         row_payload = mapping_dict(row)
         item = build_manifest_item(row_payload, config)
-        source = load_source_evidence(connection, int(row["id"]))
+        source = load_source_evidence(connection, int(row["id"]), context=context)
         item["original_source_evidence"] = source.to_reference()
         item["representative_basis"] = "direct-input"
         for field in _OPTIONAL_TECHNICAL_FIELDS:

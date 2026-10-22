@@ -369,7 +369,10 @@ def _commit_evidence_summary(
             connection,
             claim.library_item_id,
         )
-        if pending_source_operation(connection, claim.library_item_id) or active_claim.source_revision != claim.source_revision:
+        same_identity = (claim.uses_content_fingerprint and current_source_fingerprint == claim.expected_source_fingerprint
+                         and claim.source_size_bytes is not None and active_claim.source_size_bytes == claim.source_size_bytes)
+        if (pending_source_operation(connection, claim.library_item_id)
+                or (active_claim.source_revision != claim.source_revision and not same_identity)):
             transition_evidence_work(connection, claim, work_status="failed",
                                      last_error="Source revision changed before evidence commit.", restore_attempt=True)
             return
@@ -377,6 +380,7 @@ def _commit_evidence_summary(
                 actual_fingerprint is None
                 or actual_fingerprint != claim.expected_source_fingerprint
                 or current_source_fingerprint != claim.expected_source_fingerprint
+                or (claim.source_size_bytes is not None and active_claim.source_size_bytes != claim.source_size_bytes)
         ):
             transition_evidence_work(
                 connection,

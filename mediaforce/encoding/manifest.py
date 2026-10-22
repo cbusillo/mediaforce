@@ -1139,7 +1139,8 @@ def encode_one_item(
         connection, int(item["library_item_id"]), identity=output_identity,
         profile={"video_codec": staged_probe.video_codec, "width": staged_probe.width, "height": staged_probe.height},
         operation_key={"manifest_run_id": manifest["run_id"], "item_index": index,
-                       "encode_job_id": staged_values["encode_job_id"], "input_sample": item.get("content_version_fingerprint"),
+                       "encode_job_id": staged_values["encode_job_id"], "encode_origin": staged_values["encode_origin"],
+                       "input_sample": item.get("content_version_fingerprint"),
                        "input_size_bytes": source_size_bytes, "source_revision": item.get("source_revision")}, recorded_at=now,
     )
     connection.execute(

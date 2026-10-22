@@ -16,7 +16,7 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.core.utils import timestamp
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, parse_evidence_summary
 from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, SUMMARY_KEYS, append_measurement, \
-    append_version, historical_rule_conflict, json_text, known_output_check, normalize_codec, pending_source_operation
+    append_version, json_text, load_source_evidence, load_source_evidence_context, normalize_codec, pending_source_operation, SourceEvidenceContext
 
 
 @dataclass(slots=True)
@@ -177,7 +177,7 @@ def _reachable(start: tuple[str, int], edges: list[_Edge]) -> set[tuple[str, int
 
 def _eligibility(connection: DBClient, catalog: Mapping[str, Any], stage: Mapping[str, Any] | DBRow,
                  plans: list[_PlanItem], jobs: dict[str, dict[str, Any]], events: list[dict[str, Any]],
-                 unavailable_reason: str | None, rule_conflict: bool) -> tuple[_PlanItem | None, dict[str, Any], str]:
+                 unavailable_reason: str | None, context: SourceEvidenceContext) -> tuple[_PlanItem | None, dict[str, Any], str]:
     candidates = [plan for plan in plans if any(isinstance(plan.item.get(key), dict) for key in SUMMARY_KEYS.values())]
     if not candidates:
         return None, {}, "no_readable_source_summary_plan"
@@ -216,7 +216,7 @@ def _eligibility(connection: DBClient, catalog: Mapping[str, Any], stage: Mappin
     codecs = {normalize_codec(plan.item.get("video_codec")) for plan in source_plans}
     if len(codecs) != 1 or next(iter(codecs)) not in HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]:
         return None, {}, "excluded_or_unknown_input_codec"
-    if rule_conflict:
+    if context.rule_conflicts(selected.item.get("video_codec")):
         return None, {}, "historical_output_conflict"
     for event in events:
         if event["event_type"] not in {"encoding_started", "encoding_completed"}:
@@ -270,6 +270,77 @@ def _existing_summaries(connection: DBClient, catalog: Mapping[str, Any]) -> dic
     return summaries
 
 
+def _admission_conflict(original: Mapping[str, Any], checks: Mapping[str, Any], plans: list[_PlanItem],
+                        events: list[dict[str, Any]], summaries: dict[str, set[str]], context: SourceEvidenceContext) -> str:
+    identity = (original["sample_fingerprint"], original["size_bytes"])
+    output_check = context.output_check(original)
+    if output_check in {"match", "unresolved"}:
+        return "known_output_match" if output_check == "match" else "possible_output_match"
+    if context.rule_conflicts(original["video_codec"]):
+        return "historical_output_conflict"
+    references = {(reference["plan_path"], reference["run_id"], reference["item_index"]) for reference in checks.get("plans", [])}
+    source_plans = []
+    for plan in plans:
+        if (plan.path, plan.run_id, plan.index) in references and _identity(plan.item) != identity:
+            return "conflicting_or_unidentified_inputs"
+        if _identity(plan.item) == identity:
+            if normalize_codec(plan.item.get("video_codec")) != original["video_codec"]:
+                return "historical_plan_changed"
+            source_plans.append(plan)
+    if any(_stamp(plan.item) for plan in source_plans):
+        return "mediaforce_stamp"
+    for kind, key in SUMMARY_KEYS.items():
+        if any(isinstance(plan.item.get(key), dict) and summaries.get(kind)
+               and json_text(plan.item[key]) not in summaries[kind] for plan in source_plans):
+            return "historical_plan_changed"
+    operations = {(plan.path, plan.index) for plan in source_plans}
+    operations.update((path, index) for path, _run, index in references)
+    for event in events:
+        details = event["details"]
+        if (event["event_type"] not in {"encoding_started", "encoding_completed"}
+                or (details.get("manifest"), details.get("item_index")) not in operations):
+            continue
+        if ((details.get("source_size_bytes") is not None and details["source_size_bytes"] != identity[1])
+                or (details.get("source_video_codec") and normalize_codec(details["source_video_codec"]) != original["video_codec"])):
+            return "conflicting_operation_input"
+    return ""
+
+
+def _reassess_admission(connection: DBClient, catalog: Mapping[str, Any], plans: list[_PlanItem],
+                        events: list[dict[str, Any]], context: SourceEvidenceContext,
+                        stats: SourceEvidenceRestoreStats, *, apply: bool, now: str) -> bool:
+    generation = connection.execute(select(source_versions.c.generation_id).where(
+        source_versions.c.version_id == catalog.get("active_source_version_id"),
+    )).scalar_one_or_none()
+    superseded = select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))
+    admissions = connection.execute(select(source_admissions).where(
+        source_admissions.c.generation_id == generation, source_admissions.c.basis == "historical-plan",
+        source_admissions.c.admission_id.not_in(superseded),
+    )).mappings().all()
+    if len(admissions) != 1:
+        return False
+    admission = admissions[0]
+    checks = json.loads(admission["checks_json"])
+    original = connection.execute(select(source_versions).where(source_versions.c.version_id == admission["version_id"])).mappings().one()
+    summaries = _existing_summaries(connection, catalog)
+    reason = (str(checks.get("reason") or "original_not_assessed") if admission["tier"] != "probable" else
+              _admission_conflict(original, checks, plans, events, summaries, context))
+    if pending_source_operation(connection, int(catalog["id"])):
+        reason = "pending_source_operation"
+    if apply:
+        _quarantine_candidates(connection, plans, reason or "historical-plan candidate", now)
+        if reason:
+            _invalidate_previous(connection, catalog, reason, now)
+    source = load_source_evidence(connection, int(catalog["id"]), context=context)
+    for kind, trait in source.traits.items():
+        if reason or trait.summary is None:
+            stats.unknown[kind][reason or trait.reason or "missing_source_measurement"] += 1
+        else:
+            stats.historical_probable[kind] += 1
+            stats.already_recorded[kind] += 1
+    return True
+
+
 def restore_published_source_evidence(connection: DBClient, *, apply: bool = False,
                                       unavailable_sources: Mapping[int, str] | None = None) -> SourceEvidenceRestoreStats:
     """Recover advisory historical associations without opening original or output media."""
@@ -285,7 +356,7 @@ def restore_published_source_evidence(connection: DBClient, *, apply: bool = Fal
         events[row["library_item_id"]].append({**row, "details": object_dict(details)})
     tables = set(inspect(connection).get_table_names())
     has_storage = "source_versions" in tables
-    rule_conflict = historical_rule_conflict(connection)
+    context = load_source_evidence_context(connection)
     stages = connection.execute(select(staged_artifacts).where(staged_artifacts.c.promoted_at.is_not(None))).mappings().all()
     columns = {column["name"] for column in inspect(connection).get_columns("library_items")}
     catalog_rows = connection.execute(select(*(column for column in library_items.c if column.name in columns))).mappings()
@@ -297,16 +368,18 @@ def restore_published_source_evidence(connection: DBClient, *, apply: bool = Fal
             continue
         stats.published_item_count += 1
         item_id = int(catalog["id"])
+        if has_storage and _reassess_admission(connection, catalog, plans.get(item_id, []), events[item_id], context,
+                                               stats, apply=apply, now=now):
+            continue
         candidate, checks, reason = _eligibility(connection, catalog, stage, plans.get(item_id, []), jobs, events[item_id],
-                                               (unavailable_sources or {}).get(item_id), rule_conflict)
+                                               (unavailable_sources or {}).get(item_id), context)
         if has_storage and pending_source_operation(connection, item_id):
             candidate, reason = None, "pending_source_operation"
         if candidate is not None and has_storage:
             identity = _identity(candidate.item)
-            outputs = connection.execute(select(source_versions).where(source_versions.c.role == "output")).mappings()
             assert identity is not None
-            if known_output_check({"sample_fingerprint": identity[0], "size_bytes": identity[1],
-                                   "video_codec": candidate.item.get("video_codec")}, outputs) == "unresolved":
+            if context.output_check({"sample_fingerprint": identity[0], "size_bytes": identity[1],
+                                      "video_codec": candidate.item.get("video_codec")}) == "unresolved":
                 candidate, reason = None, "possible_output_match"
         existing = _existing_summaries(connection, catalog) if has_storage else {}
         if candidate is not None and any(

@@ -1,5 +1,7 @@
 import json
 import shutil
+from contextlib import nullcontext
+from importlib import import_module
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,19 +21,21 @@ from mediaforce.core.db_migrations import _alembic_config, _alembic_script_locat
 from mediaforce.core.db_tables import encode_jobs, evidence_queue_state, item_events, library_item_evidence_state, library_items, metadata, run_manifests, source_admissions, \
     source_generations, source_measurements, source_transitions, source_versions, staged_artifacts, target_production_outcomes
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint, timestamp
-from mediaforce.encoding.source_publication import apply_source_moves, prepare_source_publish, reconcile_source_publish
+from mediaforce.encoding.source_publication import apply_source_moves, prepare_archive_removal, prepare_source_publish, reconcile_source_publish
 from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.encoding.staging import promote_one_item
 from mediaforce.library.evidence_acquisition import load_fingerprint_acquisition_items, plan_fingerprint_acquisition
 from mediaforce.library.evidence_state import EvidenceKind
 from mediaforce.library.source_evidence import append_measurement, ensure_active_source_version, json_text, load_source_evidence, \
-    known_output_check, observe_file, record_current_measurement, source_trait_coverage, version_location
+    known_output_check, observe_file, record_current_measurement, record_generated_output, source_trait_coverage, version_location
 from mediaforce.library.source_evidence_backfill import restore_published_source_evidence
 from mediaforce.library.evidence_queue import load_evidence_work_claim
 from mediaforce.library.evidence_worker import _commit_evidence_summary
 from mediaforce.tuning.content_intent_observations import content_intent_replay_context
 from mediaforce.tuning.production_lineage import seal_lineage
 from mediaforce.core.evidence import stable_json_hash
+from mediaforce.library.run_manifests import select_candidates
+from mediaforce.web.runtime.archive_cleanup import clear_archive_cleanup_action
 
 
 @pytest.fixture
@@ -423,18 +427,13 @@ def test_catalog_removal_preserves_receipts_and_reused_id_inherits_nothing(conne
     assert load_source_evidence(connection, new_id).generation_id is None
 
 
-def test_forged_admission_and_later_output_conflict_never_upgrade_history(connection: DBClient, tmp_path: Path) -> None:
+def test_forged_admission_never_upgrades_history(connection: DBClient, tmp_path: Path) -> None:
     history = _history(connection, tmp_path)
     restore_published_source_evidence(connection, apply=True)
     original = load_source_evidence(connection, history["id"])
     connection.execute(source_admissions.insert().values(admission_id="forged", generation_id=original.generation_id,
                                                         version_id=original.original_version_id, tier="proven", basis="owner",
                                                         confirmation_ref="forged receipt", checks_json="{}", recorded_at=timestamp()))
-    assert load_source_evidence(connection, history["id"]).traits["cadence_analysis"].tier == "unknown"
-    connection.execute(source_versions.insert().values(version_id="contrary-output", generation_id=original.generation_id,
-                                                      role="output", video_codec="hevc", identity_json="{}", profile_json="{}", observed_at=timestamp()))
-    restore_published_source_evidence(connection, apply=True)
-    assert connection.execute(select(func.count()).select_from(source_measurements)).scalar_one() > 0
     assert load_source_evidence(connection, history["id"]).traits["cadence_analysis"].tier == "unknown"
 
 
@@ -451,6 +450,377 @@ def test_grouping_uses_probable_sources_and_own_technical_profile(connection: DB
     with pytest.raises(ValueError, match="requires"):
         content_intent_replay_context({**items[0], "content_version_fingerprint": items[0]["source_fingerprint"]})
     assert connection.execute(select(staged_artifacts.c.promoted_at)).scalar_one() == history["stage"]["promoted_at"]
+
+
+def _remake_history(connection: DBClient, root: Path, history: dict[str, Any]) -> None:
+    item = connection.execute(select(library_items).where(library_items.c.id == history["id"])).mappings().one()
+    plan_item = {**history["plan"]["items"][0], "source_size_bytes": item["size_bytes"],
+                 "content_version_fingerprint": item["content_version_fingerprint"], "source_fingerprint": item["fingerprint"],
+                 "video_codec": "av1", "cadence_summary": {"output": "A"}, "media_fingerprint": {"output": "A"}}
+    path = root / "remake.json"
+    path.write_text(json_text({"run_id": "remake", "items": [plan_item]}))
+    now = timestamp()
+    staged = root / "output-B.mkv"
+    staged.write_bytes(b"output B")
+    connection.execute(encode_jobs.insert().values(job_id="remake", prefix="tv/Show", status="completed", manifest_path=str(path),
+                                                   host_json="{}", created_at=now, updated_at=now))
+    stage = {**history["stage"], "manifest_run_id": "remake", "manifest_path": str(path), "encode_job_id": "remake",
+             "source_size_bytes": item["size_bytes"], "source_fingerprint": item["fingerprint"], "source_video_codec": "av1",
+             "staging_path": str(staged), "staging_size_bytes": staged.stat().st_size, "encode_completed_at": now,
+             "promoted_at": None, "validated_at": now, "validation_json": '{"passed":true}'}
+    connection.execute(update(staged_artifacts).where(staged_artifacts.c.library_item_id == history["id"]).values(**stage))
+    connection.execute(item_events.insert().values(library_item_id=history["id"], event_type="encoding_completed", created_at=now,
+        details_json=json_text({"manifest": str(path), "item_index": 0, "encode_job_id": "remake", "source_path": str(history["path"]),
+                               "source_size_bytes": item["size_bytes"], "source_video_codec": "av1", "staging_path": str(staged),
+                               "staging_size_bytes": staged.stat().st_size, "encode_completed_at": now})))
+    promote_one_item(connection, _config(root), {"library_item_id": history["id"], "source_path": str(history["path"]),
+                                               "rel_path": "tv/Show/episode.mkv", "media_root": "tv"}, force=False,
+                     probe_media=lambda _path: _probe(), file_fingerprint=file_fingerprint, timestamp=timestamp,
+                     record_event=lambda *_args: None, reserve_preflight=lambda *_args, **_kwargs: ReservePreflight(
+                         allowed=True, waiting_reason=None, required_by_volume={}))
+
+
+@pytest.mark.parametrize("later_evidence", ["published_remake", "different_summary", "operation_input", "possible_output"])
+def test_restore_rechecks_admitted_source_instead_of_later_inputs(connection: DBClient, tmp_path: Path, later_evidence: str) -> None:
+    history = _history(connection, tmp_path)
+    restore_published_source_evidence(connection, apply=True)
+    original = load_source_evidence(connection, history["id"])
+    admission = connection.execute(select(source_admissions)).mappings().one()
+    _remake_history(connection, tmp_path, history)
+    if later_evidence == "different_summary":
+        later = json.loads((tmp_path / "remake.json").read_text())
+        later["items"][0]["cadence_summary"] = {"different": "output A"}
+        (tmp_path / "remake.json").write_text(json_text(later))
+    elif later_evidence == "operation_input":
+        connection.execute(item_events.insert().values(library_item_id=history["id"], event_type="encoding_started",
+            created_at=timestamp(), details_json=json_text({"manifest": str(tmp_path / "remake.json"), "item_index": 0,
+                                                           "encode_job_id": "remake", "source_size_bytes": 80, "source_video_codec": "av1"})))
+    elif later_evidence == "possible_output":
+        connection.execute(source_versions.insert().values(version_id="A-again", generation_id=original.generation_id,
+            role="output", sample_fingerprint=history["stage"]["source_fingerprint"], size_bytes=80,
+            video_codec="av1", identity_json="{}", profile_json="{}", observed_at=timestamp()))
+    assert connection.execute(select(func.count()).select_from(target_production_outcomes)).scalar_one() == 0
+    stats = restore_published_source_evidence(connection, apply=True)
+    assert stats.historical_probable["cadence_analysis"] == 1
+    assert load_source_evidence(connection, history["id"]).traits == original.traits
+    assert connection.execute(select(source_admissions)).mappings().all() == [admission]
+    restore_published_source_evidence(connection, apply=True)
+    assert load_source_evidence(connection, history["id"]).original_version_id == original.original_version_id
+
+
+@pytest.mark.parametrize("contradiction,reason", [("sampled_output", "possible_output_match"),
+                                                ("source_operation", "conflicting_operation_input"),
+                                                ("source_plan", "historical_plan_changed")])
+def test_real_source_conflict_after_remake_appends_one_correction(connection: DBClient, tmp_path: Path,
+                                                               contradiction: str, reason: str) -> None:
+    history = _history(connection, tmp_path)
+    restore_published_source_evidence(connection, apply=True)
+    original = load_source_evidence(connection, history["id"])
+    admission = connection.execute(select(source_admissions)).mappings().one()
+    measurements = connection.execute(select(source_measurements)).mappings().all()
+    _remake_history(connection, tmp_path, history)
+    if contradiction == "sampled_output":
+        source = history["plan"]["items"][0]
+        connection.execute(source_versions.insert().values(version_id="matching-output", generation_id=original.generation_id,
+            role="output", sample_fingerprint=source["content_version_fingerprint"], size_bytes=source["source_size_bytes"],
+            video_codec=source["video_codec"], identity_json="{}", profile_json="{}", observed_at=timestamp()))
+    elif contradiction == "source_operation":
+        connection.execute(item_events.insert().values(library_item_id=history["id"], event_type="encoding_started",
+            created_at=timestamp(), details_json=json_text({"manifest": str(history["plan_path"]), "item_index": 0,
+                                                           "encode_job_id": "job-1", "source_size_bytes": 2, "source_video_codec": "hevc"})))
+    else:
+        history["plan"]["items"][0]["cadence_summary"] = {"changed": "S"}
+        history["plan_path"].write_text(json_text(history["plan"]))
+    restore_published_source_evidence(connection, apply=True)
+    correction = connection.execute(select(source_admissions).where(source_admissions.c.supersedes_id == admission["admission_id"])).mappings().one()
+    assert correction["tier"] == "unknown"
+    assert correction["version_id"] == original.original_version_id
+    assert json.loads(correction["checks_json"])["reason"] == reason
+    assert load_source_evidence(connection, history["id"]).traits["cadence_analysis"].tier == "unknown"
+    assert all(row in connection.execute(select(source_measurements)).mappings().all() for row in measurements)
+    restore_published_source_evidence(connection, apply=True)
+    assert connection.execute(select(source_admissions)).mappings().all() == [admission, correction]
+
+
+def test_unpublished_acquisition_keeps_current_profile_and_measurements(connection: DBClient, tmp_path: Path) -> None:
+    from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_SCHEMA_VERSION, MEDIA_FINGERPRINT_TOOL_NAME, MEDIA_FINGERPRINT_TOOL_VERSION
+    path = tmp_path / "source.mkv"
+    path.write_bytes(b"unpublished source")
+    item_id = _insert_item(connection, path)
+    summary = {"schema_version": MEDIA_FINGERPRINT_SCHEMA_VERSION,
+               "analysis": {"sampled_frames": 120, "aggregate": {"grain": 0.5},
+                            "tool": {"name": MEDIA_FINGERPRINT_TOOL_NAME, "version": MEDIA_FINGERPRINT_TOOL_VERSION}},
+               "decision": {"status": "measured", "traits": ["grain"]}}
+    connection.execute(update(library_items).where(library_items.c.id == item_id).values(
+        video_codec="h264", width=1920, height=1080, media_fingerprint_json=json_text(summary),
+        audio_summary_json='[{"codec":"aac"}]'))
+    _scope, items, measured = load_fingerprint_acquisition_items(connection, _config(tmp_path), "tv/Show")
+    assert len(items) == 1
+    item = items[0]
+    assert (item["video_codec"], item["width"], item["height"], item["source_size_bytes"], item["duration_seconds"]) == (
+        "h264", 1920, 1080, path.stat().st_size, 60)
+    assert item["source_fingerprint"] == content_version_fingerprint(path, path.stat())
+    assert item["audio_summary"] == [{"codec": "aac"}]
+    assert item["media_fingerprint_decision"] == summary["decision"]
+    plan = plan_fingerprint_acquisition(items, measured_source_ids=measured)
+    assert plan.coverage.measured_item_count == 1
+    assert plan.candidate_ids == ()
+    assert load_source_evidence(connection, item_id).traits["media_fingerprint"].tier == "unknown"
+
+
+@pytest.mark.parametrize("encoder", ["libsvtav1", "av1_videotoolbox", "libaom-av1", "librav1e", "av1"])
+@pytest.mark.parametrize("record", ["stage", "receipt", "version"])
+def test_all_av1_encoders_preserve_historical_rule(connection: DBClient, tmp_path: Path, encoder: str, record: str) -> None:
+    history = _history(connection, tmp_path)
+    restore_published_source_evidence(connection, apply=True)
+    original = load_source_evidence(connection, history["id"])
+    command = json_text(["ffmpeg", "-c:v", encoder])
+    if record == "stage":
+        connection.execute(update(staged_artifacts).values(encode_command_json=command))
+    elif record == "receipt":
+        payload = {"encode_command_json": command}
+        connection.execute(target_production_outcomes.insert().values(
+            receipt_id="output", library_item_id=history["id"], observation_id="observation", manifest_run_id="run",
+            item_index=0, encode_job_id="job", promoted_content_fingerprint="f" * 40,
+            payload_json=json_text(payload), payload_sha256=stable_json_hash(payload), recorded_at=timestamp()))
+    else:
+        record_generated_output(connection, history["id"], identity={"size_bytes": 8, "sample_fingerprint": "f" * 40},
+                                profile={"video_codec": encoder}, operation_key={"test": encoder}, recorded_at=timestamp())
+    assert load_source_evidence(connection, history["id"]).traits == original.traits
+    restore_published_source_evidence(connection, apply=True)
+    assert connection.execute(select(source_admissions.c.tier)).scalars().all() == ["probable"]
+
+
+@pytest.mark.parametrize("input_codec", ["h264", "hevc"])
+@pytest.mark.parametrize("output_kind", ["library", "fixture", "sample"])
+def test_non_av1_rule_only_invalidates_affected_library_assessments(connection: DBClient, tmp_path: Path,
+                                                                 input_codec: str, output_kind: str) -> None:
+    history = _history(connection, tmp_path, codec=input_codec)
+    restore_published_source_evidence(connection, apply=True)
+    original = load_source_evidence(connection, history["id"])
+    admission = connection.execute(select(source_admissions)).mappings().one()
+    if output_kind == "library":
+        record_generated_output(connection, history["id"], identity={"size_bytes": 5, "sample_fingerprint": "f" * 40},
+                                profile={"video_codec": "hevc"}, operation_key={"run": "non-av1"}, recorded_at=timestamp())
+    elif output_kind == "fixture":
+        connection.execute(source_versions.insert().values(version_id="fixture", generation_id=original.generation_id,
+            role="output", video_codec="hevc", identity_json="{}", profile_json="{}", observed_at=timestamp()))
+    else:
+        connection.execute(update(staged_artifacts).values(encode_origin="sample", encode_command_json='["ffmpeg","-c:v","libx265"]'))
+    affected = output_kind == "library" and input_codec == "hevc"
+    assert load_source_evidence(connection, history["id"]).traits["cadence_analysis"].tier == ("unknown" if affected else "probable")
+    restore_published_source_evidence(connection, apply=True)
+    corrections = connection.execute(select(source_admissions).where(source_admissions.c.supersedes_id == admission["admission_id"])).mappings().all()
+    assert len(corrections) == int(affected)
+    if affected:
+        assert corrections[0]["tier"] == "unknown"
+        assert json.loads(corrections[0]["checks_json"])["reason"] == "historical_output_conflict"
+    else:
+        assert load_source_evidence(connection, history["id"]).traits == original.traits
+
+
+@pytest.mark.parametrize("change", ["revision", "sample", "size"])
+def test_finished_encode_checks_identity_instead_of_revision(connection: DBClient, tmp_path: Path, change: str) -> None:
+    history = _history(connection, tmp_path)
+    planned = connection.execute(select(library_items)).mappings().one()
+    restore_published_source_evidence(connection, apply=True)
+    if change == "sample":
+        connection.execute(update(library_items).values(content_version_fingerprint="e" * 40))
+    elif change == "size":
+        connection.execute(update(library_items).values(size_bytes=planned["size_bytes"] + 1))
+    kwargs = {"identity": {"size_bytes": 12, "sample_fingerprint": "f" * 40}, "profile": {"video_codec": "av1"},
+              "operation_key": {"input_sample": planned["content_version_fingerprint"], "input_size_bytes": planned["size_bytes"],
+                                "source_revision": planned["source_revision"]}, "recorded_at": timestamp()}
+    if change != "revision":
+        with pytest.raises(RuntimeError, match="Encode input changed"):
+            record_generated_output(connection, history["id"], **kwargs)
+        return
+    output = record_generated_output(connection, history["id"], **kwargs)
+    transition = connection.execute(select(source_transitions).where(source_transitions.c.kind == "encode")).mappings().one()
+    assert transition["after_version_id"] == output
+    assert transition["outcome"] == "committed"
+
+
+@pytest.mark.parametrize("change", ["revision", "sample", "size"])
+def test_worker_commit_checks_identity_instead_of_revision(connection: DBClient, tmp_path: Path, change: str) -> None:
+    from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_SCHEMA_VERSION, MEDIA_FINGERPRINT_TOOL_NAME, MEDIA_FINGERPRINT_TOOL_VERSION
+    history = _history(connection, tmp_path)
+    item = connection.execute(select(library_items)).mappings().one()
+    connection.execute(evidence_queue_state.insert().values(queue_name="evidence", batch_id="batch", updated_at=timestamp()))
+    connection.execute(library_item_evidence_state.insert().values(
+        library_item_id=history["id"], evidence_kind="media_fingerprint", state="analysis_required", policy_hash="policy",
+        work_batch_id="batch", work_status="running", work_source_fingerprint=item["content_version_fingerprint"],
+        worker_id="worker", updated_at=timestamp()))
+    claim = load_evidence_work_claim(connection, library_item_id=history["id"], evidence_kind="media_fingerprint")
+    assert claim is not None
+    observation = observe_file(history["path"])
+    restore_published_source_evidence(connection, apply=True)
+    if change == "sample":
+        connection.execute(update(library_items).values(content_version_fingerprint="e" * 40))
+    elif change == "size":
+        connection.execute(update(library_items).values(size_bytes=item["size_bytes"] + 1))
+    summary = {"schema_version": MEDIA_FINGERPRINT_SCHEMA_VERSION,
+               "analysis": {"sampled_frames": 120, "aggregate": {"grain": 0.5},
+                            "tool": {"name": MEDIA_FINGERPRINT_TOOL_NAME, "version": MEDIA_FINGERPRINT_TOOL_VERSION}},
+               "decision": {"status": "measured", "traits": ["grain"]}}
+    with patch("mediaforce.library.evidence_worker.open_db", return_value=nullcontext(connection)):
+        _commit_evidence_summary(_config(tmp_path), claim, summary, actual_fingerprint=claim.expected_source_fingerprint,
+                                 classification_only=False, observation={"before": observation, "after": observation})
+    expected = "completed" if change == "revision" else "failed"
+    assert connection.execute(select(library_item_evidence_state.c.work_status)).scalar_one() == expected
+    assert connection.execute(select(library_items.c.media_fingerprint_json)).scalar_one() == (json_text(summary) if change == "revision" else None)
+
+
+@pytest.mark.parametrize("occupied_archive", [False, True])
+@pytest.mark.parametrize("missing_at", ["before", "observation"])
+def test_publish_missing_source_keeps_previous_success_behavior(connection: DBClient, tmp_path: Path,
+                                                               occupied_archive: bool, missing_at: str) -> None:
+    history = _history(connection, tmp_path)
+    if missing_at == "before":
+        history["path"].unlink()
+    if occupied_archive:
+        history["archive"].parent.mkdir(parents=True)
+        history["archive"].write_bytes(b"older rollback")
+    staging = tmp_path / "ready.mkv"
+    staging.write_bytes(b"ready output")
+    connection.execute(update(staged_artifacts).values(staging_path=str(staging), promoted_at=None,
+                                                       validated_at=timestamp(), validation_json='{"passed":true}'))
+    recorded: list[tuple[str, dict[str, Any]]] = []
+    vanished = False
+
+    def observe(path: Path, **kwargs: Any) -> dict[str, Any]:
+        nonlocal vanished
+        if path == history["path"] and missing_at == "observation" and not vanished:
+            path.unlink()
+            vanished = True
+        return observe_file(path, **kwargs)
+
+    with patch("mediaforce.encoding.source_publication.observe_file", side_effect=observe):
+        published = promote_one_item(connection, _config(tmp_path), {"library_item_id": history["id"], "source_path": str(history["path"]),
+                                                               "rel_path": "tv/Show/episode.mkv", "media_root": "tv"}, force=False,
+                                 probe_media=lambda _path: _probe(), file_fingerprint=file_fingerprint, timestamp=timestamp,
+                                 record_event=lambda _connection, _item, event, details: recorded.append((event, details)),
+                                 reserve_preflight=lambda *_args, **_kwargs: ReservePreflight(
+                                     allowed=True, waiting_reason=None, required_by_volume={}))
+    assert published.read_bytes() == b"ready output"
+    assert connection.execute(select(library_items.c.status)).scalar_one() == "promoted"
+    assert history["archive"].exists() == occupied_archive
+    if occupied_archive:
+        assert history["archive"].read_bytes() == b"older rollback"
+    assert [event for event, _details in recorded] == ["promotion_completed"]
+    assert recorded[0][1]["retained_archive_backup_path"] is None
+
+
+def test_cleanup_tolerates_file_vanishing_after_enumeration(connection: DBClient, tmp_path: Path) -> None:
+    archived = _config(tmp_path).archive_root / "tv/Show/episode.mkv"
+    archived.parent.mkdir(parents=True)
+    archived.write_bytes(b"rollback")
+    observed = observe_file
+
+    def vanished(path: Path) -> dict[str, Any]:
+        path.unlink()
+        return observed(path)
+
+    with patch("mediaforce.web.runtime.archive_cleanup.open_db", return_value=nullcontext(connection)), \
+            patch("mediaforce.encoding.source_publication.observe_file", side_effect=vanished):
+        result = clear_archive_cleanup_action(_config(tmp_path))
+    assert result["ok"]
+    assert result["archive_cleanup"]["file_count"] == 0
+
+
+def test_archive_removal_queries_only_identity_candidates(connection: DBClient, tmp_path: Path) -> None:
+    archived = tmp_path / "archived"
+    archived.write_bytes(b"rollback")
+    item_id = _insert_item(connection, archived)
+    ensure_active_source_version(connection, connection.execute(select(library_items)).mappings().one())
+    version = connection.execute(select(source_versions)).mappings().one()
+    for index in range(20):
+        connection.execute(source_versions.insert().values(version_id=f"unrelated-{index}", generation_id=version["generation_id"],
+            role="unknown", size_bytes=1000 + index, sample_fingerprint="e" * 40, identity_json="{}", profile_json="{}", observed_at=timestamp()))
+    execute = connection.execute
+    with patch.object(connection, "execute", wraps=execute) as queries:
+        operations = prepare_archive_removal(connection, archived)
+    assert len(operations) == 1
+    assert queries.call_count < 10
+    assert item_id == connection.execute(select(library_items.c.id)).scalar_one()
+
+
+@pytest.mark.parametrize("reader", ["acquisition", "selection", "restore"])
+def test_global_source_evidence_scans_are_once_per_pass(connection: DBClient, tmp_path: Path, reader: str) -> None:
+    history = _history(connection, tmp_path)
+    restore_published_source_evidence(connection, apply=True)
+    original = connection.execute(select(library_items)).mappings().one()
+    for index in range(1, 5):
+        copied = {**original, "id": index + 1, "source_path": str(tmp_path / f"copy-{index}"), "rel_path": f"tv/Show/copy-{index}.mkv"}
+        connection.execute(library_items.insert().values(**copied))
+    execute = connection.execute
+    with patch.object(connection, "execute", wraps=execute) as queries:
+        if reader == "acquisition":
+            load_fingerprint_acquisition_items(connection, _config(tmp_path), "tv/Show")
+        elif reader == "selection":
+            select_candidates(connection, _config(tmp_path), statuses=[original["status"]], prefixes=[], limit=None)
+        else:
+            plan = history["plan"]
+            connection.execute(update(encode_jobs).values(manifest_indexes_json=None))
+            event = json.loads(connection.execute(select(item_events.c.details_json).where(
+                item_events.c.event_type == "encoding_completed")).scalar_one())
+            for index in range(1, 5):
+                plan["items"].append({**plan["items"][0], "library_item_id": index + 1})
+                connection.execute(staged_artifacts.insert().values(**{**history["stage"], "library_item_id": index + 1, "item_index": index,
+                                                                       "promoted_path": str(tmp_path / f"copy-{index}")}))
+                connection.execute(item_events.insert().values(library_item_id=index + 1, event_type="encoding_completed",
+                    details_json=json_text({**event, "item_index": index}), created_at=timestamp()))
+                connection.execute(item_events.insert().values(library_item_id=index + 1, event_type="originals_removed_confirmed",
+                    details_json=json_text({"archived_source_path": history["stage"]["archived_source_path"]}), created_at=timestamp()))
+            history["plan_path"].write_text(json_text(plan))
+            restore_published_source_evidence(connection)
+    statements = [str(call.args[0]) for call in queries.call_args_list if call.args and str(call.args[0]).startswith("SELECT")]
+    output_scans = [sql for sql in statements if "source_versions.role =" in sql]
+    command_scans = [sql for sql in statements if "staged_artifacts.encode_command_json" in sql and "library_item_id =" not in sql]
+    receipt_scans = [sql for sql in statements if "FROM target_production_outcomes" in sql and "library_item_id =" not in sql]
+    assert len(output_scans) <= 2
+    assert len(command_scans) <= 2
+    assert len(receipt_scans) <= 1
+
+
+def test_migration_materializes_catalog_before_same_connection_writes(connection: DBClient, tmp_path: Path) -> None:
+    migration = import_module("mediaforce.core.db_migration_scripts.versions.20261022_0027_source_evidence")
+    for index in range(3):
+        path = tmp_path / f"source-{index}"
+        path.write_bytes(b"source")
+        _insert_item(connection, path)
+    execute = connection.execute
+    reading = False
+
+    class MutationSensitiveRows:
+        def __init__(self, result: Any) -> None:
+            self.result = result
+
+        def __iter__(self) -> Iterator[Any]:
+            nonlocal reading
+            reading = True
+            try:
+                yield from self.result
+            finally:
+                reading = False
+
+        def all(self) -> list[Any]:
+            return list(self)
+
+    def guarded_execute(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        if reading:
+            raise RuntimeError("SQLite catalog cursor is still active during a same-connection write")
+        result = execute(statement, *args, **kwargs)
+        if str(statement).startswith("SELECT * FROM library_items"):
+            return SimpleNamespace(mappings=lambda: MutationSensitiveRows(result.mappings()))
+        return result
+
+    with patch.object(migration.op, "get_bind", return_value=connection), \
+            patch.object(migration.op, "execute", side_effect=connection.exec_driver_sql), \
+            patch.object(connection, "execute", side_effect=guarded_execute):
+        migration.upgrade()
+    assert connection.execute(select(func.count()).select_from(source_versions)).scalar_one() == 3
+    assert connection.execute(select(func.count()).select_from(library_items).where(library_items.c.active_source_version_id.is_not(None))).scalar_one() == 3
 
 
 def test_pending_moves_reject_late_worker_commits_and_remakes_leave_original_reads(connection: DBClient, tmp_path: Path) -> None:

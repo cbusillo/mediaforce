@@ -16,8 +16,9 @@ from mediaforce.encoding.fingerprint import (
     DEFAULT_FINGERPRINT_RANGE_COUNT,
     DEFAULT_FINGERPRINT_SAMPLE_FPS,
 )
-from mediaforce.library.evidence_state import EVIDENCE_KINDS
-from mediaforce.library.source_evidence import SourceEvidence, load_source_evidence, original_trait_summary, source_trait_coverage
+from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_CURRENT, load_library_item_evidence_states, \
+    parse_evidence_summary, project_library_item_evidence_state
+from mediaforce.library.source_evidence import SourceEvidence, load_source_evidence, load_source_evidence_context, original_trait_summary, source_trait_coverage
 from mediaforce.library.media_scopes import MediaScope
 from mediaforce.library.representatives import FINGERPRINT_DIMENSIONS, MEANINGFUL_CLUSTER_FRACTION, \
     TECHNICAL_PROFILE_DIMENSIONS, RepresentativeSelection, load_representative_candidate_rows, \
@@ -136,14 +137,16 @@ def load_fingerprint_acquisition_items(
     scope, rows = load_representative_candidate_rows(connection, config, prefix)
     if not rows:
         return scope, [], frozenset()
+    context = load_source_evidence_context(connection)
     items = [
-        _acquisition_item(row, load_source_evidence(connection, int(row["id"])))
+        _acquisition_item(row, load_source_evidence(connection, int(row["id"]), context=context),
+                          load_library_item_evidence_states(connection, int(row["id"])))
         for row in rows
     ]
     measured_source_ids = frozenset(
         stable_source_id(item)
         for item in items
-        if original_trait_summary(item, EVIDENCE_KINDS[1]) is not None
+        if _fingerprint_is_measured(item)
     )
     return scope, items, measured_source_ids
 
@@ -337,28 +340,37 @@ def replay_representative_dimensions(
 def _acquisition_item(
         row: Mapping[str, Any],
         source: SourceEvidence,
+        current_states: Mapping[str, Any],
 ) -> dict[str, Any]:
     source_payload = {"original_source_evidence": source.to_payload()}
     cadence_summary = original_trait_summary(source_payload, EVIDENCE_KINDS[0])
     fingerprint_summary = original_trait_summary(source_payload, EVIDENCE_KINDS[1])
+    profile = source.profile
+    if source.original_version_id is None:
+        profile = {**row, "source_size_bytes": row.get("size_bytes")}
+        current_summaries = [parse_evidence_summary(row.get(column)) if project_library_item_evidence_state(
+            row, kind, previous_state=current_states.get(kind),
+        ).state == EVIDENCE_STATE_CURRENT else None for kind, column in
+            ((EVIDENCE_KINDS[0], "cadence_summary_json"), (EVIDENCE_KINDS[1], "media_fingerprint_json"))]
+        cadence_summary, fingerprint_summary = current_summaries
     cadence_decision = object_dict(cadence_summary.get("decision")) if cadence_summary else {}
     fingerprint_decision = object_dict(fingerprint_summary.get("decision")) if fingerprint_summary else {}
     source_fingerprint = str(
-        source.profile.get("content_version_fingerprint")
+        profile.get("content_version_fingerprint") or profile.get("fingerprint")
         or ""
     ).strip() or None
     item = {
         "library_item_id": int(row["id"]),
-        "trait_use": "advisory-original",
+        "trait_use": "advisory-original" if source.original_version_id else "direct-input",
         "rel_path": str(row["rel_path"]),
         "source_fingerprint": source_fingerprint,
-        "source_size_bytes": int_value(source.profile.get("source_size_bytes")),
-        "video_codec": source.profile.get("video_codec"),
-        "width": source.profile.get("width"),
-        "height": source.profile.get("height"),
+        "source_size_bytes": int_value(profile.get("source_size_bytes")),
+        "video_codec": profile.get("video_codec"),
+        "width": profile.get("width"),
+        "height": profile.get("height"),
         "cadence_class": str(cadence_decision.get("classification") or "unknown"),
-        "duration_seconds": source.profile.get("duration_seconds"),
-        "audio_summary": _json_list(source.profile.get("audio_summary") or source.profile.get("audio_summary_json")),
+        "duration_seconds": profile.get("duration_seconds"),
+        "audio_summary": _json_list(profile.get("audio_summary") or profile.get("audio_summary_json")),
         **source_payload,
     }
     if fingerprint_decision:

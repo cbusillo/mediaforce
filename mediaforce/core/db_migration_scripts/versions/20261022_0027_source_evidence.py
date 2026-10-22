@@ -110,7 +110,7 @@ def upgrade() -> None:
     if "active_source_version_id" not in columns:
         op.execute("ALTER TABLE library_items ADD COLUMN active_source_version_id TEXT REFERENCES source_versions(version_id)")
         op.add_column("library_items", Column("source_revision", Integer, nullable=False, server_default="0"))
-    rows = connection.execute(text("SELECT * FROM library_items WHERE active_source_version_id IS NULL")).mappings()
+    rows = connection.execute(text("SELECT * FROM library_items WHERE active_source_version_id IS NULL")).mappings().all()
     for row in rows:
         generation_id, version_id = uuid4().hex, uuid4().hex
         recorded_at = row["updated_at"]

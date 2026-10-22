@@ -11,7 +11,7 @@ from sqlalchemy import select, update
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, source_generations, source_moves, source_transitions, source_versions
 from mediaforce.library.source_evidence import append_version, ensure_active_source_version, json_text, observe_file, \
-    pending_source_operation, version_location
+    pending_source_operation, version_location, version_locations
 
 
 def _matches(path: Path, identity: Mapping[str, Any]) -> bool:
@@ -32,8 +32,11 @@ def prepare_source_publish(connection: DBClient, item_id: int, *, source_path: P
     item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
     active = item.get("active_source_version_id")
     previous = connection.execute(select(source_versions).where(source_versions.c.version_id == active)).mappings().one_or_none()
-    source_identity = observe_file(source_path, full_digest=previous is None or not previous["sha256"])
-    if (source_identity["size_bytes"] != item["size_bytes"]
+    try:
+        source_identity = observe_file(source_path, full_digest=previous is None or not previous["sha256"])
+    except FileNotFoundError:
+        source_identity = None
+    if source_identity is not None and (source_identity["size_bytes"] != item["size_bytes"]
             or (item["content_version_fingerprint"] and source_identity["sample_fingerprint"] != item["content_version_fingerprint"])):
         raise RuntimeError("Publish input changed since the catalog snapshot")
     outputs = connection.execute(select(source_versions).where(source_versions.c.role == "output")).mappings().all()
@@ -45,7 +48,7 @@ def prepare_source_publish(connection: DBClient, item_id: int, *, source_path: P
         output_identity = observe_file(staging_path, full_digest=True)
     else:
         output_identity["sha256"] = output["sha256"]
-    archive_identity = observe_file(archive_path) if backup_path else None
+    archive_identity = observe_file(archive_path) if backup_path and source_identity is not None else None
     archive_version = None
     if archive_identity is not None:
         candidates = connection.execute(select(source_versions)).mappings().all()
@@ -57,14 +60,14 @@ def prepare_source_publish(connection: DBClient, item_id: int, *, source_path: P
     version = connection.execute(select(source_versions).where(source_versions.c.version_id == before)).mappings().one()
     generation = version["generation_id"]
     now = datetime.now(UTC).isoformat()
-    if not version["sha256"]:
+    if source_identity is not None and not version["sha256"]:
         before = append_version(connection, generation_id=generation, role=version["role"], identity=source_identity,
                                 profile=json.loads(version["profile_json"]), recorded_at=now)
         connection.execute(update(library_items).where(library_items.c.id == item_id).values(
             active_source_version_id=before, source_revision=library_items.c.source_revision + 1,
         ))
         current = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
-    else:
+    elif source_identity is not None:
         source_identity["sha256"] = version["sha256"]
     after = (output["version_id"] if output is not None and output["generation_id"] == generation else
              append_version(connection, generation_id=generation, role="output", identity=output_identity,
@@ -73,7 +76,8 @@ def prepare_source_publish(connection: DBClient, item_id: int, *, source_path: P
     connection.execute(source_transitions.insert().values(
         operation_id=operation, library_item_id=item_id, before_version_id=before, after_version_id=after,
         expected_revision=current["source_revision"], kind="publish", outcome="prepared",
-        evidence_json=json_text({"strength": "observed", "limitation": "stat and samples across journaled moves"}),
+        evidence_json=json_text({"strength": "observed", "limitation": "stat and samples across journaled moves",
+                                 "source_available": source_identity is not None}),
         recorded_at=now,
     ))
     moves: list[tuple[str, Path, Path, dict[str, Any]]] = []
@@ -86,7 +90,9 @@ def prepare_source_publish(connection: DBClient, item_id: int, *, source_path: P
         else:
             archive_id = archive_version["version_id"]
         moves.append((archive_id, archive_path, backup_path, archive_identity))
-    moves.extend(((before, source_path, archive_path, source_identity), (after, staging_path, destination_path, output_identity)))
+    if source_identity is not None:
+        moves.append((before, source_path, archive_path, source_identity))
+    moves.append((after, staging_path, destination_path, output_identity))
     for ordinal, (version_id, old, new, identity) in enumerate(moves):
         connection.execute(source_moves.insert().values(
             operation_id=operation, ordinal=ordinal, version_id=version_id, from_path=str(old), to_path=str(new),
@@ -168,12 +174,18 @@ def pending_archive_paths(connection: DBClient) -> set[Path]:
 
 
 def prepare_archive_removal(connection: DBClient, path: Path) -> list[str]:
-    observed = observe_file(path)
-    versions = connection.execute(select(source_versions)).mappings().all()
+    try:
+        observed = observe_file(path)
+    except FileNotFoundError:
+        return []
+    versions = connection.execute(select(source_versions).where(
+        source_versions.c.size_bytes == observed["size_bytes"],
+        source_versions.c.sample_fingerprint == observed["sample_fingerprint"],
+    )).mappings().all()
+    locations = version_locations(connection, versions)
     operations: list[str] = []
     for version in versions:
-        if (version_location(connection, version) != str(path) or version["size_bytes"] != observed["size_bytes"]
-                or version["sample_fingerprint"] != observed["sample_fingerprint"]):
+        if locations[version["version_id"]] != str(path):
             continue
         operation = uuid4().hex
         operations.append(operation)

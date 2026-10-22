@@ -20,7 +20,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
-from mediaforce.core.db_tables import source_transitions
+from mediaforce.core.db_tables import source_moves, source_transitions
 from mediaforce.core.process_control import run_command
 from mediaforce.core.type_defs import float_value
 from mediaforce.core.type_defs import int_value
@@ -766,6 +766,10 @@ def promote_one_item(
         connection, int(item["library_item_id"]), source_path=source_path, staging_path=staging_path,
         archive_path=archive_path, destination_path=destination_path, backup_path=archive_backup_path,
     )
+    if archive_backup_path is not None and not connection.execute(select(source_moves.c.ordinal).where(
+        source_moves.c.operation_id == operation, source_moves.c.to_path == str(archive_backup_path),
+    )).first():
+        archive_backup_path = None
     try:
         apply_source_moves(connection, operation)
 

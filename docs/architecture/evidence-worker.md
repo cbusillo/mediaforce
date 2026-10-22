@@ -138,7 +138,15 @@ not establish ancestry or unavailability.
 Imported traits keep the exact plan summary and hash, sampled input, codec-rule
 version, `historical-plan` basis and `historical-plan-sampled` binding. Measurement
 time stays unknown. Apply is idempotent; later contradictory evidence appends an
-ineligibility correction. Fresh measurements, owner admissions and catalog refresh
+ineligibility correction against the admitted input and its retained evidence.
+Later encodes and publishes of its outputs do not replace that assessment's basis,
+even without production-lineage receipts. All AV1 encoders share the same codec
+exclusion; a recorded non-AV1 library output challenges only assessments of that
+codec. Sample and test outputs do not challenge the library rule. Output checks
+are collected once for each planning or recovery pass. Items without an original
+admission keep their current profile and current measurements for acquisition;
+original-trait reads still require an eligible admission.
+Fresh measurements, owner admissions and catalog refresh
 cannot rebind or upgrade an imported measurement. Readable-source intake and
 protected owner confirmation are separate work; this command cannot create
 proven traits.
