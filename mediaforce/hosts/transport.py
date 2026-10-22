@@ -21,6 +21,21 @@ _SSH_CLIENT_FAILURE_PREFIXES = (
 )
 
 
+# On a Mac, caffeinate holds a "prevent idle sleep" assertion that ends when the shell running the
+# work exits, however it ends: success, failure, Stop, a schedule deadline or a dropped link. It
+# changes no power setting. Run from a subshell, it is not a job of the work's shell, so a bare
+# `wait` there cannot wait for it. Where caffeinate is missing, the line does nothing.
+_KEEP_AWAKE_SHELL_LINE = (
+    'if command -v caffeinate >/dev/null 2>&1; then '
+    '(caffeinate -i -w "$$" </dev/null >/dev/null 2>&1 &); fi'
+)
+
+
+def keep_awake_while_running(script: str) -> str:
+    """Keep the computer from idle-sleeping for as long as the shell running ``script`` lives."""
+    return f"{_KEEP_AWAKE_SHELL_LINE}\n{script}"
+
+
 # Refusals that a later try cannot fix. They win over any drop line in the same output, because a
 # failed jump-host login is often followed by the connection closing.
 SSH_ACCESS_REFUSED_MARKERS = ("permission denied", "host key verification failed")
@@ -165,6 +180,10 @@ def run_remote_command(
     deadline = managed_schedule_close_deadline(host, process_controller)
     if deadline is not None:
         script = guard_shell_script_for_schedule_deadline(script, deadline)
+    if wake_before_connect:
+        # Work worth waking a computer for is worth keeping it awake for; probes that leave a
+        # sleeping computer asleep also let it sleep.
+        script = keep_awake_while_running(script)
     remote_kwargs: dict[str, Any] = {
         "input_text": input_text,
         "timeout": timeout,

@@ -75,7 +75,8 @@ across all claims and preparation in one scheduler pass.
    larger than the source, quality-search samples and a fixed margin. This
    worker check remains necessary if space changes after scheduler admission.
 3. Open a keeper connection that creates `.mediaforce-staged-<id>` and records
-   its process id.
+   its process id. On a Mac host it also keeps the computer from idle-sleeping
+   until the keeper ends.
 4. Copy the source over SSH while hashing it, then compare the host's SHA-256.
 5. Run the quality search on the host with its temp directory inside the scratch
    directory.
