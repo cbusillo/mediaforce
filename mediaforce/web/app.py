@@ -104,7 +104,7 @@ from mediaforce.library.candidate_selection import CandidateDecision, encode_can
     scope_lifecycle_payload_from_decisions, workflow_eligibility
 from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.hosts.types import HostSetupResult
-from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.encoding.audio_quality import check_sample_audio
 from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.quality import quality_toolchain_identity, run_sample_encode, select_quality_metric
@@ -212,12 +212,12 @@ from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEA
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
 from mediaforce.web.runtime.episode_progress import folder_episodes_payload
 from mediaforce.web.runtime.sample_history import sample_history_payload
-from mediaforce.web.runtime.encode_runtime import release_host_cooldowns, sync_encode_job_parent, \
-    sweep_stopped_remote_encodes
+from mediaforce.web.runtime.encode_runtime import ControllerShutdownCancelledError, mark_host_cooldowns, \
+    release_host_cooldowns, sync_encode_job_parent, sweep_stopped_remote_encodes
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle, run_supervised_worker_loop
-from mediaforce.web.runtime.host_recovery import process_host_recovery_once
+from mediaforce.web.runtime.host_recovery import process_host_recovery_once, retry_host_connection
 from mediaforce.web.runtime.host_status import refresh_current_machine_host_statuses
 from mediaforce.web.runtime.recovery_alerts import recovery_alerts, record_recovery_alerts
 from mediaforce.web.runtime.controller_storage_recovery import (
@@ -659,14 +659,14 @@ def create_app(
                 shutdown_event.set()
                 for controller in _active_calibration_process_controllers():
                     controller.cancel()
-                _cancel_active_encode_processes()
+                _cancel_encode_processes_for_shutdown()
                 _cancel_active_scan_processes()
                 if background_runtime is not None:
                     background_runtime.stop()
                     background_runtime.join()
                 for controller in _active_calibration_process_controllers():
                     controller.cancel()
-                _cancel_active_encode_processes()
+                _cancel_encode_processes_for_shutdown()
                 _cancel_active_scan_processes()
                 _wait_for_calibration_submissions()
                 _wait_for_encode_queue_threads()
@@ -1115,6 +1115,12 @@ def create_app(
         _release_ready_host_cooldowns(host_key)
         return _host_action_result(HostSetupResult(ok=True, message=message))
 
+    def _retry_host_connection_action(host_key: str) -> dict[str, Any]:
+        ok, message = retry_host_connection(config, host_key)
+        if ok:
+            _release_ready_host_cooldowns(host_key)
+        return {"ok": ok, "message": message, "kind": "success" if ok else "error"}
+
     def _reset_host_trust_action(host_key: str) -> dict[str, Any]:
         nonlocal config
         result = reset_remote_host_trust(config, host_key)
@@ -1180,6 +1186,7 @@ def create_app(
         start_host_action=_start_host_action,
         prepare_host_action=_prepare_host_action,
         reset_host_trust_action=_reset_host_trust_action,
+        retry_host_connection_action=_retry_host_connection_action,
     )
 
     def _operator_work_payload(
@@ -3231,7 +3238,8 @@ def _host_runtime_rows(
         collect_statuses: Any | None = None,
         now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    return host_runtime_rows(
+    current_time = now or datetime.now(UTC)
+    rows = host_runtime_rows(
         connection,
         config,
         safe_collect_statuses=collect_statuses or _safe_collect_host_statuses,
@@ -3242,8 +3250,9 @@ def _host_runtime_rows(
         format_eta_seconds=_format_eta_seconds,
         always_schedule_profile=ALWAYS_SCHEDULE_PROFILE,
         default_host_schedule_profile=DEFAULT_HOST_SCHEDULE_PROFILE,
-        now=now,
+        now=current_time,
     )
+    return mark_host_cooldowns(rows, connection, parse_iso=_parse_iso, now=current_time)
 
 
 def evidence_host_rows(
@@ -5196,10 +5205,16 @@ def _wait_for_encode_queue_threads() -> None:
             ENCODE_QUEUE_THREADS_CONDITION.wait()
 
 
-def _cancel_active_encode_processes() -> None:
+def _cancel_active_encode_processes(error: ProcessCancelledError | None = None) -> None:
     for controller in _active_encode_process_controllers():
-        controller.cancel()
-    ENCODE_QUEUE_PROCESS.cancel()
+        controller.cancel(error)
+    ENCODE_QUEUE_PROCESS.cancel(error)
+
+
+def _cancel_encode_processes_for_shutdown() -> None:
+    # The next start queues these episodes again once their earlier encodes are confirmed ended;
+    # an owner's Stop uses the plain cancel and stays stopped.
+    _cancel_active_encode_processes(ControllerShutdownCancelledError("Mediaforce is shutting down."))
 
 
 def _dispatch_encode_job(*, config_path: Path, job_id: str) -> None:

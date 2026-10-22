@@ -9,6 +9,7 @@ import time
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.hosts.config import _host_supports_capability, _ssh_lookup_host, host_media_access_for_host, \
     remote_shell_path_export_line, stream_host_has_remote_source_roots
+from mediaforce.hosts.transport import keep_awake_while_running
 from mediaforce.hosts.types import HostSetupResult, HostStatus
 
 
@@ -133,7 +134,8 @@ def _finish_remote_host_prepare(
             host,
             "sh",
             "-lc",
-            "\n".join(remote_commands),
+            # Homebrew installs can run for many minutes.
+            keep_awake_while_running("\n".join(remote_commands)),
             timeout=900,
         )
     except Exception as exc:
@@ -352,7 +354,7 @@ def _wait_for_remote_xcode_install(
         time.sleep(poll_interval_seconds)
 
     return HostSetupResult(ok=False, message="Waiting for Xcode Command Line Tools to finish on the remote Mac.",
-                           detail="The installer was requested. Finish it in the remote Mac's GUI; host preparation will continue automatically if it completes before this wait window ends, otherwise click Prepare Host again.",
+                           detail="The installer was requested. Finish it in the remote Mac's GUI; host preparation will continue automatically if it completes before this wait window ends, otherwise use Set up computer again.",
                            performed_steps=[requested_step])
 
 
@@ -551,7 +553,8 @@ def _bootstrap_remote_macos(
         "-s",
         identity_file=private_key,
         timeout=1800,
-        input_text="\n".join(remote_lines),
+        # Installing Homebrew can run for many minutes.
+        input_text=keep_awake_while_running("\n".join(remote_lines)),
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or None

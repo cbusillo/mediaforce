@@ -30,6 +30,7 @@ from mediaforce.web.runtime.scratch_reservations import calibration_scratch_rese
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
+from mediaforce.hosts.transport import SSH_ACCESS_REFUSED_MARKERS, ssh_host_unreachable
 from mediaforce.core.db import DBClient, is_database_busy_failure, open_db
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import calibration_jobs
@@ -37,8 +38,8 @@ from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
-from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, list_child_encode_jobs, \
-    load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
+from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, \
+    list_child_encode_jobs, load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
 from mediaforce.core.process_control import (
     ManagedProcessController,
     ProcessCancelledError,
@@ -58,9 +59,9 @@ from mediaforce.encoding.staged_host import StagedScratchError, host_scratch_roo
 from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.cadence import CadenceResolutionError
 from mediaforce.encoding.free_space import ReserveInputError
-from mediaforce.encoding.staging import FinishedOutputNotVisibleError, StagedOutputHeldForReviewError, \
-    UnreadableEncodeOutputError, partial_output_path, safe_unlink
-from mediaforce.encoding.remote_cleanup import end_remote_output_writers
+from mediaforce.encoding.staging import EncodeConnectionLostError, FinishedOutputNotVisibleError, \
+    StagedOutputHeldForReviewError, UnreadableEncodeOutputError, partial_output_path, safe_unlink
+from mediaforce.encoding.remote_cleanup import RemoteHostUnreachableError, end_remote_output_writers
 from mediaforce.encoding.dispatch_coordination import STANDALONE_CLI_ENCODE_ORIGINS, locked_encode_dispatch as _locked_encode_dispatch
 from mediaforce.encoding.helpers import resolve_item_staging_path
 from mediaforce.encoding.streams import StreamPlanIdentityError
@@ -101,12 +102,118 @@ class _StagingPathCleanupOutcome(StrEnum):
 class _StagingPathCleanupResult:
     outcome: _StagingPathCleanupOutcome
     detail: str | None = None
+    # The computer that holds the file did not answer, for example because it is asleep.
+    host_unreachable: bool = False
+    # The computer answered, but refused the sign-in or could not confirm the file is free.
+    check_failed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class _EncodeRetryArtifactCleanupResult:
     outcome: _EncodeRetryArtifactCleanupOutcome
     detail: str | None = None
+    # Deferred only because the computer that made the unfinished file did not answer.
+    waiting_for_computer: bool = False
+    # Deferred because that computer answered but its check did not get through; waiting will not fix it.
+    check_failed: bool = False
+
+
+class _CleanupOwnershipDeferral(RuntimeError):
+    """Mediaforce's own records say the file is in use again; the computer itself was not at fault."""
+
+
+class EncodeRetryWaitsForComputerError(HTTPException):
+    """An owner's retry is refused only because the computer that made the unfinished file did not answer.
+
+    A caller that can keep the retry pending lets the queue finish it once that computer is back.
+    """
+
+    def __init__(self, host: Mapping[str, Any]) -> None:
+        self.host = dict(host)
+        super().__init__(status_code=409, detail=encode_retry_refused_for_computer_message(self.host))
+
+
+# Progress key naming the computer a retry waits for, so the season lists that wait by computer.
+WAITING_FOR_COMPUTER_PROGRESS_KEY = "waiting_for_computer"
+# Progress key marking an owner's retry the queue finishes once its computer is back. It outlives
+# temporary waits and goes only when cleanup gets through or the retry asks the owner.
+PENDING_OWNER_RETRY_PROGRESS_KEY = "pending_owner_retry"
+
+
+def _computer_label(host: Mapping[str, Any]) -> str:
+    return str(host.get("label") or host.get("key") or host.get("host") or "").strip() or "the computer that made it"
+
+
+def encode_retry_waiting_for_computer_reason(host: Mapping[str, Any]) -> str:
+    """Why a retried episode waits: its earlier computer must answer before its unfinished file is removed."""
+    label = _computer_label(host)
+    return (
+        f"Waiting for {label} to be available, such as in its next work window, to remove the unfinished "
+        f"file it left. It is made again then, with no need to retry it."
+    )
+
+
+def owner_retry_waiting_for_computer_fields(host: Mapping[str, Any], *, now_iso: str) -> dict[str, Any]:
+    """A retried episode's queue fields while it waits for the computer holding its unfinished file.
+
+    The queue's retry pass removes that file once the computer answers, waking it only inside its
+    work window, and only then queues the episode.
+    """
+    return {
+        "status": "retry_backoff",
+        "host": dict(host),
+        "retry_not_before": now_iso,
+        "waiting_reason": encode_retry_waiting_for_computer_reason(host),
+        "progress": {WAITING_FOR_COMPUTER_PROGRESS_KEY: _computer_label(host), PENDING_OWNER_RETRY_PROGRESS_KEY: True},
+    }
+
+
+def _pending_retry_check_failed_message(host: Mapping[str, Any], detail: str | None) -> str:
+    """Why a retry that waited for its computer now needs the owner: the computer answered but the check failed."""
+    label = _computer_label(host)
+    if any(marker in (detail or "").lower() for marker in SSH_ACCESS_REFUSED_MARKERS):
+        lead = (
+            f"{label} is back but refused Mediaforce's sign-in, so the unfinished file it left could not be "
+            f"checked. Fix the sign-in on {label}, then retry this episode."
+        )
+    else:
+        lead = (
+            f"{label} is back but Mediaforce could not confirm its earlier encode ended, so the unfinished "
+            f"file it left was kept. Check {label}, then retry this episode."
+        )
+    return f"{lead} Details: {detail}" if detail else lead
+
+
+def _deferred_cleanup_result(
+        results: list[_StagingPathCleanupResult], host: Mapping[str, Any], deps: "EncodeQueueRuntimeDeps",
+        *, fallback_detail: str | None = None,
+) -> _EncodeRetryArtifactCleanupResult:
+    """One deferred result for these file checks: waiting only when the computer did not answer at all."""
+    reasons = "; ".join(result.detail for result in results if result.detail)
+    if results and all(result.host_unreachable for result in results):
+        # The owner reads which computer it waits for; the SSH text is for diagnosis.
+        deps.logger.info("Retry cleanup is waiting for its computer to answer: %s", reasons)
+        return _EncodeRetryArtifactCleanupResult(
+            _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
+            detail=encode_retry_waiting_for_computer_reason(host),
+            waiting_for_computer=True,
+        )
+    detail = reasons or None
+    if fallback_detail is not None:
+        detail = fallback_detail + (f" Details: {reasons}" if reasons else "")
+    return _EncodeRetryArtifactCleanupResult(
+        _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
+        detail=detail,
+        check_failed=any(result.check_failed for result in results),
+    )
+
+
+def encode_retry_refused_for_computer_message(host: Mapping[str, Any]) -> str:
+    label = _computer_label(host)
+    return (
+        f"Waiting for {label} to be available, such as in its next work window, to remove the unfinished "
+        f"file it left. Retry this episode once {label} is available."
+    )
 
 
 @dataclass(slots=True)
@@ -278,19 +385,35 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
         return
     _, active_paths = active
     failed_hosts: dict[str, str] = {}
+    # Stop runs this sweep too: an episode a restart had stopped then stays stopped for the owner.
+    owner_stop_requested = bool(load_queue_state(connection).get("stop_requested"))
     for row in rows:
         job = load_encode_job(connection, str(row["job_id"]))
         if job is None:
             continue
+        restart_stop = job["status"] == "stopped" and job.get("terminal_reason") == CONTROLLER_RESTART_STOP_REASON
+        if restart_stop and owner_stop_requested:
+            snapshot = stable_json_hash(job)
+            job["terminal_reason"] = None
+            reloaded = load_encode_job(connection, str(row["job_id"])) if _save_swept_job(
+                connection, job, snapshot, deps) else None
+            if reloaded is None:
+                continue
+            job, restart_stop = reloaded, False
         snapshot = stable_json_hash(job)
         host = object_dict(job.get("host"))
         host_key = str(host.get("host") or host.get("key") or stable_json_hash(host))
         progress = object_dict(job.get("progress"))
         if execution_mode_for_host(host) != "ssh" or host_media_access_for_host(host) == "stream":
+            if not restart_stop:
+                continue
+            _settle_restart_stop_without_remote_writer(connection, job, snapshot, deps)
             continue
+        selected_items: list[Any] = []
         try:
             items = object_list(json.loads(Path(job["manifest_path"]).read_text()).get("items"))
             indexes = _manifest_indexes_for_job(job, [object_dict(item) for item in items])
+            selected_items = [items[index] for index in indexes]
             receipt = stable_json_hash({
                 "job_id": job["job_id"], "started_at": job.get("started_at"),
                 "attempt_count": job.get("attempt_count"), "host": host,
@@ -335,14 +458,27 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
                     continue
         except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError, subprocess.SubprocessError) as exc:
             message = f"Waiting to end its earlier remote encode before making this file again. {exc}"
-            if job["status"] == "stopped":
-                job["error"] = f"Stopped; {message}"
+            if restart_stop:
+                # Ask once and wait: an encode that may still be writing is never started again blindly.
+                episode, host_label = _restart_stop_names(job, selected_items)
+                job["error"] = _restart_stop_unconfirmed_message(episode, host_label)
+                progress["restart_cleanup_detail"] = str(exc)[:2000]
+                job["progress"] = progress
+            elif job["status"] == "stopped":
+                job["error"] = f"{STOPPED_CLEANUP_PENDING_MESSAGE} {exc}"
             else:
                 job["waiting_reason"] = message
         else:
             progress["remote_cleanup_verified"] = receipt
+            progress.pop("restart_cleanup_detail", None)
             job["progress"] = progress
-            if job["status"] == "stopped":
+            if restart_stop:
+                if int_value(job.get("attempt_count")) < deps.encode_job_max_attempts:
+                    _requeue_restart_stopped_job(job, deps)
+                else:
+                    job["error"] = _restart_stop_last_attempt_message(_restart_stop_names(job, selected_items)[0])
+                    progress["restart_stop_last_attempt"] = True
+            elif job["status"] == "stopped":
                 job["error"] = "Encode queue job was stopped; its remote processes have ended."
             else:
                 job["waiting_reason"] = None
@@ -356,6 +492,46 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
         save_encode_job(connection, job)
         sync_encode_job_parent(connection, job, deps)
         connection.commit()
+
+
+def _settle_restart_stop_without_remote_writer(
+        connection: DBClient, job: dict[str, Any], snapshot: str, deps: EncodeQueueRuntimeDeps,
+) -> None:
+    """Requeue or ask about a restart-stopped child whose output no remote encoder wrote.
+
+    A streamed encode's output is written by the Mediaforce process that shut down, so that writer
+    has ended. A local encoder was that process's own child, which a new process cannot confirm ended.
+    """
+    episode, host_label = _restart_stop_names(job)
+    if execution_mode_for_host(object_dict(job.get("host"))) == "ssh":
+        if int_value(job.get("attempt_count")) < deps.encode_job_max_attempts:
+            _requeue_restart_stopped_job(job, deps)
+        else:
+            job["error"] = _restart_stop_last_attempt_message(episode)
+            job["progress"] = {**object_dict(job.get("progress")), "restart_stop_last_attempt": True}
+    else:
+        job["error"] = _restart_stop_unconfirmed_message(episode, host_label)
+    _save_swept_job(connection, job, snapshot, deps)
+
+
+def _save_swept_job(
+        connection: DBClient, job: dict[str, Any], snapshot: str, deps: EncodeQueueRuntimeDeps,
+) -> bool:
+    """Save a sweep's change unless the job changed meanwhile; True when the job now holds `job`."""
+    connection.commit()
+    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    current = load_encode_job(connection, str(job["job_id"]))
+    if current is None or stable_json_hash(current) != snapshot:
+        connection.rollback()
+        return False
+    if current == job:
+        connection.rollback()
+        return True
+    job["updated_at"] = deps.now_iso()
+    save_encode_job(connection, job)
+    sync_encode_job_parent(connection, job, deps)
+    connection.commit()
+    return True
 
 
 def reconcile_encode_jobs(
@@ -485,12 +661,35 @@ def reconcile_encode_jobs(
                 ),
             )
             continue
+        pending_owner_retry = bool(object_dict(payload.get("progress")).get(PENDING_OWNER_RETRY_PROGRESS_KEY))
+        if (cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED
+                and cleanup_outcome.check_failed and pending_owner_retry):
+            # The computer is back, but its check failed; waiting longer cannot fix that, so the owner hears why.
+            progress = object_dict(payload.get("progress"))
+            progress.pop(WAITING_FOR_COMPUTER_PROGRESS_KEY, None)
+            progress.pop(PENDING_OWNER_RETRY_PROGRESS_KEY, None)
+            payload["progress"] = progress
+            transition_encode_job_failure(
+                connection,
+                config,
+                payload,
+                deps,
+                failure_kind="deterministic",
+                error_message=_pending_retry_check_failed_message(
+                    object_dict(payload.get("host")), cleanup_outcome.detail,
+                ),
+            )
+            continue
         if cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED:
             # The computer that holds the unfinished file cannot be reached. Each miss doubles the
             # wait, up to the retry cap, so an offline computer is not asked every minute forever.
             progress = object_dict(payload.get("progress"))
             deferrals = int_value(progress.get("cleanup_deferrals")) + 1
             progress["cleanup_deferrals"] = deferrals
+            if cleanup_outcome.waiting_for_computer:
+                progress[WAITING_FOR_COMPUTER_PROGRESS_KEY] = _computer_label(object_dict(payload.get("host")))
+            else:
+                progress.pop(WAITING_FOR_COMPUTER_PROGRESS_KEY, None)
             retry_delay = _encode_job_retry_delay_seconds(deferrals, deps)
             retry_not_before = (now + timedelta(seconds=retry_delay)).isoformat(timespec="seconds")
             host_label = str(object_dict(payload.get("host")).get("label") or "the computer that made it").strip()
@@ -499,7 +698,8 @@ def reconcile_encode_jobs(
                     "progress": progress,
                     "retry_not_before": retry_not_before,
                     "waiting_reason": (
-                        f"Waiting to reach {host_label} to remove an unfinished file it left; "
+                        cleanup_outcome.detail if cleanup_outcome.waiting_for_computer
+                        else f"Waiting to reach {host_label} to remove an unfinished file it left; "
                         f"next try at {retry_not_before}"
                     ),
                     "updated_at": deps.now_iso(),
@@ -524,6 +724,8 @@ def reconcile_encode_jobs(
         progress = object_dict(payload.get("progress"))
         # The cleanup got through, so a later outage starts its backoff from the beginning.
         progress.pop("cleanup_deferrals", None)
+        progress.pop(WAITING_FOR_COMPUTER_PROGRESS_KEY, None)
+        progress.pop(PENDING_OWNER_RETRY_PROGRESS_KEY, None)
         payload.update(
             {
                 "status": "queued",
@@ -552,6 +754,70 @@ STALE_LEASE_RECLAIM_MESSAGE = "Encode queue job stopped heartbeating and was rec
 
 class ReclaimCancelledError(ProcessCancelledError):
     """The lease reclaim ended this worker; the job retries instead of stopping for the owner."""
+
+
+class ControllerShutdownCancelledError(ProcessCancelledError):
+    """Mediaforce itself is shutting down; the owner did not ask for this stop."""
+
+
+# A child stopped only because Mediaforce shut down keeps this terminal reason until the next
+# start confirms its earlier encode ended and queues it again. An owner's Stop never sets it.
+CONTROLLER_RESTART_STOP_REASON = "controller_restart"
+# An owner's Stop is final until the owner retries the episode, even while its cleanup is unfinished.
+STOPPED_CLEANUP_PENDING_MESSAGE = (
+    "Stopped. It stays stopped until you retry it; before it runs again, its earlier encode is ended "
+    "and its unfinished file removed."
+)
+CONTROLLER_RESTART_REQUEUE_REASON = "Queued again after Mediaforce restarted; removing its unfinished file first."
+
+
+def _restart_stop_names(job: Mapping[str, Any], items: list[Any] | None = None) -> tuple[str, str]:
+    """The episode and the computer an owner-facing restart message names."""
+    host_label = str(object_dict(job.get("host")).get("label") or "").strip() or "the computer that was encoding it"
+    names = [
+        Path(str(object_dict(item).get("rel_path") or "")).stem
+        for item in (items or [])
+        if str(object_dict(item).get("rel_path") or "").strip()
+    ]
+    if not names:
+        current = str(object_dict(job.get("progress")).get("current_item_rel_path") or "").strip()
+        names = [Path(current).stem] if current else []
+    return (", ".join(names) or "this file"), host_label
+
+
+def _restart_stop_unconfirmed_message(episode: str, host_label: str) -> str:
+    return (
+        f"Stopped when Mediaforce restarted. Mediaforce could not confirm that the earlier encode of "
+        f"{episode} on {host_label} has ended, so it will not start it again by itself. "
+        f"Check {host_label}, then retry this episode."
+    )
+
+
+def _restart_stop_last_attempt_message(episode: str) -> str:
+    return (
+        f"Stopped when Mediaforce restarted, during the last automatic attempt at {episode}. "
+        f"Its earlier encode has ended; retry this episode to make it again."
+    )
+
+
+def _requeue_restart_stopped_job(job: dict[str, Any], deps: EncodeQueueRuntimeDeps) -> None:
+    """Send a restart-stopped child back through retry cleanup, which removes its unfinished file first.
+
+    The attempt it was on stays counted, so restarts during an episode still end at the attempt cap.
+    """
+    now_iso = deps.now_iso()
+    job.update(
+        {
+            "status": "retry_backoff",
+            "finished_at": None,
+            "retry_not_before": now_iso,
+            "waiting_reason": CONTROLLER_RESTART_REQUEUE_REASON,
+            "terminal_reason": None,
+            "last_failure_kind": "worker_restart",
+            "last_failure_at": now_iso,
+            "error": None,
+        }
+    )
 
 
 def _renew_lease_for_live_worker(
@@ -982,23 +1248,42 @@ def _remove_remote_stale_staging_path(
             f"if [ $status -eq 0 ] && [ -d {quoted_parent} ]; then "
             f"rmdir {quoted_parent} >/dev/null 2>&1 || true; fi; exit $status"
         )
-    try:
-        end_remote_output_writers(host, path, run_command=run_remote_command, ownership_check=ownership_check)
-        if ownership_check is not None:
+    def check_ownership() -> None:
+        if ownership_check is None:
+            return
+        try:
             ownership_check()
+        except RuntimeError as exc:
+            raise _CleanupOwnershipDeferral(str(exc)) from exc
+
+    try:
+        end_remote_output_writers(host, path, run_command=run_remote_command, ownership_check=check_ownership)
+        check_ownership()
         result = run_remote_command(host, ["sh", "-lc", script], timeout=10, wake_before_connect=False)
+    except RemoteHostUnreachableError as exc:
+        return _StagingPathCleanupResult(
+            _StagingPathCleanupOutcome.CLEANUP_DEFERRED, detail=f"{path}: {exc}", host_unreachable=True,
+        )
+    except _CleanupOwnershipDeferral as exc:
+        return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANUP_DEFERRED, detail=f"{path}: {exc}")
     except Exception as exc:
+        # The computer answered (or hung), but did not confirm the file is free.
         return _StagingPathCleanupResult(
             _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
             detail=f"{path}: {exc}",
+            check_failed=True,
         )
     if result.returncode == 0:
         return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANED)
     detail = (result.stderr or result.stdout or f"remote cleanup exited with status {result.returncode}").strip()
-    if result.returncode == 255:
+    # 255 is the SSH client's own failure; a negative status means the client was killed by a signal.
+    if result.returncode == 255 or result.returncode < 0:
+        unreachable = ssh_host_unreachable(result.returncode, result.stderr)
         return _StagingPathCleanupResult(
             _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
             detail=f"{path}: {detail}",
+            host_unreachable=unreachable,
+            check_failed=not unreachable,
         )
     return _StagingPathCleanupResult(
         _StagingPathCleanupOutcome.CLEANUP_FAILED,
@@ -1084,6 +1369,9 @@ def aggregate_encode_parent_job(
     aggregate_speed = 0.0
     aggregate_fps = 0.0
     recoverable_item_count = 0
+    left_out_duration_seconds = 0.0
+    left_out_needs_attention_item_count = 0
+    left_out_failed_item_count = 0
     speed_reporting_children = 0
     running_progress_states: list[str] = []
     running_schedule_deadlines: list[tuple[datetime, str]] = []
@@ -1120,9 +1408,17 @@ def aggregate_encode_parent_job(
         total_item_count += child_total_item_count
         completed_duration_seconds += child_shown_duration_seconds
         completed_item_count += min(child_completed_item_count, child_total_item_count)
-        remaining_duration_seconds += max(child_total_duration_seconds - child_completed_duration_seconds, 0.0)
+        child_remaining_duration_seconds = max(child_total_duration_seconds - child_completed_duration_seconds, 0.0)
         if str(child.get("status") or "") in {"needs_attention", "failed", "stopped"}:
             recoverable_item_count += child_total_item_count
+            # Nothing runs this part until someone acts, so the estimate leaves it out and says so.
+            left_out_duration_seconds += child_remaining_duration_seconds
+            if str(child.get("status") or "") == "needs_attention":
+                left_out_needs_attention_item_count += child_total_item_count
+            else:
+                left_out_failed_item_count += child_total_item_count
+        else:
+            remaining_duration_seconds += child_remaining_duration_seconds
         speed = float_value(progress.get("speed"))
         child_progress_state = str(progress.get("progress_state") or "").strip().lower()
         if str(child.get("status") or "") == "running" and child_progress_state:
@@ -1188,6 +1484,9 @@ def aggregate_encode_parent_job(
         "completed_duration_seconds": completed_duration_seconds,
         "overall_completed_duration_seconds": completed_duration_seconds,
         "remaining_duration_seconds": max(remaining_duration_seconds, 0.0),
+        "left_out_duration_seconds": left_out_duration_seconds,
+        "left_out_needs_attention_item_count": left_out_needs_attention_item_count,
+        "left_out_failed_item_count": left_out_failed_item_count,
         "percent_complete": percent_complete,
         "speed": aggregate_speed or None,
         "eta_speed": eta_speed or None,
@@ -1247,7 +1546,12 @@ def aggregate_encode_parent_job(
         if terminal_reason:
             break
     error = None
-    for child in attention_children + failed_children + stopped_children:
+    # A stopped episode in a season that is still working is listed in the unfinished breakdown;
+    # its "stopped" message would read as the whole season having stopped.
+    error_children = attention_children + failed_children
+    if status not in ACTIVE_ENCODE_JOB_STATUSES:
+        error_children += stopped_children
+    for child in error_children:
         error = str(child.get("error") or "").strip() or None
         if error:
             break
@@ -1328,7 +1632,17 @@ def unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str, bool]:
                 return reason, label, needs_owner
         return f"waiting:{waiting_reason}", waiting_reason, False
     if status == "retry_backoff":
+        computer = str(object_dict(child.get("progress")).get(WAITING_FOR_COMPUTER_PROGRESS_KEY) or "").strip()
+        if computer:
+            return f"waiting_for_computer:{computer}", f"waiting for {computer} to be available", False
         return "retrying", _UNFINISHED_REASON_LABELS["retrying"], False
+    if status == "stopped" and child.get("terminal_reason") == CONTROLLER_RESTART_STOP_REASON:
+        # Still stopped after a restart: its earlier encode is not confirmed ended, or it was on its
+        # last attempt. Each computer gets its own line so the owner knows where to look.
+        if object_dict(child.get("progress")).get("restart_stop_last_attempt"):
+            return "restart_stopped_last_attempt", "stopped by a restart on its last try", True
+        host_label = _restart_stop_names(child)[1]
+        return f"restart_stopped:{host_label}", f"stopped by a restart; check {host_label}", True
     reason = "stopped" if status == "stopped" else _attention_child_reason(child)
     return reason, _UNFINISHED_REASON_LABELS[reason], reason != "size_exception_declined"
 
@@ -2676,6 +2990,44 @@ def _globally_backed_off_encode_hosts(
 ) -> dict[str, dict[str, Any]]:
     if connection is None:
         return {}
+    return backed_off_encode_hosts(connection, parse_iso=deps.parse_iso, now=now)
+
+
+def mark_host_cooldowns(
+        host_rows: list[dict[str, Any]],
+        connection: DBClient,
+        *,
+        parse_iso: Callable[[Any], datetime | None],
+        now: datetime,
+) -> list[dict[str, Any]]:
+    """Each computer row says when the queue takes it back after repeated failures, or None.
+
+    A computer cooling down and running nothing reads `cooldown`, not idle: it is held out on purpose.
+    """
+    blocked_hosts = list(backed_off_encode_hosts(connection, parse_iso=parse_iso, now=now).values())
+    for row in host_rows:
+        row_tokens = _host_identity_tokens({"key": row.get("key"), "host": row.get("host")})
+        cooldown_until = max(
+            (
+                blocked["cooldown_until"]
+                for blocked in blocked_hosts
+                if _host_identity_tokens(blocked) & row_tokens
+            ),
+            default=None,
+        )
+        row["cooldown_until"] = cooldown_until.isoformat(timespec="seconds") if cooldown_until else None
+        if cooldown_until is not None and not int_value(row.get("active_encode_count")):
+            row["active_flag"] = "cooldown"
+    return host_rows
+
+
+def backed_off_encode_hosts(
+        connection: DBClient,
+        *,
+        parse_iso: Callable[[Any], datetime | None],
+        now: datetime,
+) -> dict[str, dict[str, Any]]:
+    """Computers the queue holds out after repeated failures, each with when it takes them back."""
     rows = connection.execute(
         select(
             encode_jobs.c.last_host_json,
@@ -2689,7 +3041,7 @@ def _globally_backed_off_encode_hosts(
     ).mappings().fetchall()
     host_failures: list[dict[str, Any]] = []
     for row in rows:
-        cooldown_until = deps.parse_iso(row["host_cooldown_until"])
+        cooldown_until = parse_iso(row["host_cooldown_until"])
         if cooldown_until is None or cooldown_until <= now:
             continue
         host_payload = _load_quarantine_host_payload(row["last_host_json"])
@@ -3253,6 +3605,7 @@ def _duration_aware_encode_waiting_reason(
     if not estimate_items or not encode_hosts:
         return None
     best_estimate_seconds: int | None = None
+    best_estimate_host = ""
     longest_window_seconds = 0.0
     longest_window_host = ""
     longest_window_estimate_seconds = 0
@@ -3261,6 +3614,7 @@ def _duration_aware_encode_waiting_reason(
         estimate = estimate_encode_job_duration(estimate_items, host, duration_samples)
         if best_estimate_seconds is None or estimate.total_seconds < best_estimate_seconds:
             best_estimate_seconds = estimate.total_seconds
+            best_estimate_host = _blocked_host_display_name(host)
         policy = deps.schedule_profile_policy_for_host(config, host)
         max_window_seconds = deps.max_encode_schedule_window_seconds(
             policy,
@@ -3276,20 +3630,30 @@ def _duration_aware_encode_waiting_reason(
             longest_window_estimate_seconds = estimate.total_seconds
         if estimate.total_seconds <= max_window_seconds:
             fits_configured_window = True
+    # Each sentence names the computer whose estimate it quotes: estimates differ by computer.
     estimate_copy = _format_estimated_duration(best_estimate_seconds or 0)
     if not fits_configured_window:
-        impossible_estimate_copy = _format_estimated_duration(
-            longest_window_estimate_seconds or best_estimate_seconds or 0
-        )
+        if longest_window_estimate_seconds:
+            impossible_estimate_seconds, estimate_host = longest_window_estimate_seconds, longest_window_host
+        else:
+            impossible_estimate_seconds, estimate_host = best_estimate_seconds or 0, best_estimate_host
+        impossible_estimate_copy = _format_estimated_duration(impossible_estimate_seconds)
         longest_copy = _format_estimated_duration(longest_window_seconds)
-        host_copy = f" on {longest_window_host}" if longest_window_host else ""
+        estimate_host_copy = f" on {estimate_host}" if estimate_host else ""
+        window_host_copy = (
+            f" on {longest_window_host}" if longest_window_host and longest_window_host != estimate_host else ""
+        )
         return (
-            f"Estimated runtime {impossible_estimate_copy} is {HOST_WINDOW_IMPOSSIBLE_MARKER} "
-            f"(longest {longest_copy}{host_copy}). Widen a host window or use Bypass scheduler."
+            f"Estimated runtime {impossible_estimate_copy}{estimate_host_copy} is {HOST_WINDOW_IMPOSSIBLE_MARKER} "
+            f"(longest {longest_copy}{window_host_copy}). Widen a host window or use Bypass scheduler."
         )
     if impossible_only:
         return None
-    return f"Estimated runtime {estimate_copy}; waiting for a host window with enough time remaining."
+    estimate_host_copy = f" on {best_estimate_host}" if best_estimate_host else ""
+    return (
+        f"Estimated runtime {estimate_copy}{estimate_host_copy}; "
+        "waiting for a host window with enough time remaining."
+    )
 
 
 def _format_estimated_duration(seconds: float) -> str:
@@ -3621,6 +3985,8 @@ def claim_next_runnable_encode_job(
                     waiting_reason=None,
                     terminal_reason=None,
                     last_failure_kind=None,
+                    # A job that was stopped or failed earlier is running again; its old message is stale.
+                    error=None,
                     progress_json=json.dumps(_initial_encode_job_progress(next_job, deps), sort_keys=True),
                     updated_at=now_iso,
                 )
@@ -4129,6 +4495,8 @@ def run_encode_job(
         )
         schedule_deadline_thread.start()
     final_status: str | None = None
+    # Set when Mediaforce's own shutdown, not the owner, stopped this encode.
+    restart_stop = False
     schedule_interrupted = False
     failure_kind: str | None = None
     error: str | None = None
@@ -4169,12 +4537,13 @@ def run_encode_job(
         else:
             failure_kind = "stale_lease"
             error = STALE_LEASE_RECLAIM_MESSAGE
-    except ProcessCancelledError:
+    except ProcessCancelledError as cancel_error:
         if _encode_job_outputs_completed_by_id(config, job_id):
             final_status = "completed"
             error = None
         else:
             final_status = "stopped"
+            restart_stop = isinstance(cancel_error, ControllerShutdownCancelledError)
             with open_db(config.paths.db_path) as connection:
                 cleanup = _cleanup_encode_retry_artifacts(
                     connection, manifest_path=manifest_path, indexes=indexes,
@@ -4183,7 +4552,7 @@ def run_encode_job(
             error = (
                 "Encode queue job was stopped and cleaned up."
                 if cleanup.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANED
-                else "Stopped; waiting to end its earlier encode and remove its unfinished file before retrying."
+                else STOPPED_CLEANUP_PENDING_MESSAGE
             )
     except Exception as exc:
         deps.logger.exception("Encode job %s failed before terminal transition.", job_id)
@@ -4247,6 +4616,17 @@ def run_encode_job(
                             "updated_at": deps.now_iso(),
                         }
                     )
+                    if (final_status == "stopped" and restart_stop
+                            and not load_queue_state(connection).get("stop_requested")):
+                        # An owner's Stop that raced the shutdown stays an owner's Stop.
+                        episode, host_label = _restart_stop_names(job)
+                        job.update({
+                            "terminal_reason": CONTROLLER_RESTART_STOP_REASON,
+                            "error": (
+                                f"Stopped when Mediaforce restarted; {episode} will be queued again once "
+                                f"its earlier encode on {host_label} is confirmed to have ended."
+                            ),
+                        })
                     save_encode_job(connection, job)
                     sync_encode_job_parent(connection, job, deps)
                 elif error is not None:
@@ -4498,8 +4878,7 @@ def _encode_failure_retries_after_attempt_cap(
     if not _encode_failure_is_host_related(failure_kind, error_message, host_payload):
         return False
     lowered = error_message.lower()
-    non_transient_markers = ("permission denied", "host key verification failed")
-    return not any(marker in lowered for marker in non_transient_markers)
+    return not any(marker in lowered for marker in SSH_ACCESS_REFUSED_MARKERS)
 
 
 def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) -> str:
@@ -4553,6 +4932,8 @@ def prepare_terminal_encode_job_for_requeue(
         deps=deps,
         config=config,
     )
+    if cleanup.waiting_for_computer:
+        raise EncodeRetryWaitsForComputerError(object_dict(job.get("host")))
     if cleanup.outcome is not _EncodeRetryArtifactCleanupOutcome.CLEANED:
         raise HTTPException(
             status_code=409,
@@ -4619,6 +5000,7 @@ def _cleanup_encode_retry_artifacts_locked(
     active_items, active_paths = active
     now_iso = deps.now_iso()
     cleanup_succeeded_for_all = True
+    staging_cleanup_deferrals: list[_StagingPathCleanupResult] = []
     manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
     selected_indexes = indexes if isinstance(indexes, list) else list(range(len(manifest_items)))
     for index in selected_indexes:
@@ -4665,7 +5047,7 @@ def _cleanup_encode_retry_artifacts_locked(
                 and _staged_output_is_complete({**dict(stage_row), "status": library_status})
             )
         )
-        partial_cleanup_deferred = False
+        partial_cleanup_deferrals: list[_StagingPathCleanupResult] = []
         partial_paths = {
             partial_output_path(Path(str(value)))
             for value in (staging_value, manifest_staging_value)
@@ -4687,15 +5069,16 @@ def _cleanup_encode_retry_artifacts_locked(
                         detail=partial_cleanup_result.detail,
                     )
                 if partial_cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_DEFERRED:
-                    partial_cleanup_deferred = True
-            if partial_cleanup_deferred:
-                return _EncodeRetryArtifactCleanupResult(
-                    _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED,
-                    detail="The earlier output could not be checked; retry when its host is reachable.",
+                    partial_cleanup_deferrals.append(partial_cleanup_result)
+            if partial_cleanup_deferrals:
+                # Keep what blocked the check: "reachable" is only the most common reason.
+                return _deferred_cleanup_result(
+                    partial_cleanup_deferrals, object_dict(host), deps,
+                    fallback_detail="The earlier output could not be checked; retry when its host is reachable.",
                 )
         if library_item_id is None or promoted or complete:
             continue
-        cleanup_succeeded = not partial_cleanup_deferred
+        cleanup_succeeded = True
         if staging_path is not None:
             cleanup_result = _remove_stale_staging_path(
                 staging_path,
@@ -4712,6 +5095,7 @@ def _cleanup_encode_retry_artifacts_locked(
                 )
             if cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_DEFERRED:
                 cleanup_succeeded = False
+                staging_cleanup_deferrals.append(cleanup_result)
         if not cleanup_succeeded:
             cleanup_succeeded_for_all = False
             deps.logger.warning(
@@ -4730,11 +5114,9 @@ def _cleanup_encode_retry_artifacts_locked(
             )
         if commit_between_items:
             connection.commit()
-    return (
-        _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANED)
-        if cleanup_succeeded_for_all
-        else _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED)
-    )
+    if cleanup_succeeded_for_all:
+        return _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANED)
+    return _deferred_cleanup_result(staging_cleanup_deferrals, object_dict(host), deps)
 
 
 def _encode_retry_artifact_cleanup_error_message(
@@ -4763,6 +5145,8 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "unreadable_output"
     if isinstance(exc, FinishedOutputNotVisibleError):
         return OUTPUT_NOT_VISIBLE_FAILURE_KIND
+    if isinstance(exc, EncodeConnectionLostError):
+        return "ssh_transport"
     if isinstance(exc, StagedScratchError):
         return "host_scratch"
     if isinstance(exc, PermissionError):

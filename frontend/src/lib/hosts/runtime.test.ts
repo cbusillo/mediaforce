@@ -63,7 +63,7 @@ describe('host runtime status', () => {
 		const reachable = runtime({
 			probe_available: true,
 			storage_recovery_available: true,
-			message: 'Storage will reconnect when work starts'
+			message: 'Storage is reconnecting in the background'
 		});
 		const needsSetup = runtime({ probe_available: true, issues: ['Install ffmpeg first'] });
 		const offline = runtime({ probe_available: false, message: 'Turn on SSH first' });

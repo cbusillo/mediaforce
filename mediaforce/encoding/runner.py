@@ -15,6 +15,7 @@ from mediaforce.core.schedule_deadline import guard_command_for_schedule_deadlin
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.staged_host import pull_output, remote_ffmpeg_command, staged_job_for_host
 from mediaforce.encoding.remote_cleanup import REMOTE_PROCESS_IDENTITY_SHELL, REMOTE_PROCESS_SIGNAL_SHELL
+from mediaforce.hosts.transport import keep_awake_while_running
 
 
 _PROCESS_WAIT_POLL_SECONDS = 0.1
@@ -133,6 +134,11 @@ def remote_script_ending_with_connection(script: str, owned_output: Path) -> str
     ])
 
 
+def _remote_shell_argument(script: str) -> str:
+    """The SSH command that runs ``script`` on an encode computer kept awake until it ends."""
+    return f"sh -lc {shlex.quote(keep_awake_while_running(script))}"
+
+
 def run_encode_command(
         *,
         ffmpeg_cmd: list[str],
@@ -187,7 +193,7 @@ def run_encode_command(
         if deadline is not None:
             staged_script = guard_shell_script_for_schedule_deadline(staged_script, deadline)
         result = run_tracked_process_fn(
-            ["ssh", *ssh_client_options(), ssh_host, f"sh -lc {shlex.quote(staged_script)}"],
+            ["ssh", *ssh_client_options(), ssh_host, _remote_shell_argument(staged_script)],
             process_controller=process_controller,
             progress_callback=progress_callback,
             terminate_on_progress_failure=False,
@@ -245,7 +251,7 @@ def run_encode_command(
         "ssh",
         *ssh_client_options(),
         ssh_host,
-        f"sh -lc {shlex.quote(remote_script)}",
+        _remote_shell_argument(remote_script),
     ]
     result = run_tracked_process_fn(
         ssh_cmd,
@@ -291,7 +297,7 @@ def run_streamed_remote_encode_command(
         "ssh",
         *ssh_client_options(),
         ssh_host,
-        f"sh -lc {shlex.quote(remote_script)}",
+        _remote_shell_argument(remote_script),
     ]
 
     process_controller.throw_if_cancelled() if process_controller is not None else None

@@ -764,6 +764,26 @@ describe('season experience translation', () => {
 		});
 	});
 
+	it('says which episodes the season estimate leaves out', () => {
+		const job = (progress: EncodeQueueJob['progress']): EncodeQueueJob => ({
+			job_id: 'season-encode',
+			prefix: 'tv/Show/Season 1',
+			status: 'running',
+			progress
+		});
+
+		expect(
+			scopedEncodeProgress(
+				job({ eta_copy: '2h 5m', left_out_needs_attention_item_count: 1 }),
+				0,
+				10
+			).etaDetail
+		).toBe('2h 5m · Leaves out 1 item waiting for you');
+		expect(scopedEncodeProgress(job({ eta_copy: '2h 5m' }), 0, 10).etaDetail).toBe('2h 5m');
+		// No estimate, nothing to qualify.
+		expect(scopedEncodeProgress(job({ left_out_failed_item_count: 2 }), 0, 10).etaDetail).toBe('');
+	});
+
 	it('shows the queued sample target instead of the folder default', () => {
 		const videoPolicy = technicalVideoPolicy(
 			folder({

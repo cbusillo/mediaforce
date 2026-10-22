@@ -1,29 +1,54 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
-	import { fetchJson } from '$lib/api/client';
+	import { fetchJson, postJson } from '$lib/api/client';
 	import type { DashboardScanJob } from '$lib/api/types';
 	import { catalogWarningNotice } from '$lib/season/experience';
 	import { onMount, type Snippet } from 'svelte';
+	import { refreshedRecoveryAlerts, type RecoveryAlert } from './recovery-alerts';
+	import ShellWarnings from './ShellWarnings.svelte';
 	import ThemeToggle from './ThemeToggle.svelte';
 
 	let { children }: { children: Snippet } = $props();
 	let scanJob = $state<DashboardScanJob | null>(null);
 	let scanRequest = 0;
-	let recoveryAlerts = $state<{ id: string; title: string; detail: string }[]>([]);
+	let recoveryAlerts = $state<RecoveryAlert[]>([]);
+	let retryingAlert = $state<string | null>(null);
+	let retryOutcome = $state<{ id: string; message: string } | null>(null);
+
+	async function loadAlerts() {
+		recoveryAlerts = await refreshedRecoveryAlerts(recoveryAlerts, () =>
+			fetchJson<{ alerts: RecoveryAlert[] }>('/api/recovery-alerts')
+		);
+	}
+
+	async function retryConnection(alert: RecoveryAlert) {
+		if (!alert.host_key || retryingAlert) return;
+		retryingAlert = alert.id;
+		retryOutcome = null;
+		try {
+			const response = await postJson<{ ok: boolean; message?: string }>(
+				`${resolve('/')}api/hosts/retry-connection`,
+				{ host_key: alert.host_key }
+			);
+			retryOutcome = { id: alert.id, message: response.message ?? '' };
+		} catch (error) {
+			retryOutcome = {
+				id: alert.id,
+				message: error instanceof Error ? error.message : 'Retry connection failed.'
+			};
+		} finally {
+			retryingAlert = null;
+			await loadAlerts();
+		}
+	}
 
 	onMount(() => {
 		let stopped = false;
 		let timer: ReturnType<typeof setTimeout>;
 		async function refreshAlerts() {
-			try {
-				const payload = await fetchJson<{ alerts: typeof recoveryAlerts }>('/api/recovery-alerts');
-				if (!stopped) recoveryAlerts = payload.alerts;
-			} catch {
-				// Retain the last warning when a refresh fails.
-			} finally {
-				if (!stopped) timer = setTimeout(refreshAlerts, 30_000);
-			}
+			await loadAlerts();
+			if (!stopped) timer = setTimeout(refreshAlerts, 30_000);
 		}
 		void refreshAlerts();
 		return () => {
@@ -113,23 +138,13 @@
 			<ThemeToggle />
 		</div>
 	</header>
-	{#if catalogWarning}
-		<div class="catalog-warning" role="alert" aria-live="polite">
-			<div class="catalog-warning__inner">
-				<strong>{catalogWarning.title}</strong>
-				<span>{catalogWarning.detail}</span>
-			</div>
-		</div>
-	{/if}
-
-	{#each recoveryAlerts as alert (alert.id)}
-		<div class="catalog-warning" role="alert" aria-live="polite">
-			<div class="catalog-warning__inner">
-				<strong>{alert.title}</strong>
-				<span>{alert.detail} <a href={resolve('/ops')}>View computers</a></span>
-			</div>
-		</div>
-	{/each}
+	<ShellWarnings
+		{catalogWarning}
+		{recoveryAlerts}
+		{retryingAlert}
+		{retryOutcome}
+		onRetry={retryConnection}
+	/>
 
 	<div class="app-content">
 		{@render children()}
@@ -239,26 +254,6 @@
 		min-height: calc(100vh - 58px);
 	}
 
-	.catalog-warning {
-		background: var(--mf-wait-bg);
-		border-bottom: 1px solid var(--mf-wait-line);
-		color: var(--mf-wait-fg);
-	}
-
-	.catalog-warning__inner {
-		align-items: baseline;
-		display: flex;
-		font-size: 13px;
-		gap: 8px;
-		margin: 0 auto;
-		max-width: var(--mf-shell-max);
-		padding: 9px var(--mf-shell-pad);
-	}
-
-	.catalog-warning__inner strong {
-		overflow-wrap: anywhere;
-	}
-
 	@media (max-width: 680px) {
 		.app-header__inner {
 			height: 62px;
@@ -300,17 +295,6 @@
 
 		.app-content {
 			min-height: calc(100vh - 62px);
-		}
-
-		.catalog-warning__inner {
-			align-items: stretch;
-			flex-direction: column;
-			gap: 2px;
-			padding: 9px 14px;
-		}
-
-		.catalog-warning__inner strong {
-			white-space: normal;
 		}
 	}
 </style>

@@ -1,11 +1,13 @@
 import type {
 	DashboardSummaryPayload,
 	EncodeQueueJob,
+	EncodeQueueSummary,
 	HostRuntime,
 	HostsPayload,
 	ReviewReadySample
 } from '$lib/api/types';
 import { folderRoutePath } from '$lib/folder-display';
+import { formatClockMoment, formatScheduleMoment, leftOutItemsCopy } from '$lib/format';
 import {
 	hostSchedulePresentation,
 	jobSchedulePresentation,
@@ -28,6 +30,7 @@ export type OpsActionId =
 	| 'stop-calibration'
 	| 'start-host'
 	| 'prepare-host'
+	| 'retry-host-connection'
 	| 'reset-host-trust';
 
 export type OpsQueueRow = {
@@ -589,10 +592,62 @@ export function workerCapabilitiesSummary(capabilities: string[]): string {
 	return labels.length ? labels.join(' · ') : 'No work assigned to this computer';
 }
 
+/**
+ * A computer Mediaforce holds out after repeated failures, while it runs nothing and its work
+ * window is open; outside the window, the window is the reason it waits.
+ */
+export function hostCoolingDown(host: HostRuntime, now = new Date()): boolean {
+	if (!host.available || host.schedule_open === false) return false;
+	if (numberValue(host.active_encode_count) > 0) return false;
+	const until = Date.parse(String(host.cooldown_until ?? ''));
+	return Number.isFinite(until) && until > now.getTime();
+}
+
+function hostCooldownReason(host: HostRuntime, now = new Date()): string {
+	const until = formatScheduleMoment(host.cooldown_until, host.schedule_timezone, now);
+	return `Held back after repeated failures. Mediaforce tries it again ${until ?? 'soon'}, or prepare it to try now.`;
+}
+
+function hostRecoveryAction(host: HostRuntime) {
+	return !host.available && host.recovery?.status === 'action_required' ? host.recovery : null;
+}
+
+/** Retry connection runs one background reconnect pass now, for a computer that has one. */
+export function hostConnectionRetryAvailable(host: HostRuntime): boolean {
+	return !host.available && Boolean(host.recovery) && host.recovery?.status !== 'ready';
+}
+
+export function hostRecoveryCopy(host: HostRuntime, now = new Date()): string | null {
+	const recovery = host.available ? null : host.recovery;
+	if (!recovery || recovery.status === 'ready') return null;
+	if (recovery.status === 'action_required') {
+		const reason = recovery.reason || host.message;
+		const lastCheck = formatClockMoment(recovery.last_check_at, null, now);
+		return lastCheck ? `${reason} Last checked ${lastCheck}.` : reason;
+	}
+	const nextCheck =
+		Date.parse(String(recovery.next_retry_at ?? '')) > now.getTime()
+			? formatClockMoment(recovery.next_retry_at, null, now)
+			: null;
+	const parts = [nextCheck ? `Retrying, next check ${nextCheck}.` : 'Retrying now.'];
+	const since = formatClockMoment(recovery.first_failure_at, null, now);
+	const failures = numberValue(recovery.failure_count);
+	if (since && failures > 0) {
+		parts.push(
+			`First failed at ${since}; ${failures.toLocaleString('en-US')} ${failures === 1 ? 'try' : 'tries'} so far.`
+		);
+	}
+	if (host.storage_recovery_available !== true && host.message) {
+		parts.unshift(/[.!?]$/.test(host.message) ? host.message : `${host.message}.`);
+	}
+	return parts.join(' ');
+}
+
 export function hostWorkReason(
 	host: HostRuntime,
 	hosts: HostsPayload | null | undefined,
-	dashboard: DashboardSummaryPayload | null | undefined
+	dashboard: DashboardSummaryPayload | null | undefined,
+	now = new Date()
 ): string {
 	const schedule = activitySchedulePresentationCopy(
 		hostSchedulePresentation(host, dashboard?.encode_queue),
@@ -605,6 +660,7 @@ export function hostWorkReason(
 			'Outside its work schedule; this is a normal wait.'
 		);
 	}
+	if (hostCoolingDown(host, now)) return hostCooldownReason(host, now);
 	const activeCount = numberValue(host.active_encode_count);
 	const maxParallel = Math.max(numberValue(host.max_parallel_encodes), 1);
 	if (host.available && activeCount > 0) {
@@ -634,6 +690,8 @@ export function hostWorkReason(
 	if (host.available && host.queue_active === false) {
 		return host.active_reason || host.message || 'Reachable but not accepting Mediaforce work.';
 	}
+	const recovery = hostRecoveryCopy(host, now);
+	if (recovery) return recovery;
 	if (host.setup_supported === false) {
 		return host.message || 'Unavailable and cannot be prepared from this screen.';
 	}
@@ -1165,7 +1223,10 @@ export function buildOpsReadinessSummary(
 			detailParts.push(reviewReadySummaryCopy(reviewReadyCount));
 		}
 		if (queue?.telemetry?.eta_copy) {
-			detailParts.push(`Estimated finish in ${queue.telemetry.eta_copy}`);
+			const leftOut = leftOutItemsCopy(queue.telemetry);
+			detailParts.push(
+				`Estimated finish in ${queue.telemetry.eta_copy}${leftOut ? ` (${leftOut.toLowerCase()})` : ''}`
+			);
 		}
 		return {
 			tone: 'active',
@@ -1322,8 +1383,7 @@ export function buildOpsStatusTiles(
 		{
 			label: 'Compression queue',
 			value: `${visibleRunningCount} working · ${visibleQueuedCount} waiting`,
-			detail:
-				encode?.telemetry?.eta_copy ?? `${encode?.needs_attention_count ?? 0} retry available`,
+			detail: compressionQueueEtaCopy(encode),
 			tone:
 				(encode?.needs_attention_count ?? 0) > 0
 					? 'wait'
@@ -1413,6 +1473,13 @@ export function buildOpsFooterSignals(
 	];
 }
 
+function compressionQueueEtaCopy(encode: EncodeQueueSummary | null | undefined): string {
+	const eta = encode?.telemetry?.eta_copy;
+	if (!eta) return `${encode?.needs_attention_count ?? 0} retry available`;
+	const leftOut = leftOutItemsCopy(encode?.telemetry);
+	return leftOut ? `${eta} · ${leftOut}` : eta;
+}
+
 export function hostTone(
 	host: HostRuntime,
 	fleetHasConnectedHost = false,
@@ -1420,6 +1487,7 @@ export function hostTone(
 ): ShellTone {
 	if (host.storage_recovery_available === true) return 'wait';
 	if (!host.available) return fleetHasConnectedHost ? 'wait' : 'fail';
+	if (hostCoolingDown(host)) return 'wait';
 	const schedule = activitySchedulePresentationCopy(
 		hostSchedulePresentation(host, dashboard?.encode_queue),
 		hostCopyTerms([host])
@@ -1434,8 +1502,10 @@ export function hostStateCopy(
 	host: HostRuntime,
 	dashboard?: DashboardSummaryPayload | null
 ): string {
+	if (hostRecoveryAction(host)) return 'Needs attention';
 	if (host.storage_recovery_available === true) return 'Reconnecting storage';
 	if (!host.available) return 'Unavailable';
+	if (hostCoolingDown(host)) return 'Cooling down';
 	const schedule = activitySchedulePresentationCopy(
 		hostSchedulePresentation(host, dashboard?.encode_queue),
 		hostCopyTerms([host])

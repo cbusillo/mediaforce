@@ -124,6 +124,17 @@ def _cached_statuses_for_current_key(config: MediaforceConfig) -> list[HostStatu
         return list(_HOST_STATUS_CACHE_VALUE) if _HOST_STATUS_CACHE_KEY == cache_key else []
 
 
+def checked_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
+    """The computers' last check results as the cards show them, without checking anything.
+
+    Computers that have not been checked since settings changed or the service started are left out.
+    """
+    return [
+        status for status in _cached_statuses_for_current_key(config)
+        if status.message != _HOST_STATUS_PENDING_MESSAGE
+    ]
+
+
 def cached_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
     _complete_host_status_refresh_if_ready()
     cache_key = _host_status_cache_key(config)

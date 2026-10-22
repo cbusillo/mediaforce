@@ -10,6 +10,7 @@ import {
 	buildOpsReadinessSummary,
 	buildOpsFooterSignals,
 	buildOpsStatusTiles,
+	hostConnectionRetryAvailable,
 	hostPrepareDisabled,
 	hostPrepareTitle,
 	hostStateCopy,
@@ -1432,6 +1433,46 @@ describe('Ops workstation mapping', () => {
 		).toBe('Idle');
 	});
 
+	it('says when a computer is held back after repeated failures', () => {
+		const [ready] = hostsFixture().hosts;
+		const cooling = {
+			...ready,
+			active_encode_count: 0,
+			cooldown_until: '2999-01-01T12:00:00+00:00'
+		};
+		const hosts: HostsPayload = { ...hostsFixture(), hosts: [cooling] };
+
+		expect(hostStateCopy(cooling)).toBe('Cooling down');
+		expect(hostTone(cooling)).toBe('wait');
+		expect(hostWorkReason(cooling, hosts, dashboardFixture())).toMatch(
+			/^Held back after repeated failures\. Mediaforce tries it again .+, or prepare it to try now\.$/
+		);
+		// Work already running on it, or a cooldown that has run out, reads as before.
+		expect(hostStateCopy({ ...cooling, active_encode_count: 1 })).toBe('Working');
+		expect(hostStateCopy({ ...cooling, cooldown_until: '2000-01-01T00:00:00+00:00' })).not.toBe(
+			'Cooling down'
+		);
+	});
+
+	it('says how many items the queue estimate leaves out', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.telemetry = {
+			eta_copy: '5h 2m',
+			left_out_needs_attention_item_count: 2,
+			left_out_failed_item_count: 1
+		};
+
+		const tiles = buildOpsStatusTiles(dashboard, hostsFixture(), null);
+		const summary = buildOpsReadinessSummary(dashboard, hostsFixture(), null);
+
+		expect(tiles.find((tile) => tile.label === 'Compression queue')?.detail).toBe(
+			"5h 2m · Leaves out 2 items waiting for you and 1 that didn't finish"
+		);
+		expect(summary.detail).toContain(
+			"Estimated finish in 5h 2m (leaves out 2 items waiting for you and 1 that didn't finish)"
+		);
+	});
+
 	it('treats storage-recoverable computers as reconnecting capacity', () => {
 		const dashboard = dashboardFixture();
 		dashboard.encode_queue.needs_attention_count = 0;
@@ -1442,7 +1483,7 @@ describe('Ops workstation mapping', () => {
 			queue_active: false,
 			active_encode_count: 0,
 			storage_recovery_available: true,
-			message: 'Storage will reconnect when work starts'
+			message: 'Storage is reconnecting in the background'
 		};
 		const hosts = { compact: true, hosts: [recoverable] };
 
@@ -1455,6 +1496,86 @@ describe('Ops workstation mapping', () => {
 		});
 		expect(hostTone(recoverable)).toBe('wait');
 		expect(hostStateCopy(recoverable)).toBe('Reconnecting storage');
+	});
+
+	it('shows background storage recovery state on the computer card', () => {
+		const now = new Date('2026-10-19T14:30:00Z');
+		const retrying = {
+			...hostsFixture().hosts[0],
+			available: false,
+			queue_active: false,
+			active_encode_count: 0,
+			storage_recovery_available: true,
+			message: 'Storage is reconnecting in the background',
+			recovery: {
+				status: 'retrying' as const,
+				reason: 'Missing required paths',
+				first_failure_at: '2026-10-19T13:58:00Z',
+				last_check_at: '2026-10-19T14:28:00Z',
+				next_retry_at: '2026-10-19T14:42:00Z',
+				failure_count: 4
+			}
+		};
+		const hosts = { compact: true, hosts: [retrying] };
+		const at = (iso: string) =>
+			new Intl.DateTimeFormat('en-US', {
+				hour: 'numeric',
+				minute: '2-digit',
+				timeZoneName: 'short'
+			}).format(new Date(iso));
+
+		expect(hostStateCopy(retrying)).toBe('Reconnecting storage');
+		expect(hostWorkReason(retrying, hosts, null, now)).toBe(
+			`Retrying, next check ${at('2026-10-19T14:42:00Z')}. First failed at ${at('2026-10-19T13:58:00Z')}; 4 tries so far.`
+		);
+		expect(
+			hostWorkReason(
+				{ ...retrying, recovery: { ...retrying.recovery, next_retry_at: '2026-10-19T14:29:00Z' } },
+				hosts,
+				null,
+				now
+			)
+		).toMatch(/^Retrying now\./);
+
+		const needsSomeone = {
+			...retrying,
+			message: 'Worker needs its share password saved.',
+			recovery: {
+				...retrying.recovery,
+				status: 'action_required' as const,
+				reason: 'Worker needs its share password saved.'
+			}
+		};
+		expect(hostTone(needsSomeone)).toBe('wait');
+		expect(hostStateCopy(needsSomeone)).toBe('Needs attention');
+		expect(hostWorkReason(needsSomeone, hosts, null, now)).toBe(
+			`Worker needs its share password saved. Last checked ${at('2026-10-19T14:28:00Z')}.`
+		);
+	});
+
+	it('offers Retry connection only for a computer that background reconnects are working on', () => {
+		const reachable = hostsFixture().hosts[0];
+		const recovery = { status: 'retrying' as const, failure_count: 2 };
+		expect(hostConnectionRetryAvailable({ ...reachable, available: false, recovery })).toBe(true);
+		expect(
+			hostConnectionRetryAvailable({
+				...reachable,
+				available: false,
+				recovery: { ...recovery, status: 'action_required' }
+			})
+		).toBe(true);
+		expect(hostConnectionRetryAvailable({ ...reachable, available: true, recovery })).toBe(false);
+		expect(
+			hostConnectionRetryAvailable({
+				...reachable,
+				available: false,
+				recovery: { ...recovery, status: 'ready' }
+			})
+		).toBe(false);
+		// This computer, or one not checked yet, has no background reconnect to run now.
+		expect(hostConnectionRetryAvailable({ ...reachable, available: false, recovery: null })).toBe(
+			false
+		);
 	});
 
 	it('shows running encode telemetry instead of stale restart errors', () => {

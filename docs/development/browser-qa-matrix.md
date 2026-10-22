@@ -514,7 +514,8 @@ introduces new workflow states.
 
 The route smoke supplies synthetic controller-storage and prolonged computer
 outages to `/api/recovery-alerts` at desktop and 390px. It follows View computers
-to Activity, checks that polling does not duplicate incident warnings, and clears
+to Activity, presses a computer warning's Retry connection once and checks the
+request and its reply, checks that polling does not duplicate incident warnings, and clears
 them after a recovered response. Queue-first placement is measured within the
 workspace beneath global notices, while still requiring the queue in the first
 viewport. Fixture seeding clears only its own synthetic computers' prior outage

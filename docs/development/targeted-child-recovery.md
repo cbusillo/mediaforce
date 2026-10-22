@@ -181,9 +181,23 @@ retains its existing backoff. A schedule-close transition completes cleanup befo
 computer's configured shutdown command. A late sweep result cannot overwrite
 a job that was requeued or changed while SSH was running. A failed host connection, incomplete inventory, or surviving writer
 keeps the unfinished file and delays automatic retry. Making a terminal file
-again reports HTTP 409 with a wait message until cleanup succeeds. Retry through
-the same supported action once the host is reachable; no manual file deletion
-is needed. Startup and Stop also inspect retained stopped-job manifests when
+again reports HTTP 409 with a wait message until cleanup succeeds, except when
+the only thing missing is an answer from the computer that made the file, for
+example because it sleeps outside its work window. Then the owner's folder
+retry is accepted: that episode's new queue part waits in `retry_backoff` on
+that computer, its reason names the computer by its label, and the SSH text goes
+to the log rather than the reason. The retry pass above then wakes it only
+inside its work window, removes the file once the computer confirms nothing
+still writes it, and queues the episode without another retry. A refused login,
+a surviving writer, or an active encode of that episode still refuses the retry.
+If the computer comes back but refuses the sign-in, fails its host key, or
+cannot confirm its earlier encode ended, the waiting episode stops waiting and
+needs attention, with the computer's own reason under Details; it is not
+retried again until the owner retries it. Only a computer that does not answer
+at all keeps the episode waiting.
+The retry also leaves that episode's file alone in its stale-encoding reset.
+Retry through the same supported action in the other cases; no manual file
+deletion is needed. Startup and Stop also inspect retained stopped-job manifests when
 an earlier cleanup already removed the staging record. They preserve output
 paths currently owned by a running job or an unfinished standalone CLI attempt.
 A CLI encode publishes its start reservation under the same controller dispatch
@@ -197,6 +211,28 @@ remote removal. Cleanup also rereads completion evidence for the actual target;
 an output that finished while the old attempt was being checked remains attached
 to its durable row. Finished and promoted outputs retain
 their existing protection.
+
+When Mediaforce itself shuts down, for example for a controller restart, the
+encodes it ends are recorded as stopped by a restart (`terminal_reason`
+`controller_restart`), not as the owner's Stop. At the next start the
+retained-job sweep checks each one. Once the earlier remote encode and its
+output writers are confirmed ended, the episode goes back through ordinary
+retry cleanup, which removes its unfinished file before it is queued again. It
+keeps its attempt count, so restarts still end at the attempt cap; one stopped
+on its last attempt stays stopped and asks the owner to retry it. A streamed
+encode's output was written by the process that shut down, so it needs no
+remote check. When the check cannot confirm the old encode ended, or the
+encoder ran locally under the old process, the episode stays stopped with one
+message naming the episode and the computer, and is not retried in a loop. An
+owner's Stop, including one pressed just before the shutdown, stays stopped,
+and a Stop pressed while a restart-stopped episode waits makes it an owner's
+Stop too. An episode the owner stopped stays stopped until the owner retries
+it. Stop ends every running episode at once, so one episode's cleanup can still
+be waiting on another's; its reason then says it stays stopped until retried,
+and the retry ends the earlier encode and removes the unfinished file first.
+When that computer is asleep at the retry, the retry is kept and finishes once
+the computer is back in its work window, as described above; Stop alone never
+does this.
 
 This recovery is for mounted remote outputs. Scratch-host lifetime protection
 remains described in [staged encode hosts](../architecture/staged-encode-hosts.md).

@@ -7,6 +7,95 @@ from mediaforce.core.process_control import ManagedProcessController, ScheduleWi
 from mediaforce.core.schedule_deadline import guard_shell_script_for_schedule_deadline, \
     managed_schedule_close_deadline, process_result_reached_schedule_deadline
 
+# Lines the OpenSSH client prints itself when the connection fails or is ended, as opposed to the
+# remote command's own output.
+_SSH_CLIENT_FAILURE_PREFIXES = (
+    "ssh:",
+    "client_loop:",
+    "kex_exchange_identification:",
+    "connection closed by",
+    "connection to ",
+    "timeout, server",
+    "killed by signal",
+    "packet_write_wait:",
+)
+
+
+# On a Mac, caffeinate holds a "prevent idle sleep" assertion that ends when the shell running the
+# work exits, however it ends: success, failure, Stop, a schedule deadline or a dropped link. It
+# changes no power setting. Run from a subshell, it is not a job of the work's shell, so a bare
+# `wait` there cannot wait for it. Where caffeinate is missing, the line does nothing.
+_KEEP_AWAKE_SHELL_LINE = (
+    'if command -v caffeinate >/dev/null 2>&1; then '
+    '(caffeinate -i -w "$$" </dev/null >/dev/null 2>&1 &); fi'
+)
+
+
+def keep_awake_while_running(script: str) -> str:
+    """Keep the computer from idle-sleeping for as long as the shell running ``script`` lives."""
+    return f"{_KEEP_AWAKE_SHELL_LINE}\n{script}"
+
+
+# Refusals that a later try cannot fix. They win over any drop line in the same output, because a
+# failed jump-host login is often followed by the connection closing.
+SSH_ACCESS_REFUSED_MARKERS = ("permission denied", "host key verification failed")
+
+
+# Of those, the ones that say an established or attempted link went away, which a later try can fix.
+_SSH_CONNECTION_DROP_MARKERS = (
+    "killed by signal",
+    "closed by remote host",
+    "connection closed by",
+    "connection reset",
+    "broken pipe",
+    "timed out",
+    "timeout, server",
+    "packet_write_wait:",
+)
+
+
+def ssh_connection_lost(returncode: int, stderr: str | None) -> bool:
+    """The SSH client, not the command it ran, ended the run, for any reason including refused access.
+
+    The client exits 255 and says why when its connection fails or it is told to stop. A negative
+    status means the client itself was killed by a signal before it could say anything.
+    """
+    if returncode < 0:
+        return True
+    if returncode != 255:
+        return False
+    return bool(_ssh_client_lines(stderr))
+
+
+def ssh_connection_dropped(returncode: int, stderr: str | None) -> bool:
+    """The SSH link itself went away, as opposed to the computer refusing access.
+
+    Refused logins and changed host keys also end the run as an SSH failure, but trying again
+    cannot fix them, so they are not a dropped link.
+    """
+    if returncode < 0:
+        return True
+    if returncode != 255:
+        return False
+    if any(marker in (stderr or "").lower() for marker in SSH_ACCESS_REFUSED_MARKERS):
+        return False
+    return any(marker in line for line in _ssh_client_lines(stderr) for marker in _SSH_CONNECTION_DROP_MARKERS)
+
+
+def ssh_host_unreachable(returncode: int, stderr: str | None) -> bool:
+    """The SSH client could not reach the computer or lost it, for example because it is asleep.
+
+    A refused login also fails in the client, but the computer answered, so it is not this.
+    """
+    if not ssh_connection_lost(returncode, stderr):
+        return False
+    return not any(marker in (stderr or "").lower() for marker in SSH_ACCESS_REFUSED_MARKERS)
+
+
+def _ssh_client_lines(stderr: str | None) -> list[str]:
+    lines = [line.strip().lower() for line in (stderr or "").splitlines()]
+    return [line for line in lines if line.startswith(_SSH_CLIENT_FAILURE_PREFIXES)]
+
 
 def ssh_client_options(*, batch_mode: bool = True, connect_timeout_seconds: int = 5) -> list[str]:
     options = [
@@ -91,6 +180,10 @@ def run_remote_command(
     deadline = managed_schedule_close_deadline(host, process_controller)
     if deadline is not None:
         script = guard_shell_script_for_schedule_deadline(script, deadline)
+    if wake_before_connect:
+        # Work worth waking a computer for is worth keeping it awake for; probes that leave a
+        # sleeping computer asleep also let it sleep.
+        script = keep_awake_while_running(script)
     remote_kwargs: dict[str, Any] = {
         "input_text": input_text,
         "timeout": timeout,

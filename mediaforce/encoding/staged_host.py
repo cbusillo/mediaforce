@@ -7,7 +7,8 @@ the host against that local file, pulls the output back, and removes the directo
 
 Scratch space is recovered three ways: the controller removes the directory when the job
 ends, a keeper connection removes it when the controller goes away, and a sweep before each
-job removes directories whose keeper is no longer running.
+job removes directories whose keeper is no longer running. The keeper also keeps a Mac host from
+idle-sleeping through the copy, the encode and the pull back.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import Any
 
 from mediaforce.core.type_defs import object_dict
 from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.hosts.transport import keep_awake_while_running
 
 STAGED_JOB_KEY = "staged_job"
 SCRATCH_DIR_PREFIX = ".mediaforce-staged-"
@@ -220,7 +222,7 @@ def staged_job(
     )
     keeper = popen(
         ["ssh", *ssh_options, "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=4", ssh_target,
-         f"sh -c {shlex.quote(keeper_script(scratch_dir))}"],
+         f"sh -c {shlex.quote(keep_awake_while_running(keeper_script(scratch_dir)))}"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,

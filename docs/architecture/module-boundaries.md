@@ -246,6 +246,12 @@ Guidance:
 
 - `transport.py`
   - SSH command execution, SCP/rsync helpers, shell/path helpers
+  - remote work that wakes a computer also keeps it awake while it runs: on a
+    Mac, `caffeinate -i -w` watches the shell running the work and ends with
+    it, however it ends; elsewhere nothing changes, and probes that do not wake
+    a computer do not keep it awake. No power setting is ever changed. The
+    direct SSH encode commands in `encoding/runner.py`, the staged keeper and
+    the long Homebrew setup scripts in `setup_runtime.py` use the same wrapper
 - `status_helpers.py` and `status_runtime.py`
   - host probe scripts, capability checks, and status parsing
   - successful status probes remain distinct from full encode readiness, so a

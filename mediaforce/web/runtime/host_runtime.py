@@ -111,7 +111,7 @@ def host_runtime_rows(
             active_reason = "status check deferred while encode is running"
         elif not status.available:
             active_reason = (
-                "shared storage will reconnect when work starts"
+                "shared storage is reconnecting in the background"
                 if storage_recovery_available
                 else status.message
             )
@@ -128,11 +128,8 @@ def host_runtime_rows(
         schedule_detail = str(policy["summary"])
         if schedule_profile == always_schedule_profile and schedule_detail == "runs anytime":
             schedule_detail = ""
+        host_eta_seconds = _host_eta_seconds(host_running_jobs)
         host_speed = sum(_progress_float(job, "speed") for job in host_running_jobs)
-        host_remaining_duration_seconds = sum(
-            _progress_float(job, "remaining_duration_seconds") for job in host_running_jobs
-        )
-        host_eta_seconds = (host_remaining_duration_seconds / host_speed) if host_speed > 0 else None
         if active_probe_degraded:
             status_payload = {
                 **status_payload,
@@ -151,7 +148,7 @@ def host_runtime_rows(
                 "probe_issues": list(status.issues),
             }
             if storage_recovery_available:
-                status_payload["message"] = "Storage will reconnect when work starts"
+                status_payload["message"] = "Storage is reconnecting in the background"
             needs_action = object_dict(recovery.get(status.key))
             if not status.available and needs_action.get("status") == "action_required" and needs_action.get("reason"):
                 # Background reconnects stopped for something only someone at that computer can do.
@@ -180,12 +177,50 @@ def host_runtime_rows(
                     "eta_copy": format_eta_seconds(host_eta_seconds),
                 },
                 "queue_active": queue_active,
-                "active_flag": "active" if queue_active else "idle",
+                "active_flag": _host_active_flag(active_encode_count=active_encode_count, queue_active=queue_active),
                 "active_reason": active_reason,
                 "controller_storage_issue": controller_issue,
+                "recovery": host_recovery_row(recovery.get(status.key)),
             }
         )
     return rows
+
+
+def _host_active_flag(*, active_encode_count: int, queue_active: bool) -> str:
+    """A computer running work is busy, even when it has no free slot for more."""
+    if active_encode_count > 0:
+        return "busy"
+    return "active" if queue_active else "idle"
+
+
+def _host_eta_seconds(host_running_jobs: list[dict[str, Any]]) -> float | None:
+    """The computer's estimate is known only when every item it is running has one."""
+    if not host_running_jobs:
+        return None
+    if any(object_dict(job.get("progress")).get("eta_seconds") is None for job in host_running_jobs):
+        return None
+    host_speed = sum(_progress_float(job, "speed") for job in host_running_jobs)
+    host_remaining_duration_seconds = sum(
+        _progress_float(job, "remaining_duration_seconds") for job in host_running_jobs
+    )
+    if host_speed <= 0 or host_remaining_duration_seconds <= 0:
+        return None
+    return host_remaining_duration_seconds / host_speed
+
+
+def host_recovery_row(record: object) -> dict[str, Any] | None:
+    """The background reconnect state a computer card shows, read from host-recovery.json."""
+    state = object_dict(record)
+    if not state:
+        return None
+    return {
+        "status": state.get("status"),
+        "reason": state.get("reason"),
+        "first_failure_at": state.get("first_failure_at"),
+        "last_check_at": state.get("last_check_at"),
+        "next_retry_at": state.get("next_retry_at"),
+        "failure_count": state.get("failure_count"),
+    }
 
 
 def running_encode_counts_by_host(connection: DBClient) -> dict[str, int]:
@@ -292,10 +327,14 @@ def _decorate_running_job_progress(progress: dict[str, Any], *, format_eta_secon
     percent_complete = _float_or_none(progress.get("percent_complete"), allow_zero=True)
     if percent_complete is None and total_duration_seconds > 0:
         percent_complete = min(overall_completed_duration_seconds / total_duration_seconds, 1.0) * 100.0
-    eta_seconds = _float_or_none(progress.get("eta_seconds"), allow_zero=True)
+    # Zero is not an estimate: it is what a job reports before it has one.
+    eta_seconds = _float_or_none(progress.get("eta_seconds"))
     speed = _float_or_none(progress.get("speed"))
-    if eta_seconds is None and speed not in {None, 0.0}:
+    if eta_seconds is None and speed not in {None, 0.0} and remaining_duration_seconds > 0:
         eta_seconds = remaining_duration_seconds / speed
+    if str(progress.get("progress_state") or "").strip().lower() in {"quality_search", "starting"}:
+        # Compression has not started, so no reading says how long it will take.
+        eta_seconds = None
     return {
         **progress,
         "total_duration_seconds": total_duration_seconds,
