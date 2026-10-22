@@ -149,6 +149,20 @@ the Director-watched session on a real encode computer.
 A sample job records the same kind, message and whether the run was stopped in
 its result, without retrying on its own.
 
+## Samples that lose their computer
+
+A sample whose SSH computer cannot be reached or drops the link (the
+`ssh_host_unreachable` classifier in `mediaforce/hosts/transport.py`, applied
+to the SSH client lines its error keeps) goes back to the sample queue instead
+of failing. It waits 1, 2, 4 and then 8 minutes before its next tries, and its
+progress names the computer it waits for. The queue starts it again only once
+that time has passed and the computer's work window is open, so a waiting
+sample never wakes a computer outside its window. After 4 automatic retries it
+fails with a message naming the computer and asks the owner to retry it. A
+refused login or changed host key is not a lost computer and still asks the
+owner straight away. An owner's Stop, whether pressed during the try that lost
+its computer or while the sample waits, leaves it stopped.
+
 ## Progress and heartbeat failures
 
 A live heartbeat is lease evidence, not proof that encoder frames are advancing.

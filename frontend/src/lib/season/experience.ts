@@ -1228,6 +1228,8 @@ export function calibrationStageLabel(job: CalibrationJobPayload | null | undefi
 		completed: 'Complete'
 	};
 	if (labels[stage]) return labels[stage];
+	const waitingReason = text(job?.progress?.waiting_reason);
+	if (job?.status === 'queued' && waitingReason) return waitingReason;
 	if (job?.status === 'queued') return 'Waiting for a computer';
 	if (job?.status === 'retry_backoff') return 'Waiting to retry the sample';
 	if (job?.status === 'failed' || job?.status === 'stopped') return 'Sample needs retry';
