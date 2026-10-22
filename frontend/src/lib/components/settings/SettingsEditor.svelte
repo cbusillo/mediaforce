@@ -216,7 +216,7 @@
 		{
 			label: 'Save state',
 			value: savePending ? 'Saving' : dirty ? 'Unsaved' : saveError ? 'Save error' : 'Saved',
-			detail: saveError || saveMessage || 'Local settings draft',
+			detail: saveError || saveMessage || 'Changes stay on this page until you save.',
 			tone: (saveError ? 'fail' : dirty ? 'wait' : savePending ? 'active' : 'ready') as BadgeTone
 		},
 		{
@@ -425,7 +425,7 @@
 		const metric = defaults.quality_metric.trim().toLowerCase();
 		if (metric === 'xpsnr')
 			return `${target} · Minimum picture detail score ${defaults.min_target_xpsnr}`;
-		if (metric === 'auto') return `${target} · Auto metric guardrails`;
+		if (metric === 'auto') return `${target} · Minimum picture quality chosen automatically`;
 		return `${target} · Minimum picture appearance score ${defaults.min_target_vmaf}`;
 	}
 
@@ -471,7 +471,7 @@
 		if (!savedSettings) return;
 		draft = draftFromSettings(savedSettings);
 		saveError = '';
-		saveMessage = 'Draft reset to saved settings.';
+		saveMessage = 'Changes undone. Showing your saved settings.';
 		clearArchiveArmed = false;
 	}
 
@@ -623,7 +623,7 @@
 							<span class="mf-eyebrow">Compatibility preview</span>
 							<h2 id="library-type-preview-title">Change library type?</h2>
 							{#if pendingTypeChange.loading}
-								<p>Checking scanned items and saved profiles…</p>
+								<p>Checking scanned items and saved settings…</p>
 							{:else if pendingTypeChange.error}
 								<div class="notice notice--fail">{pendingTypeChange.error}</div>
 							{:else if pendingTypeChange.preview}
@@ -635,9 +635,11 @@
 									items.
 								</p>
 								<ul class="settings-modal__facts">
-									<li>The library returns to Browse only until the new workflow is reviewed.</li>
+									<li>The library goes back to View only until you review the change.</li>
 									<li>A fresh scan applies the new grouping and metadata rules.</li>
-									<li>Existing profiles are preserved but no longer apply to the new type.</li>
+									<li>
+										Existing compression settings are kept but no longer apply to the new type.
+									</li>
 									<li>No media files move or delete.</li>
 								</ul>
 							{/if}
@@ -671,7 +673,7 @@
 								Remove {draft.libraries[pendingRemovalIndex].label || 'this library'}?
 							</h2>
 							<p>
-								Mediaforce stops scanning this root after Save. Files stay where they are and are
+								Mediaforce stops scanning this folder after Save. Files stay where they are and are
 								never deleted by this action.
 							</p>
 							<div class="settings-modal__actions">
@@ -731,7 +733,7 @@
 					<div id="settings-libraries" class="settings-anchor">
 						<WorkstationPanel
 							eyebrow="Libraries"
-							title="Library roots"
+							title="Library folders"
 							meta={`${configuredLibraries.length.toLocaleString('en-US')} configured`}
 						>
 							<LibraryRootsPanel
@@ -845,16 +847,6 @@
 									</select>
 								</label>
 								<label class="stacked-field">
-									<span>Sample engine</span>
-									<select
-										class="field"
-										bind:value={draft.video_defaults.quality_engine}
-										onchange={(event) => updateVideoDefault('quality_engine', selectValue(event))}
-									>
-										<option value="ab_av1_fast_sample">ab-av1 fast sample</option>
-									</select>
-								</label>
-								<label class="stacked-field">
 									<span>Picture quality measurement</span>
 									<select
 										class="field"
@@ -939,7 +931,7 @@
 									/>
 								</label>
 								<label class="stacked-field">
-									<span>Safety ceiling %</span>
+									<span>Largest allowed size, % of original</span>
 									<input
 										class="field field--number"
 										type="number"
@@ -950,6 +942,9 @@
 										oninput={(event) =>
 											updateVideoDefault('max_encoded_percent', inputValue(event))}
 									/>
+									<small
+										>A compressed file bigger than this share of its original is not used.</small
+									>
 								</label>
 								<div class="encode-defaults-readout">
 									<span>Default goal</span>
@@ -963,14 +958,30 @@
 									</small>
 								</div>
 								<div class="encode-defaults-readout">
-									<span>Resolution guardrail</span>
+									<span>Resolution</span>
 									<strong
 										>{Number(draft.video_defaults.max_height) > 0
-											? `max ${draft.video_defaults.max_height}p`
-											: 'source resolution'}</strong
+											? `Up to ${draft.video_defaults.max_height}p`
+											: 'Same as the original'}</strong
 									>
-									<small>Used unless the operator explicitly asks for a resolution change.</small>
+									<small>Used unless you ask for a different resolution.</small>
 								</div>
+								<details class="host-advanced encode-defaults-advanced">
+									<summary>
+										<strong>Advanced</strong>
+										<span>How samples are made</span>
+									</summary>
+									<label class="stacked-field">
+										<span>Sample method</span>
+										<select
+											class="field"
+											bind:value={draft.video_defaults.quality_engine}
+											onchange={(event) => updateVideoDefault('quality_engine', selectValue(event))}
+										>
+											<option value="ab_av1_fast_sample">Fast sample (the only method)</option>
+										</select>
+									</label>
+								</details>
 							</div>
 						</WorkstationPanel>
 					</div>
@@ -1448,7 +1459,7 @@
 												</div>
 											</div>
 											<label class="stacked-field">
-												<span>Source root overrides JSON</span>
+												<span>Library folder overrides (JSON)</span>
 												<textarea
 													class="field field--textarea"
 													bind:value={draft.remote_hosts[index].source_roots_json}
@@ -1586,7 +1597,7 @@
 			</section>
 
 			<aside class="settings-console__rail" aria-label="Settings navigation and files">
-				<WorkstationPanel eyebrow="Save state" title="Settings draft">
+				<WorkstationPanel eyebrow="Save state" title="Your changes">
 					<div class="rail-save">
 						<StateBadge
 							tone={saveError ? 'fail' : dirty ? 'wait' : 'ready'}
@@ -1622,20 +1633,26 @@
 					<a href="#settings-workers">Computers</a>
 					<a href="#settings-danger">Original backups</a>
 				</nav>
-				<WorkstationPanel eyebrow="Scope" title="Machine-local settings">
+				<WorkstationPanel eyebrow="Storage" title="On this computer">
 					<div class="rail-list">
-						<div class="rail-row">
-							<span>Settings file</span>
-							<strong class="mf-path">{savedSettings.runtime_settings_path}</strong>
-						</div>
-						<div class="rail-row">
-							<span>Default file</span>
-							<strong class="mf-path">{savedSettings.repo_config_path}</strong>
-						</div>
 						<div class="rail-row">
 							<span>Cleanup folder</span>
 							<strong class="mf-path">{savedArchiveRootCopy}</strong>
 						</div>
+						<details class="host-advanced">
+							<summary>
+								<strong>Advanced</strong>
+								<span>Where settings are saved</span>
+							</summary>
+							<div class="rail-row">
+								<span>Settings file</span>
+								<strong class="mf-path">{savedSettings.runtime_settings_path}</strong>
+							</div>
+							<div class="rail-row">
+								<span>Default file</span>
+								<strong class="mf-path">{savedSettings.repo_config_path}</strong>
+							</div>
+						</details>
 					</div>
 				</WorkstationPanel>
 			</aside>
@@ -2069,6 +2086,10 @@
 
 	.encode-defaults-grid .field--number {
 		max-width: none;
+	}
+
+	.encode-defaults-advanced {
+		grid-column: 1 / -1;
 	}
 
 	.storage-readout,

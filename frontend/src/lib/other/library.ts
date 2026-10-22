@@ -131,7 +131,7 @@ export function otherLibraryStateGroup(unit: OtherWorkUnit): OtherLibraryStateGr
 		return { key: 'blocked', label: 'Cannot start', tone: 'fail' };
 	}
 	if (unit.profile_readiness.state === 'browse_only') {
-		return { key: 'browse_only', label: 'Browse only', tone: 'idle' };
+		return { key: 'browse_only', label: 'View only', tone: 'idle' };
 	}
 	const lane = unit.workflow_state?.primary_lane;
 	if (lane === 'attention' || lane === 'blocked') {

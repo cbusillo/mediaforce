@@ -313,11 +313,36 @@ describe('settings draft helpers', () => {
 			policy: { grouping: 'folder' as const }
 		};
 
-		expect(libraryReadiness(other)).toEqual({
-			state: 'ready',
-			label: 'Ready',
-			detail: 'Generic file and folder scopes use the selected profile and require probe readiness.'
-		});
+		expect(libraryReadiness(other).state).toBe('ready');
+	});
+
+	it('describes every library readiness in plain words', () => {
+		const base = payload.libraries[0];
+		const variants = [
+			{ ...base, key: '', label: '', path: '' },
+			{ ...base, availability: 'disabled' as const },
+			{ ...base, availability: 'browse_only' as const },
+			{ ...base, library_type: 'spatial' as const, policy: {} },
+			{
+				...base,
+				library_type: 'spatial' as const,
+				policy: {
+					playback_target: 'Headset',
+					stereo_layout: 'side_by_side' as const,
+					projection: 'flat' as const
+				}
+			},
+			{ ...base, library_type: 'other' as const, default_profile: '' },
+			{ ...base, library_type: 'other' as const, default_profile: 'other_conservative' },
+			{ ...base, library_type: 'movie' as const }
+		];
+
+		for (const library of variants) {
+			const readiness = libraryReadiness(library);
+			expect(`${readiness.label} ${readiness.detail}`).not.toMatch(
+				/root|production|workflow|qualification|probe|profile|scope|browse/i
+			);
+		}
 	});
 
 	it('uses the saved transcode root for destructive archive cleanup', () => {
