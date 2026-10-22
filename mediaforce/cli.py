@@ -39,6 +39,7 @@ from mediaforce.library.metadata_sync import sync_external_metadata
 from mediaforce.review import generate_compare_clips
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.quality_acceptance import format_quality_acceptance_report, load_quality_acceptance_report
+from mediaforce.tuning.content_intent_backfill import backfill_content_intent_approvals
 from mediaforce.tuning.target_defaults import load_target_default_report
 from mediaforce.tuning.production_outcomes import load_target_production_report
 from mediaforce.web.runtime_lock import (
@@ -159,6 +160,15 @@ def build_parser() -> argparse.ArgumentParser:
         "target-production-evidence", help="Report linked production outcome eligibility without changing defaults",
     )
     production_evidence_parser.add_argument("observation_id", help="Visual boundary observation ID")
+    backfill_parser = subparsers.add_parser(
+        "backfill-approval-boundaries",
+        help="Record approvals missing from the learning tables, rebuilt from saved approval files",
+    )
+    backfill_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the rows; without it, only report what would be recorded",
+    )
 
     plan_parser = subparsers.add_parser("plan", help="Generate a run manifest from current state")
     plan_parser.add_argument("--limit", type=int, help="Maximum items in the run manifest")
@@ -275,6 +285,13 @@ def _main(
             payload = load_target_production_report(connection, observation_id=args.observation_id)
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
+    if args.command == "backfill-approval-boundaries" and not args.apply:
+        with open_readonly_db(config.paths.db_path) as connection:
+            backfill = backfill_content_intent_approvals(
+                connection, config.paths.web_state_dir, apply=False,
+            )
+        print(json.dumps(backfill.to_payload(), indent=2, sort_keys=True))
+        return 0
     if args.command == "target-defaults":
         try:
             with open_readonly_db(config.paths.db_path) as connection:
@@ -341,6 +358,13 @@ def _run_locked_command(
         return _run_evidence_command(config, args)
 
     with open_db(config.paths.db_path) as connection:
+        if args.command == "backfill-approval-boundaries":
+            backfill = backfill_content_intent_approvals(
+                connection, config.paths.web_state_dir, apply=True,
+            )
+            print(json.dumps(backfill.to_payload(), indent=2, sort_keys=True))
+            return 0
+
         if args.command == "scan":
             stats = scan_library(connection, config, prefixes=args.prefix or None, limit=args.limit)
             metadata_status = None

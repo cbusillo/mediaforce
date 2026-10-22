@@ -16,7 +16,7 @@ same completed sampled-calibration review:
 - a confirmed versioned compression intent
 - the validated stream-budget ledger for the same source and policy
 - the sample job ID, decision-time SHA-256 identity of the encoded and source
-  review clips, measured quality result, sampled bytes, projected whole-item
+  review clips, measured quality result, projected video and whole-item
   bytes, and authoritative target bytes
 - the encoder, encoder runtime, quality tool, preset, pixel format, dimensions,
   frame rate, cadence transform, filters, grain parameters, metric, and
@@ -31,7 +31,34 @@ Canceled or stopped jobs, schedule closure, stale leases, storage or transport
 failures, missing review media, full-run calibration payloads, stale source or
 policy ledgers, unmeasured fingerprints, incompatible toolchains, and
 unconfirmed legacy intent return an exclusion reason and append no observation.
-No historical row is relabeled or backfilled.
+
+`sampled_clip_bytes` is optional evidence. `ab-av1 sample-encode` reports only
+the projected encode size, so the column stays empty unless the tool reports a
+clip size. Nothing reads it: boundaries and bitrates come from the projected
+bytes. Requiring it once dropped every approval as
+`sample_measurement_missing` (issue #970).
+
+## Backfill from saved approvals
+
+`mediaforce backfill-approval-boundaries` rebuilds approvals that the runtime
+dropped. It reads each approved folder's saved calibration and advice files
+and calls the same builder as a live approval, with the approval time, prefix,
+tags, evidence IDs and moments from the saved approval record. Without
+`--apply` it opens the database read-only and only reports. With `--apply` it
+appends under the runtime lock.
+
+It never invents a measurement. An approval is skipped, with a counted reason,
+when its calibration was replaced or changed since approval, its approval
+record is missing, or the builder excludes it for any reason a live approval
+would. A review series that already has a row counts as already recorded, so
+re-running it, or running it after a live approval, adds nothing. Backfilled
+rows carry `recorded_by: approval_file_backfill` in their provenance. The
+command does not change the advice files, so Studio's exact-item evidence and
+production lineage still need a fresh approval to link to a backfilled row.
+
+Production receipts cannot be backfilled: they need the source and toolchain
+identity captured while encoding. The report counts published approved samples
+without that identity as `encode_identity_not_captured`.
 
 ## Identities and compatibility
 
