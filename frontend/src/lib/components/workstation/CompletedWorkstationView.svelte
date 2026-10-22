@@ -28,8 +28,6 @@
 		cleanupState,
 		cleanupStateCounts,
 		cleanupTone,
-		completedHistoryDetail,
-		completedHistoryLabel,
 		completedHistorySearchText,
 		completedLibraryOptions,
 		completedStateOptions,
@@ -532,8 +530,8 @@
 				</WorkstationPanel>
 			{:else if mode === 'completed'}
 				<WorkstationPanel
-					eyebrow="Register"
-					title="Finished media"
+					eyebrow="Finished media"
+					title="Folders"
 					meta={`${filteredFolders.length.toLocaleString('en-US')} of ${folders.length.toLocaleString('en-US')} visible`}
 				>
 					<div class="completed-filter" aria-label="Finished backup filters">
@@ -981,8 +979,8 @@
 				</WorkstationPanel>
 			{:else}
 				<WorkstationPanel
-					eyebrow="History"
-					title="Handled history"
+					eyebrow="Finished media"
+					title="History"
 					meta={`${visibleHistory.length.toLocaleString('en-US')} of ${historyRows.length.toLocaleString('en-US')} events`}
 				>
 					<div class="history-workspace">
@@ -991,27 +989,31 @@
 							<input
 								type="search"
 								value={historyQuery}
-								placeholder="Event, path, folder, or detail"
+								placeholder="Show, file, or what happened"
 								oninput={handleHistorySearchInput}
 							/>
 						</label>
 						<div class="history-list history-list--wide">
 							{#each visibleHistory as event (`${event.source}:${event.id}:${event.created_at}`)}
 								<div class="history-row">
-									<StateBadge
-										compact
-										tone={eventTone(event.tone)}
-										label={completedHistoryLabel(event)}
-									/>
+									<StateBadge compact tone={eventTone(event.tone)} label={event.label} />
 									<div>
 										<strong>{event.title}</strong>
-										<span>{event.prefix}</span>
+										{#if event.file_name}<span>{event.file_name}</span>{/if}
 									</div>
-									<p>{completedHistoryDetail(event.detail, event)}</p>
+									<div class="history-row__detail">
+										<p>{event.detail}</p>
+										{#if event.technical_detail}
+											<details class="history-row__technical">
+												<summary>Details</summary>
+												<pre>{event.technical_detail}</pre>
+											</details>
+										{/if}
+									</div>
 									<time>{formatTimestamp(event.created_at)}</time>
 								</div>
 							{:else}
-								<div class="empty-note">No history events match the active search.</div>
+								<div class="empty-note">Nothing in History matches this search.</div>
 							{/each}
 						</div>
 					</div>
@@ -1069,26 +1071,22 @@
 					<div class="history-list">
 						{#each historyRows.slice(0, 8) as event (`rail:${event.source}:${event.id}:${event.created_at}`)}
 							<div class="history-row history-row--rail">
-								<StateBadge
-									compact
-									tone={eventTone(event.tone)}
-									label={completedHistoryLabel(event)}
-								/>
+								<StateBadge compact tone={eventTone(event.tone)} label={event.label} />
 								<div>
 									<strong>{event.title}</strong>
-									<span>{event.prefix}</span>
+									{#if event.file_name}<span>{event.file_name}</span>{/if}
 								</div>
 								<time>{formatTimestamp(event.created_at)}</time>
 							</div>
 						{:else}
-							<div class="empty-note">No completed-history events are available yet.</div>
+							<div class="empty-note">Nothing has finished yet.</div>
 						{/each}
 					</div>
 				</WorkstationPanel>
 			{:else}
-				<WorkstationPanel eyebrow="History" title="Audit trail">
+				<WorkstationPanel eyebrow="Finished media" title="History">
 					<div class="audit-note">
-						<strong>Handled history is available in the History tab.</strong>
+						<strong>Every change is listed in the History tab.</strong>
 						<span>No original-backup action is waiting.</span>
 					</div>
 				</WorkstationPanel>
@@ -1752,6 +1750,23 @@
 	.history-row p {
 		margin: 0;
 		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+
+	.history-row__technical summary {
+		color: var(--mf-fg-tertiary);
+		cursor: pointer;
+		font-size: var(--mf-text-2xs);
+	}
+
+	.history-row__technical pre {
+		color: var(--mf-fg-secondary);
+		font-family: var(--mf-font-mono), monospace;
+		font-size: var(--mf-text-2xs);
+		margin: var(--mf-space-1) 0 0;
+		max-height: 12rem;
+		overflow: auto;
+		white-space: pre-wrap;
 		overflow-wrap: anywhere;
 	}
 

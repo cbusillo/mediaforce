@@ -3664,6 +3664,31 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
         "Finished history did not render every event returned by the completed API.",
       );
     }
+    // Raw paths, folder keys, and computer output stay behind Details.
+    const historyRowTexts = await renderedHistoryRows.evaluateAll((rows) =>
+      rows.map((row) => row.innerText),
+    );
+    for (const event of completedHistoryPayload.history) {
+      const rawTexts = [event.prefix, event.technical_detail].filter(Boolean);
+      const leaked = historyRowTexts.find((text) =>
+        rawTexts.some((raw) => text.includes(raw)),
+      );
+      if (leaked) {
+        throw new Error(
+          `Finished history shows raw text outside Details: ${JSON.stringify(leaked)}`,
+        );
+      }
+    }
+    if (
+      !completedHistoryPayload.history.some((event) => event.technical_detail)
+    ) {
+      throw new Error("Finished history fixture has no Details text to hide.");
+    }
+    const technicalDetails = page.locator(
+      ".history-list--wide .history-row__technical",
+    );
+    await technicalDetails.first().locator("summary").click();
+    await technicalDetails.first().locator("pre").waitFor();
 
     await page.setViewportSize(NARROW_VIEWPORT);
     await page.reload({ waitUntil: "domcontentloaded", timeout: timeoutMs });

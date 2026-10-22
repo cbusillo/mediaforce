@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CompletedFolderRow, CompletedPayload } from '$lib/api/types';
+import { formatFileSize } from '$lib/format';
 import {
 	buildCompletedHistoryRows,
 	buildCompletedStatusTiles,
@@ -8,8 +9,6 @@ import {
 	cleanupActionBlockers,
 	cleanupDetail,
 	cleanupState,
-	completedHistoryDetail,
-	completedHistoryLabel,
 	completedHistorySearchText,
 	completedStateOptions,
 	finishedCopy,
@@ -101,117 +100,44 @@ describe('Completed workstation mapping', () => {
 		expect(options.map((option) => option.key)).toEqual(['ready', 'blocked', 'unknown', 'cleaned']);
 	});
 
-	it('falls back to promotion rows when the API has not supplied history events', () => {
+	it('falls back to plain promotion rows when the API has not supplied history events', () => {
 		const rows = buildCompletedHistoryRows(
 			payload([folder({ title: 'Season 1', promoted_item_count: 2, total_bytes_saved: 2048 })])
 		);
 
 		expect(rows).toHaveLength(1);
-		expect(rows[0]).toMatchObject({
-			source: 'folder',
-			label: 'Promotion completed',
-			title: 'Season 1'
-		});
+		expect(rows[0]).toMatchObject({ source: 'folder', title: 'Season 1' });
+		const visible = `${rows[0].label} ${rows[0].detail}`.toLowerCase();
+		expect(visible).toContain(formatFileSize(2048).toLowerCase());
+		for (const internal of ['promot', 'item', 'bytes']) {
+			expect(visible).not.toContain(internal);
+		}
 	});
 
-	it('keeps failed season work distinct from an operator stop', () => {
+	it('shows backend history copy as sent and keeps technical text searchable', () => {
 		const event = {
-			id: 1,
+			id: 7083,
 			event_type: 'encoding_failed',
-			label: 'Encoding failed',
+			label: 'Failed',
 			tone: 'fail',
-			prefix: 'tv/show/season 1',
-			title: 'Season 1',
-			subtitle: 'Show',
+			prefix: 'tv/Futurama/Season 3',
+			title: 'Futurama · Season 3',
+			subtitle: 'Futurama',
 			scope_label: 'Season',
 			domain: 'tv' as const,
-			created_at: '2026-07-11T12:00:00Z',
-			detail: 'Encode worker failed while processing an item.',
+			created_at: '2026-10-21T02:58:59+00:00',
+			detail: 'Compressing this episode did not finish.',
 			size_bytes: null,
-			source: 'api' as const
+			file_name: 'Futurama.S03E08.1080p.mkv',
+			technical_detail: 'encoder banner line one\n  configuration: --prefix=/opt/encoder'
 		};
+		const rows = buildCompletedHistoryRows({ ...payload([]), history: [event] });
 
-		expect(completedHistoryLabel(event)).toBe('Episode failed');
-		expect(completedHistoryLabel({ ...event, label: 'Encoding stopped' })).toBe('Episode stopped');
-		expect(completedHistoryLabel({ ...event, label: 'Encoding started' })).toBe('Episode started');
-		expect(completedHistoryDetail(event.detail, event)).toBe(
-			'A computer failed while making an episode.'
-		);
-		expect(
-			completedHistoryLabel({
-				...event,
-				prefix: 'movies/Arrival (2016)',
-				domain: 'movie',
-				label: 'Promotion completed'
-			})
-		).toBe('Movie finished');
-	});
-
-	it('indexes the same plain-language history copy shown to operators', () => {
-		const event = {
-			id: 1,
-			event_type: 'encoding_failed',
-			label: 'Encoding failed',
-			tone: 'fail',
-			prefix: 'tv/show/season 1',
-			title: 'Season 1',
-			subtitle: 'Show',
-			scope_label: 'tv',
-			domain: 'tv' as const,
-			created_at: '2026-07-11T12:00:00Z',
-			detail: 'Encode worker failed while processing an item.',
-			size_bytes: null
-		};
-
-		expect(completedHistorySearchText({ ...event, source: 'api' })).toContain('episode failed');
-		expect(completedHistorySearchText({ ...event, source: 'api' })).toContain('a computer failed');
-	});
-
-	it('uses backend media domains when library roots are customized', () => {
-		const event = {
-			id: 2,
-			event_type: 'promotion_completed',
-			label: 'Promotion completed',
-			tone: 'ready',
-			prefix: 'series/Show/Season 1',
-			title: 'Season 1',
-			subtitle: 'Show',
-			scope_label: 'Season',
-			domain: 'tv' as const,
-			created_at: '2026-08-16T12:00:00Z',
-			detail: 'Promoted item.',
-			size_bytes: null,
-			source: 'api' as const
-		};
-
-		expect(completedHistoryLabel(event)).toBe('Episode finished');
-		expect(
-			completedHistoryLabel({
-				...event,
-				prefix: 'cinema/Arrival (2016)',
-				domain: 'movie'
-			})
-		).toBe('Movie finished');
-	});
-
-	it('normalizes originals-removed history labels from the event type', () => {
-		const event = {
-			id: 3,
-			event_type: 'originals_removed_confirmed',
-			label: 'Originals marked removed',
-			tone: 'idle',
-			prefix: 'series/Show/Season 1',
-			title: 'Season 1',
-			subtitle: 'Show',
-			scope_label: 'Season',
-			domain: 'tv' as const,
-			created_at: '2026-08-16T12:00:00Z',
-			detail: 'Operator confirmed the originals were removed.',
-			size_bytes: null,
-			source: 'api' as const
-		};
-
-		expect(completedHistoryLabel(event)).toBe('Marked handled');
+		expect(rows).toEqual([{ ...event, source: 'api' }]);
+		const search = completedHistorySearchText(rows[0]);
+		for (const text of [event.label, event.detail, event.title, event.file_name, 'configuration']) {
+			expect(search).toContain(text.toLowerCase());
+		}
 	});
 
 	it('keeps delete and mark-handled confirmations semantically separate', () => {
