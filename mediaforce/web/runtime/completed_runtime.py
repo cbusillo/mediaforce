@@ -51,6 +51,17 @@ class CompletedHistoryEvent:
     created_at: str
     detail: str
     size_bytes: int | None = None
+    file_name: str = ""
+    technical_detail: str = ""
+
+
+@dataclass(slots=True, frozen=True)
+class _HistoryCopy:
+    label: str
+    tone: str
+    detail: str
+    size_bytes: int | None = None
+    technical_detail: str = ""
 
 
 def completed_page_payload(
@@ -426,21 +437,24 @@ def list_completed_history_events(
         ).domain
         event_type = _clean_text(row["event_type"])
         details = _event_details(row["details_json"])
-        label, tone, detail, size_bytes = _history_event_copy(event_type, details)
+        copy = _history_event_copy(event_type, details, noun=_history_item_noun(domain))
         history.append(
             CompletedHistoryEvent(
                 id=int(row["id"]),
                 event_type=event_type,
-                label=label,
-                tone=tone,
+                label=copy.label,
+                tone=copy.tone,
                 prefix=prefix,
                 title=title,
                 subtitle=subtitle,
                 scope_label=scope_label,
                 domain=domain,
                 created_at=_clean_text(row["created_at"]),
-                detail=detail,
-                size_bytes=size_bytes,
+                detail=copy.detail,
+                size_bytes=copy.size_bytes,
+                # A folder-wide event is not about the one file it was recorded on.
+                file_name="" if event_type == ORIGINALS_REMOVED_EVENT else _file_name(row["rel_path"]),
+                technical_detail=copy.technical_detail,
             )
         )
         if len(history) >= limit:
@@ -652,53 +666,58 @@ def _event_details(raw_details: object) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _history_event_copy(event_type: str, details: dict[str, Any]) -> tuple[str, str, str, int | None]:
+def _history_item_noun(domain: str) -> str:
+    if domain == "tv":
+        return "episode"
+    if domain == "movie":
+        return "movie"
+    return "file"
+
+
+def _history_event_copy(event_type: str, details: dict[str, Any], *, noun: str = "file") -> _HistoryCopy:
+    """Plain words for one history row; raw paths and computer output stay in technical_detail."""
     if event_type == "promotion_completed":
-        return (
-            "Promotion completed",
+        promoted_path = _clean_text(details.get("promoted_path"))
+        promoted_name = _file_name(promoted_path)
+        return _HistoryCopy(
+            "Replaced",
             "ready",
-            _path_detail(details.get("promoted_path"), "Encoded file promoted into the source library."),
-            None,
+            f"Replaced the original with {promoted_name}." if promoted_name else f"Replaced the original {noun}.",
+            technical_detail=promoted_path,
         )
     if event_type == ORIGINALS_REMOVED_EVENT:
-        return (
+        return _HistoryCopy(
             "Marked handled",
             "ready",
             "The original backups were already gone. Nothing was deleted; this finished folder was marked handled after review.",
-            None,
         )
     if event_type == "encoding_completed":
-        return (
-            "Encoding completed",
+        bytes_saved = _int_or_none(details.get("bytes_saved"))
+        return _HistoryCopy(
+            "Compressed",
             "ready",
-            _bytes_detail(details.get("bytes_saved"), "Encoded item completed."),
-            _int_or_none(details.get("bytes_saved")),
+            f"Saved {_size_text(bytes_saved)}." if bytes_saved else "Compressed.",
+            bytes_saved,
+            f"{bytes_saved:,} bytes saved" if bytes_saved is not None else "",
         )
-    if event_type == "encoding_failed":
+    if event_type in ("encoding_failed", "encoding_stopped"):
         error = _history_detail_summary(details.get("error"))
-        if _is_stopped_encode_error(error):
-            return "Encoding stopped", "idle", error or "Encode stopped before promotion.", None
-        return (
-            "Encoding failed",
+        if event_type == "encoding_stopped" or _is_stopped_encode_error(error):
+            return _HistoryCopy(
+                "Stopped",
+                "idle",
+                f"Compressing this {noun} stopped before it finished. Nothing was replaced.",
+                technical_detail=error,
+            )
+        return _HistoryCopy(
+            "Failed",
             "fail",
-            error or "Encode failed before promotion.",
-            None,
-        )
-    if event_type == "encoding_stopped":
-        return (
-            "Encoding stopped",
-            "idle",
-            _history_detail_summary(details.get("error")) or "Encode stopped before promotion.",
-            None,
+            error if _is_plain_sentence(error) else f"Compressing this {noun} did not finish.",
+            technical_detail="" if _is_plain_sentence(error) else error,
         )
     if event_type == "validation_completed":
-        return (
-            "Validation completed",
-            "active",
-            _validation_detail(details),
-            None,
-        )
-    return "Encoding started", "idle", "Encode worker started processing an item.", None
+        return _HistoryCopy("Checked", "active", "Checked.", technical_detail=_validation_detail(details))
+    return _HistoryCopy("Started", "idle", f"A computer started compressing this {noun}.")
 
 
 def _is_stopped_encode_error(value: str) -> bool:
@@ -714,9 +733,19 @@ def _is_stopped_encode_error(value: str) -> bool:
     )
 
 
-def _path_detail(path: object, fallback: str) -> str:
-    cleaned = _clean_text(path)
-    return cleaned or fallback
+def _is_plain_sentence(value: str, max_chars: int = 160) -> bool:
+    """Mediaforce's own short failure sentences show as-is; computer output does not."""
+    return (
+        0 < len(value) <= max_chars
+        and "\n" not in value
+        and value.endswith(".")
+        and not any(marker in value for marker in ("/", "\\", "ffmpeg", "Traceback", "Error:", "[", "{"))
+    )
+
+
+def _file_name(path: object) -> str:
+    cleaned = _clean_text(path).rstrip("/")
+    return cleaned.rsplit("/", 1)[-1] if cleaned else ""
 
 
 def _history_detail_summary(value: object, max_chars: int = HISTORY_DETAIL_MAX_CHARS) -> str:
@@ -727,11 +756,19 @@ def _history_detail_summary(value: object, max_chars: int = HISTORY_DETAIL_MAX_C
     return f"{cleaned[:max_chars].rstrip()} ... [{omitted:,} characters omitted]"
 
 
-def _bytes_detail(value: object, fallback: str) -> str:
-    parsed = _int_or_none(value)
-    if parsed is None:
-        return fallback
-    return f"{parsed} bytes saved by the encoded item."
+def _size_text(size_bytes: int | None) -> str:
+    """Decimal sizes with the same rounding as the frontend's formatFileSize."""
+    value = float(size_bytes or 0)
+    units = ("B", "KB", "MB", "GB", "TB", "PB")
+    index = 0
+    while value >= 1000 and index < len(units) - 1:
+        value /= 1000
+        index += 1
+    digits = 0 if value.is_integer() or value >= 100 else 1 if value >= 10 else 2
+    number = f"{value:,.{digits}f}"
+    if digits:
+        number = number.rstrip("0").rstrip(".")
+    return f"{number} {units[index]}"
 
 
 def _validation_detail(details: dict[str, Any]) -> str:
@@ -739,7 +776,7 @@ def _validation_detail(details: dict[str, Any]) -> str:
     score = _clean_text(details.get("score") or details.get("quality_score"))
     if metric and score:
         return f"{metric.upper()} {score}"
-    return "Validation completed for encoded output."
+    return ""
 
 
 def _int_or_none(value: object) -> int | None:

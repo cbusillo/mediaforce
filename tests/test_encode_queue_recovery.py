@@ -16033,20 +16033,11 @@ raise SystemExit(0)
             self.assertEqual(stopped_details["error"], "Operation was cancelled.")
 
     def test_completed_history_distinguishes_failures_from_operator_stops(self) -> None:
-        self.assertEqual(
-            completed_runtime._history_event_copy(
-                "encoding_failed",
-                {"error": "ffmpeg exited with status 1"},
-            )[:2],
-            ("Encoding failed", "fail"),
-        )
-        self.assertEqual(
-            completed_runtime._history_event_copy(
-                "encoding_failed",
-                {"error": "Operation was cancelled."},
-            )[:2],
-            ("Encoding stopped", "idle"),
-        )
+        failed = completed_runtime._history_event_copy("encoding_failed", {"error": "ffmpeg exited with status 1"})
+        stopped = completed_runtime._history_event_copy("encoding_failed", {"error": "Operation was cancelled."})
+        self.assertEqual(failed.tone, "fail")
+        self.assertEqual(stopped.tone, "idle")
+        self.assertNotEqual(failed.label, stopped.label)
 
     def test_completed_history_lists_stopped_encode_events(self) -> None:
         source_path = self._create_source_file("completed-history-stopped.mkv")
@@ -16070,16 +16061,12 @@ raise SystemExit(0)
 
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0].event_type, "encoding_stopped")
-        self.assertEqual(history[0].label, "Encoding stopped")
         self.assertEqual(history[0].tone, "idle")
         self.assertEqual(history[0].domain, "tv")
-        self.assertEqual(
-            completed_runtime._history_event_copy(
-                "encoding_stopped",
-                {"error": "Stopped by operator."},
-            )[:2],
-            ("Encoding stopped", "idle"),
-        )
+        failed = completed_runtime._history_event_copy("encoding_failed", {"error": "ffmpeg exited with status 1"})
+        self.assertEqual(history[0].label, completed_runtime._history_event_copy("encoding_failed", {
+            "error": "Stopped by operator."}).label)
+        self.assertNotEqual(history[0].label, failed.label)
 
     def test_encode_one_item_records_cleanup_warning_in_failure_event(self) -> None:
         source_path = self._create_source_file("episode-cleanup-warning.mkv")

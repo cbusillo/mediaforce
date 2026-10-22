@@ -1976,30 +1976,77 @@ class TuningRuntimeTests(unittest.TestCase):
             "The original backups were already gone. Nothing was deleted; this finished folder was marked handled after review.",
         )
 
-    def test_completed_page_payload_truncates_large_failed_history_details(self) -> None:
+    def test_completed_page_payload_history_uses_plain_words_for_live_event_shapes(self) -> None:
         from mediaforce.web import app as web_app
+        from mediaforce.web.runtime import completed_runtime
 
+        prefix = "tv/Example Show/Season 1"
+        promoted_path = "/Volumes/media/tv/Example Show/Season 1/Example.S01E01.1080p.mkv"
+        encoder_banner = (
+            "ffmpeg version 8.1 Copyright (c) 2000-2026 the FFmpeg developers\n"
+            "  built with Apple clang version 17.0.0 (clang-1700.6.4.2)\n"
+            "  configuration: --prefix=/opt/homebrew/Cellar/ffmpeg-full/8.1 --enable-shared " + "--enable-x " * 400
+        )
+        connection_lost = "Lost the connection to M2 MBP. It will be tried again."
+        bytes_saved = 660981419
         self._insert_promoted_artifact(
-            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
+            rel_path=f"{prefix}/Example.S01E01.1080p.mkv",
             promoted_at="2026-04-10T10:00:00+00:00",
             archived_size_bytes=3,
             bytes_saved=12,
         )
+        events = [
+            ("encoding_started", {"encode_started_at": "2026-04-10T09:00:00+00:00"}),
+            ("encoding_failed", {"error": encoder_banner}),
+            ("encoding_failed", {"error": connection_lost}),
+            ("encoding_completed", {"bytes_saved": bytes_saved}),
+            ("validation_completed", {"ok": True}),
+            ("promotion_completed", {"promoted_path": promoted_path}),
+        ]
         with open_db(self.config.paths.db_path) as connection:
             library_item_id = connection.execute(select(library_items.c.id)).scalar_one()
-            connection.execute(
-                item_events.insert().values(
-                    library_item_id=library_item_id,
-                    created_at="2026-04-10T10:01:00+00:00",
-                    event_type="encoding_failed",
-                    details_json=json.dumps({"error": "x" * 1200}),
+            for minute, (event_type, details) in enumerate(events):
+                connection.execute(
+                    item_events.insert().values(
+                        library_item_id=library_item_id,
+                        created_at=f"2026-04-10T10:{minute:02d}:00+00:00",
+                        event_type=event_type,
+                        details_json=json.dumps(details),
+                    )
                 )
-            )
             connection.commit()
             payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
 
-        self.assertLessEqual(len(payload["history"][0]["detail"]), 380)
-        self.assertIn("characters omitted", payload["history"][0]["detail"])
+        history = {(row["event_type"], row["detail"]): row for row in payload["history"]}
+        self.assertEqual(len(history), len(events))
+        for row in payload["history"]:
+            visible = " ".join((row["label"], row["detail"], row["title"], row["file_name"]))
+            with self.subTest(event_type=row["event_type"], detail=row["detail"]):
+                self.assertNotIn("/", visible)
+                self.assertNotIn("\n", visible)
+                self.assertNotIn(prefix, visible)
+                for internal_word in ("worker", "bytes", "item", "encod", "ffmpeg", "promot", "validat"):
+                    self.assertNotIn(internal_word, visible.casefold())
+                self.assertEqual(row["file_name"], Path(promoted_path).name)
+                self.assertIn("Example Show", row["title"])
+
+        rows = {row["event_type"]: row for row in payload["history"] if row["detail"] != connection_lost}
+        self.assertIn(connection_lost, {row["detail"] for row in payload["history"]})
+        self.assertTrue(rows["encoding_failed"]["technical_detail"].startswith(encoder_banner.splitlines()[0]))
+        self.assertIn("characters omitted", rows["encoding_failed"]["technical_detail"])
+        self.assertEqual(rows["encoding_completed"]["size_bytes"], bytes_saved)
+        self.assertIn(completed_runtime._size_text(bytes_saved), rows["encoding_completed"]["detail"])
+        self.assertIn(str(bytes_saved), rows["encoding_completed"]["technical_detail"].replace(",", ""))
+        self.assertIn(Path(promoted_path).name, rows["promotion_completed"]["detail"])
+        self.assertEqual(rows["promotion_completed"]["technical_detail"], promoted_path)
+
+    def test_history_size_text_matches_decimal_frontend_rounding(self) -> None:
+        from mediaforce.web.runtime.completed_runtime import _size_text
+
+        self.assertEqual(_size_text(660981419), "661 MB")
+        self.assertEqual(_size_text(1500), "1.5 KB")
+        self.assertEqual(_size_text(10_500_000), "10.5 MB")
+        self.assertEqual(_size_text(12), "12 B")
 
     def test_completed_page_payload_tolerates_missing_archive_root(self) -> None:
         from mediaforce.web import app as web_app
