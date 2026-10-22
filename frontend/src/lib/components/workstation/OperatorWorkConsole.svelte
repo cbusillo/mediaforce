@@ -124,7 +124,7 @@
 			...(prepareFingerprint ? ['media_fingerprint'] : [])
 		];
 		if (!prefix) {
-			actionError = 'Enter one library, folder, or file scope before preparing analysis.';
+			actionError = 'Enter one library, folder, or file before preparing analysis.';
 			return;
 		}
 		if (!evidenceKinds.length) {
@@ -374,7 +374,7 @@
 						<legend>Analysis to update</legend>
 						<label><input type="checkbox" bind:checked={prepareCadence} /> Motion pattern</label>
 						<label
-							><input type="checkbox" bind:checked={prepareFingerprint} /> Media fingerprint</label
+							><input type="checkbox" bind:checked={prepareFingerprint} /> Picture and sound check</label
 						>
 					</fieldset>
 					<label class="field">
@@ -391,8 +391,8 @@
 						class="work-button work-button--primary"
 						disabled={Boolean(actionPending) || !work?.evidence.can_prepare}
 						title={work?.evidence.can_prepare
-							? 'Prepare this bounded evidence batch.'
-							: 'Finish or cancel the active batch before preparing another scope.'}
+							? 'Prepare this group of files.'
+							: 'Finish or cancel the current group before preparing another.'}
 					>
 						{actionPending === 'prepare' ? 'Preparing…' : 'Prepare'}
 					</button>
@@ -424,7 +424,7 @@
 						<select bind:value={evidenceKindFilter} onchange={() => void applyFilters()}>
 							<option value="">All analysis</option>
 							<option value="cadence_analysis">Motion pattern</option>
-							<option value="media_fingerprint">Media fingerprint</option>
+							<option value="media_fingerprint">Picture and sound check</option>
 						</select>
 					</label>
 					<label>
@@ -484,8 +484,8 @@
 											class="text-action"
 											disabled={!work?.evidence.can_prepare}
 											title={work?.evidence.can_prepare
-												? 'Use this folder as the next bounded analysis scope.'
-												: 'Finish or cancel the active batch before preparing another scope.'}
+												? 'Use this folder as the next group of files to check.'
+												: 'Finish or cancel the current group before preparing another.'}
 											onclick={() => useRowScope(row)}
 										>
 											Prepare this folder

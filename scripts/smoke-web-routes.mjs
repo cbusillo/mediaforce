@@ -1158,6 +1158,25 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
       }
       if (route === "/ops") {
         await checkActivityQueueFirst(page, label, label === "Activity");
+        // textContent also reads closed disclosures, where these internal words used to live.
+        const activityText = (
+          (await page.locator("body").textContent()) ?? ""
+        ).toLowerCase();
+        for (const staleTerm of [
+          "system scope",
+          "unassigned",
+          "shards",
+          "media fingerprint",
+          "bounded evidence",
+          "operator request",
+          "analyzer owns",
+        ]) {
+          if (activityText.includes(staleTerm)) {
+            throw new Error(
+              `${label} exposed stale term ${JSON.stringify(staleTerm)}.`,
+            );
+          }
+        }
       }
       if (route === "/settings") {
         const requiredCopies = [
@@ -1841,7 +1860,7 @@ async function checkHeldSeasonUnderShowJob(baseUrl, timeoutMs) {
       { timeout: timeoutMs },
     );
     const heldRow = (await row("Season 2").innerText()).replace(/\s+/g, " ");
-    if (!heldRow.includes("held") || heldRow.includes("Compressing")) {
+    if (!heldRow.includes("kept for now") || heldRow.includes("Compressing")) {
       throw new Error(
         `A held season read as working while its show's run was active: ${heldRow}`,
       );
@@ -2105,6 +2124,9 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
     for (const staleTerm of [
       "ready to act on",
       "current-season policy",
+      "recent-acquisition",
+      "lifecycle",
+      "· held",
       "use series status",
       "no eligible savings",
       " eligible · ",

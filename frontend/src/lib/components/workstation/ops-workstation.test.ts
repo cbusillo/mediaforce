@@ -16,6 +16,7 @@ import {
 	hostStateCopy,
 	hostTone,
 	hostWorkReason,
+	opsRowWorkLabel,
 	opsWorkLabel,
 	RefreshCoordinator,
 	rowRecoveryLabel,
@@ -1311,6 +1312,37 @@ describe('Ops workstation mapping', () => {
 	it('turns storage prefixes into human work labels', () => {
 		expect(opsWorkLabel('tv/Constellation/Season 1')).toBe('Constellation · Season 1');
 		expect(opsWorkLabel('movies/Arrival (2016)')).toBe('Arrival (2016)');
+	});
+
+	it('describes rows without a folder, computer, or live progress in plain words', () => {
+		const dashboard = dashboardFixture();
+		const sample = dashboard.calibration_queue.sample.running[0];
+		delete sample.host;
+		sample.prefix = '';
+		const encode = dashboard.encode_queue.running[0];
+		encode.prefix = '';
+		encode.progress = null;
+		encode.shard_count = 4;
+		encode.completed_shard_count = 1;
+
+		const rows = buildOpsQueueRows(dashboard);
+		const sampleRow = rows.find((row) => row.key === 'sample:sample-1');
+		const encodeRow = rows.find((row) => row.key === 'encode:encode-1');
+
+		expect(sampleRow?.prefix).toBe('');
+		expect(encodeRow?.prefix).toBe('');
+		expect(sampleRow?.host).toBeTruthy();
+		expect(encodeRow?.progress).toMatch(/\b1\b.*\b4\b/);
+		const shown = [
+			opsRowWorkLabel(sampleRow?.prefix ?? ''),
+			sampleRow?.host,
+			encodeRow?.progress
+		].join(' ');
+		expect(opsRowWorkLabel('')).toBeTruthy();
+		expect(shown).not.toMatch(/\b(scope|unassigned|shards?)\b/i);
+		expect(opsRowWorkLabel('tv/Constellation/Season 1')).toBe(
+			opsWorkLabel('tv/Constellation/Season 1')
+		);
 	});
 
 	it('surfaces controller storage waits before claiming a computer can start', () => {

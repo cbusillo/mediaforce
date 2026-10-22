@@ -252,7 +252,8 @@ class StreamBudgetTests(unittest.TestCase):
         self.assertEqual(blocker.code, "target_lower_bound_exceeds_source_relative_cap")
         self.assertEqual(blocker.target_lower_bound_bytes, 540_000_000)
         self.assertEqual(blocker.source_cap_total_bytes, 288_000_000)
-        self.assertIn("80% source cap", blocker.message)
+        self.assertIn("80%", blocker.message)
+        self.assertNotRegex(blocker.message, r"(?i)\b(cap|percent|preserved|streams?)\b")
 
     def test_projection_allows_target_band_below_source_cap(self) -> None:
         ledger = self._ledger(
@@ -308,7 +309,8 @@ class StreamBudgetTests(unittest.TestCase):
 
         self.assertIsNotNone(blocker)
         self.assertEqual(blocker.code, "source_relative_cap_consumed_by_non_video_budget")
-        self.assertIn("consume the 80% source cap", blocker.message)
+        self.assertIn("80%", blocker.message)
+        self.assertNotRegex(blocker.message, r"(?i)\b(cap|percent|preserved|streams?)\b")
 
     def test_ledger_round_trip_rejects_stale_policy(self) -> None:
         ledger = self._ledger(

@@ -334,7 +334,7 @@ describe('page state copy', () => {
 			.join(' ');
 
 		expect(copy).not.toMatch(
-			/\b(calibration|candidate|worker|host|Mac|preview|CRF|VMAF|prefix|lane|job)\b/i
+			/\b(calibration|candidate|worker|host|Mac|preview|CRF|VMAF|prefix|lane|job|encode)\b/i
 		);
 	});
 });

@@ -224,7 +224,7 @@ export function seasonPromotionIntegrity(status: FolderStatusPayload): SeasonPro
 			code: 'staged_integrity_incomplete_report',
 			count: 1,
 			label: 'Inventory incomplete',
-			nextAction: 'Inspect the full staged-output report before finishing this season.'
+			nextAction: 'Check the full file list before finishing this season.'
 		});
 	}
 
@@ -1184,7 +1184,7 @@ export function calibrationJobTargetContract(
 }
 
 export function calibrationTargetModeLabel(
-	target: CalibrationTargetContract | null | undefined
+	target: Pick<CalibrationTargetContract, 'mode'> | null | undefined
 ): string {
 	if (target?.mode === 'absolute') return 'Absolute per episode';
 	if (target?.mode === 'normalized') return 'Scaled by episode runtime';
@@ -1612,8 +1612,8 @@ function encodeTargetConstraint(
 	);
 	const measured =
 		targetMb > 0 && reachableMb > 0
-			? `The full encode could not reach ${targetMb} MB; the smallest result that kept the required quality was about ${reachableMb} MB.`
-			: 'The full encode could not reach the saved size while keeping the required quality.';
+			? `Compressing the full episode could not reach ${targetMb} MB; the smallest result that kept the required quality was about ${reachableMb} MB.`
+			: 'Compressing the full episode could not reach the saved size while keeping the required quality.';
 	return {
 		kind: 'quality_conflict',
 		title: 'This size conflicts with the minimum picture quality.',
@@ -2176,7 +2176,7 @@ export function motionHoldNotes(holds: MotionHolds, onShowPage = false): string[
 	}
 	if (holds.asIsCount > 0 && !onShowPage) {
 		notes.push(
-			`The show page can encode ${holds.asIsCount === held ? (held === 1 ? 'it' : 'them') : holds.asIsCount} as-is.`
+			`The show page can compress ${holds.asIsCount === held ? (held === 1 ? 'it' : 'them') : holds.asIsCount} as-is.`
 		);
 	}
 	if (check > 0) {

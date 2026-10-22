@@ -229,7 +229,11 @@ describe('movieSizeCapBlockView', () => {
 	it('uses the configured cap instead of assuming 80 percent', () =>
 		expect(
 			movieSizeCapBlockView(
-				{ primary_lane: 'blocked', detail: 'Target size exceeds the 75% source cap.' },
+				{
+					primary_lane: 'blocked',
+					detail:
+						'The size goal is larger than this file is allowed to be (75% of the original). Lower the goal or raise the largest allowed file.'
+				},
 				{
 					size_goal: { target_size_bytes: 800_000_000 },
 					source_relative_cap: {
@@ -252,7 +256,8 @@ describe('movieSizeCapBlockView', () => {
 			movieSizeCapBlockView(
 				{
 					primary_lane: 'blocked',
-					detail: 'Preserved streams consume the 75% source cap.'
+					detail:
+						'The kept sound and subtitle tracks already use the whole size allowed for this file (75% of the original). Keep fewer tracks or raise the largest allowed file.'
 				},
 				{
 					size_goal: { target_size_bytes: 800_000_000 },

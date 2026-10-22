@@ -69,6 +69,7 @@
 	let policySavingPrefix = $state('');
 	let policySavingTitle = $state('');
 	let policyError = $state('');
+	const newestSeasonSaveError = 'Couldn’t save the newest-season choice.';
 	let showSound = $state<AudioPresetPayload | null>(null);
 	let soundSavingPrefix = $state('');
 
@@ -291,16 +292,15 @@
 		try {
 			const response = await postJson<{
 				ok: boolean;
-				message?: string;
 				lifecycle?: LifecycleState;
 			}>(`/api/folders/${encodePrefix(show.prefix)}/series-lifecycle`, { mode });
-			if (!response.ok) throw new Error(response.message || 'Lifecycle policy could not be saved.');
-			if (!response.lifecycle) throw new Error('Saved lifecycle policy was not returned.');
-			onLifecycleSaved(response.lifecycle);
-		} catch (error) {
-			policyError = `${show.title}: ${
-				error instanceof Error ? error.message : 'Lifecycle policy could not be saved.'
-			}`;
+			if (!response.ok || !response.lifecycle) {
+				policyError = `${show.title}: ${newestSeasonSaveError}`;
+			} else {
+				onLifecycleSaved(response.lifecycle);
+			}
+		} catch {
+			policyError = `${show.title}: ${newestSeasonSaveError}`;
 		} finally {
 			if (pendingLifecycleMode?.prefix === show.prefix) pendingLifecycleMode = null;
 			if (policySavingPrefix === show.prefix) {
@@ -639,8 +639,8 @@
 										{olderSeasonAction.checkEpisodeCount > 0
 											? `Each checked episode compresses once its motion-pattern check passes.`
 											: ''}
-										{olderSeasonAction.latestSeasonLabel} stays original, and the current-season policy
-										does not change. Recent-acquisition holds are bypassed only after confirmation.
+										{olderSeasonAction.latestSeasonLabel} stays original. Your newest-season setting stays
+										the same. Recently added episodes are included only if you confirm.
 									</span>
 								</div>
 								<a class="primary-button" href={resolve(folderHref(selectedShow.prefix))}

@@ -359,7 +359,7 @@ function hostCopy(value: unknown): string {
 
 function calibrationHostCopy(job: CalibrationJob): string {
 	const host = record(job.host);
-	return hostCopy(host) || compactText(job.host_key) || 'unassigned';
+	return hostCopy(host) || compactText(job.host_key) || 'No computer yet';
 }
 
 function encodeHostCopy(job: EncodeQueueJob): string {
@@ -434,7 +434,7 @@ function controllerStorageWaitingJobs(
 }
 
 function calibrationPrefix(job: { prefix?: unknown; folder_prefix?: unknown }): string {
-	return compactText(job.prefix) || compactText(job.folder_prefix) || 'system scope';
+	return compactText(job.prefix) || compactText(job.folder_prefix);
 }
 
 function normalizedQueuePath(value: unknown): string {
@@ -707,6 +707,11 @@ export function opsWorkLabel(prefix: string): string {
 	return workSegments.join(' · ') || 'Media work';
 }
 
+/** Activity rows without a folder cover the whole library. */
+export function opsRowWorkLabel(prefix: string): string {
+	return prefix ? opsWorkLabel(prefix) : 'All media';
+}
+
 export function encodeJobTone(job: EncodeQueueJob): ShellTone {
 	const status = String(job.status ?? '').toLowerCase();
 	if (['failed', 'needs_attention', 'stopped', 'retry_backoff'].includes(status)) return 'wait';
@@ -718,7 +723,7 @@ export function encodeJobProgress(job: EncodeQueueJob): string {
 	if (!progress) {
 		const completed = numberValue(job.completed_shard_count);
 		const total = numberValue(job.shard_count);
-		return total > 0 ? `${completed}/${total} shards` : '—';
+		return total > 0 ? `${completed} of ${total} parts` : '—';
 	}
 	const percent = percentCopy(progress.percent_complete);
 	const item =
@@ -807,7 +812,7 @@ export function buildEncodeRows(
 			scopeLabel: encodeJobMediaKind(job).replace(/^./, (character) => character.toUpperCase()),
 			tone: jobTone === 'fail' || schedule.tone !== 'fail' ? jobTone : 'fail',
 			status: statusCopy(job.status || 'unknown'),
-			prefix: job.prefix || 'system scope',
+			prefix: job.prefix || '',
 			host: encodeHostCopy(job),
 			phase: activePartCount
 				? `${activePartCount} active compression ${activePartCount === 1 ? 'task' : 'tasks'}`

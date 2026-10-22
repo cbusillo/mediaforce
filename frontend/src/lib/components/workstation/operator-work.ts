@@ -104,7 +104,7 @@ export function catalogStateView(
 		return {
 			label: 'Current',
 			tone: 'ready',
-			detail: 'Remembered file facts match the current catalog policy.'
+			detail: 'Remembered file facts match the current rules.'
 		};
 	}
 	if (catalog.freshness === 'stale') {
@@ -132,7 +132,7 @@ export function evidenceStateView(
 		return {
 			label: 'Cancelling',
 			tone: 'wait',
-			detail: 'Stopping the active analyzer and cancelling every item that has not started.'
+			detail: 'Stopping the current check and cancelling every file that has not started.'
 		};
 	}
 	if (evidence.runner_active || queue.status === 'running') {
@@ -148,8 +148,8 @@ export function evidenceStateView(
 			label: started ? 'Paused' : libraryCheckLabels.analysisReady,
 			tone: 'wait',
 			detail: started
-				? 'No new analyzer will start until you resume this batch.'
-				: 'The scope is prepared, but no media will be opened until you start analysis.'
+				? 'No new check will start until you resume this group.'
+				: 'The files are chosen, but no media will be opened until you start analysis.'
 		};
 	}
 	if (queue.status === 'queued') {
@@ -189,7 +189,7 @@ export function evidenceStateView(
 
 export function evidenceKindLabel(kind: string): string {
 	if (kind === 'cadence_analysis') return 'Motion pattern';
-	if (kind === 'media_fingerprint') return 'Media fingerprint';
+	if (kind === 'media_fingerprint') return 'Picture and sound check';
 	return 'Other analysis';
 }
 
@@ -260,17 +260,17 @@ export function evidenceWorkReasonView(reason: string | null): EvidenceWorkReaso
 	if (reason === 'representative_technical_coverage') {
 		return {
 			label: 'Representative check',
-			detail: 'Chosen from codec, resolution, cadence, audio layout, and runtime.'
+			detail: 'Chosen from codec, resolution, motion pattern, audio layout, and runtime.'
 		};
 	}
 	if (reason === 'representative_uncertainty') {
 		return {
-			label: 'Bounded follow-up',
+			label: 'One more file to check',
 			detail: 'Checks one nearby file because measured representative coverage is uncertain.'
 		};
 	}
 	if (reason === 'operator_scope') {
-		return { label: 'Operator request', detail: 'Prepared from the scope you selected.' };
+		return { label: 'You asked for this', detail: 'Prepared from the files you chose.' };
 	}
 	return { label: 'Priority work', detail: 'Prepared for a decision that needs current evidence.' };
 }
@@ -288,7 +288,7 @@ export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): Operato
 		};
 	}
 	if (status === 'running') {
-		return { label: 'Running', tone: 'active', detail: 'The analyzer owns this item now.' };
+		return { label: 'Running', tone: 'active', detail: 'Checking this file now.' };
 	}
 	if (status === 'retry_wait') {
 		return {
@@ -301,7 +301,8 @@ export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): Operato
 		return {
 			label: operatorStateCopy(status),
 			tone: 'wait',
-			detail: 'Files are measured only on an encode computer; this resumes when one is free.'
+			detail:
+				'Files are measured only on a computer that compresses; this resumes when one is free.'
 		};
 	}
 	if (status === 'waiting_source') {
@@ -336,7 +337,7 @@ export function operatorRefreshInterval(
 
 export function scopeLabel(evidence: OperatorEvidenceState | null | undefined): string {
 	const scope = evidence?.queue.scope;
-	return scope?.scope_label || scope?.title || scope?.prefix || 'No scope prepared';
+	return scope?.scope_label || scope?.title || scope?.prefix || 'Nothing prepared';
 }
 
 export function formatCount(value: number): string {

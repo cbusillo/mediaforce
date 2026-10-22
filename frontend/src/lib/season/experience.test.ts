@@ -1315,6 +1315,7 @@ describe('season experience translation', () => {
 			code: 'staged_integrity_incomplete_report',
 			label: 'Inventory incomplete'
 		});
+		expect(integrity.blockers.at(-1)?.nextAction).not.toMatch(/\b(staged|output|report)\b/i);
 	});
 
 	it('explains files made under settings that were never approved without blocking the rest', () => {
@@ -1617,6 +1618,12 @@ describe('season experience translation', () => {
 			recoveryLabel: 'Choose a roomier goal',
 			detail: expect.stringMatching(/could not reach 225 MB.*about 523 MB.*Retrying would stop/)
 		});
+		expect(
+			targetConstraintSummary(
+				folder({ encode_job: stoppedEncode }),
+				stoppedOnSize('quality_conflict')
+			)?.detail
+		).not.toMatch(/\bencode\b/i);
 		// The page leads with something else, such as a newer sample, so the stopped run is not the question.
 		expect(
 			targetConstraintSummary(folder({ encode_job: stoppedEncode }), {
@@ -2484,6 +2491,7 @@ describe('motionHolds', () => {
 		const settled = motionHoldNotes(motionHolds(season(held, [])));
 
 		expect(decided.some((note) => note.includes('show page'))).toBe(true);
+		expect(decided.join(' ')).not.toMatch(/\bencode\b/i);
 		expect(settled.some((note) => note.includes('show page'))).toBe(false);
 		// The show page holds the decision itself, so it does not point to itself.
 		const onShow = motionHoldNotes(

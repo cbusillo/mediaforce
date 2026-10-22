@@ -207,6 +207,15 @@ export function movieReviewStatusLabel(status: unknown, inheritedParentSample = 
 	);
 }
 
+// The workflow detail carries only the blocker's text, so these follow the source-cap blocker messages in
+// mediaforce/tuning/stream_budget.py and mediaforce/tuning/quality_risk.py.
+const SOURCE_CAP_PATTERN = /source(?:-size)? cap/i;
+const PRESERVED_CONTENT_CAP_PATTERN =
+	/preserved streams consume .*source(?:-size)? cap|tracks already use the whole size allowed/i;
+const TARGET_ABOVE_CAP_PATTERN =
+	/target size exceeds .*source(?:-size)? cap|size goal is larger than this file is allowed/i;
+const CAP_PERCENT_PATTERN = /(\d+(?:\.\d+)?)%\s+(?:source(?:-size)? cap|of the original)/i;
+
 export function movieSizeCapBlockView(
 	workflow: MovieSizeCapWorkflow | null | undefined,
 	ledger: MovieSizeCapLedger | null | undefined
@@ -218,7 +227,10 @@ export function movieSizeCapBlockView(
 	}
 	const blockerText = [detail, ...reasons].join(' ');
 	const sourceCapInfeasible = ledger?.source_relative_cap?.status === 'arithmetically_infeasible';
-	const mentionsSourceCap = /source(?:-size)? cap/i.test(blockerText);
+	const mentionsSourceCap =
+		SOURCE_CAP_PATTERN.test(blockerText) ||
+		PRESERVED_CONTENT_CAP_PATTERN.test(blockerText) ||
+		TARGET_ABOVE_CAP_PATTERN.test(blockerText);
 	const preservedContentReason = reasons.includes(
 		'source_relative_cap_consumed_by_non_video_budget'
 	);
@@ -230,16 +242,16 @@ export function movieSizeCapBlockView(
 	}
 
 	const configuredPercent = finitePositive(ledger?.source_relative_cap?.configured_total_percent);
-	const detailPercent = Number(blockerText.match(/(\d+(?:\.\d+)?)%\s+source(?:-size)? cap/i)?.[1]);
+	const detailPercent = Number(blockerText.match(CAP_PERCENT_PATTERN)?.[1]);
 	const capPercent = configuredPercent ?? (Number.isFinite(detailPercent) ? detailPercent : null);
 	const capCopy = capPercent == null ? null : `${formatPercent(capPercent)}%`;
 	const targetSize = finitePositive(ledger?.size_goal?.target_size_bytes);
 	const totalCap = finitePositive(ledger?.source_relative_cap?.total_cap_bytes);
 	const preservedContentConsumesCap =
-		preservedContentReason || /preserved streams consume .*source(?:-size)? cap/i.test(blockerText);
+		preservedContentReason || PRESERVED_CONTENT_CAP_PATTERN.test(blockerText);
 	const targetExceedsCap =
 		targetExceedsReason ||
-		/target size exceeds .*source(?:-size)? cap/i.test(blockerText) ||
+		TARGET_ABOVE_CAP_PATTERN.test(blockerText) ||
 		Boolean(!sourceCapInfeasible && targetSize && totalCap && targetSize > totalCap);
 
 	if (preservedContentConsumesCap) {

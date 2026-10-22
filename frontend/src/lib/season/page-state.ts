@@ -80,11 +80,11 @@ export const PAGE_STATE_COPY = {
 	motion_decision: {
 		season: {
 			label: 'Motion decision',
-			detail: 'The show page can encode episodes with an unclear motion pattern as-is.'
+			detail: 'The show page can compress episodes with an unclear motion pattern as-is.'
 		},
 		episode: {
 			label: 'Motion decision',
-			detail: 'The show page can encode this episode’s unclear motion pattern as-is.'
+			detail: 'The show page can compress this episode’s unclear motion pattern as-is.'
 		}
 	},
 	making_season: {

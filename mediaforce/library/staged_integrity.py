@@ -374,7 +374,7 @@ def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> Staged
     status = str(row["status"] or "")
     staging_path = str(row["staging_path"] or "").strip() or None
     if status == "promoted" or row["promoted_at"] is not None:
-        return _record("tracked", item_id, rel_path, staging_path, "Already promoted and tracked in the library.")
+        return _record("tracked", item_id, rel_path, staging_path, "Already replaced.")
     if remake_intent(row).get("state") == "removed":
         return _record("not_started", item_id, rel_path, staging_path,
                        "Finished copy removed; saved request not queued yet. Use Make again to retry.")
@@ -384,7 +384,7 @@ def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> Staged
             if status in {"discovered", "planned", "approved"}
             else "missing"
         )
-        detail = "No staged artifact is recorded for this item."
+        detail = "Not compressed yet."
         return _record(disposition, item_id, rel_path, None, detail)
     path = Path(staging_path).expanduser()
     root = _staging_root_for_path(path, staging_roots)
@@ -453,7 +453,7 @@ def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> Staged
             size_prediction=size_prediction,
         )
     if validation_passed is False:
-        return _record("validation_failed", item_id, rel_path, staging_path, "Machine validation recorded a failure.")
+        return _record("validation_failed", item_id, rel_path, staging_path, "The compressed file didn't pass its check.")
     if validation_passed is not True or row["validated_at"] is None:
         return _record("unvalidated", item_id, rel_path, staging_path, "The staged output has not passed machine validation.")
     if status != "validated":
