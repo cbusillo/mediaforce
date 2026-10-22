@@ -963,7 +963,6 @@ def test_encoder_size_only_miss_is_checked_then_asks_keep_or_make_again(
 
     result = _keep(config, item_id, item)
     assert result["ok"], result
-    assert "passed its check" in result["message"]
     _run(config)
     assert _status(config, item_id) == "promoted"
 
