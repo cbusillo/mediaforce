@@ -27,6 +27,8 @@ from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, Evid
     start_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_KINDS
 from mediaforce.library.evidence_worker import default_evidence_worker_deps, run_evidence_queue_until_blocked
+from mediaforce.library.source_evidence import restore_published_source_evidence
+from mediaforce.core.utils import timestamp
 from mediaforce.remote import collect_host_statuses
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.run_manifests import build_run_manifest as build_db_run_manifest, \
@@ -106,6 +108,15 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_replay_parser.add_argument(
         "prefix",
         help="Explicit scope such as tv/Show/Season 1 or movies/Title (Year)",
+    )
+    evidence_restore_parser = evidence_actions.add_parser(
+        "restore-source",
+        help="Give published files back their source measurements from run plans or the catalog",
+    )
+    evidence_restore_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the restored measurements; without it, only count what could be restored",
     )
     evidence_run_parser = evidence_actions.add_parser(
         "run",
@@ -582,7 +593,9 @@ def _schedule_aware_evidence_host_rows(config: MediaforceConfig) -> list[dict[st
 def _run_evidence_command(config: MediaforceConfig, args: argparse.Namespace) -> int:
     action = str(args.evidence_action)
     try:
-        if action == "run":
+        if action == "restore-source":
+            summary = _restore_source_evidence(config, apply=bool(args.apply))
+        elif action == "run":
             summary = run_evidence_queue_until_blocked(
                 config_path=config.paths.config_path,
                 config=config,
@@ -635,6 +648,16 @@ def _run_evidence_command(config: MediaforceConfig, args: argparse.Namespace) ->
         return 2
     print(json.dumps(summary, separators=(",", ":"), sort_keys=True))
     return 2 if action == "run" and summary.get("status") == "completed_with_errors" else 0
+
+
+def _restore_source_evidence(config: MediaforceConfig, *, apply: bool) -> dict[str, Any]:
+    if not apply:
+        with open_readonly_db(config.paths.db_path) as reader:
+            stats = restore_published_source_evidence(reader, recorded_at=timestamp(), apply=False)
+        return {"applied": False, **stats.to_payload()}
+    with open_db(config.paths.db_path) as connection:
+        stats = restore_published_source_evidence(connection, recorded_at=timestamp())
+    return {"applied": True, **stats.to_payload()}
 
 
 def _add_manifest_selection_args(parser: argparse.ArgumentParser, *, require_manifest: bool = True) -> None:
