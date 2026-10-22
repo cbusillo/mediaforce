@@ -982,6 +982,8 @@ export interface CompletedHistoryEvent {
 	created_at: string;
 	detail: string;
 	size_bytes?: number | null;
+	file_name?: string;
+	technical_detail?: string;
 }
 
 export interface CompletedPayload {
