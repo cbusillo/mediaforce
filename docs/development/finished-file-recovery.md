@@ -11,6 +11,9 @@ records only that size miss. That copy counts as not yet checked, so automatic
 publishing runs its normal check like any other finished file. If the size
 goal is the only failed check, the file then asks **Keep this file** or
 **Make again** with no other action. Any other failed check stays a failure.
+The encoder's size miss counts as the size result on every later check, even
+when the run's saved plan has no size band, so only the owner's keep of that
+exact copy lets it publish.
 
 Select several files on the show or season page and use **Make selected again**
 to queue them in one action. The same endpoint accepts `library_item_ids: [id, ...]`

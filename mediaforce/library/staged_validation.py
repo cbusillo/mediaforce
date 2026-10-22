@@ -4,7 +4,7 @@ import json
 from typing import Any, Literal
 
 from mediaforce.core.type_defs import object_dict, object_list
-from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
+from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK, encoder_final_size_miss
 
 
 def held_size_prediction(raw_validation: Any) -> dict[str, Any] | None:
@@ -36,13 +36,7 @@ def awaits_check_after_final_size_miss(raw_validation: Any) -> bool:
         payload = object_dict(json.loads(str(raw_validation or "{}")))
     except json.JSONDecodeError:
         return False
-    verification = object_dict(payload.get("target_size_verification"))
-    return (
-        payload.get("passed") is False
-        and "checks" not in payload
-        and verification.get("passed") is False
-        and verification.get("status") in {"over_target", "under_target"}
-    )
+    return payload.get("passed") is False and "checks" not in payload and encoder_final_size_miss(payload) is not None
 
 
 def staged_validation_outcome(raw_validation: Any) -> Literal["size_held", "failed"] | None:

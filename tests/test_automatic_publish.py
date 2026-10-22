@@ -889,14 +889,17 @@ def test_cleanup_keeps_originals_needed_by_an_unpublished_sibling(config: Mediaf
     assert _status(config, item_id) != "promoted"
 
 
-def _encoder_size_record(config: MediaforceConfig, rel_path: str, *, lower: int, upper: int) -> tuple[int, dict[str, Any]]:
-    """Stage a file the way the encoder leaves it after its final size check, with that band as the goal."""
+def _encoder_size_record(
+    config: MediaforceConfig, rel_path: str, *, lower: int, upper: int, band_in_plan: bool = True
+) -> tuple[int, dict[str, Any]]:
+    """Stage a file the way the encoder leaves it after its final size check against that band."""
     item_id, item, staged = _stage(config, rel_path)
     staged_bytes = staged.stat().st_size
     status = "over_target" if staged_bytes > upper else "under_target" if staged_bytes < lower else "inside_target_band"
-    item["resolved_operator_intent"] = {
-        "size_goal": {"final_lower_bound_bytes": lower, "final_upper_bound_bytes": upper, "target_size_bytes": lower}
-    }
+    if band_in_plan:
+        item["resolved_operator_intent"] = {
+            "size_goal": {"final_lower_bound_bytes": lower, "final_upper_bound_bytes": upper, "target_size_bytes": lower}
+        }
     manifest_path = config.paths.project_root / f"manifest-{item_id}.json"
     manifest_path.write_text(json.dumps({"run_id": f"run-{item_id}", "items": [item]}))
     passed = status == "inside_target_band"
@@ -939,17 +942,23 @@ def _remake_reason(config: MediaforceConfig, item_id: int) -> str | None:
     return object_dict(records[0].get("remake")).get("reason")
 
 
-def test_encoder_size_only_miss_is_checked_then_asks_keep_or_make_again(config: MediaforceConfig) -> None:
-    item_id, item = _encoder_size_record(config, "tv/Show/Season 1/too-big.mkv", lower=1, upper=2)
+@pytest.mark.parametrize("band_in_plan", [True, False], ids=["band_in_plan", "no_band_in_plan"])
+def test_encoder_size_only_miss_is_checked_then_asks_keep_or_make_again(
+    config: MediaforceConfig, band_in_plan: bool
+) -> None:
+    item_id, item = _encoder_size_record(
+        config, "tv/Show/Season 1/too-big.mkv", lower=1, upper=2, band_in_plan=band_in_plan
+    )
 
     _run(config)
 
+    assert _status(config, item_id) == "encoded"
+    assert not (config.archive_root / item["rel_path"]).exists()
     with open_db(config.paths.db_path) as connection:
         saved = json.loads(str(connection.execute(
             select(staged_artifacts.c.validation_json).where(staged_artifacts.c.library_item_id == item_id)
         ).scalar_one()))
     assert [check["message"] for check in saved["checks"] if not check["passed"]] == [FINAL_SIZE_GOAL_CHECK]
-    assert _status(config, item_id) == "encoded"
     assert _remake_reason(config, item_id) == "final_size"
 
     result = _keep(config, item_id, item)
