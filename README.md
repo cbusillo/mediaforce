@@ -121,6 +121,11 @@ uv run mediaforce evidence resume
 uv run mediaforce evidence run --max-items 1
 ```
 
+`uv run mediaforce evidence restore-source` reports historical original-trait
+recovery from retained run plans without reading original media. Add `--apply`
+to append eligible historical-probable records. Those advisory traits stay
+separate from current-file evidence and cannot grant approval or cleanup authority.
+
 Repeat the final command to resume durable progress. `evidence pause` prevents
 the next claim, while `evidence cancel` terminates the active managed process
 and cancels the remainder. See `docs/architecture/evidence-worker.md`.

@@ -24,6 +24,7 @@ from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection,
 from mediaforce.library.media_scopes import resolve_media_scope, resolve_media_scopes, scope_rel_path_filter
 from mediaforce.library.planner import build_manifest_item, recommend_item
 from mediaforce.library.scanner import scan_library
+from mediaforce.library.source_evidence import load_source_evidence
 from mediaforce.tuning.target_provenance import ExactItemTargetProvenanceBlocked, exact_item_target_provenance_blocker
 
 
@@ -110,6 +111,7 @@ def select_candidates(
         for position, row in enumerate(rows, start=1):
             decision = row.pop("_selection_decision")
             row["selection_provenance"] = decision.provenance(rank_position=position)
+            row["original_source_evidence"] = load_source_evidence(connection, int(row["id"])).to_reference()
         return rows
 
     joined_tables = outerjoin(
@@ -147,6 +149,8 @@ def select_candidates(
     rows = [object_dict(row) for row in connection.execute(query).mappings().fetchall()]
     if buckets:
         rows = [row for row in rows if recommend_item(row, config).bucket in buckets]
+    for row in rows:
+        row["original_source_evidence"] = load_source_evidence(connection, int(row["id"])).to_reference()
     return rows
 
 

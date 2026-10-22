@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from test_target_default_context import _context
 from mediaforce.cli import _main, build_parser
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
+from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.encoding import staging as staging_module
 from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.core.db_tables import (
@@ -502,7 +503,8 @@ def test_real_promotion_transaction_owns_receipt_and_rollback(
         connection.execute(
             update(library_items)
             .where(library_items.c.id == 1)
-            .values(status="validated", source_path=str(source))
+            .values(status="validated", source_path=str(source), size_bytes=source.stat().st_size,
+                    content_version_fingerprint=content_version_fingerprint(source, source.stat()))
         )
         connection.commit()
         config = SimpleNamespace(

@@ -117,6 +117,8 @@ def build_manifest_item(
 
     item = {
         "library_item_id": row["id"],
+        "source_version_id": row.get("active_source_version_id"),
+        "source_revision": row.get("source_revision"),
         "source_path": row["source_path"],
         "rel_path": row["rel_path"],
         "media_root": row["media_root"],
@@ -156,6 +158,7 @@ def build_manifest_item(
         "media_fingerprint": media_fingerprint,
         "media_fingerprint_evidence": media_fingerprint_evidence,
         "media_fingerprint_decision": media_fingerprint_decision,
+        "original_source_evidence": row.get("original_source_evidence"),
     }
     item["stream_budget_ledger"] = resolve_stream_budget_ledger(
         item,

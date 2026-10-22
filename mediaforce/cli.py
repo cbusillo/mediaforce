@@ -27,6 +27,7 @@ from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, Evid
     start_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_KINDS
 from mediaforce.library.evidence_worker import default_evidence_worker_deps, run_evidence_queue_until_blocked
+from mediaforce.library.source_evidence_backfill import restore_published_source_evidence
 from mediaforce.remote import collect_host_statuses
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.run_manifests import build_run_manifest as build_db_run_manifest, \
@@ -112,6 +113,10 @@ def build_parser() -> argparse.ArgumentParser:
         "run",
         help="Run a bounded foreground worker pass and exit",
     )
+    evidence_restore_parser = evidence_actions.add_parser(
+        "restore-source", help="Recover advisory original traits from historical run plans (dry-run by default)",
+    )
+    evidence_restore_parser.add_argument("--apply", action="store_true", help="Append qualifying historical-probable evidence")
     evidence_run_parser.add_argument(
         "--max-items",
         type=int,
@@ -280,6 +285,11 @@ def _main(
         args: argparse.Namespace,
         config: MediaforceConfig,
 ) -> int:
+    if args.command == "evidence" and args.evidence_action == "restore-source" and not args.apply:
+        with open_readonly_db(config.paths.db_path) as connection:
+            stats = restore_published_source_evidence(connection)
+        print(json.dumps({"applied": False, **stats.to_payload()}, sort_keys=True))
+        return 0
     if args.command == "target-production-evidence":
         with open_readonly_db(config.paths.db_path) as connection:
             payload = load_target_production_report(connection, observation_id=args.observation_id)
@@ -606,7 +616,11 @@ def _schedule_aware_evidence_host_rows(config: MediaforceConfig) -> list[dict[st
 def _run_evidence_command(config: MediaforceConfig, args: argparse.Namespace) -> int:
     action = str(args.evidence_action)
     try:
-        if action == "run":
+        if action == "restore-source":
+            with open_db(config.paths.db_path) as connection:
+                stats = restore_published_source_evidence(connection, apply=True)
+            summary = {"applied": True, **stats.to_payload()}
+        elif action == "run":
             summary = run_evidence_queue_until_blocked(
                 config_path=config.paths.config_path,
                 config=config,

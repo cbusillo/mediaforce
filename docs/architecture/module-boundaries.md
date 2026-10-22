@@ -309,6 +309,8 @@ test patch targets.
   - local vs remote execution entry points
 - `staging.py`
   - validation, promotion, staging cleanup helpers
+- `source_publication.py`
+  - durable version-specific publish moves, rollback reconciliation and archive-location history
 - `manifest.py`
   - encode-one and encode-many orchestration
   - final output size verification and bounded measured retry logging for
@@ -351,6 +353,9 @@ Guidance:
 - `evidence_worker.py`
   - foreground bounded execution, heartbeat-managed subprocess cancellation,
     policy-only reclassification, retry backoff, and source-safe canonical commits
+- `source_evidence.py` and `source_evidence_backfill.py`
+  - independent source generations, output versions and immutable measurements
+  - typed original-trait reads and advisory historical-plan recovery, separate from current-input evidence
 - `media_scopes.py`
   - canonical user grouping for TV, movie, and generic media roots
   - exact-item versus descendant matching, SQL-safe boundaries, and API scope payloads

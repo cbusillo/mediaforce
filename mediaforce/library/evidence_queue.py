@@ -60,6 +60,7 @@ class EvidenceWorkClaim:
     canonical_summary_json: str | None
     attempt_count: int
     worker_id: str
+    source_revision: int = 0
 
 
 def ensure_evidence_queue_state(
@@ -751,6 +752,7 @@ def load_evidence_work_claim(
             library_items.c.duration_seconds,
             library_items.c.cadence_summary_json,
             library_items.c.media_fingerprint_json,
+            library_items.c.source_revision,
         )
         .select_from(
             library_item_evidence_state.join(
@@ -795,6 +797,7 @@ def load_evidence_work_claim(
         canonical_summary_json=str(summary_json) if summary_json is not None else None,
         attempt_count=int(row["attempt_count"] or 0),
         worker_id=str(row["worker_id"]),
+        source_revision=int(row["source_revision"]),
     )
 
 

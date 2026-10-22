@@ -16,6 +16,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
+from mediaforce.library.source_evidence import observe_file, record_generated_output
 from mediaforce.core.process_control import ProcessCancelledError, ProcessDeadlineEnforcementError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.dispatch_coordination import STANDALONE_CLI_ENCODE_ORIGINS, locked_encode_dispatch
@@ -1132,6 +1133,15 @@ def encode_one_item(
         "staged_at": now,
         "updated_at": now,
     }
+    output_identity = observe_file(staging_path, full_digest=True,
+                                   check_cancelled=process_controller.throw_if_cancelled if process_controller else None)
+    record_generated_output(
+        connection, int(item["library_item_id"]), identity=output_identity,
+        profile={"video_codec": staged_probe.video_codec, "width": staged_probe.width, "height": staged_probe.height},
+        operation_key={"manifest_run_id": manifest["run_id"], "item_index": index,
+                       "encode_job_id": staged_values["encode_job_id"], "input_sample": item.get("content_version_fingerprint"),
+                       "input_size_bytes": source_size_bytes, "source_revision": item.get("source_revision")}, recorded_at=now,
+    )
     connection.execute(
         sqlite_insert(staged_artifacts)
         .values(**staged_values)

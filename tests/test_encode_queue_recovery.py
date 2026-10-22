@@ -14983,7 +14983,7 @@ raise SystemExit(0)
         )
 
         with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path, status="validated")
+            item_id = self._insert_library_item(connection, source_path, status="validated", size_bytes=source_path.stat().st_size)
             connection.execute(
                 staged_artifacts.insert().values(
                     library_item_id=item_id,
@@ -15047,7 +15047,7 @@ raise SystemExit(0)
         staging_path.parent.mkdir(parents=True, exist_ok=True)
         staging_path.write_text("encoded")
         with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path, status="validated")
+            item_id = self._insert_library_item(connection, source_path, status="validated", size_bytes=source_path.stat().st_size)
             connection.execute(
                 staged_artifacts.insert().values(
                     library_item_id=item_id,
@@ -15171,7 +15171,7 @@ raise SystemExit(0)
         archived_source.write_text("prior archive")
 
         with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path, status="validated")
+            item_id = self._insert_library_item(connection, source_path, status="validated", size_bytes=source_path.stat().st_size)
             connection.execute(
                 staged_artifacts.insert().values(
                     library_item_id=item_id,
@@ -15232,7 +15232,7 @@ raise SystemExit(0)
         )
 
         with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path, status="validated")
+            item_id = self._insert_library_item(connection, source_path, status="validated", size_bytes=source_path.stat().st_size)
             connection.execute(
                 staged_artifacts.insert().values(
                     library_item_id=item_id,
@@ -15253,7 +15253,7 @@ raise SystemExit(0)
             original_execute = connection.execute
 
             def fail_library_update(statement: Any, *args: Any, **kwargs: Any) -> Any:
-                if getattr(statement, "table", None) is library_items:
+                if getattr(statement, "table", None) is library_items and source_path.with_suffix(".mp4").exists():
                     raise sqlite3.OperationalError("database is locked")
                 return original_execute(statement, *args, **kwargs)
 
@@ -15320,6 +15320,7 @@ raise SystemExit(0)
                 source_path,
                 status="validated",
                 rel_path="films/Example/Feature.mkv",
+                size_bytes=source_path.stat().st_size,
             )
             connection.execute(
                 staged_artifacts.insert().values(
@@ -15378,7 +15379,7 @@ raise SystemExit(0)
         )
 
         with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path, status="validated")
+            item_id = self._insert_library_item(connection, source_path, status="validated", size_bytes=source_path.stat().st_size)
             connection.execute(
                 staged_artifacts.insert().values(
                     library_item_id=item_id,
@@ -33051,6 +33052,7 @@ raise SystemExit(0)
             status: str = "planned",
             rel_path: str | None = None,
             missing: bool = False,
+            size_bytes: int = 1024,
     ) -> int:
         now = web_app._now_iso()
         normalized_rel_path = rel_path or f"tv/show/{source_path.name}"
@@ -33063,7 +33065,7 @@ raise SystemExit(0)
                 parent_dir=str(path.parent),
                 file_name=path.name,
                 container=".mkv",
-                size_bytes=1024,
+                size_bytes=size_bytes,
                 mtime_ns=1,
                 fingerprint=f"fingerprint-{source_path.name}",
                 duration_seconds=60.0,

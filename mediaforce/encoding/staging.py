@@ -2,7 +2,6 @@ import errno
 import json
 import logging
 import os
-import shutil
 import subprocess
 import time
 from collections.abc import Sequence
@@ -21,6 +20,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.core.db_tables import source_transitions
 from mediaforce.core.process_control import run_command
 from mediaforce.core.type_defs import float_value
 from mediaforce.core.type_defs import int_value
@@ -28,6 +28,8 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.core.type_defs import object_list
 from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.encoding.free_space import ReservePreflight, promotion_reserve_preflight
+from mediaforce.encoding.source_publication import apply_source_moves, commit_source_publish, \
+    prepare_source_publish, reconcile_source_publish
 from mediaforce.library.media_scopes import logical_library_rel_path
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.tuning.compression_intent import compression_intent_from_item
@@ -680,30 +682,6 @@ def _archive_backup_path(archive_path: Path) -> Path:
     return archive_path.with_name(f".{archive_path.name}.promotion-backup-{uuid4().hex}")
 
 
-def _restore_failed_promotion(
-        *,
-        source_path: Path,
-        staging_path: Path,
-        destination_path: Path,
-        archive_path: Path,
-        archive_backup_path: Path | None,
-        source_archived: bool,
-        staged_promoted: bool,
-) -> None:
-    if staged_promoted:
-        if staging_path.exists():
-            raise FileExistsError(f"Cannot restore staged output because it already exists: {staging_path}")
-        shutil.move(str(destination_path), str(staging_path))
-    if source_archived:
-        if source_path.exists():
-            raise FileExistsError(f"Cannot restore source because it already exists: {source_path}")
-        shutil.move(str(archive_path), str(source_path))
-    if archive_backup_path is not None and archive_backup_path.exists():
-        if archive_path.exists():
-            raise FileExistsError(f"Cannot restore prior archive because it already exists: {archive_path}")
-        shutil.move(str(archive_backup_path), str(archive_path))
-
-
 def promote_one_item(
         connection: DBClient,
         config: MediaforceConfig,
@@ -717,6 +695,13 @@ def promote_one_item(
         reserve_preflight: Callable[..., ReservePreflight] = promotion_reserve_preflight,
         active_reserve_waiting_reason: Callable[[DBClient, str | None], str | None] | None = None,
 ) -> Path:
+    pending = list(connection.execute(select(source_transitions.c.operation_id).where(
+        source_transitions.c.library_item_id == item["library_item_id"],
+        source_transitions.c.outcome.in_(("prepared", "unresolved")),
+    )).scalars())
+    for operation in pending:
+        if not reconcile_source_publish(connection, operation):
+            raise PromotionRestoreError("A previous publish has unresolved file locations")
     stage_row = connection.execute(
         select(staged_artifacts).where(staged_artifacts.c.library_item_id == item["library_item_id"])
     ).mappings().fetchone()
@@ -776,18 +761,13 @@ def promote_one_item(
     destination_path.parent.mkdir(parents=True, exist_ok=True)
 
     target_outcome = prepare_target_production_outcome(stage_row, item)
-    archive_backup_path: Path | None = None
-    source_archived = False
-    staged_promoted = False
+    archive_backup_path = _archive_backup_path(archive_path) if archive_path.exists() else None
+    operation = prepare_source_publish(
+        connection, int(item["library_item_id"]), source_path=source_path, staging_path=staging_path,
+        archive_path=archive_path, destination_path=destination_path, backup_path=archive_backup_path,
+    )
     try:
-        if source_path.exists():
-            if archive_path.exists():
-                archive_backup_path = _archive_backup_path(archive_path)
-                shutil.move(str(archive_path), str(archive_backup_path))
-            shutil.move(str(source_path), str(archive_path))
-            source_archived = True
-        shutil.move(str(staging_path), str(destination_path))
-        staged_promoted = True
+        apply_source_moves(connection, operation)
 
         promoted_stat = destination_path.stat()
         promoted_probe = probe_media(destination_path)
@@ -802,6 +782,7 @@ def promote_one_item(
         rel_path = logical_path.as_posix()
         parent_dir = logical_path.parent.as_posix()
 
+        commit_source_publish(connection, operation)
         connection.execute(
             update(library_items)
             .where(library_items.c.id == item["library_item_id"])
@@ -862,15 +843,8 @@ def promote_one_item(
         except BaseException as rollback_error:
             LOGGER.warning("Failed to roll back promotion database transaction: %s", rollback_error)
         try:
-            _restore_failed_promotion(
-                source_path=source_path,
-                staging_path=staging_path,
-                destination_path=destination_path,
-                archive_path=archive_path,
-                archive_backup_path=archive_backup_path,
-                source_archived=source_archived,
-                staged_promoted=staged_promoted,
-            )
+            if not reconcile_source_publish(connection, operation):
+                raise RuntimeError("Recorded file locations could not be reconciled")
         except BaseException as restore_error:
             raise PromotionRestoreError(
                 f"Promotion failed and filesystem rollback could not restore the original state: {restore_error}"

@@ -1,6 +1,7 @@
 from sqlalchemy import Column
 from sqlalchemy import CheckConstraint
 from sqlalchemy import ForeignKey
+from sqlalchemy import ForeignKeyConstraint
 from sqlalchemy import Index
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
@@ -77,9 +78,95 @@ library_items = Table(
     Column("discovered_at", Text, nullable=False),
     Column("last_seen_at", Text, nullable=False),
     Column("updated_at", Text, nullable=False),
+    Column("active_source_version_id", Text, ForeignKey("source_versions.version_id")),
+    Column("source_revision", Integer, nullable=False, server_default="0"),
 )
 Index("idx_library_items_rel_path", library_items.c.rel_path)
 Index("idx_library_items_status_score", library_items.c.status, library_items.c.priority_score.desc())
+
+source_generations = Table(
+    "source_generations", metadata,
+    Column("generation_id", Text, primary_key=True),
+    Column("created_at", Text, nullable=False),
+)
+
+source_versions = Table(
+    "source_versions", metadata,
+    Column("version_id", Text, primary_key=True),
+    Column("generation_id", Text, ForeignKey("source_generations.generation_id"), nullable=False),
+    Column("role", Text, nullable=False),
+    Column("sha256", Text),
+    Column("size_bytes", Integer),
+    Column("sample_fingerprint", Text),
+    Column("video_codec", Text),
+    Column("identity_json", Text, nullable=False),
+    Column("profile_json", Text, nullable=False),
+    Column("observed_at", Text, nullable=False),
+    CheckConstraint("role IN ('unknown', 'input', 'output')"),
+    UniqueConstraint("version_id", "generation_id"),
+)
+
+source_admissions = Table(
+    "source_admissions", metadata,
+    Column("admission_id", Text, primary_key=True),
+    Column("generation_id", Text, ForeignKey("source_generations.generation_id"), nullable=False),
+    Column("version_id", Text, nullable=False),
+    Column("tier", Text, nullable=False),
+    Column("basis", Text, nullable=False),
+    Column("checks_json", Text, nullable=False),
+    Column("confirmation_ref", Text),
+    Column("supersedes_id", Text, ForeignKey("source_admissions.admission_id")),
+    Column("recorded_at", Text, nullable=False),
+    ForeignKeyConstraint(["version_id", "generation_id"], ["source_versions.version_id", "source_versions.generation_id"]),
+    CheckConstraint("tier IN ('proven', 'probable', 'unknown')"),
+    CheckConstraint("tier != 'proven' OR confirmation_ref IS NOT NULL"),
+    UniqueConstraint("supersedes_id"),
+)
+
+source_measurements = Table(
+    "source_measurements", metadata,
+    Column("measurement_id", Text, primary_key=True),
+    Column("version_id", Text, ForeignKey("source_versions.version_id")),
+    Column("kind", Text, nullable=False),
+    Column("binding", Text, nullable=False),
+    Column("summary_json", Text, nullable=False),
+    Column("summary_sha256", Text, nullable=False),
+    Column("provenance_json", Text, nullable=False),
+    Column("measured_at", Text),
+    Column("recorded_at", Text, nullable=False),
+    CheckConstraint("version_id IS NOT NULL OR binding = 'unbound'"),
+    CheckConstraint("kind IN ('cadence_analysis', 'media_fingerprint')"),
+)
+Index("idx_source_measurements_version", source_measurements.c.version_id, source_measurements.c.kind)
+
+source_transitions = Table(
+    "source_transitions", metadata,
+    Column("operation_id", Text, primary_key=True),
+    Column("library_item_id", Integer, ForeignKey("library_items.id", ondelete="SET NULL")),
+    Column("before_version_id", Text, ForeignKey("source_versions.version_id"), nullable=False),
+    Column("after_version_id", Text, ForeignKey("source_versions.version_id"), nullable=False),
+    Column("expected_revision", Integer, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("outcome", Text, nullable=False),
+    Column("evidence_json", Text, nullable=False),
+    Column("recorded_at", Text, nullable=False),
+    CheckConstraint("outcome IN ('prepared', 'committed', 'rolled_back', 'unresolved')"),
+)
+Index(
+    "uq_source_transition_pending", source_transitions.c.library_item_id, unique=True,
+    sqlite_where=source_transitions.c.outcome.in_(("prepared", "unresolved")),
+)
+
+source_moves = Table(
+    "source_moves", metadata,
+    Column("operation_id", Text, ForeignKey("source_transitions.operation_id"), primary_key=True),
+    Column("ordinal", Integer, primary_key=True),
+    Column("version_id", Text, ForeignKey("source_versions.version_id"), nullable=False),
+    Column("from_path", Text, nullable=False),
+    Column("to_path", Text, nullable=False),
+    Column("phase", Text, nullable=False),
+    Column("checks_json", Text, nullable=False),
+)
 
 library_item_evidence_state = Table(
     "library_item_evidence_state",
