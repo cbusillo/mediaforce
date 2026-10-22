@@ -813,7 +813,12 @@ class LibraryLifecycleTests(unittest.TestCase):
         self.assertNotEqual(size_held.blocker, state.blocker)
         self.assertEqual(derive_item_workflow_state({**row, "promoted_at": NOW.isoformat()}).state, "complete")
         self.assertEqual(derive_item_workflow_state({**row, "staging_path": None}).state, "blocked")
-        for validation in (None, "invalid-json", json.dumps({"passed": True})):
+        # The encoder's own final-size miss still waits for the file's normal check.
+        encoder_size_miss = json.dumps({
+            "passed": False,
+            "target_size_verification": {"status": "over_target", "passed": False, "retry_allowed": False},
+        })
+        for validation in (None, "invalid-json", json.dumps({"passed": True}), encoder_size_miss):
             with self.subTest(validation=validation):
                 self.assertEqual(derive_item_workflow_state({**row, "validation_json": validation}).state, "ready_to_validate")
 

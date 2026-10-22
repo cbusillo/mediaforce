@@ -19,10 +19,12 @@ from mediaforce.core.db_tables import encode_jobs, item_events, library_items, s
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.utils import file_fingerprint, timestamp
 from mediaforce.encoding.delivery_lock import delivery_lock
-from mediaforce.encoding.staging import PromotionRestoreError, PromotionWaiting
+from mediaforce.core.type_defs import object_dict
+from mediaforce.encoding.staging import FINAL_SIZE_GOAL_CHECK, PromotionRestoreError, PromotionWaiting
 from mediaforce.library.staged_integrity import staged_integrity_report
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import automatic_publish as delivery
+from mediaforce.web.runtime import size_held
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.production_approval import production_approval_contract
 
@@ -885,3 +887,102 @@ def test_cleanup_keeps_originals_needed_by_an_unpublished_sibling(config: Mediaf
     archived.rename(original)
     _run(config)
     assert _status(config, item_id) != "promoted"
+
+
+def _encoder_size_record(
+    config: MediaforceConfig, rel_path: str, *, lower: int, upper: int, band_in_plan: bool = True
+) -> tuple[int, dict[str, Any]]:
+    """Stage a file the way the encoder leaves it after its final size check against that band."""
+    item_id, item, staged = _stage(config, rel_path)
+    staged_bytes = staged.stat().st_size
+    status = "over_target" if staged_bytes > upper else "under_target" if staged_bytes < lower else "inside_target_band"
+    if band_in_plan:
+        item["resolved_operator_intent"] = {
+            "size_goal": {"final_lower_bound_bytes": lower, "final_upper_bound_bytes": upper, "target_size_bytes": lower}
+        }
+    manifest_path = config.paths.project_root / f"manifest-{item_id}.json"
+    manifest_path.write_text(json.dumps({"run_id": f"run-{item_id}", "items": [item]}))
+    passed = status == "inside_target_band"
+    encoder_record = {
+        "passed": passed,
+        "target_size_verification": {
+            "status": status, "passed": passed, "lower_bound_bytes": lower, "upper_bound_bytes": upper,
+            "actual_output_bytes": staged_bytes, "retry_allowed": False,
+            "retry_reason": None if passed else "The final-size retry budget is used up.",
+        },
+        "target_size_trace": None,
+    }
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(
+            staged_artifacts.update()
+            .where(staged_artifacts.c.library_item_id == item_id)
+            .values(validation_json=json.dumps(encoder_record))
+        )
+        connection.commit()
+    return item_id, item
+
+
+def _keep(config: MediaforceConfig, item_id: int, item: dict[str, Any]) -> dict[str, Any]:
+    def validate_items(_prefix: str, _ids: Any) -> dict[str, Any]:
+        with patch("mediaforce.execution.probe_media", return_value=_probe()), open_db(config.paths.db_path) as connection:
+            result = delivery.validate_one_item(connection, config, item)
+        return {"ok": True, "validated_count": int(bool(result["passed"]))}
+
+    return size_held.decide_size_held_file(
+        config, "tv/Show/Season 1", item_id, keep=True, now_iso=timestamp,
+        validate_items=validate_items, queue_items=lambda *_args: pytest.fail("keeping must not queue anything"),
+    )
+
+
+def _remake_reason(config: MediaforceConfig, item_id: int) -> str | None:
+    with open_db(config.paths.db_path) as connection:
+        report = staged_integrity_report(connection, config, "tv/Show/Season 1", discover=False)
+        records = [record.to_payload() for record in report.records if record.item_id == item_id]
+        size_held.staged_remake_records(connection, records, "tv/Show/Season 1", current_approval=lambda _p: None)
+    return object_dict(records[0].get("remake")).get("reason")
+
+
+@pytest.mark.parametrize("band_in_plan", [True, False], ids=["band_in_plan", "no_band_in_plan"])
+def test_encoder_size_only_miss_is_checked_then_asks_keep_or_make_again(
+    config: MediaforceConfig, band_in_plan: bool
+) -> None:
+    item_id, item = _encoder_size_record(
+        config, "tv/Show/Season 1/too-big.mkv", lower=1, upper=2, band_in_plan=band_in_plan
+    )
+
+    _run(config)
+
+    assert _status(config, item_id) == "encoded"
+    assert not (config.archive_root / item["rel_path"]).exists()
+    with open_db(config.paths.db_path) as connection:
+        saved = json.loads(str(connection.execute(
+            select(staged_artifacts.c.validation_json).where(staged_artifacts.c.library_item_id == item_id)
+        ).scalar_one()))
+    assert [check["message"] for check in saved["checks"] if not check["passed"]] == [FINAL_SIZE_GOAL_CHECK]
+    assert _remake_reason(config, item_id) == "final_size"
+
+    result = _keep(config, item_id, item)
+    assert result["ok"], result
+    _run(config)
+    assert _status(config, item_id) == "promoted"
+
+
+def test_encoder_size_miss_with_another_failure_stays_failed(config: MediaforceConfig) -> None:
+    item_id, item = _encoder_size_record(config, "tv/Show/Season 1/broken.mkv", lower=1, upper=2)
+
+    with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
+        delivery.publish_checked_files_once(config, load_calibration_state=lambda _config, _prefix: _approval())
+
+    with open_db(config.paths.db_path) as connection:
+        report = staged_integrity_report(connection, config, "tv/Show/Season 1", discover=False)
+    assert [record.disposition for record in report.records if record.item_id == item_id] == ["validation_failed"]
+    assert _remake_reason(config, item_id) is None
+    assert not _keep(config, item_id, item)["ok"]
+    assert _status(config, item_id) == "encoded"
+
+
+def test_encoder_copy_inside_its_size_band_publishes_without_a_question(config: MediaforceConfig) -> None:
+    item_id, item = _encoder_size_record(config, "tv/Show/Season 1/fits.mkv", lower=1, upper=100)
+    _run(config)
+    assert _status(config, item_id) == "promoted"
+    assert Path(item["source_path"]).read_bytes() == b"av1"
