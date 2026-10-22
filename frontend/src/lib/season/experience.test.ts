@@ -929,7 +929,7 @@ describe('season experience translation', () => {
 			})
 		).toBe('Checking the sound');
 		const waitingReason =
-			'Waiting for M2 MBP to be available, such as in its next work window, to make this sample. It starts again then, with no need to retry it.';
+			'Waiting for M2 MBP to be available, such as in its next work window, to make this sample. Mediaforce tries again by itself a few times before it asks you.';
 		expect(
 			calibrationStageLabel({
 				job_id: 'sample-1',

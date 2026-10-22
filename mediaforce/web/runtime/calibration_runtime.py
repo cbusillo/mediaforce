@@ -699,7 +699,7 @@ def sample_waiting_for_computer_reason(host: Mapping[str, Any]) -> str:
     label = _sample_computer_label(host)
     return (
         f"Waiting for {label} to be available, such as in its next work window, to make this sample. "
-        f"It starts again then, with no need to retry it."
+        f"Mediaforce tries again by itself a few times before it asks you."
     )
 
 

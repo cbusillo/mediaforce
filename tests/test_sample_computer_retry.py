@@ -20,11 +20,13 @@ from mediaforce.tuning.calibration_jobs import load_job, save_job, update_job_te
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import job_runtime
-from mediaforce.web.runtime.calibration_runtime import SAMPLE_COMPUTER_RETRY_LIMIT, CalibrationRunDeps, \
-    run_calibration_job
+from mediaforce.web.runtime.calibration_runtime import SAMPLE_COMPUTER_RETRY_BASE_DELAY_SECONDS, \
+    SAMPLE_COMPUTER_RETRY_LIMIT, CalibrationRunDeps, run_calibration_job
 from mediaforce.web.runtime.queue_actions import stop_calibration_queue_action
 
 NOW = "2026-10-21T23:38:00+00:00"
+# The first try after losing the computer may start this long after the try that lost it.
+FIRST_RETRY_AT = datetime.fromisoformat(NOW) + timedelta(seconds=SAMPLE_COMPUTER_RETRY_BASE_DELAY_SECONDS)
 PREFIX = "tv/Futurama/Season 8"
 JOB_ID = "sample-s08e02"
 COMPUTER = "M2 MBP"
@@ -207,24 +209,26 @@ class SampleComputerRetryTests(unittest.TestCase):
 
         return _step
 
-    def _assert_waiting_for_computer(self, job: dict[str, Any], *, retry_not_before: str) -> None:
+    def _assert_waiting_for_computer(self, job: dict[str, Any]) -> None:
         self.assertEqual(job["status"], "queued")
         self.assertIsNone(job["error"])
         self.assertIsNone(job["finished_at"])
         progress = job["progress"]
         self.assertEqual(progress["stage"], "waiting_for_computer")
         self.assertEqual(progress["waiting_for_computer"], COMPUTER)
-        self.assertTrue(progress["waiting_reason"].startswith(f"Waiting for {COMPUTER} to be available"))
-        self.assertEqual(progress["retry_not_before"], retry_not_before)
+        self.assertIn(COMPUTER, progress["waiting_reason"])
+        self.assertEqual(datetime.fromisoformat(progress["retry_not_before"]), FIRST_RETRY_AT)
+        self.assertEqual(job["result"]["computer_retry"]["attempts"], 1)
 
     def test_a_link_dropped_mid_sample_waits_for_its_computer_and_tries_again(self) -> None:
         self._save_job(status="running")
 
         self._run(self._deps(search=_search_fails(QualitySearchError(f"Encoding sample 2/4\n{HOST_DOWN_MID_ENCODE}"))))
 
-        self._assert_waiting_for_computer(self._job(), retry_not_before="2026-10-21T23:39:00+00:00")
-        self.assertEqual(self._queue_pass(now="2026-10-21T23:38:30+00:00"), [])
-        self.assertEqual(self._queue_pass(now="2026-10-21T23:39:00+00:00"), [JOB_ID])
+        self._assert_waiting_for_computer(self._job())
+        just_before = (FIRST_RETRY_AT - timedelta(seconds=1)).isoformat()
+        self.assertEqual(self._queue_pass(now=just_before), [])
+        self.assertEqual(self._queue_pass(now=FIRST_RETRY_AT.isoformat()), [JOB_ID])
 
     def test_an_unreachable_computer_at_start_waits_then_runs_inside_its_work_window(self) -> None:
         self._save_job(status="running")
@@ -234,8 +238,8 @@ class SampleComputerRetryTests(unittest.TestCase):
 
         self._run(self._deps(host_ready=_host_is_down))
 
-        self._assert_waiting_for_computer(self._job(), retry_not_before="2026-10-21T23:39:00+00:00")
-        after_wait = "2026-10-21T23:45:00+00:00"
+        self._assert_waiting_for_computer(self._job())
+        after_wait = FIRST_RETRY_AT.isoformat()
         self.assertEqual(self._queue_pass(now=after_wait, window_open=False), [])
         self.assertEqual(self._job()["status"], "queued")
         self.assertEqual(self._queue_pass(now=after_wait, window_open=True), [JOB_ID])
@@ -268,7 +272,7 @@ class SampleComputerRetryTests(unittest.TestCase):
 
                 job = self._job()
                 self.assertEqual(job["status"], "failed")
-                self.assertIn("Permission denied", job["error"])
+                self.assertIn(REFUSED_LOGIN, job["error"])
 
     def test_a_sample_asks_the_owner_once_its_retries_are_used_up(self) -> None:
         self._save_job(status="running", result={"computer_retry": {"attempts": SAMPLE_COMPUTER_RETRY_LIMIT}})
@@ -278,8 +282,8 @@ class SampleComputerRetryTests(unittest.TestCase):
         job = self._job()
         self.assertEqual(job["status"], "failed")
         self.assertIn(COMPUTER, job["error"])
-        self.assertIn("retry the sample", job["error"])
         self.assertEqual(job["result"]["failure_kind"], "host_unreachable")
+        self.assertEqual(job["result"]["computer"], COMPUTER)
         self.assertEqual(job["result"]["tries"], SAMPLE_COMPUTER_RETRY_LIMIT + 1)
         self.assertEqual(self._queue_pass(now="2026-10-22T09:00:00+00:00"), [])
 
