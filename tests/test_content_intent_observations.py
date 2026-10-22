@@ -18,6 +18,7 @@ from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_migrations import _alembic_config, _alembic_script_location
 from mediaforce.core.db_tables import content_intent_boundary_observations
 from mediaforce.core.evidence import stable_source_id
+from mediaforce.encoding.quality import parse_sample_encode_result
 from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
 from mediaforce.tuning.av1_cold_start import plan_av1_cold_start
 from mediaforce.tuning.compression_intent import CompressionIntentLevel, CompressionIntentV1
@@ -92,6 +93,35 @@ class ContentIntentObservationTests(unittest.TestCase):
         self.assertEqual(row["payload_sha256"], observation.payload_sha256)
         self.assertEqual(json.loads(row["provenance_json"])["recorded_at"], observation.recorded_at)
         self.assertNotIn("operator_note", row["assessment_json"])
+
+    def test_approval_records_a_boundary_from_real_sample_encode_output(self) -> None:
+        sample_item, calibration = self._review_payload()
+        sample = parse_sample_encode_result(
+            '{"crf":31.0,"predicted_encode_percent":16.25,"predicted_encode_seconds":900.0,'
+            '"predicted_encode_size":122000000,"type":"sample-encode-done","vmaf":95.4}\n',
+            "vmaf",
+        )
+        sample_result = calibration["sample_result"]
+        assert isinstance(sample_result, dict)
+        sample_result["sampled_clip_bytes"] = sample.sampled_clip_size_bytes
+
+        result = record_visual_content_intent_observation(
+            self.connection,
+            prefix="tv/Futurama/Season 8",
+            sample_item=sample_item,
+            calibration=calibration,
+            verdict="approved",
+            concern_tags=["other"],
+            evidence_ids=["ev1_fingerprint"],
+            moment_indexes=[1],
+            recorded_at="2026-07-26T21:00:00+00:00",
+        )
+
+        self.assertEqual(result.status, "inserted", result.exclusion_reason)
+        row = self.connection.execute(select(content_intent_boundary_observations)).mappings().one()
+        self.assertEqual(row["observation_id"], result.observation_id)
+        self.assertEqual(row["verdict"], "acceptable")
+        self.assertIsNone(row["sampled_clip_bytes"])
 
     def test_visual_rejection_runtime_records_current_boundary(self) -> None:
         sample_item, calibration = self._review_payload()
@@ -1624,7 +1654,6 @@ class ContentIntentObservationTests(unittest.TestCase):
                 "quality_score": 95.4,
                 "predicted_video_size_bytes": boundary_size_bytes - 8_000_000,
                 "predicted_total_size_bytes": boundary_size_bytes,
-                "sampled_clip_bytes": 12_000_000,
                 "review_artifact_size_bytes": 18_000_000,
                 "target_size_trace": {
                     "quality_floor": {"minimum": 92.0},
