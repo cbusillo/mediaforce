@@ -65,4 +65,22 @@ describe('recovery banner', () => {
 		expect(html).not.toContain('Worker is unavailable');
 		expect(html).not.toContain('Retry connection');
 	});
+
+	it('keeps the storage path behind Details', () => {
+		const storage: RecoveryAlert = {
+			id: 'storage:/Volumes/media:2026-10-16T12:00:30+00:00',
+			title: "This Mac can't see the media library",
+			detail: 'Some shared storage is not connected. Mediaforce is retrying automatically.',
+			technical: '/Volumes/media: The required SMB share is not mounted.'
+		};
+		const html = banner([storage]);
+		const [visible, details] = html.split('<details');
+
+		expect(visible).toContain(storage.title);
+		expect(visible).not.toContain('/Volumes/media');
+		expect(details).toMatch(/<summary[^>]*>Details<\/summary>/);
+		expect(details).toContain(storage.technical);
+		// A warning without technical facts has no empty Details.
+		expect(banner([outage])).not.toContain('<details');
+	});
 });

@@ -109,37 +109,8 @@ const OPS_STATUS_OVERRIDES: Readonly<Record<string, string>> = {
 	stopped: 'Retry available'
 };
 
-function replaceStandaloneOperatorNoun(value: string, from: string, to: string): string {
-	return value.replace(
-		new RegExp(`(^|[^A-Za-z0-9_/-])${from}(?=$|[^A-Za-z0-9_/-])`, 'gi'),
-		`$1${to}`
-	);
-}
-
-function activityComputerCopy(value: string, protectedTerms: readonly string[] = []): string {
-	const placeholders = [...new Set(protectedTerms.map((term) => term.trim()).filter(Boolean))]
-		.sort((left, right) => right.length - left.length)
-		.map((term, index) => ({ term, token: `\u0000mediaforce-${index}\u0000` }));
-	let copy = value;
-	for (const { term, token } of placeholders) copy = copy.replaceAll(term, token);
-	copy = copy
-		.replace(/\bhost schedule windows\b/gi, 'computer work windows')
-		.replace(/\bhost schedule window\b/gi, 'computer work window')
-		.replace(/\bhost windows\b/gi, 'computer work windows')
-		.replace(/\bhost window\b/gi, 'computer work window')
-		.replace(/\buse Bypass scheduler\b/gi, 'bypass the work schedule')
-		.replace(/\bBypass scheduler\b/gi, 'Bypass work schedule');
-	copy = replaceStandaloneOperatorNoun(copy, 'workers', 'computers');
-	copy = replaceStandaloneOperatorNoun(copy, 'worker', 'computer');
-	copy = replaceStandaloneOperatorNoun(copy, 'hosts', 'computers');
-	copy = replaceStandaloneOperatorNoun(copy, 'host', 'computer');
-	for (const { term, token } of placeholders) copy = copy.replaceAll(token, term);
-	return copy;
-}
-
 export function activitySchedulePresentationCopy(
-	presentation: SchedulePresentation | null,
-	protectedTerms: readonly string[] = []
+	presentation: SchedulePresentation | null
 ): SchedulePresentation | null {
 	if (!presentation) return null;
 	const labels: Readonly<Record<string, string>> = {
@@ -152,26 +123,17 @@ export function activitySchedulePresentationCopy(
 	return {
 		...presentation,
 		label: labels[presentation.label] ?? presentation.label,
-		detail: activityComputerCopy(workScheduleSummaryCopy(presentation.detail), protectedTerms)
+		detail: workScheduleSummaryCopy(presentation.detail)
 	};
 }
 
-export function activityScheduleDetailCopy(
-	value: string | null | undefined,
-	protectedTerms: readonly string[] = []
-): string {
+export function activityScheduleDetailCopy(value: string | null | undefined): string {
 	const detail = compactText(value);
 	const waitingSummary = detail.match(/^waiting for (runs .+)$/i)?.[1];
-	const copy = /^waiting for never runs$/i.test(detail)
-		? 'Work schedule is off'
-		: waitingSummary
-			? `Waiting for ${workScheduleSummaryCopy(waitingSummary).replace(/^Work runs /, 'work ')}`
-			: workScheduleSummaryCopy(detail);
-	return activityComputerCopy(copy, protectedTerms);
-}
-
-function hostCopyTerms(hosts: readonly HostRuntime[]): string[] {
-	return hosts.flatMap((host) => [host.key, host.host ?? '', host.label]);
+	if (/^waiting for never runs$/i.test(detail)) return 'Work schedule is off';
+	return waitingSummary
+		? `Waiting for ${workScheduleSummaryCopy(waitingSummary).replace(/^Work runs /, 'work ')}`
+		: workScheduleSummaryCopy(detail);
 }
 
 function calibrationProgressCopy(job: CalibrationJob, status: string): string {
@@ -312,10 +274,7 @@ function hostEncodeReady(
 	queue?: DashboardSummaryPayload['encode_queue'] | null
 ): boolean {
 	const storageRecovery = host.storage_recovery_available === true;
-	const schedule = activitySchedulePresentationCopy(
-		hostSchedulePresentation(host, queue),
-		hostCopyTerms([host])
-	);
+	const schedule = activitySchedulePresentationCopy(hostSchedulePresentation(host, queue));
 	return (
 		(host.available || storageRecovery) &&
 		host.schedule_open !== false &&
@@ -650,8 +609,7 @@ export function hostWorkReason(
 	now = new Date()
 ): string {
 	const schedule = activitySchedulePresentationCopy(
-		hostSchedulePresentation(host, dashboard?.encode_queue),
-		hostCopyTerms(hosts?.hosts ?? [host])
+		hostSchedulePresentation(host, dashboard?.encode_queue)
 	);
 	if (host.available && host.schedule_open === false) {
 		return (
@@ -792,8 +750,7 @@ export function buildEncodeRows(
 	return displayJobs.map((job) => {
 		const status = String(job.status ?? '').toLowerCase();
 		const schedule = activitySchedulePresentationCopy(
-			jobSchedulePresentation(job, hosts?.hosts ?? [], now),
-			hostCopyTerms(hosts?.hosts ?? [])
+			jobSchedulePresentation(job, hosts?.hosts ?? [], now)
 		)!;
 		const jobTone = encodeJobTone(job);
 		const needsChangedInputs = encodeRequiresChangedInputs(job);
@@ -1489,8 +1446,7 @@ export function hostTone(
 	if (!host.available) return fleetHasConnectedHost ? 'wait' : 'fail';
 	if (hostCoolingDown(host)) return 'wait';
 	const schedule = activitySchedulePresentationCopy(
-		hostSchedulePresentation(host, dashboard?.encode_queue),
-		hostCopyTerms([host])
+		hostSchedulePresentation(host, dashboard?.encode_queue)
 	);
 	if (schedule) return schedule.tone;
 	if (host.active_encode_count > 0) return 'active';
@@ -1507,8 +1463,7 @@ export function hostStateCopy(
 	if (!host.available) return 'Unavailable';
 	if (hostCoolingDown(host)) return 'Cooling down';
 	const schedule = activitySchedulePresentationCopy(
-		hostSchedulePresentation(host, dashboard?.encode_queue),
-		hostCopyTerms([host])
+		hostSchedulePresentation(host, dashboard?.encode_queue)
 	);
 	if (schedule) return schedule.label;
 	if (host.active_encode_count > 0) return 'Working';

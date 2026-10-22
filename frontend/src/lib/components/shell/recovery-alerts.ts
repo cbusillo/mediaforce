@@ -1,5 +1,14 @@
-/** A current outage warning from `GET /api/recovery-alerts`; `host_key` names a computer to retry. */
-export type RecoveryAlert = { id: string; title: string; detail: string; host_key?: string };
+/**
+ * A current outage warning from `GET /api/recovery-alerts`; `host_key` names a computer to retry.
+ * `technical` holds paths and raw reasons for whoever fixes it, shown only behind Details.
+ */
+export type RecoveryAlert = {
+	id: string;
+	title: string;
+	detail: string;
+	host_key?: string;
+	technical?: string;
+};
 
 /**
  * The warnings to show after a refresh: exactly the ones the server still reports, so a

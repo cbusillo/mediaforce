@@ -32,6 +32,12 @@
 		<div class="catalog-warning__inner">
 			<strong>{alert.title}</strong>
 			<span>{alert.detail} <a href={resolve('/ops')}>View computers</a></span>
+			{#if alert.technical}
+				<details class="recovery-alert__details">
+					<summary>Details</summary>
+					<span>{alert.technical}</span>
+				</details>
+			{/if}
 			{#if alert.host_key}
 				<button
 					type="button"
@@ -97,6 +103,20 @@
 	.recovery-alert__retry:disabled {
 		cursor: progress;
 		opacity: 0.6;
+	}
+
+	.recovery-alert__details {
+		flex: none;
+		font-size: var(--mf-text-xs);
+	}
+
+	.recovery-alert__details summary {
+		cursor: pointer;
+	}
+
+	.recovery-alert__details span {
+		display: block;
+		overflow-wrap: anywhere;
 	}
 
 	.recovery-alert__outcome {

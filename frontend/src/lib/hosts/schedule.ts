@@ -160,7 +160,7 @@ export function jobSchedulePresentation(
 			state,
 			label: scheduleLabels.bypassed,
 			tone: 'wait',
-			detail: 'This work ignores the normal worker close time and can continue past it.'
+			detail: 'This work ignores the normal close of the work window and can continue past it.'
 		};
 	}
 	if (state === 'schedule_interrupted') {
@@ -200,7 +200,7 @@ export function jobSchedulePresentation(
 			tone: 'fail',
 			detail:
 				compactText(job.waiting_reason) ||
-				'The estimated item is longer than every compatible work window. Widen a worker window or use Bypass scheduler.'
+				"The estimated item is longer than every compatible work window. Widen a computer's work window or intentionally bypass the work schedule."
 		};
 	}
 	if (state === 'off_schedule') {
@@ -209,7 +209,7 @@ export function jobSchedulePresentation(
 		const detail =
 			nextOpening && opening
 				? `Starts automatically when ${nextOpening.host.label} opens ${opening}.`
-				: 'Starts automatically when a compatible worker window opens.';
+				: "Starts automatically when a compatible computer's work window opens.";
 		return {
 			state,
 			label: 'Off schedule',
@@ -223,7 +223,7 @@ export function jobSchedulePresentation(
 			state,
 			label: 'Running',
 			tone: 'active',
-			detail: compactText(job.scheduler_status_copy) || 'Running inside the worker work window.'
+			detail: compactText(job.scheduler_status_copy) || "Running inside the computer's work window."
 		};
 	}
 	if (state === 'ready') {
@@ -231,7 +231,7 @@ export function jobSchedulePresentation(
 			state,
 			label: 'Ready',
 			tone: 'ready',
-			detail: compactText(job.scheduler_status_copy) || 'Ready when a compatible worker is free.'
+			detail: compactText(job.scheduler_status_copy) || 'Ready when a compatible computer is free.'
 		};
 	}
 	return {
@@ -271,7 +271,7 @@ export function hostSchedulePresentation(
 			state: 'bypassed',
 			label: scheduleLabels.bypassed,
 			tone: 'wait',
-			detail: 'Active work can continue after this worker’s normal close time.'
+			detail: 'Active work can continue after this computer’s normal close time.'
 		};
 	}
 	if (host.schedule_profile_label === 'Never') {
@@ -279,7 +279,7 @@ export function hostSchedulePresentation(
 			state: 'host_off_schedule',
 			label: 'Not accepting',
 			tone: 'idle',
-			detail: 'This worker’s work window is set to Never.'
+			detail: 'This computer’s work window is set to Never.'
 		};
 	}
 	if (host.schedule_open === false) {
