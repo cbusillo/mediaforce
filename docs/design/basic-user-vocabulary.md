@@ -118,6 +118,10 @@ Keyboard refresh returns focus to the workspace heading.
 - No sample exists: `Needs sample`. Mediaforce needs one representative file
   before settings can be approved.
 - Sample is queued: `Sample waiting`. A computer has not started the sample yet.
+- Sample lost its computer: `Sample waiting`, with the reason naming the
+  computer, for example `Waiting for M2 MBP to be available, such as in its
+  next work window, to make this sample.` It tries again by itself, a few
+  times with growing waits, before it becomes `Sample needs retry`.
 - Sample is running: `Creating sample`. Comparison clips are being created.
 - Sample failed but can retry: `Sample needs retry`. The next safe action is
   retrying the sample.

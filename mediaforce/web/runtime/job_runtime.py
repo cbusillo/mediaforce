@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy import update
 
 from mediaforce.tuning.calibration_jobs import RUNNING_JOB_STATUSES, claim_next_queued_calibration_job, \
-    queued_job_hosts, \
+    queued_job_hosts, queued_jobs_waiting_to_retry, \
     load_active_overlapping_job, \
     load_latest_failed_sample_job, \
     load_latest_failed_target_size_sample_job, load_latest_job, load_latest_overlapping_job, \
@@ -874,12 +874,20 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
             if status in {"starting", "running"} and lane in running_by_lane:
                 running_by_lane[lane] += 1
 
+        now = datetime.fromisoformat(deps.now_iso())
+        with deps.calibration_submissions_lock:
+            # A job whose last try is still cleaning up must not start again until that try ends.
+            still_ending = tuple(sorted(deps.calibration_submissions))
         for lane, capacity in capacities.items():
-            # A sample waits in the queue while its machine is outside its work window.
+            # A sample waits in the queue while its machine is outside its work window, and after
+            # losing its computer until its retry time.
             outside_window = tuple(
                 job_id
                 for job_id, host in queued_job_hosts(connection, lane=lane)
                 if host and not deps.host_window_open(config, host)
+            )
+            not_startable = (
+                outside_window + queued_jobs_waiting_to_retry(connection, lane=lane, now=now) + still_ending
             )
             while running_by_lane[lane] < capacity:
                 started_at = deps.now_iso()
@@ -889,7 +897,7 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
                     owner_pid=os.getpid(),
                     started_at=started_at,
                     excluded_prefixes=tuple(sorted(active_prefixes)),
-                    excluded_job_ids=outside_window,
+                    excluded_job_ids=not_startable,
                 )
                 if payload is None:
                     break
