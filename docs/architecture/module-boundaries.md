@@ -339,6 +339,9 @@ Guidance:
     fingerprint JSON
   - compact freshness reasons, source/analyzer/policy identities, retry timing,
     and media-free status/count queries
+- `source_evidence.py`
+  - a published file's source cadence and fingerprint measurements, recorded
+    at publish and restored for older publishes, kept apart from the output's
 - `evidence_queue.py`
   - explicit scoped batch state, atomic single-concurrency claims, pause/cancel,
     lease recovery, retry readiness, and aggregate status

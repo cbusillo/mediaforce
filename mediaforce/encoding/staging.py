@@ -30,6 +30,7 @@ from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.encoding.free_space import ReservePreflight, promotion_reserve_preflight
 from mediaforce.library.media_scopes import logical_library_rel_path
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
+from mediaforce.library.source_evidence import record_source_evidence_before_publish
 from mediaforce.tuning.compression_intent import compression_intent_from_item
 from mediaforce.tuning.production_lineage import validated_target_identity
 from mediaforce.tuning.production_outcomes import append_target_production_outcome, prepare_target_production_outcome
@@ -777,6 +778,13 @@ def promote_one_item(
         rel_path = logical_path.as_posix()
         parent_dir = logical_path.parent.as_posix()
 
+        # The catalog row moves to the output next, and the output gets measured on its own later.
+        record_source_evidence_before_publish(
+            connection,
+            int(item["library_item_id"]),
+            published_fingerprint=promoted_content_fingerprint or promoted_fingerprint,
+            recorded_at=now,
+        )
         connection.execute(
             update(library_items)
             .where(library_items.c.id == item["library_item_id"])

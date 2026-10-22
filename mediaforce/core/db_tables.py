@@ -708,6 +708,18 @@ production_holds = Table(
 Index("idx_production_holds_status", production_holds.c.status)
 
 # The owner's choice to keep a file held for its motion pattern original, bound to the source it was made for.
+library_item_source_evidence = Table(
+    "library_item_source_evidence",
+    metadata,
+    Column("library_item_id", Integer, ForeignKey("library_items.id", ondelete="CASCADE"), primary_key=True),
+    Column("evidence_kind", Text, primary_key=True),
+    Column("summary_json", Text, nullable=False),
+    Column("source_fingerprint", Text),
+    Column("published_fingerprint", Text),
+    Column("origin", Text, nullable=False),
+    Column("recorded_at", Text, nullable=False),
+)
+
 motion_keep_decisions = Table(
     "motion_keep_decisions",
     metadata,

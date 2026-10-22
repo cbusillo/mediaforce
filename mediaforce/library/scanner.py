@@ -28,6 +28,7 @@ from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_
 from mediaforce.library.media_scopes import logical_library_rel_path, path_matches_scope
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.probe import probe_media
+from mediaforce.library.source_evidence import forget_source_evidence
 from mediaforce.core.type_defs import float_value, int_value, object_list
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint, timestamp
 
@@ -544,6 +545,7 @@ def _reopen_replaced_publishes(connection: DBClient, *, updated_at: str) -> None
             )
         )
         connection.execute(delete(staged_artifacts).where(staged_artifacts.c.library_item_id == row["id"]))
+        forget_source_evidence(connection, int(row["id"]))
         connection.execute(
             update(library_items)
             .where(library_items.c.id == row["id"])

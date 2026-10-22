@@ -41,6 +41,34 @@ reason so decision-blocking safety work can run before advisory backfill.
 Analyzer or policy changes remain visible as projection state until a user
 explicitly prepares and starts work.
 
+## Source measurements after publish
+
+The cadence and fingerprint columns on `library_items` describe the file in the
+library now. A publish moves that row to the AV1 output, so its evidence becomes
+`source_changed` and a later batch measures the output there. Grouping shows by
+what their sources look like needs the source's measurements, so revision
+`20261022_0027` adds `library_item_source_evidence`, one row per
+`(library_item_id, evidence_kind)`:
+
+- `promote_one_item` records the item's current summary in the publish
+  transaction, before the row moves, when its evidence state binds that exact
+  summary to the file being replaced. Otherwise the kind has no record.
+- `published_fingerprint` names the output that replaced the source. Publishing
+  again over that output keeps the original source's record.
+- A new original downloaded over a published copy retires the record, since it
+  is a new source.
+- `load_source_evidence_summaries()` answers a published item from the record
+  and an unpublished item from its current, still-bound summary. A published
+  item without a record is left out instead of answered with its output.
+
+Items published before this table existed are restored once with
+`mediaforce evidence restore-source`. Without `--apply` it only counts, through
+a read-only database connection. It takes the item's run plan first (found
+through `staged_artifacts.manifest_path`), then a catalog summary whose evidence
+state is still bound to an earlier file than the output, and leaves existing
+records alone, so repeating it changes nothing. Run plans are pruned over time,
+so run it soon after upgrading.
+
 ## Batch lifecycle
 
 `start_evidence_work()` requires a non-empty resolved scope. It selects only

@@ -151,7 +151,7 @@ def project_evidence_state(
     projected_at = updated_at or timestamp()
     policy_hash = current_policy_hash or stable_policy_hash(spec.policy_snapshot())
     raw_summary = summary_json if isinstance(summary_json, str) else None
-    summary_hash = _summary_hash(raw_summary)
+    summary_hash = evidence_summary_sha256(raw_summary)
     payload, base_state, base_reason = _canonical_state(raw_summary, spec)
     analysis = object_dict(payload.get("analysis")) if payload is not None else {}
     decision = object_dict(payload.get("decision")) if payload is not None else {}
@@ -619,6 +619,11 @@ def _evidence_spec(evidence_kind: EvidenceKind) -> _EvidenceSpec:
         raise ValueError(f"Unsupported evidence kind: {evidence_kind}") from exc
 
 
+def evidence_summary_column(evidence_kind: EvidenceKind) -> str:
+    """The ``library_items`` column holding the current file's measurements of this kind."""
+    return _evidence_spec(evidence_kind).column_name
+
+
 def library_item_source_fingerprint(item: Mapping[str, Any]) -> str | None:
     """The fingerprint evidence and owner decisions about this file are bound to."""
     return (
@@ -627,7 +632,7 @@ def library_item_source_fingerprint(item: Mapping[str, Any]) -> str | None:
     )
 
 
-def _summary_hash(raw_summary: str | None) -> str | None:
+def evidence_summary_sha256(raw_summary: str | None) -> str | None:
     if raw_summary is None or not raw_summary.strip():
         return None
     return f"sha256:{hashlib.sha256(raw_summary.encode(), usedforsecurity=False).hexdigest()}"

@@ -58,7 +58,7 @@ from mediaforce.web.runtime_lock import (
 )
 from mediaforce.web import runtime_lock as runtime_lock_module
 
-CURRENT_DB_REVISION = "20261018_0026"
+CURRENT_DB_REVISION = "20261022_0027"
 
 
 def _fixture_database_custody(db_path: Path) -> DatabaseFileCustody:
