@@ -95,7 +95,8 @@ from mediaforce.tuning.compression_intent import CompressionIntentV1
 from mediaforce.tuning.content_intent_observations import build_content_intent_boundary_compatibility, \
     content_intent_stream_plan_id
 from mediaforce.tuning.size_goals import SizeGoalIntent
-from mediaforce.tuning.target_size_search import TargetSizeSearchError
+from mediaforce.tuning import target_size_search
+from mediaforce.tuning.target_size_search import QUALITY_SAFE_BRACKET_MISS_REASON, TargetSizeSearchError
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.reviewing.helpers import ReviewMoment
 from mediaforce.web import app as web_app
@@ -2402,12 +2403,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             connection: Any,
             name: str,
             *,
-            best_reachable_bytes: int,
+            best_reachable_bytes: int = 0,
             compression_intent: dict[str, Any] | None = None,
+            error_message: str | None = None,
     ) -> tuple[dict[str, Any] | None, Path]:
         source_path = self._create_source_file(f"{name}.mkv")
         staging_path = self._staging_path(f"{name}.mkv")
-        error_message = (
+        error_message = error_message or (
             "The approved target size conflicts with the configured quality floor "
             "(target_band_violates_quality_floor); "
             f"target=200000000 bytes, best_reachable={best_reachable_bytes} bytes."
@@ -2600,6 +2602,70 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
         self.assertEqual(analysis["owner_size_decision"]["answer"], "allow")
         self.assertEqual(len(events), 1)
+
+    @staticmethod
+    def _quality_safe_bracket_miss_message(*, goal_bytes: int, larger_bytes: int, smaller_bytes: int) -> str:
+        """The search's own failure message for a closed quality-safe bracket around the goal."""
+        return target_size_search._failure_message(
+            "needs_review",
+            QUALITY_SAFE_BRACKET_MISS_REASON,
+            {
+                "target": {"total_target_bytes": goal_bytes},
+                "quality_safe_bracket": {
+                    "larger_candidate": {"predicted_whole_episode_bytes": larger_bytes},
+                    "smaller_candidate": {"predicted_whole_episode_bytes": smaller_bytes},
+                },
+            },
+        )
+
+    def test_quality_safe_bracket_miss_asks_the_owner_with_the_closest_larger_size(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated, manifest_path = self._quality_floor_conflict_job(
+                connection,
+                "bracket-question",
+                error_message=self._quality_safe_bracket_miss_message(
+                    goal_bytes=200_000_000, larger_bytes=212_000_000, smaller_bytes=186_000_000,
+                ),
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+        assert updated is not None
+        # Neither side breaks the quality floor, so nothing is raised automatically, even within the allowance.
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertEqual(manifest["items"][0]["resolved_policy"]["video"]["target_size_bytes"], 200_000_000)
+        self.assertNotIn("compression_escalation", manifest["items"][0])
+        self.assertEqual(
+            encode_runtime.size_exception_question(updated),
+            {
+                "job_id": "job-bracket-question",
+                "rel_path": "tv/show/bracket-question.mkv",
+                "goal_bytes": 200_000_000,
+                "smallest_quality_safe_bytes": 212_000_000,
+            },
+        )
+
+    def test_owner_allowing_a_bracket_miss_records_only_the_owner_as_evidence(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._quality_floor_conflict_job(
+                connection,
+                "bracket-allow",
+                error_message=self._quality_safe_bracket_miss_message(
+                    goal_bytes=200_000_000, larger_bytes=212_000_000, smaller_bytes=186_000_000,
+                ),
+            )
+            result = self._decide_size(connection, "job-bracket-allow", allow=True)
+            updated = load_encode_job(connection, "job-bracket-allow")
+        manifest = json.loads((self.root / "runs" / "manifest-bracket-allow.json").read_text())
+
+        self.assertTrue(result["ok"], result)
+        assert updated is not None
+        self.assertEqual(updated["status"], "queued")
+        item = manifest["items"][0]
+        self.assertEqual(item["resolved_policy"]["video"]["target_size_bytes"], 212_000_000)
+        escalation = item["compression_escalation"]
+        self.assertEqual(escalation["evidence"]["kind"], "operator_override")
+        self.assertEqual(escalation["evidence"]["owner_approval"]["kind"], "operator_override")
+        self.assertEqual(escalation["decision"]["outcome"], "authorized")
 
     def _floor_conflict_shard_under_running_folder(self, connection: DBClient, name: str) -> dict[str, Any]:
         child, _manifest_path = self._quality_floor_conflict_job(connection, name, best_reachable_bytes=400_000_000)
