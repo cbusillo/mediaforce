@@ -189,3 +189,32 @@ def test_backfill_is_idempotent_and_respects_native_rows(tmp_path: Path) -> None
     assert second["boundary_observations"]["recorded"] == 0
     assert second["boundary_observations"]["already_recorded"] == 2
     assert len(rows) == 2
+    native_entry = next(entry for entry in second["entries"] if entry["advice_file"] == "native.advice.json")
+    assert native_entry["observation_id"] == native_result.observation_id
+    assert {entry["observation_id"] for entry in second["entries"]} == {row["observation_id"] for row in rows}
+
+
+def test_backfill_reports_the_current_revision_of_a_corrected_series(tmp_path: Path) -> None:
+    web_dir = tmp_path / "web"
+    calibration, _ = _approval_files(web_dir, "corrected", library_item_id=1, job_id="sample-1")
+    db_path = tmp_path / "library.sqlite3"
+    with open_db(db_path) as connection:
+        for verdict, tags in (("approved", ["other"]), ("rejected", ["motion_breakup"])):
+            latest = record_visual_content_intent_observation(
+                connection,
+                prefix=PREFIX,
+                sample_item=deepcopy(calibration["sample_item"]),
+                calibration=calibration,
+                verdict=verdict,
+                concern_tags=tags,
+                evidence_ids=["ev1_fingerprint"],
+                moment_indexes=[1],
+                recorded_at=ACCEPTED_AT,
+            )
+        assert latest.status == "corrected"
+
+    with open_readonly_db(db_path) as connection:
+        report = backfill_content_intent_approvals(connection, web_dir, apply=False).to_payload()
+
+    assert report["boundary_observations"]["already_recorded"] == 1
+    assert report["entries"][0]["observation_id"] == latest.observation_id

@@ -132,8 +132,9 @@ def _backfill_one(
     observation = result.observation
     if observation is None:
         return skipped(result.exclusion_reason or "unknown_reason")
-    if _series_recorded(connection, observation):
-        return ApprovalBackfillEntry(advice_name, "already_recorded", None, observation.observation_id)
+    persisted_observation_id = _latest_series_observation_id(connection, observation)
+    if persisted_observation_id is not None:
+        return ApprovalBackfillEntry(advice_name, "already_recorded", None, persisted_observation_id)
     if not apply:
         return ApprovalBackfillEntry(advice_name, "would_record", None, observation.observation_id)
     append_content_intent_boundary_observation(connection, observation)
@@ -151,15 +152,18 @@ def _approval_record(advice: Mapping[str, Any], job_id: str) -> dict[str, Any] |
     return matches[-1] if matches else None
 
 
-def _series_recorded(connection: DBClient, observation: ContentIntentBoundaryObservation) -> bool:
-    # A native approval of the same review shares the series, whatever its provenance says.
-    return bool(
-        connection.execute(
-            select(func.count())
-            .select_from(content_intent_boundary_observations)
-            .where(content_intent_boundary_observations.c.series_id == observation.series_id)
-        ).scalar_one()
-    )
+def _latest_series_observation_id(
+        connection: DBClient,
+        observation: ContentIntentBoundaryObservation,
+) -> str | None:
+    # A native approval of the same review shares the series but not the candidate's provenance
+    # or ID, and later corrections supersede it; report the row that is actually current.
+    return connection.execute(
+        select(content_intent_boundary_observations.c.observation_id)
+        .where(content_intent_boundary_observations.c.series_id == observation.series_id)
+        .order_by(content_intent_boundary_observations.c.revision.desc())
+        .limit(1)
+    ).scalar_one_or_none()
 
 
 def _published_without_lineage(connection: DBClient, library_item_id: int) -> bool:
