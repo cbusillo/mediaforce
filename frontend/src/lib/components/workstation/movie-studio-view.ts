@@ -332,14 +332,10 @@ export function movieCurrentWorkView(
 		startConditions.push('the compression schedule opens');
 	}
 	const waitingCopy = textValue(job.waiting_reason) || textValue(job.scheduler_status_copy);
-	if (
-		['draining_impossible', 'draining_no_fit', 'schedule_interrupted'].includes(
-			job.schedule_state ?? ''
-		) &&
-		waitingCopy
-	) {
-		blockers.push(waitingCopy);
-		startConditions.push('the scheduler condition clears');
+	const workWindowWait = WORK_WINDOW_WAITS[job.schedule_state ?? ''];
+	if (workWindowWait && waitingCopy) {
+		blockers.push(workWindowWait.blocker);
+		startConditions.push(workWindowWait.startCondition);
 	}
 	if (job.status === 'retry_backoff') {
 		blockers.push('Mediaforce is waiting before retrying.');
@@ -378,6 +374,23 @@ export function movieCurrentWorkView(
 		currentItem
 	};
 }
+
+// Work-window waits that need their own sentence; the raw scheduler text stays out of the blockers.
+const WORK_WINDOW_WAITS: Record<string, { blocker: string; startCondition: string }> = {
+	draining_no_fit: {
+		blocker: 'This movie does not fit in the time left in the current work window.',
+		startCondition: 'the next work window opens'
+	},
+	draining_impossible: {
+		blocker: 'This movie is longer than every work window. Widen a work window to let it run.',
+		startCondition: 'a work window is long enough'
+	},
+	schedule_interrupted: {
+		blocker:
+			'The work window closed during compression. The whole movie restarts automatically, and no failure attempt was used.',
+		startCondition: 'the next work window opens'
+	}
+};
 
 function normalizeMovieQueueCopy(value: string): string {
 	return value
@@ -616,10 +629,10 @@ function qualityContractCopy(
 		configuredMetric === 'AUTO' ? textValue(resolvedMetric).toUpperCase() : configuredMetric;
 	if (configuredMetric === 'AUTO' && !metric) {
 		return {
-			label: 'Quality floor',
-			value: 'Automatic metric guardrail',
+			label: 'Minimum picture quality',
+			value: 'Chosen automatically',
 			detail:
-				'Use VMAF when available, otherwise XPSNR; Mediaforce resolves the active floor before sampling.',
+				'Mediaforce picks the best picture score it can measure on this computer before making a sample.',
 			provenance: provenanceLabel(quality?.source, false),
 			tone: 'normal'
 		};
@@ -629,19 +642,21 @@ function qualityContractCopy(
 	const floor = finitePositive(usesXpsnr ? quality?.min_target_xpsnr : quality?.min_target_vmaf);
 	if (!metric || !floor) {
 		return {
-			label: 'Quality floor',
+			label: 'Minimum picture quality',
 			value: 'Still resolving',
-			detail: 'Mediaforce is resolving the acceptance guardrail for this movie.',
+			detail: 'Mediaforce is still working out the minimum picture quality for this movie.',
 			provenance: 'Still resolving',
 			tone: 'normal'
 		};
 	}
+	const scoreLabel = usesXpsnr ? 'Picture detail score' : 'Picture appearance score';
+	const minimum = formatCompactNumber(floor);
 	return {
-		label: 'Quality floor',
-		value: `${metric} floor ${formatCompactNumber(floor)}`,
+		label: 'Minimum picture quality',
+		value: `${scoreLabel} at least ${minimum}`,
 		detail: target
-			? `Aim for ${formatCompactNumber(target)}; the floor is an acceptance guardrail, not a guarantee.`
-			: 'This floor is an acceptance guardrail, not a guarantee.',
+			? `Aim for ${formatCompactNumber(target)}. A compressed file scoring under ${minimum} is not used; a passing score does not promise it looks identical.`
+			: `A compressed file scoring under ${minimum} is not used; a passing score does not promise it looks identical.`,
 		provenance: provenanceLabel(quality?.source, false),
 		tone: 'normal'
 	};
@@ -656,7 +671,7 @@ function compressionContractCopy(intent: ResolvedOperatorIntentPayload): MovieGo
 		value: requiresChoice ? 'Needs your choice' : compression.title,
 		detail: requiresChoice
 			? 'Choose the intended balance between file size and visible detail before preparing.'
-			: `${compression.detail} ${compression.accepts_under_target_result ? 'A smaller result is acceptable when it still meets the quality floor.' : 'Stay near the size target when the quality floor allows it.'}`,
+			: `${compression.detail} ${compression.accepts_under_target_result ? 'A smaller result is acceptable when it still meets the minimum picture quality.' : 'Stay near the size target when the minimum picture quality allows it.'}`,
 		provenance: provenanceLabel(compression?.source, requiresChoice),
 		tone: requiresChoice ? 'attention' : 'normal'
 	};
@@ -824,8 +839,8 @@ function qualityFindingLabel(value: unknown): string {
 			likely_analog_noise: 'Grain / noise treatment',
 			compression_noise_advisory: 'Grain / noise treatment',
 			uncertain_noise_mix: 'Grain / noise treatment',
-			cadence_interlace_artifacts: 'Cadence / interlace artifacts',
-			duplicate_cadence: 'Cadence / interlace artifacts',
+			cadence_interlace_artifacts: 'Uneven motion / combing lines',
+			duplicate_cadence: 'Uneven motion / combing lines',
 			audio_quality_layout: 'Audio quality / layout',
 			audio_complexity: 'Audio quality / layout',
 			other: 'Other review concern'

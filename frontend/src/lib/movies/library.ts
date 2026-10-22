@@ -3,6 +3,7 @@ import type {
 	FolderWorkflowState,
 	MovieLibraryPayload,
 	MovieMember,
+	MoviePromotionConflict,
 	MovieTitle
 } from '$lib/api/types';
 
@@ -140,6 +141,43 @@ export function movieCompositionDetail(title: MovieTitle): string | null {
 		);
 	}
 	return details.length ? details.join(' · ') : null;
+}
+
+function fileCount(count: number): string {
+	return `${count} ${count === 1 ? 'file' : 'files'}`;
+}
+
+/**
+ * Plain explanation for a movie whose files stay original. The backend detail names its lifecycle
+ * policy, so the Movie views build the sentence from the counts instead of showing it.
+ */
+export function movieHeldExplanation(workflow: FolderWorkflowState | null | undefined): string {
+	const held = Math.max(0, Number(workflow?.counts?.held) || 0);
+	const motionHeld = Math.min(held, Math.max(0, Number(workflow?.counts?.motion_held) || 0));
+	const timingHeld = held - motionHeld;
+	const parts: string[] = [];
+	if (motionHeld) {
+		parts.push(
+			`${fileCount(motionHeld)} ${motionHeld === 1 ? 'stays' : 'stay'} original because Mediaforce can't convert the motion pattern safely.`
+		);
+	}
+	if (timingHeld) {
+		parts.push(
+			`${fileCount(timingHeld)} ${timingHeld === 1 ? 'stays' : 'stay'} original for now (newest season or recently added).`
+		);
+	}
+	return parts.length ? parts.join(' ') : 'These files stay original for now.';
+}
+
+/** Plain sentence for a replacement conflict; the destination path is shown beside it. */
+export function movieConflictExplanation(conflict: Pick<MoviePromotionConflict, 'kind'>): string {
+	if (conflict.kind === 'duplicate_destination') {
+		return 'More than one file in this movie would be saved to the same place:';
+	}
+	if (conflict.kind === 'destination_exists') {
+		return 'A different file is already where the compressed movie would be saved:';
+	}
+	return 'Something is already where the compressed movie would be saved:';
 }
 
 // A movie the queue leaves out because Mediaforce can't convert its motion pattern safely.

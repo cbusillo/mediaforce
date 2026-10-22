@@ -18,6 +18,8 @@
 		movieReclaimTotalIsLowerBound,
 		movieTitleNeedsAction,
 		movieTitleRuntimeSeconds,
+		movieConflictExplanation,
+		movieHeldExplanation,
 		movieWorkflowIsComplete,
 		movieWorkflowLabel,
 		selectMovieLeadTitle,
@@ -174,12 +176,18 @@
 	const libraryNotices = $derived.by<LibraryNotice[]>(() => {
 		const notices: LibraryNotice[] = [];
 		if (loadError) {
-			notices.push({ title: 'The movie library could not open', detail: loadError, tone: 'fail' });
+			notices.push({
+				title: 'The movie library could not open',
+				detail: 'Mediaforce could not load your movies. Reload the page to try again.',
+				technicalDetail: loadError,
+				tone: 'fail'
+			});
 		}
 		if (detailsError && payload.titles.length) {
 			notices.push({
 				title: 'Titles are available',
-				detail: `${detailsError} Workflow and savings details may be stale.`
+				detail: 'Progress and space-saving details could not refresh, so some may be out of date.',
+				technicalDetail: detailsError
 			});
 		}
 		if (conflictCount) {
@@ -283,7 +291,9 @@
 		if (title.availability === 'browse_only' || title.workflow_state?.state === 'browse_only') {
 			return 'You can review these files, but Mediaforce cannot change this library.';
 		}
-		if (title.workflow_state?.state === 'motion_held') return title.workflow_state.detail;
+		if (title.workflow_state?.state === 'motion_held') {
+			return movieHeldExplanation(title.workflow_state);
+		}
 		if (title.workflow_state?.state === 'explicit_selection_required') {
 			const explicitCount = title.members.filter((member) => !member.included_by_default).length;
 			return `${explicitCount} ${explicitCount === 1 ? 'file needs' : 'files need'} you to choose ${explicitCount === 1 ? 'it' : 'them'} individually.`;
@@ -480,7 +490,7 @@
 		<div class="empty-state" role="status">
 			<span class="loading-mark" aria-hidden="true"></span>
 			<strong>Loading movie library…</strong>
-			<p>Files appear first; workflow details follow.</p>
+			<p>Movies appear first; progress details follow.</p>
 		</div>
 	{:else if !payload.titles.length && !loadError}
 		<div class="empty-state">
@@ -593,7 +603,10 @@
 							<div>
 								<span class="eyebrow">{selectedTitle.library_label}</span>
 								<h2>{selectedTitle.title}</h2>
-								<p>{selectedTitle.prefix}</p>
+								<details class="folder-location">
+									<summary>Folder location</summary>
+									<code>{selectedTitle.prefix}</code>
+								</details>
 							</div>
 							<StateBadge
 								tone={workflowTone(selectedTitle)}
@@ -663,13 +676,16 @@
 							<div class="inline-alert inline-alert--danger">
 								<strong>Cannot replace yet</strong>
 								{#each selectedTitle.promotion_conflicts as conflict (`${conflict.kind}:${conflict.destination_path}`)}
-									<span>{conflict.detail} <code>{conflict.destination_path}</code></span>
+									<span
+										>{movieConflictExplanation(conflict)}
+										<code>{conflict.destination_path}</code></span
+									>
 								{/each}
 							</div>
 						{/if}
 
 						{#if policyExceptions(selectedTitle).length}
-							<div class="policy-strip" aria-label="Movie library policy exceptions">
+							<div class="policy-strip" aria-label="Movie library setting exceptions">
 								{#each policyExceptions(selectedTitle) as exception (exception)}
 									<span>{exception}</span>
 								{/each}
@@ -685,7 +701,7 @@
 									{#if selectedTitle.members.length > 1}
 										<p>
 											Open an individual edition, extra, or uncertain file only when you want to
-											work outside the whole-title scope.
+											work on it apart from the whole title.
 										</p>
 									{/if}
 								</div>
@@ -744,7 +760,6 @@
 		margin: 0;
 	}
 
-	.inspector-heading p,
 	.section-heading p,
 	.selection-command p {
 		color: var(--mf-fg-secondary);
@@ -925,9 +940,14 @@
 		margin: 4px 0;
 	}
 
-	.inspector-heading p {
-		font-family: var(--mf-font-mono);
+	.folder-location {
+		color: var(--mf-fg-secondary);
 		font-size: 11px;
+	}
+
+	.folder-location code {
+		display: block;
+		font-family: var(--mf-font-mono);
 		word-break: break-all;
 	}
 

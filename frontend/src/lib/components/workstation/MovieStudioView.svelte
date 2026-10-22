@@ -14,7 +14,7 @@
 		MovieMember
 	} from '$lib/api/types';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
-	import { safeOperatorErrorCopy } from '$lib/operator-copy';
+	import { operatorErrorView } from '$lib/operator-copy';
 	import {
 		approvalStartDetail,
 		approvalStartLabel,
@@ -34,7 +34,12 @@
 		prepareAgainRequest,
 		proposalRecoveryView
 	} from '$lib/folders/studio';
-	import { movieWorkflowIsComplete, movieWorkflowLabel } from '$lib/movies/library';
+	import {
+		movieConflictExplanation,
+		movieHeldExplanation,
+		movieWorkflowIsComplete,
+		movieWorkflowLabel
+	} from '$lib/movies/library';
 	import {
 		canRetrySampleJob,
 		formatMovieBytes,
@@ -73,6 +78,7 @@
 	let pendingAction = $state('');
 	let actionMessage = $state('');
 	let actionError = $state('');
+	let actionErrorDetail = $state<string | null>(null);
 	let actionNeedsAttention = $state(false);
 	let actionAttentionTitle = $state('');
 	let noteInput = $state<HTMLTextAreaElement>();
@@ -630,6 +636,7 @@
 		pendingAction = action;
 		actionMessage = '';
 		actionError = '';
+		actionErrorDetail = null;
 		actionNeedsAttention = false;
 		actionAttentionTitle = '';
 		let actionCompleted = false;
@@ -641,10 +648,14 @@
 			actionCompleted = true;
 			await onMutate(typeof result === 'string' ? undefined : result.targetPrefix);
 		} catch (error) {
-			const message = safeOperatorErrorCopy(error, 'Studio could not refresh.');
+			const view = operatorErrorView(
+				error,
+				actionCompleted ? 'Reload the page to see the latest state.' : 'Try again in a moment.'
+			);
 			actionError = actionCompleted
-				? `The movie action completed, but Studio could not refresh. ${message}`
-				: message;
+				? `The movie action completed, but Studio could not refresh. ${view.summary}`
+				: view.summary;
+			actionErrorDetail = view.technicalDetail;
 		} finally {
 			pendingAction = '';
 		}
@@ -708,7 +719,7 @@
 		if (isBrowseOnly || workflow?.state === 'browse_only') {
 			return 'You can review these files, but Mediaforce cannot change this library.';
 		}
-		if (workflow?.state === 'motion_held') return workflow.detail;
+		if (workflow?.state === 'motion_held') return movieHeldExplanation(workflow);
 		if (workflow?.state === 'explicit_selection_required') {
 			const explicitCount =
 				context?.members.filter((member) => !member.included_by_default).length ?? 0;
@@ -772,13 +783,10 @@
 
 	function sampleFailureDetail(): string {
 		const error = asText(retryableSampleJob.error);
-		if (!error) {
-			return 'Mediaforce stopped before review media was ready.';
-		}
 		if (error.toLowerCase().includes('containment cleanup is unproven')) {
 			return 'Mediaforce stopped because it could not verify that every sample process was cleaned up safely.';
 		}
-		return error;
+		return 'Mediaforce stopped before the sample was ready to review.';
 	}
 
 	function memberStatusLabel(member: MovieMember): string {
@@ -826,6 +834,15 @@
 	}
 </script>
 
+{#snippet rawDetail(text: string | null | undefined)}
+	{#if text}
+		<details class="raw-detail">
+			<summary>Details</summary>
+			<code>{text}</code>
+		</details>
+	{/if}
+{/snippet}
+
 {#snippet goalContract(label: string, showChangeAction: boolean)}
 	<section class="goal-contract" aria-label={label}>
 		<div class="goal-contract__heading">
@@ -856,7 +873,7 @@
 				{/each}
 			</dl>
 			<details class="goal-contract__details">
-				<summary>All findings and provenance detail</summary>
+				<summary>All findings and where each goal came from</summary>
 				<div class="goal-contract__detail-body">
 					{#if movieGoalContract.findings.length}
 						<ul>
@@ -903,19 +920,26 @@
 		<div>
 			<span class="eyebrow">Movie Studio · {exactScope ? 'One file' : 'Whole title'}</span>
 			<h1>{title}</h1>
-			<p>{folder.prefix}</p>
+			<details class="folder-location">
+				<summary>Folder location</summary>
+				<code>{folder.prefix}</code>
+			</details>
 		</div>
 		<StateBadge tone={badgeTone()} label={workflowDisplayLabel} />
 	</header>
 
 	{#if loadError}
 		<div class="notice notice--danger" role="alert">
-			<strong>Studio could not open.</strong><span>{loadError}</span>
+			<strong>Studio could not open.</strong><span
+				>Mediaforce could not load this movie. Reload the page to try again.</span
+			>
+			{@render rawDetail(loadError)}
 		</div>
 	{/if}
 	{#if actionError}
 		<div class="notice notice--danger" role="alert">
 			<strong>Action stopped.</strong><span>{actionError}</span>
+			{@render rawDetail(actionErrorDetail)}
 		</div>
 	{/if}
 	{#if actionMessage}
@@ -944,7 +968,7 @@
 		<div class="notice notice--danger" role="alert">
 			<strong>Mediaforce cannot replace this movie yet.</strong>
 			{#each conflicts as conflict (`${conflict.kind}:${conflict.destination_path}`)}
-				<span>{conflict.detail} <code>{conflict.destination_path}</code></span>
+				<span>{movieConflictExplanation(conflict)} <code>{conflict.destination_path}</code></span>
 			{/each}
 		</div>
 	{/if}
@@ -1126,6 +1150,7 @@
 								{/if}
 								{#if primaryAction() === 'retry-sample'}
 									<p>{sampleFailureDetail()}</p>
+									{@render rawDetail(asText(retryableSampleJob.error))}
 									<small class="decision-note">
 										Retry uses the same file, request, and computer. No full movie work was queued.
 									</small>
@@ -1426,10 +1451,11 @@
 							<p>
 								{pendingProposalCanQueue
 									? 'This is the current plan. Choose Create sample above when you are ready.'
-									: pendingProposalRecovery?.detail ||
-										asText(pendingProposal.message) ||
-										'The sample plan needs another request.'}
+									: pendingProposalRecovery?.detail || 'The sample plan needs another request.'}
 							</p>
+							{#if !pendingProposalCanQueue && !pendingProposalRecovery}
+								{@render rawDetail(asText(pendingProposal.message))}
+							{/if}
 							{#if !pendingProposalCanQueue}
 								<p class="sample-plan__queue-state"><strong>Nothing was queued.</strong></p>
 							{/if}
@@ -1642,10 +1668,17 @@
 		margin: 4px 0;
 	}
 
-	.studio-heading p {
+	.folder-location,
+	.raw-detail {
 		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-mono);
 		font-size: var(--mf-text-2xs);
+	}
+
+	.folder-location code,
+	.raw-detail code {
+		display: block;
+		font-family: var(--mf-font-mono);
+		white-space: pre-wrap;
 		word-break: break-all;
 	}
 
