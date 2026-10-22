@@ -2,6 +2,7 @@ import unittest
 from typing import Any
 
 from mediaforce.library.workflow_state import ItemWorkflowState
+from mediaforce.web.runtime.encode_runtime import SIZE_QUESTION_QUALITY_NEEDS_MORE
 from mediaforce.web.runtime.episode_progress import season_episode_progress
 
 SEASON = "tv/Show/Season 1"
@@ -44,7 +45,7 @@ class SeasonEpisodeProgressTests(unittest.TestCase):
         runs = {
             items[1].rel_path: _run("running", progress={"progress_state": "encoding", "percent_complete": 41.6}),
             items[2].rel_path: _run("running", progress={"progress_state": "quality_search"}),
-            items[3].rel_path: _run("queued", waiting_reason="Waiting for a host schedule window."),
+            items[3].rel_path: _run("queued", waiting_reason="Waiting for the next work window."),
             items[4].rel_path: _run(
                 "needs_attention",
                 progress={"failure_analysis": {"kind": "final_size_target_miss"}},
@@ -102,8 +103,8 @@ class SeasonEpisodeProgressTests(unittest.TestCase):
         run = _run(
             "queued",
             waiting_reason=(
-                "Estimated runtime about 4h is longer than every configured host schedule window "
-                "(longest about 3h on Smoke Worker). Widen a host window or use Bypass scheduler."
+                "Estimated runtime about 4h is longer than every work window "
+                "(longest about 3h on Smoke Worker). Widen a computer's work window or intentionally bypass the work schedule."
             ),
         )
 
@@ -138,6 +139,7 @@ class SeasonEpisodeProgressTests(unittest.TestCase):
                 "rel_path": item.rel_path,
                 "goal_bytes": 191_800_000,
                 "smallest_quality_safe_bytes": 358_900_000,
+                "reason": SIZE_QUESTION_QUALITY_NEEDS_MORE,
             },
         )
 

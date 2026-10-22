@@ -1,5 +1,6 @@
 import json
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any
 from typing import TypeVar
 
@@ -22,6 +23,9 @@ RUNNING_JOB_STATUSES = frozenset({"starting", "running"})
 EXECUTION_ACTIVE_JOB_STATUSES = RUNNING_JOB_STATUSES | {"queued"}
 ACTIVE_JOB_STATUSES = EXECUTION_ACTIVE_JOB_STATUSES | {"pending_review"}
 SUCCESSFUL_SAMPLE_JOB_STATUSES = ("completed", "pending_review", "superseded")
+# A queued job's result holds this while it waits to try again after losing its computer: how many
+# times it has tried again, when it may next start, and which computer it waits for.
+COMPUTER_RETRY_RESULT_KEY = "computer_retry"
 
 
 def load_latest_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
@@ -253,6 +257,87 @@ def claim_next_queued_calibration_job(
         .returning(*calibration_jobs.c, _rowid_column())
     ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
+
+
+def requeue_running_job_for_retry(
+        connection: DBClient,
+        job_id: str,
+        *,
+        result: dict[str, Any],
+        updated_at: str,
+) -> bool:
+    """Put a running job back in the queue to try again by itself.
+
+    Returns False and changes nothing when the job is no longer running, for example because the
+    owner stopped it while its last try was ending.
+    """
+    outcome = connection.execute(
+        update(calibration_jobs)
+        .where(calibration_jobs.c.job_id == job_id)
+        .where(calibration_jobs.c.status.in_(tuple(RUNNING_JOB_STATUSES)))
+        .values(
+            status="queued",
+            owner_pid=None,
+            finished_at=None,
+            error=None,
+            result_json=json.dumps(result, sort_keys=True),
+            updated_at=updated_at,
+        )
+    )
+    return bool(outcome.rowcount)
+
+
+def finish_running_job(
+        connection: DBClient,
+        job_id: str,
+        *,
+        status: str,
+        finished_at: str,
+        error: str | None,
+        result: dict[str, Any] | None = None,
+) -> str | None:
+    """End a running job with ``status`` unless something else already ended it.
+
+    The owner's Stop, for example, wins over a failure that was still being recorded. Returns the
+    job's status afterwards, or None when there is no such job. ``result`` replaces the saved
+    result only when given.
+    """
+    values: dict[str, Any] = {"status": status, "finished_at": finished_at, "error": error, "updated_at": finished_at}
+    if result is not None:
+        values["result_json"] = json.dumps(result, sort_keys=True)
+    outcome = connection.execute(
+        update(calibration_jobs)
+        .where(calibration_jobs.c.job_id == job_id)
+        .where(calibration_jobs.c.status.in_(tuple(RUNNING_JOB_STATUSES)))
+        .values(**values)
+    )
+    if outcome.rowcount:
+        return status
+    current = connection.execute(
+        select(calibration_jobs.c.status).where(calibration_jobs.c.job_id == job_id)
+    ).scalar_one_or_none()
+    return str(current) if current is not None else None
+
+
+def queued_jobs_waiting_to_retry(connection: DBClient, *, lane: str, now: datetime) -> tuple[str, ...]:
+    """Queued jobs that lost their computer and must not start again before their retry time."""
+    rows = connection.execute(
+        select(calibration_jobs.c.job_id, calibration_jobs.c.result_json)
+        .where(calibration_jobs.c.lane == lane)
+        .where(calibration_jobs.c.status == "queued")
+    ).mappings().fetchall()
+    waiting: list[str] = []
+    for row in rows:
+        retry = object_dict(object_dict(_loads_optional(row["result_json"], default={})).get(COMPUTER_RETRY_RESULT_KEY))
+        try:
+            not_before = datetime.fromisoformat(str(retry.get("retry_not_before") or ""))
+        except ValueError:
+            continue
+        if not_before.tzinfo is None:
+            not_before = not_before.replace(tzinfo=UTC)
+        if not_before > now:
+            waiting.append(str(row["job_id"]))
+    return tuple(waiting)
 
 
 def queued_job_hosts(connection: DBClient, *, lane: str) -> list[tuple[str, dict[str, Any]]]:

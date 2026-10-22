@@ -2076,7 +2076,9 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 str(archived_source),
                 "encoding_failed",
                 COMPLETED_PREFIX,
-                "Fixture encode failed before a successful retry.",
+                # Live shape: the encoder's banner was once stored as the failure text.
+                "ffmpeg version 8.1 Copyright (c) 2000-2026 the FFmpeg developers\n"
+                "  configuration: --prefix=/opt/homebrew/Cellar/ffmpeg-full/8.1 --enable-shared",
             ),
             (
                 blocked_completed_id,
@@ -2160,6 +2162,11 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                             "prefix": prefix,
                             "bytes_saved": 4 * 1024**3,
                             "note": "Fixture promoted item for browser QA.",
+                            "promoted_path": str(
+                                project_root
+                                / "scratch/web-smoke/source"
+                                / Path(row["rel_path"]).with_suffix(".av1.mkv")
+                            ),
                         }
                     ),
                 )
@@ -2637,7 +2644,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 prefix=ENCODE_WAITING_PREFIX,
                 rel_path="movies/Waiting Encode/Feature.mkv",
                 status="queued",
-                waiting_reason="Waiting for a host schedule window.",
+                waiting_reason="Waiting for the next work window.",
                 progress={"progress_state": "schedule_waiting"},
             ),
             _encode_job(
@@ -2647,8 +2654,8 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 rel_path="movies/Window Too Short/Feature.mkv",
                 status="queued",
                 waiting_reason=(
-                    "Estimated runtime about 4h is longer than every configured host schedule window "
-                    "(longest about 3h on Smoke Worker). Widen a host window or use Bypass scheduler."
+                    "Estimated runtime about 4h is longer than every work window "
+                    "(longest about 3h on Smoke Worker). Widen a computer's work window or intentionally bypass the work schedule."
                 ),
             ),
             _encode_job(
@@ -2658,7 +2665,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 rel_path="tv/Waiting for Full Window/Season 1/Episode 01.mkv",
                 status="queued",
                 waiting_reason=(
-                    "Estimated runtime about 2h; waiting for a host window with enough time remaining."
+                    "Estimated runtime about 2h; waiting for a work window with enough time left."
                 ),
             ),
             _encode_job(

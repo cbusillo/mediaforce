@@ -4,9 +4,11 @@ import type { MovieLibraryPayload, MovieTitle } from '$lib/api/types';
 import {
 	mergeMovieLibraryPayloads,
 	movieCompositionDetail,
+	movieConflictExplanation,
 	movieEstimateEvidence,
 	movieEstimatedOutputTotalIsLowerBound,
 	movieExpectedOutputBytes,
+	movieHeldExplanation,
 	movieLibraryStateGroup,
 	moviePendingReviewBadge,
 	moviePrimaryStudioPrefix,
@@ -515,6 +517,33 @@ describe('movie action discoverability', () => {
 		expect(movieTitleNeedsAction(explicitTitle)).toBe(true);
 		expect(movieWorkflowLabel(explicitTitle)).toBe('Choose a file');
 		expect(selectMovieLeadTitle([title, explicitTitle], 'priority', '')).toBe(explicitTitle);
+	});
+
+	it('explains held files from their counts in plain words', () => {
+		const workflow = (counts: Record<string, number>) => ({
+			...readyTitle.workflow_state!,
+			state: 'motion_held',
+			detail: 'raw backend detail held by the library lifecycle policy',
+			counts
+		});
+		const mixed = movieHeldExplanation(workflow({ held: 52, motion_held: 2 }));
+		const motionOnly = movieHeldExplanation(workflow({ held: 1, motion_held: 1 }));
+		const timingOnly = movieHeldExplanation(workflow({ held: 3, motion_held: 0 }));
+
+		for (const copy of [mixed, motionOnly, timingOnly, movieHeldExplanation(null)]) {
+			expect(copy).not.toMatch(/policy|lifecycle|item\(s\)|raw backend/i);
+		}
+		expect(mixed).toContain('50');
+		expect(mixed).toContain('2');
+		expect(motionOnly).toContain('1');
+		expect(timingOnly).toContain('3');
+		expect(timingOnly).not.toBe(motionOnly);
+	});
+
+	it('explains replacement conflicts without backend wording', () => {
+		for (const kind of ['duplicate_destination', 'destination_exists'] as const) {
+			expect(movieConflictExplanation({ kind })).not.toMatch(/promot|destination|_/i);
+		}
 	});
 
 	it('never offers to compress a movie held for its motion pattern', () => {

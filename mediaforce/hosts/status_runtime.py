@@ -10,9 +10,9 @@ from mediaforce.hosts.config import _host_capabilities, _host_priority, _parse_u
     host_media_access_for_host, host_targets_current_machine, stream_host_has_remote_source_roots
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
 from mediaforce.hosts.status_helpers import _classify_ssh_failure, _find_local_tool, _host_capability_issues, \
-    _host_setup_supported, _local_platform_name, _local_schedule_timezone, _local_utc_offset_minutes, \
-    _parse_remote_status_output, _remote_setup_needs_password, _remote_status_script, _status_from_paths, \
-    _status_platform
+    computer_check_failure_copy, _host_setup_supported, _local_platform_name, _local_schedule_timezone, \
+    _local_utc_offset_minutes, _parse_remote_status_output, _remote_setup_needs_password, _remote_status_script, \
+    _status_from_paths, _status_platform
 from mediaforce.hosts.types import HostStatus
 
 REMOTE_TOOL_CACHE_TTL_SECONDS = 24 * 60 * 60
@@ -138,6 +138,13 @@ def _run_remote_status_probe(
     raise RuntimeError("Remote status probe did not produce a result.")
 
 
+def _probe_exception_copy(exc: Exception, label: str) -> tuple[str, list[str]]:
+    """A check that never finished: a timeout reads as a computer that is off or asleep."""
+    return computer_check_failure_copy(
+        "unreachable" if isinstance(exc, subprocess.TimeoutExpired) else "check_failed", label,
+    )
+
+
 def _remote_host_status(
         config: MediaforceConfig,
         host: dict[str, object],
@@ -157,11 +164,11 @@ def _remote_host_status(
             priority=_host_priority(host),
             capabilities=_host_capabilities(host),
             available=False,
-            message="Missing SSH host configuration",
+            message=computer_check_failure_copy("no_address", label)[0],
             missing_paths=[],
             probe_available=False,
             repo_path=repo_path,
-            issues=["Add an SSH host to enable remote checks."],
+            issues=computer_check_failure_copy("no_address", label)[1],
         )
 
     if host_targets_current_machine({"host": ssh_host}):
@@ -213,17 +220,17 @@ def _remote_host_status(
             priority=_host_priority(host),
             capabilities=_host_capabilities(host),
             available=False,
-            message="SSH unavailable",
+            message=_probe_exception_copy(exc, label)[0],
             missing_paths=[],
             probe_available=False,
             repo_path=repo_path,
-            issues=["Mediaforce could not reach this host over SSH."],
+            issues=_probe_exception_copy(exc, label)[1],
             detail=str(exc),
         )
 
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "SSH host unavailable"
-        classification = _classify_ssh_failure(detail)
+        classification = _classify_ssh_failure(detail, label=label, returncode=result.returncode)
         return HostStatus(
             key=ssh_host,
             label=label,
@@ -252,11 +259,11 @@ def _remote_host_status(
             priority=_host_priority(host),
             capabilities=_host_capabilities(host),
             available=False,
-            message="Remote check returned unreadable output",
+            message=computer_check_failure_copy("unreadable_reply", label)[0],
             missing_paths=[],
             probe_available=False,
             repo_path=repo_path,
-            issues=["The remote host responded, but the capability payload was invalid."],
+            issues=computer_check_failure_copy("unreadable_reply", label)[1],
             detail=result.stdout.strip() or None,
             setup_supported=True,
         )
@@ -283,16 +290,16 @@ def _remote_host_status(
                 priority=_host_priority(host),
                 capabilities=_host_capabilities(host),
                 available=False,
-                message="SSH unavailable",
+                message=_probe_exception_copy(exc, label)[0],
                 missing_paths=[],
                 probe_available=False,
                 repo_path=repo_path,
-                issues=["Mediaforce could not reach this host over SSH."],
+                issues=_probe_exception_copy(exc, label)[1],
                 detail=str(exc),
             )
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "SSH host unavailable"
-            classification = _classify_ssh_failure(detail)
+            classification = _classify_ssh_failure(detail, label=label, returncode=result.returncode)
             return HostStatus(
                 key=ssh_host,
                 label=label,
@@ -320,11 +327,11 @@ def _remote_host_status(
                 priority=_host_priority(host),
                 capabilities=_host_capabilities(host),
                 available=False,
-                message="Remote check returned unreadable output",
+                message=computer_check_failure_copy("unreadable_reply", label)[0],
                 missing_paths=[],
                 probe_available=False,
                 repo_path=repo_path,
-                issues=["The remote host responded, but the capability payload was invalid."],
+                issues=computer_check_failure_copy("unreadable_reply", label)[1],
                 detail=result.stdout.strip() or None,
                 setup_supported=True,
             )

@@ -13,6 +13,7 @@ from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQU
 from mediaforce.hosts.config import _host_supports_capability, host_media_access_for_host, \
     _parse_utc_offset_minutes, remote_shell_path_export_line, stream_host_has_remote_source_roots
 from mediaforce.hosts.mount_runtime import mount_output_field
+from mediaforce.hosts.transport import ssh_host_unreachable
 from mediaforce.hosts.types import VMAF_MODEL_MISSING_ISSUE, VMAF_SELF_TEST_ARGS
 from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, FFMPEG_MISSING_ISSUE, HostStatus, \
     LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE, \
@@ -318,10 +319,6 @@ def _remote_setup_needs_password(issues: list[str]) -> bool:
     return any(issue in password_required_issues for issue in issues)
 
 
-def _needs_initial_ssh_key_install(status: HostStatus) -> bool:
-    return status.message == "SSH access setup required"
-
-
 def _default_public_key_path() -> Path | None:
     preferred = [
         Path.home() / ".ssh" / "id_ed25519.pub",
@@ -339,89 +336,112 @@ def _private_key_path_for_public_key(public_key: Path) -> Path | None:
     return private_key if private_key.exists() else None
 
 
-def _classify_ssh_failure(detail: str) -> dict[str, Any]:
+# What Mediaforce says when it cannot check a computer, one entry per kind of failure. Each names
+# the computer by its label and uses the button names on its card; the raw output stays in the
+# status detail, behind Details.
+_CHECK_FAILURE_COPY: dict[str, tuple[str, str]] = {
+    "identity_changed": (
+        "{label}'s identity changed",
+        "{label} answered with a different identity than Mediaforce remembers. Check that it is the right "
+        "computer, then use Reset computer trust.",
+    ),
+    "password_needed": (
+        "{label} needs its password once",
+        "Make sure Remote Login is on for {label}, then enter its account password and use Set up computer. "
+        "After that Mediaforce signs in on its own.",
+    ),
+    "new_name": (
+        "{label} needs to be confirmed",
+        "{label} answered under a name Mediaforce has not seen before. Check that it is the right computer, "
+        "then use Retry connection.",
+    ),
+    "remote_login_off": (
+        "{label} needs Remote Login turned on",
+        "{label} is on but turned Mediaforce away. Turn on Remote Login in its Sharing settings, then use "
+        "Retry connection.",
+    ),
+    "unreachable": (
+        "Can't reach {label}. Is it on and awake?",
+        "{label} did not answer. It may be off or asleep. Mediaforce keeps trying.",
+    ),
+    "not_found": (
+        "Can't find {label} on the network",
+        "Check the address for {label} in Settings, under advanced.",
+    ),
+    "python_missing": (
+        "{label} needs Python 3",
+        "Install Python 3 on {label}. Mediaforce checks it again on its own.",
+    ),
+    "no_address": (
+        "{label} has no address",
+        "Add the address for {label} in Settings, under advanced.",
+    ),
+    "unreadable_reply": (
+        "Can't read the reply from {label}",
+        "{label} answered, but Mediaforce could not read its reply. Use Set up computer to repair it.",
+    ),
+    "check_failed": (
+        "Can't check {label}",
+        "Mediaforce could not finish checking {label}. Details shows what it reported.",
+    ),
+}
+
+
+def computer_check_failure_copy(kind: str, label: str) -> tuple[str, list[str]]:
+    """The status message and issue for one kind of failed check, naming the computer."""
+    message, issue = _CHECK_FAILURE_COPY[kind]
+    return message.format(label=label), [issue.format(label=label)]
+
+
+def _needs_initial_ssh_key_install(status: HostStatus) -> bool:
+    return status.message == computer_check_failure_copy("password_needed", status.label)[0]
+
+
+def _classify_ssh_failure(
+        detail: str,
+        *,
+        label: str = "This computer",
+        returncode: int | None = None,
+) -> dict[str, Any]:
     lowered = detail.lower()
+    flags = {
+        "setup_supported": False,
+        "setup_requires_password": False,
+        "trust_reset_supported": False,
+        "show_detail": True,
+    }
     if "remote host identification has changed" in lowered or "host key verification failed" in lowered:
-        return {
-            "message": "SSH host key changed",
-            "issues": [
-                "The saved SSH fingerprint no longer matches this host. Verify the machine, then reset the stale known_hosts entry and retry."
-            ],
-            "setup_supported": False,
-            "setup_requires_password": False,
-            "trust_reset_supported": True,
-            "show_detail": False,
-        }
-    if "permission denied" in lowered:
-        return {
-            "message": "SSH access setup required",
-            "issues": [
-                "Turn on Remote Login on the target Mac, then enter that account password once so Mediaforce can install this Mac's SSH key."
-            ],
-            "setup_supported": True,
-            "setup_requires_password": True,
-            "trust_reset_supported": False,
-            "show_detail": True,
-        }
-    if (
+        kind = "identity_changed"
+        flags.update(trust_reset_supported=True, show_detail=False)
+    elif "permission denied" in lowered:
+        kind = "password_needed"
+        flags.update(setup_supported=True, setup_requires_password=True)
+    elif (
             "the authenticity of host" in lowered
             or "are you sure you want to continue connecting" in lowered
             or "host key is known by the following other names" in lowered
     ):
-        return {
-            "message": "SSH trust needs confirmation",
-            "issues": [
-                "SSH reached the machine, but this hostname or alias still needs to be trusted. Verify the host, then retry or connect once manually to record the new alias."
-            ],
-            "setup_supported": False,
-            "setup_requires_password": False,
-            "trust_reset_supported": False,
-            "show_detail": True,
-        }
-    if "connection refused" in lowered or "operation timed out" in lowered or "no route to host" in lowered:
-        return {
-            "message": "Turn on SSH first",
-            "issues": [
-                "Enable Remote Login on the target machine first. Once SSH answers, Mediaforce can finish setup automatically."
-            ],
-            "setup_supported": False,
-            "setup_requires_password": False,
-            "trust_reset_supported": False,
-            "show_detail": True,
-        }
-    if (
+        kind = "new_name"
+    elif "connection refused" in lowered:
+        kind = "remote_login_off"
+    elif "operation timed out" in lowered or "no route to host" in lowered:
+        kind = "unreachable"
+    elif (
             "could not resolve hostname" in lowered
             or "name or service not known" in lowered
             or "temporary failure in name resolution" in lowered
             or "nodename nor servname provided" in lowered
     ):
-        return {
-            "message": "Fix hostname or DNS first",
-            "issues": [
-                "Update the SSH host to a resolvable hostname or IP address before trying remote setup."
-            ],
-            "setup_supported": False,
-            "setup_requires_password": False,
-            "trust_reset_supported": False,
-            "show_detail": True,
-        }
-    if "python3" in lowered and ("not found" in lowered or "command not found" in lowered):
-        return {
-            "message": "python3 is required",
-            "issues": ["Install python3 on the remote host before using it for Mediaforce checks."],
-            "setup_supported": True,
-            "setup_requires_password": False,
-            "trust_reset_supported": False,
-            "show_detail": True,
-        }
-    return {
-        "message": "SSH unavailable",
-        "issues": ["Mediaforce could not complete the remote capability check."],
-        "setup_supported": True,
-        "setup_requires_password": False,
-        "trust_reset_supported": False,
-        "show_detail": True,
-    }
+        kind = "not_found"
+    elif "python3" in lowered and ("not found" in lowered or "command not found" in lowered):
+        kind = "python_missing"
+        flags.update(setup_supported=True)
+    else:
+        # Setup stays offered for anything unrecognized; only the words say a lost link is likely sleep.
+        kind = "unreachable" if returncode is not None and ssh_host_unreachable(returncode, detail) else "check_failed"
+        flags.update(setup_supported=True)
+    message, issues = computer_check_failure_copy(kind, label)
+    return {"message": message, "issues": issues, **flags}
 
 
 def _remote_status_script(
@@ -604,6 +624,7 @@ def _ssh_access_must_be_fixed_first(status: HostStatus) -> bool:
 
 __all__ = [
     "_classify_ssh_failure",
+    "computer_check_failure_copy",
     "_command_output",
     "_command_succeeds",
     "_default_public_key_path",

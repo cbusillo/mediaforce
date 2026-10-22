@@ -207,6 +207,15 @@ export function movieReviewStatusLabel(status: unknown, inheritedParentSample = 
 	);
 }
 
+// The workflow detail carries only the blocker's text, so these follow the source-cap blocker messages in
+// mediaforce/tuning/stream_budget.py and mediaforce/tuning/quality_risk.py.
+const SOURCE_CAP_PATTERN = /source(?:-size)? cap/i;
+const PRESERVED_CONTENT_CAP_PATTERN =
+	/preserved streams consume .*source(?:-size)? cap|tracks already use the whole size allowed/i;
+const TARGET_ABOVE_CAP_PATTERN =
+	/target size exceeds .*source(?:-size)? cap|size goal is larger than this file is allowed/i;
+const CAP_PERCENT_PATTERN = /(\d+(?:\.\d+)?)%\s+(?:source(?:-size)? cap|of the original)/i;
+
 export function movieSizeCapBlockView(
 	workflow: MovieSizeCapWorkflow | null | undefined,
 	ledger: MovieSizeCapLedger | null | undefined
@@ -218,7 +227,10 @@ export function movieSizeCapBlockView(
 	}
 	const blockerText = [detail, ...reasons].join(' ');
 	const sourceCapInfeasible = ledger?.source_relative_cap?.status === 'arithmetically_infeasible';
-	const mentionsSourceCap = /source(?:-size)? cap/i.test(blockerText);
+	const mentionsSourceCap =
+		SOURCE_CAP_PATTERN.test(blockerText) ||
+		PRESERVED_CONTENT_CAP_PATTERN.test(blockerText) ||
+		TARGET_ABOVE_CAP_PATTERN.test(blockerText);
 	const preservedContentReason = reasons.includes(
 		'source_relative_cap_consumed_by_non_video_budget'
 	);
@@ -230,16 +242,16 @@ export function movieSizeCapBlockView(
 	}
 
 	const configuredPercent = finitePositive(ledger?.source_relative_cap?.configured_total_percent);
-	const detailPercent = Number(blockerText.match(/(\d+(?:\.\d+)?)%\s+source(?:-size)? cap/i)?.[1]);
+	const detailPercent = Number(blockerText.match(CAP_PERCENT_PATTERN)?.[1]);
 	const capPercent = configuredPercent ?? (Number.isFinite(detailPercent) ? detailPercent : null);
 	const capCopy = capPercent == null ? null : `${formatPercent(capPercent)}%`;
 	const targetSize = finitePositive(ledger?.size_goal?.target_size_bytes);
 	const totalCap = finitePositive(ledger?.source_relative_cap?.total_cap_bytes);
 	const preservedContentConsumesCap =
-		preservedContentReason || /preserved streams consume .*source(?:-size)? cap/i.test(blockerText);
+		preservedContentReason || PRESERVED_CONTENT_CAP_PATTERN.test(blockerText);
 	const targetExceedsCap =
 		targetExceedsReason ||
-		/target size exceeds .*source(?:-size)? cap/i.test(blockerText) ||
+		TARGET_ABOVE_CAP_PATTERN.test(blockerText) ||
 		Boolean(!sourceCapInfeasible && targetSize && totalCap && targetSize > totalCap);
 
 	if (preservedContentConsumesCap) {
@@ -332,14 +344,10 @@ export function movieCurrentWorkView(
 		startConditions.push('the compression schedule opens');
 	}
 	const waitingCopy = textValue(job.waiting_reason) || textValue(job.scheduler_status_copy);
-	if (
-		['draining_impossible', 'draining_no_fit', 'schedule_interrupted'].includes(
-			job.schedule_state ?? ''
-		) &&
-		waitingCopy
-	) {
-		blockers.push(waitingCopy);
-		startConditions.push('the scheduler condition clears');
+	const workWindowWait = WORK_WINDOW_WAITS[job.schedule_state ?? ''];
+	if (workWindowWait && waitingCopy) {
+		blockers.push(workWindowWait.blocker);
+		startConditions.push(workWindowWait.startCondition);
 	}
 	if (job.status === 'retry_backoff') {
 		blockers.push('Mediaforce is waiting before retrying.');
@@ -378,6 +386,23 @@ export function movieCurrentWorkView(
 		currentItem
 	};
 }
+
+// Work-window waits that need their own sentence; the raw scheduler text stays out of the blockers.
+const WORK_WINDOW_WAITS: Record<string, { blocker: string; startCondition: string }> = {
+	draining_no_fit: {
+		blocker: 'This movie does not fit in the time left in the current work window.',
+		startCondition: 'the next work window opens'
+	},
+	draining_impossible: {
+		blocker: 'This movie is longer than every work window. Widen a work window to let it run.',
+		startCondition: 'a work window is long enough'
+	},
+	schedule_interrupted: {
+		blocker:
+			'The work window closed during compression. The whole movie restarts automatically, and no failure attempt was used.',
+		startCondition: 'the next work window opens'
+	}
+};
 
 function normalizeMovieQueueCopy(value: string): string {
 	return value
@@ -616,10 +641,10 @@ function qualityContractCopy(
 		configuredMetric === 'AUTO' ? textValue(resolvedMetric).toUpperCase() : configuredMetric;
 	if (configuredMetric === 'AUTO' && !metric) {
 		return {
-			label: 'Quality floor',
-			value: 'Automatic metric guardrail',
+			label: 'Minimum picture quality',
+			value: 'Chosen automatically',
 			detail:
-				'Use VMAF when available, otherwise XPSNR; Mediaforce resolves the active floor before sampling.',
+				'Mediaforce picks the best picture score it can measure on this computer before making a sample.',
 			provenance: provenanceLabel(quality?.source, false),
 			tone: 'normal'
 		};
@@ -629,19 +654,21 @@ function qualityContractCopy(
 	const floor = finitePositive(usesXpsnr ? quality?.min_target_xpsnr : quality?.min_target_vmaf);
 	if (!metric || !floor) {
 		return {
-			label: 'Quality floor',
+			label: 'Minimum picture quality',
 			value: 'Still resolving',
-			detail: 'Mediaforce is resolving the acceptance guardrail for this movie.',
+			detail: 'Mediaforce is still working out the minimum picture quality for this movie.',
 			provenance: 'Still resolving',
 			tone: 'normal'
 		};
 	}
+	const scoreLabel = usesXpsnr ? 'Picture detail score' : 'Picture appearance score';
+	const minimum = formatCompactNumber(floor);
 	return {
-		label: 'Quality floor',
-		value: `${metric} floor ${formatCompactNumber(floor)}`,
+		label: 'Minimum picture quality',
+		value: `${scoreLabel} at least ${minimum}`,
 		detail: target
-			? `Aim for ${formatCompactNumber(target)}; the floor is an acceptance guardrail, not a guarantee.`
-			: 'This floor is an acceptance guardrail, not a guarantee.',
+			? `Aim for ${formatCompactNumber(target)}. A compressed file scoring under ${minimum} is not used; a passing score does not promise it looks identical.`
+			: `A compressed file scoring under ${minimum} is not used; a passing score does not promise it looks identical.`,
 		provenance: provenanceLabel(quality?.source, false),
 		tone: 'normal'
 	};
@@ -656,7 +683,7 @@ function compressionContractCopy(intent: ResolvedOperatorIntentPayload): MovieGo
 		value: requiresChoice ? 'Needs your choice' : compression.title,
 		detail: requiresChoice
 			? 'Choose the intended balance between file size and visible detail before preparing.'
-			: `${compression.detail} ${compression.accepts_under_target_result ? 'A smaller result is acceptable when it still meets the quality floor.' : 'Stay near the size target when the quality floor allows it.'}`,
+			: `${compression.detail} ${compression.accepts_under_target_result ? 'A smaller result is acceptable when it still meets the minimum picture quality.' : 'Stay near the size target when the minimum picture quality allows it.'}`,
 		provenance: provenanceLabel(compression?.source, requiresChoice),
 		tone: requiresChoice ? 'attention' : 'normal'
 	};
@@ -824,8 +851,8 @@ function qualityFindingLabel(value: unknown): string {
 			likely_analog_noise: 'Grain / noise treatment',
 			compression_noise_advisory: 'Grain / noise treatment',
 			uncertain_noise_mix: 'Grain / noise treatment',
-			cadence_interlace_artifacts: 'Cadence / interlace artifacts',
-			duplicate_cadence: 'Cadence / interlace artifacts',
+			cadence_interlace_artifacts: 'Uneven motion / combing lines',
+			duplicate_cadence: 'Uneven motion / combing lines',
 			audio_quality_layout: 'Audio quality / layout',
 			audio_complexity: 'Audio quality / layout',
 			other: 'Other review concern'

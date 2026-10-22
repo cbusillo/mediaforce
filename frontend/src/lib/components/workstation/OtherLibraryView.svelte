@@ -113,7 +113,7 @@
 	const libraryMetrics = $derived<LibraryMetric[]>([
 		{
 			value: `${payload.work_units.length}`,
-			label: payload.work_units.length === 1 ? 'Scope' : 'Scopes',
+			label: payload.work_units.length === 1 ? 'Folder or file' : 'Folders and files',
 			detail: `${totalFiles} ${totalFiles === 1 ? 'file' : 'files'}`
 		},
 		{ value: formatBytes(totalSize), label: 'Current size' },
@@ -136,17 +136,23 @@
 	const libraryNotices = $derived.by<LibraryNotice[]>(() => {
 		const notices: LibraryNotice[] = [];
 		if (loadError)
-			notices.push({ title: 'Other Library could not open', detail: loadError, tone: 'fail' });
+			notices.push({
+				title: 'Other Library could not open',
+				detail: 'Mediaforce could not load these folders and files. Reload the page to try again.',
+				technicalDetail: loadError,
+				tone: 'fail'
+			});
 		if (detailsError) {
 			notices.push({
-				title: 'Workflow details are unavailable',
-				detail: `The library index remains usable. ${detailsError}`
+				title: 'Progress details are unavailable',
+				detail: 'The list still works, but progress and estimates could not refresh.',
+				technicalDetail: detailsError
 			});
 		}
 		if (payload.catalog_truncated) {
 			notices.push({
-				title: 'Safe catalog window reached',
-				detail: `Showing at most ${payload.catalog_work_unit_limit} folders and files from the first ${payload.catalog_item_limit.toLocaleString()} indexed items. Narrow the configured roots to expose more bounded work; hidden items cannot be queued from this view.`,
+				title: 'Showing part of this library',
+				detail: `Showing at most ${payload.catalog_work_unit_limit} folders and files from the first ${payload.catalog_item_limit.toLocaleString()} scanned files. To reach the rest, point the Other library at a smaller folder in Settings. Files not shown cannot be compressed from here.`,
 				tone: 'wait'
 			});
 		}
@@ -238,7 +244,7 @@
 	activeWorkSegment={stateFilter === 'all' ? '' : stateFilter}
 	onWorkSegmentSelect={selectWorkSegment}
 	notices={libraryNotices}
-	toolbarSummary={`${workUnits.length} of ${payload.work_units.length} scopes`}
+	toolbarSummary={`${workUnits.length} of ${payload.work_units.length} folders and files`}
 	loading={structurePending || detailsPending}
 >
 	{#snippet toolbar()}
@@ -249,7 +255,7 @@
 		<label>
 			<span>Library</span>
 			<select bind:value={rootFilter}>
-				<option value="all">All roots</option>
+				<option value="all">All libraries</option>
 				{#each payload.libraries as library (library.key)}
 					<option value={library.key}>{library.label}</option>
 				{/each}
@@ -263,7 +269,7 @@
 				<option value="blocked">Cannot start</option>
 				<option value="processing">Compressing</option>
 				<option value="ready">{libraryCopy.ready}</option>
-				<option value="browse_only">Browse only</option>
+				<option value="browse_only">View only</option>
 				<option value="idle">No active work</option>
 			</select>
 		</label>
@@ -281,14 +287,13 @@
 	{#if structurePending && payload.work_units.length === 0}
 		<div class="empty-state" role="status">
 			<strong>Loading Other Library…</strong>
-			<span>Folders and files appear first; workflow details follow.</span>
+			<span>Folders and files appear first; progress details follow.</span>
 		</div>
 	{:else if payload.catalog_empty || payload.work_units.length === 0}
 		<div class="empty-state">
 			<strong>No Other media found.</strong>
 			<span
-				>Add or scan an Other root in Settings. Root-level files and nested folders will appear
-				here.</span
+				>Add or scan an Other library folder in Settings. Its files and subfolders will appear here.</span
 			>
 			<a href={resolve('/settings')}>Open Settings</a>
 		</div>
@@ -301,7 +306,7 @@
 	{:else}
 		<div class="library-register">
 			<div class="unit-list__head library-register__header" aria-hidden="true">
-				<span>Scope</span><span>Files</span><span>Current size</span><span>Workflow</span>
+				<span>Folder or file</span><span>Files</span><span>Current size</span><span>Status</span>
 			</div>
 			<div class="library-workbench">
 				<div class="unit-list library-index">
@@ -388,7 +393,7 @@
 
 						<div class="inspector-facts">
 							<div>
-								<span>Membership</span><strong
+								<span>Files included</span><strong
 									>{selectedUnit.item_count}
 									{selectedUnit.item_count === 1 ? 'file' : 'files'}</strong
 								>
@@ -418,7 +423,7 @@
 						</div>
 
 						<section class="readiness" data-state={selectedUnit.profile_readiness.state}>
-							<span>Compression profile</span>
+							<span>Compression setting</span>
 							<strong>{selectedUnit.profile_readiness.profile_label}</strong>
 							<p>{selectedUnit.profile_readiness.detail}</p>
 							{#if selectedUnit.profile_readiness.blockers.length}
@@ -430,7 +435,7 @@
 							{/if}
 						</section>
 
-						<div class="policy-strip" aria-label="Other library policy">
+						<div class="policy-strip" aria-label="Other library settings">
 							<span
 								>{selectedUnit.scope_mode === 'exact_file'
 									? 'One file at a time'

@@ -4,7 +4,7 @@ import type {
 	CompletedHistoryEvent,
 	CompletedPayload
 } from '$lib/api/types';
-import { formatFileSize, normalizeFileSizeCopy } from '$lib/format';
+import { formatFileSize } from '$lib/format';
 import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
 
 export type CleanupState = 'ready' | 'blocked' | 'unknown' | 'cleaned';
@@ -86,51 +86,15 @@ export function cleanupLabel(state: CleanupState): string {
 	return 'Nothing to delete';
 }
 
-function completedHistoryNoun(event: CompletedHistoryRow): string {
-	if (event.domain === 'movie') return 'Movie';
-	if (event.domain === 'tv') return event.source === 'folder' ? 'Season' : 'Episode';
-	if (event.domain === 'other') return 'File';
-	if (event.source === 'folder' && event.scope_label === 'Title') return 'Movie';
-	return event.scope_label || 'Media item';
-}
-
-export function completedHistoryLabel(event: CompletedHistoryRow): string {
-	const normalized = event.label.toLowerCase();
-	const noun = completedHistoryNoun(event);
-	if (normalized.includes('encoding started')) return `${noun} started`;
-	if (normalized.includes('encoding completed')) return `${noun} made`;
-	if (normalized.includes('encoding stopped')) return `${noun} stopped`;
-	if (normalized.includes('encoding failed')) return `${noun} failed`;
-	if (normalized.includes('validation completed')) return `${noun} checked`;
-	if (normalized.includes('promotion completed')) return `${noun} finished`;
-	if (event.event_type === 'originals_removed_confirmed') return 'Marked handled';
-	if (normalized.includes('cleanup') || normalized.includes('backup'))
-		return 'Original backups deleted';
-	return event.label.replace(/encode/gi, noun.toLowerCase()).replace(/promotion/gi, 'finish');
-}
-
-export function completedHistoryDetail(value: string, event?: CompletedHistoryRow): string {
-	const noun = event ? completedHistoryNoun(event).toLowerCase() : 'media item';
-	const article = noun === 'episode' ? 'an' : 'a';
-	return normalizeFileSizeCopy(
-		value
-			.replace(/encode worker/gi, 'A computer')
-			.replace(/processing an item/gi, `making ${article} ${noun}`)
-			.replace(/promoted items/gi, `finished ${noun}s`)
-			.replace(/promoted item/gi, `finished ${noun}`)
-	);
-}
-
 export function completedHistorySearchText(event: CompletedHistoryRow): string {
 	return [
-		completedHistoryLabel(event),
-		completedHistoryDetail(event.detail, event),
 		event.label,
-		event.prefix,
+		event.detail,
 		event.title,
 		event.subtitle,
-		event.detail,
-		event.event_type
+		event.file_name ?? '',
+		event.technical_detail ?? '',
+		event.prefix
 	]
 		.join(' ')
 		.toLowerCase();
@@ -309,7 +273,7 @@ export function buildCompletedStatusTiles(
 		{
 			label: 'Finished folders',
 			value: payload.completed_count.toLocaleString('en-US'),
-			detail: `${folders.reduce((total, folder) => total + folder.promoted_item_count, 0).toLocaleString('en-US')} promoted items`,
+			detail: `${folders.reduce((total, folder) => total + folder.promoted_item_count, 0).toLocaleString('en-US')} finished files`,
 			tone: payload.completed_count > 0 ? 'ready' : 'idle'
 		},
 		{
@@ -442,14 +406,14 @@ export function buildCompletedHistoryRows(payload: CompletedPayload): CompletedH
 		.map((folder, index) => ({
 			id: index,
 			event_type: 'promotion_completed',
-			label: 'Promotion completed',
+			label: 'Replaced',
 			tone: 'ready',
 			prefix: folder.prefix,
 			title: folder.title,
 			subtitle: folder.subtitle,
 			scope_label: folder.scope_label,
 			created_at: folder.latest_promoted_at ?? '',
-			detail: `${folder.promoted_item_count.toLocaleString('en-US')} promoted items · ${formatFileSize(folder.total_bytes_saved)} saved`,
+			detail: `Replaced ${folder.promoted_item_count.toLocaleString('en-US')} ${folder.promoted_item_count === 1 ? 'file' : 'files'} and saved ${formatFileSize(folder.total_bytes_saved)}.`,
 			size_bytes: folder.total_bytes_saved,
 			source: 'folder'
 		}));

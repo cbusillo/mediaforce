@@ -100,6 +100,12 @@
 				role={notice.tone === 'fail' ? 'alert' : 'status'}
 			>
 				<strong>{notice.title}</strong><span>{notice.detail}</span>
+				{#if notice.technicalDetail}
+					<details class="notice__details">
+						<summary>Details</summary>
+						<code>{notice.technicalDetail}</code>
+					</details>
+				{/if}
 			</div>
 		{/each}
 	</div>
@@ -307,6 +313,17 @@
 
 	.notice strong {
 		white-space: nowrap;
+	}
+
+	.notice__details {
+		font-size: var(--mf-text-xs);
+		margin-left: auto;
+	}
+
+	.notice__details code {
+		display: block;
+		overflow-wrap: anywhere;
+		white-space: pre-wrap;
 	}
 
 	.workspace {

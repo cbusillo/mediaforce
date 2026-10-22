@@ -66,6 +66,21 @@ describe('season episode list', () => {
 				})
 			)
 		).toBe('Keeping the picture quality needs 359 MB, over its 192 MB goal');
+		expect(
+			episodeDetail(
+				episode('needs_you', {
+					size_question: {
+						job_id: 'shard-2',
+						rel_path: 'tv/Futurama/Season 8/Futurama S08E02.mkv',
+						goal_bytes: 82_500_000,
+						smallest_quality_safe_bytes: 88_700_000,
+						reason: 'no_setting_fits'
+					}
+				})
+			)
+		).toBe(
+			'No setting lands in the size range. The closest one that keeps the picture right is 88.7 MB'
+		);
 	});
 
 	it('counts episodes in the order the list reads', () => {

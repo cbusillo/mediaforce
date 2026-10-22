@@ -9,9 +9,10 @@ from mediaforce.core.timezones import system_timezone, valid_timezone_name
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
 SCHEDULE_DAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-SCHEDULE_CLOSE_WAITING_REASON = "Waiting for a host schedule window."
-HOST_WINDOW_TOO_SHORT_REASON = "waiting for a host window with enough time remaining"
-HOST_WINDOW_IMPOSSIBLE_MARKER = "longer than every configured host schedule window"
+SCHEDULE_CLOSE_WAITING_REASON = "Waiting for the next work window."
+HOST_WINDOW_TOO_SHORT_REASON = "waiting for a work window with enough time left"
+HOST_WINDOW_IMPOSSIBLE_MARKER = "longer than every work window"
+COMPUTER_WORK_WINDOW_WAITING_REASON = "waiting for a computer's work window"
 
 
 @dataclass(slots=True)
@@ -613,7 +614,7 @@ def decorate_encode_job_for_scheduler(
     elif schedule_waiting:
         decorated["scheduler_status_copy"] = f"waiting for {policy['summary']}"
     else:
-        decorated["scheduler_status_copy"] = "ready when a worker is free"
+        decorated["scheduler_status_copy"] = "ready when a computer is free"
     if include_telemetry:
         return decorate_encode_job_telemetry(decorated, encode_job_manifest_totals=deps.encode_job_manifest_totals)
     return decorated
@@ -713,7 +714,8 @@ def decorate_encode_queue_for_scheduler(
                     job.get("schedule_state") == "schedule_interrupted"
                     and not str(job.get("waiting_reason") or "").strip()
                 )
-                or "waiting for a host schedule window" in str(job.get("waiting_reason") or "").casefold()
+                or COMPUTER_WORK_WINDOW_WAITING_REASON in str(job.get("waiting_reason") or "").casefold()
+                or SCHEDULE_CLOSE_WAITING_REASON.casefold() in str(job.get("waiting_reason") or "").casefold()
                 or HOST_WINDOW_TOO_SHORT_REASON in str(job.get("waiting_reason") or "").casefold()
             )
         )

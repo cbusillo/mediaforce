@@ -15,6 +15,7 @@ import type {
 	SizeGoalOptionPayload
 } from '$lib/api/types';
 import {
+	sizeQuestionFinding,
 	waitingScopeName,
 	encodeWaitingReasons,
 	approvalGuardFromMessage,
@@ -928,6 +929,20 @@ describe('season experience translation', () => {
 				progress: { schema_version: 1, stage: 'checking_sound' }
 			})
 		).toBe('Checking the sound');
+		const waitingReason =
+			'Waiting for M2 MBP to be available, such as in its next work window, to make this sample. Mediaforce tries again by itself a few times before it asks you.';
+		expect(
+			calibrationStageLabel({
+				job_id: 'sample-1',
+				status: 'queued',
+				progress: {
+					schema_version: 1,
+					stage: 'waiting_for_computer',
+					waiting_for_computer: 'M2 MBP',
+					waiting_reason: waitingReason
+				}
+			})
+		).toBe(waitingReason);
 	});
 
 	it('identifies a blocked cadence decision that needs Activity resolution', () => {
@@ -1300,6 +1315,7 @@ describe('season experience translation', () => {
 			code: 'staged_integrity_incomplete_report',
 			label: 'Inventory incomplete'
 		});
+		expect(integrity.blockers.at(-1)?.nextAction).not.toMatch(/\b(staged|output|report)\b/i);
 	});
 
 	it('explains files made under settings that were never approved without blocking the rest', () => {
@@ -1602,6 +1618,12 @@ describe('season experience translation', () => {
 			recoveryLabel: 'Choose a roomier goal',
 			detail: expect.stringMatching(/could not reach 225 MB.*about 523 MB.*Retrying would stop/)
 		});
+		expect(
+			targetConstraintSummary(
+				folder({ encode_job: stoppedEncode }),
+				stoppedOnSize('quality_conflict')
+			)?.detail
+		).not.toMatch(/\bencode\b/i);
 		// The page leads with something else, such as a newer sample, so the stopped run is not the question.
 		expect(
 			targetConstraintSummary(folder({ encode_job: stoppedEncode }), {
@@ -2469,6 +2491,7 @@ describe('motionHolds', () => {
 		const settled = motionHoldNotes(motionHolds(season(held, [])));
 
 		expect(decided.some((note) => note.includes('show page'))).toBe(true);
+		expect(decided.join(' ')).not.toMatch(/\bencode\b/i);
 		expect(settled.some((note) => note.includes('show page'))).toBe(false);
 		// The show page holds the decision itself, so it does not point to itself.
 		const onShow = motionHoldNotes(
@@ -2575,6 +2598,23 @@ describe('encodeWaitingReasons', () => {
 
 		expect(reasons.needsYou.map((group) => group.reason)).toEqual(['stopped']);
 		expect(reasons.waiting.map((group) => group.reason)).toEqual(['retrying']);
+	});
+
+	it('says why a file does not fit its size goal in plain words', () => {
+		const question = {
+			job_id: 'shard-1',
+			rel_path: 'tv/Futurama/Season 8/Futurama S08E02.mkv',
+			goal_bytes: 82_500_000,
+			smallest_quality_safe_bytes: 88_700_000
+		};
+
+		expect(sizeQuestionFinding(question)).toBe('Keeping the picture quality needs 88.7 MB.');
+		expect(sizeQuestionFinding({ ...question, reason: 'quality_needs_more' })).toBe(
+			'Keeping the picture quality needs 88.7 MB.'
+		);
+		expect(sizeQuestionFinding({ ...question, reason: 'no_setting_fits' })).toBe(
+			'No setting lands in the size range. The closest one that keeps the picture right is 88.7 MB.'
+		);
 	});
 
 	it('lists files the owner already answered for apart from what is waiting', () => {

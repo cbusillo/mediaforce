@@ -166,6 +166,24 @@ function goalRow(view: ReturnType<typeof movieGoalContractView>, label: string) 
 	return undefined;
 }
 
+const QUALITY_JARGON = /vmaf|xpsnr|guardrail|metric|floor|cadence|interlace/i;
+
+function qualityRow(view: ReturnType<typeof movieGoalContractView>) {
+	const row = view.rows.find((candidate) => /picture quality/i.test(candidate.label));
+	if (!row) throw new Error('Expected a picture quality row');
+	return row;
+}
+
+function expectPlainQualityRow(
+	row: ReturnType<typeof qualityRow>,
+	numbers: { minimum: string; target: string } | null = null
+) {
+	expect(`${row.label} ${row.value} ${row.detail}`).not.toMatch(QUALITY_JARGON);
+	if (!numbers) return;
+	expect(row.value).toContain(numbers.minimum);
+	expect(row.detail).toContain(numbers.target);
+}
+
 describe('formatMovieBytes', () =>
 	it('uses the same decimal precision across movie facts and member rows', () => {
 		expect(formatMovieBytes(11_800_000_000)).toBe('11.8 GB');
@@ -229,7 +247,11 @@ describe('movieSizeCapBlockView', () => {
 	it('uses the configured cap instead of assuming 80 percent', () =>
 		expect(
 			movieSizeCapBlockView(
-				{ primary_lane: 'blocked', detail: 'Target size exceeds the 75% source cap.' },
+				{
+					primary_lane: 'blocked',
+					detail:
+						'The size goal is larger than this file is allowed to be (75% of the original). Lower the goal or raise the largest allowed file.'
+				},
 				{
 					size_goal: { target_size_bytes: 800_000_000 },
 					source_relative_cap: {
@@ -252,7 +274,8 @@ describe('movieSizeCapBlockView', () => {
 			movieSizeCapBlockView(
 				{
 					primary_lane: 'blocked',
-					detail: 'Preserved streams consume the 75% source cap.'
+					detail:
+						'The kept sound and subtitle tracks already use the whole size allowed for this file (75% of the original). Keep fewer tracks or raise the largest allowed file.'
 				},
 				{
 					size_goal: { target_size_bytes: 800_000_000 },
@@ -616,6 +639,29 @@ describe('movieCurrentWorkView', () => {
 		expect(view?.detail).toBe('Waiting for an available computer.');
 	});
 
+	it.each(['draining_no_fit', 'draining_impossible', 'schedule_interrupted'] as const)(
+		'explains a %s work-window wait without raw scheduler text',
+		(scheduleState) => {
+			const rawReason = 'draining: no queued job fits remaining window (scheduler)';
+			const view = movieCurrentWorkView(
+				{
+					job_id: 'encode-1',
+					prefix: 'movies/title',
+					status: 'queued',
+					schedule_state: scheduleState,
+					waiting_reason: rawReason
+				},
+				{ is_paused: false, stop_requested: false },
+				1
+			);
+
+			expect(view?.blockers.length).toBeGreaterThan(0);
+			expect(`${view?.blockers.join(' ')} ${view?.nextCondition}`).not.toMatch(
+				/scheduler|draining|no queued job/i
+			);
+		}
+	);
+
 	it('treats a queued host as preferred rather than assigned', () => {
 		const view = movieCurrentWorkView(
 			{
@@ -905,11 +951,6 @@ describe('movieGoalContractView', () => {
 					detail: 'Keep the source resolution; no downscale is planned.'
 				}),
 				expect.objectContaining({
-					label: 'Quality floor',
-					value: 'VMAF floor 80',
-					detail: 'Aim for 85; the floor is an acceptance guardrail, not a guarantee.'
-				}),
-				expect.objectContaining({
 					label: 'Audio',
 					value: 'Keep 2 tracks',
 					detail: expect.stringContaining('1 copied, 1 converted')
@@ -921,6 +962,7 @@ describe('movieGoalContractView', () => {
 				})
 			])
 		);
+		expectPlainQualityRow(qualityRow(view), { minimum: '80', target: '85' });
 		expect(view.findings).toEqual([
 			{ kind: 'Advisory', label: 'Motion breakup' },
 			{ kind: 'Advisory', label: 'Banding / dark-scene damage' }
@@ -991,10 +1033,7 @@ describe('movieGoalContractView', () => {
 			detail: 'Use one fixed size target for this movie.',
 			provenance: 'Library setting'
 		});
-		expect(goalRow(view, 'Quality floor')).toMatchObject({
-			value: 'XPSNR floor 40',
-			detail: 'Aim for 42; the floor is an acceptance guardrail, not a guarantee.'
-		});
+		expectPlainQualityRow(qualityRow(view), { minimum: '40', target: '42' });
 		expect(goalRow(view, 'Compression')).toMatchObject({
 			value: 'Needs your choice',
 			provenance: 'Needs your choice',
@@ -1016,15 +1055,9 @@ describe('movieGoalContractView', () => {
 		const resolved = movieGoalContractView(intent, streamBudgetLedger([]), {}, null, 'XPSNR');
 		const unresolved = movieGoalContractView(intent, streamBudgetLedger([]), {}, null);
 
-		expect(goalRow(resolved, 'Quality floor')).toMatchObject({
-			value: 'XPSNR floor 35',
-			detail: 'Aim for 41; the floor is an acceptance guardrail, not a guarantee.'
-		});
-		expect(goalRow(unresolved, 'Quality floor')).toMatchObject({
-			value: 'Automatic metric guardrail',
-			detail:
-				'Use VMAF when available, otherwise XPSNR; Mediaforce resolves the active floor before sampling.'
-		});
+		expectPlainQualityRow(qualityRow(resolved), { minimum: '35', target: '41' });
+		expectPlainQualityRow(qualityRow(unresolved));
+		expect(qualityRow(resolved).value).not.toBe(qualityRow(unresolved).value);
 	});
 
 	it('separates measured, advisory, and stale review evidence', () => {
@@ -1108,6 +1141,7 @@ describe('movieGoalContractView', () => {
 		const copy = JSON.stringify(view.findings);
 
 		for (const id of producerIds) expect(copy).not.toContain(id);
+		expect(copy).not.toMatch(QUALITY_JARGON);
 		expect(view.findings.length).toBeGreaterThan(0);
 	});
 

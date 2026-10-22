@@ -5,8 +5,9 @@ import threading
 import time
 import uuid
 from contextlib import nullcontext
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -24,7 +25,9 @@ from mediaforce.encoding.quality import RemoteQualityTimeoutError, SampleEncodeR
     quality_error_message, resolve_local_quality_temp_root
 from mediaforce.encoding.video_filters import build_video_filter, planned_output_dimensions
 from mediaforce.encoding.staged_host import STAGED_JOB_KEY, host_scratch_root, staged_job, staged_job_for_host
+from mediaforce.encoding.staging import EncodeConnectionLostError
 from mediaforce.hosts.config import host_media_access_for_host, host_targets_current_machine, ssh_target_for_host
+from mediaforce.hosts.transport import ssh_host_unreachable
 from mediaforce.remote import execution_mode_for_host, run_remote_command, ssh_client_options
 from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
 from mediaforce.state_cleanup import purge_transient_artifacts
@@ -34,12 +37,22 @@ from mediaforce.tuning.content_intent_observations import (
     content_intent_stream_plan_id,
 )
 from mediaforce.tuning.av1_cold_start import unavailable_av1_cold_start_prediction
+from mediaforce.tuning.calibration_jobs import COMPUTER_RETRY_RESULT_KEY, finish_running_job, \
+    requeue_running_job_for_retry
 from mediaforce.tuning.target_size_search import MAX_TARGET_SIZE_CANDIDATES, TargetSizeSearchError
 from mediaforce.web.runtime.encode_runtime import running_staged_scratch_reservations
 from mediaforce.web.runtime.scratch_reservations import host_identity_tokens
 from mediaforce.encoding.staged_host import StagedScratchError
 
 LOGGER = logging.getLogger(__name__)
+
+# A sample that loses its computer tries again by itself this many times before it asks the owner.
+SAMPLE_COMPUTER_RETRY_LIMIT = 4
+# Waits between those tries double from the base, up to the cap: 1, 2, 4 and 8 minutes.
+SAMPLE_COMPUTER_RETRY_BASE_DELAY_SECONDS = 60
+SAMPLE_COMPUTER_RETRY_MAX_DELAY_SECONDS = 15 * 60
+# Progress stage while a sample waits for its computer to come back.
+WAITING_FOR_COMPUTER_STAGE = "waiting_for_computer"
 
 
 @dataclass(slots=True)
@@ -136,6 +149,21 @@ class _CalibrationTelemetry:
         self.progress["compatibility_key"] = compatibility_key
         self.progress["last_progress_at"] = self.deps.now_iso()
         self._persist(progress=self.progress)
+
+    def wait_for_computer(self, *, computer: str, waiting_reason: str, retry_not_before: str) -> None:
+        """Show that the sample waits for its computer; ``finish`` saves it."""
+        now = self.deps.now_iso()
+        self.progress.update(
+            {
+                "stage": WAITING_FOR_COMPUTER_STAGE,
+                "stage_started_at": now,
+                "last_progress_at": now,
+                WAITING_FOR_COMPUTER_STAGE: computer,
+                "waiting_reason": waiting_reason,
+                "retry_not_before": retry_not_before,
+            }
+        )
+        self.progress.pop("work", None)
 
     def finish(self, terminal_status: str | None) -> None:
         self.stop_event.set()
@@ -603,59 +631,49 @@ def run_calibration_job(
                 },
             )
     except TargetSizeSearchError as exc:
-        terminal_status = "failed"
-        with open_db(config.paths.db_path) as connection:
-            deps.save_job_state(
-                connection,
-                config,
-                prefix,
-                {
-                    **job,
-                    "job_id": job_id,
-                    "status": "failed",
-                    "finished_at": deps.now_iso(),
-                    "error": quality_error_message(exc),
-                    "result": {
-                        "target_size_status": exc.status,
-                        "target_size_trace": exc.trace,
-                    },
-                },
-            )
+        terminal_status = _fail_unless_ended(
+            config=config,
+            prefix=prefix,
+            job=job,
+            job_id=job_id,
+            deps=deps,
+            error=quality_error_message(exc),
+            result={
+                "target_size_status": exc.status,
+                "target_size_trace": exc.trace,
+            },
+        )
     except RemoteQualityTimeoutError as exc:
-        terminal_status = "failed"
-        with open_db(config.paths.db_path) as connection:
-            deps.save_job_state(
-                connection,
-                config,
-                prefix,
-                {
-                    **job,
-                    "job_id": job_id,
-                    "status": "failed",
-                    "finished_at": deps.now_iso(),
-                    "error": quality_error_message(exc),
-                    "result": {
-                        "failure_kind": exc.failure_kind,
-                        "failure_message": str(exc),
-                        "host_key": exc.host_key,
-                        "remote_process_contained": exc.remote_process_contained,
-                    },
-                },
-            )
+        terminal_status = _fail_unless_ended(
+            config=config,
+            prefix=prefix,
+            job=job,
+            job_id=job_id,
+            deps=deps,
+            error=quality_error_message(exc),
+            result={
+                "failure_kind": exc.failure_kind,
+                "failure_message": str(exc),
+                "host_key": exc.host_key,
+                "remote_process_contained": exc.remote_process_contained,
+            },
+        )
     except Exception as exc:
-        terminal_status = "failed"
-        with open_db(config.paths.db_path) as connection:
-            deps.save_job_state(
-                connection,
-                config,
-                prefix,
-                {
-                    **job,
-                    "job_id": job_id,
-                    "status": "failed",
-                    "finished_at": deps.now_iso(),
-                    "error": quality_error_message(exc),
-                },
+        if _lost_sample_computer(exc, host_data):
+            terminal_status = _handle_lost_sample_computer(
+                exc,
+                config=config,
+                prefix=prefix,
+                job=job,
+                job_id=job_id,
+                host_data=host_data,
+                process_controller=process_controller,
+                telemetry=telemetry,
+                deps=deps,
+            )
+        else:
+            terminal_status = _fail_unless_ended(
+                config=config, prefix=prefix, job=job, job_id=job_id, deps=deps, error=quality_error_message(exc),
             )
     finally:
         telemetry.finish(terminal_status)
@@ -670,6 +688,168 @@ def run_calibration_job(
         remove_path(manifest_path)
         remove_path(calibration_dir)
         purge_transient_artifacts(config, force=True)
+
+
+def _sample_computer_label(host: Mapping[str, Any]) -> str:
+    return str(host.get("label") or host.get("key") or host.get("host") or "").strip() or "its computer"
+
+
+def sample_waiting_for_computer_reason(host: Mapping[str, Any]) -> str:
+    """Why a sample waits after losing its computer, in the words encodes use for the same wait."""
+    label = _sample_computer_label(host)
+    return (
+        f"Waiting for {label} to be available, such as in its next work window, to make this sample. "
+        f"Mediaforce tries again by itself a few times before it asks you."
+    )
+
+
+def sample_computer_retries_used_message(host: Mapping[str, Any], tries: int) -> str:
+    label = _sample_computer_label(host)
+    return (
+        f"{label} could not be reached for this sample after {tries} tries. Check that {label} is on "
+        f"and connected, then retry the sample."
+    )
+
+
+def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _lost_sample_computer(exc: BaseException, host: Mapping[str, Any]) -> bool:
+    """The sample's SSH computer was asleep, off the network or dropped the link mid-run.
+
+    A refused login or changed host key also fails in the SSH client, but trying again cannot fix
+    it, so it is not this and still asks the owner straight away.
+    """
+    if execution_mode_for_host(dict(host)) != "ssh":
+        return False
+    for error in _exception_chain(exc):
+        if isinstance(error, EncodeConnectionLostError):
+            return True
+        # Errors keep the SSH client's own lines but not its exit status; 255 is the status the
+        # client exits with whenever it prints them.
+        text = "\n".join([str(error), *getattr(error, "__notes__", ())])
+        if ssh_host_unreachable(255, text):
+            return True
+    return False
+
+
+def _fail_unless_ended(
+        *,
+        config: MediaforceConfig,
+        prefix: str,
+        job: dict[str, Any],
+        job_id: str,
+        deps: CalibrationRunDeps,
+        error: str,
+        result: dict[str, Any] | None = None,
+) -> str:
+    """Record a failed try unless the owner's Stop, or anything else, already ended the job.
+
+    Returns the job's status afterwards.
+    """
+    finished_at = deps.now_iso()
+    with open_db(config.paths.db_path) as connection:
+        status = finish_running_job(
+            connection, job_id, status="failed", finished_at=finished_at, error=error, result=result,
+        )
+        if status is not None:
+            return status
+        # No saved row to guard, so save the whole job as before.
+        payload: dict[str, Any] = {**job, "job_id": job_id, "status": "failed", "finished_at": finished_at,
+                                   "error": error}
+        if result is not None:
+            payload["result"] = result
+        deps.save_job_state(connection, config, prefix, payload)
+    return "failed"
+
+
+def _sample_computer_retry_delay_seconds(attempt: int) -> int:
+    delay = SAMPLE_COMPUTER_RETRY_BASE_DELAY_SECONDS * (2 ** max(attempt - 1, 0))
+    return min(delay, SAMPLE_COMPUTER_RETRY_MAX_DELAY_SECONDS)
+
+
+def _handle_lost_sample_computer(
+        exc: Exception,
+        *,
+        config: MediaforceConfig,
+        prefix: str,
+        job: dict[str, Any],
+        job_id: str,
+        host_data: dict[str, Any],
+        process_controller: ManagedProcessController,
+        telemetry: _CalibrationTelemetry,
+        deps: CalibrationRunDeps,
+) -> str:
+    """Wait for the computer and try again, or ask the owner once the tries are used up.
+
+    Returns the job's status after this try.
+    """
+    now_iso = deps.now_iso()
+    if process_controller.cancelled:
+        # The owner's Stop ended the link, so the sample stays stopped and does not try again.
+        with open_db(config.paths.db_path) as connection:
+            deps.save_job_state(
+                connection,
+                config,
+                prefix,
+                {
+                    **job,
+                    "job_id": job_id,
+                    "status": "stopped",
+                    "finished_at": now_iso,
+                    "error": "Calibration queue job was stopped and cleaned up.",
+                },
+            )
+        return "stopped"
+    computer = _sample_computer_label(host_data)
+    previous = object_dict(object_dict(job.get("result")).get(COMPUTER_RETRY_RESULT_KEY))
+    attempt = int_value(previous.get("attempts")) + 1
+    detail = quality_error_message(exc)
+    if attempt > SAMPLE_COMPUTER_RETRY_LIMIT:
+        return _fail_unless_ended(
+            config=config,
+            prefix=prefix,
+            job=job,
+            job_id=job_id,
+            deps=deps,
+            error=sample_computer_retries_used_message(host_data, attempt),
+            result={
+                "failure_kind": "host_unreachable",
+                "computer": computer,
+                "tries": attempt,
+                "failure_detail": detail,
+            },
+        )
+    retry_not_before = (
+        datetime.fromisoformat(now_iso) + timedelta(seconds=_sample_computer_retry_delay_seconds(attempt))
+    ).isoformat(timespec="seconds")
+    waiting_reason = sample_waiting_for_computer_reason(host_data)
+    retry = {
+        "attempts": attempt,
+        "retry_not_before": retry_not_before,
+        "computer": computer,
+        "waiting_reason": waiting_reason,
+        "last_failure_detail": detail,
+    }
+    with open_db(config.paths.db_path) as connection:
+        requeued = requeue_running_job_for_retry(
+            connection,
+            job_id,
+            result={COMPUTER_RETRY_RESULT_KEY: retry},
+            updated_at=now_iso,
+        )
+    if not requeued:
+        # The owner stopped it while this try was ending; their Stop stands.
+        return "stopped"
+    LOGGER.info("Sample %s lost %s and will try again at %s: %s", job_id, computer, retry_not_before, detail)
+    telemetry.wait_for_computer(computer=computer, waiting_reason=waiting_reason, retry_not_before=retry_not_before)
+    return "queued"
 
 
 def run_sampled_calibration(

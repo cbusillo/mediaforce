@@ -4,6 +4,7 @@ from statistics import median
 from typing import Any
 from unittest.mock import patch
 
+from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.quality import QualitySearchResult, QualitySearchWarmStart, SampleEncodeError, SampleEncodeResult
 from mediaforce.tuning.compression_intent import (
     CompressionEvidenceRef,
@@ -11,10 +12,14 @@ from mediaforce.tuning.compression_intent import (
     authorize_compression_change,
 )
 from mediaforce.tuning.size_goals import SizeGoalIntent
+from mediaforce.web.runtime import encode_runtime
 from mediaforce.tuning.stream_budget import StreamBudgetLedger, resolve_stream_budget_ledger
 from mediaforce.tuning import target_size_search
 from mediaforce.tuning.target_size_search import (
     FINAL_RETRY_SKIP_REASONS,
+    MAX_BRACKET_FILL_MEASUREMENTS,
+    MAX_TARGET_SIZE_CANDIDATES,
+    QUALITY_SAFE_BRACKET_MISS_REASON,
     FinalSizeVerification,
     TargetSizeSearchError,
     _straddle_interpolation_probe_crf,
@@ -842,6 +847,152 @@ class TargetSizeSearchTests(unittest.TestCase):
         self.assertEqual(context.exception.status, "needs_review")
         self.assertEqual(context.exception.trace["curve"]["shape"], "non_monotonic")
         self.assertEqual(len(context.exception.trace["candidates"]), 6)
+
+    def _bracket_search(
+            self,
+            between_totals: dict[int, int],
+            *,
+            bracket_smaller_score: float = 87.4,
+    ) -> tuple[list[int], QualitySearchResult | TargetSizeSearchError]:
+        """Futurama S08E02's shape: the main budget ends with setting 60 above the band and 63 below it.
+
+        Every setting up to 60 lands above the band and 63 lands below it, so the main search spends
+        its whole budget expanding toward 60 and 63 before either setting between them is tried.
+        """
+        ledger = self._ledger(target_bytes=82_500_000, source_size_bytes=200_000_000)
+        non_video = ledger.non_video_bytes or 0
+        totals = {63: 74_000_000, **between_totals}
+        scores = {60: 92.6, 61: 90.9, 62: 89.1, 63: bracket_smaller_score}
+        measured: list[int] = []
+
+        def run_sample(_path: Path, *, crf: float, **_kwargs: Any) -> SampleEncodeResult:
+            crf_int = int(crf)
+            measured.append(crf_int)
+            total = totals.get(crf_int, 88_700_000 + (60 - crf_int) * 1_000_000)
+            video = total - non_video
+            return SampleEncodeResult("VMAF", scores.get(crf_int, 95.0), video / 10_000_000, 30.0, video, "")
+
+        try:
+            result: QualitySearchResult | TargetSizeSearchError = search_target_size(
+                Path("/tmp/source.mkv"),
+                self._policy(),
+                source_codec="h264",
+                metric_name="vmaf",
+                metric_target=85.0,
+                min_metric_score=80.0,
+                preset=4,
+                pixel_format="yuv420p10le",
+                sample_every="8m",
+                sample_duration="20s",
+                min_crf=18,
+                max_crf=38,
+                search_max_crf=63,
+                svt_params=[],
+                video_filter=None,
+                stream_budget_ledger=ledger,
+                transform_plan=self._transform_plan(),
+                process_controller=None,
+                host=None,
+                quality_temp_dir=None,
+                run_sample_encode=run_sample,
+            )
+        except TargetSizeSearchError as exc:
+            result = exc
+        lower, upper = target_size_search._sample_bounds(ledger)
+        main_budget = measured[:MAX_TARGET_SIZE_CANDIDATES]
+        # The stub must reproduce the live trace: the main budget ends on the bracket, both ends quality-safe.
+        self.assertEqual(main_budget[-2:], [60, 63])
+        self.assertGreater(88_700_000, upper)
+        self.assertLess(totals[63], lower)
+        return measured, result
+
+    def test_search_measures_settings_between_a_quality_safe_bracket_before_giving_up(self) -> None:
+        for between, expected_fill, expected_crf in (
+                ({61: 83_600_000, 62: 78_800_000}, [62], 62.0),
+                ({61: 80_000_000, 62: 74_100_000}, [62, 61], 61.0),
+        ):
+            with self.subTest(between=between):
+                measured, result = self._bracket_search(between)
+
+                self.assertIsInstance(result, QualitySearchResult)
+                assert isinstance(result, QualitySearchResult)
+                self.assertEqual(measured[MAX_TARGET_SIZE_CANDIDATES:], expected_fill)
+                self.assertEqual(result.crf, expected_crf)
+                selected = object_dict(object_dict(result.target_size_trace).get("selected_candidate"))
+                self.assertTrue(selected["within_sample_band"])
+                self.assertTrue(selected["quality_floor_met"])
+                self.assertEqual(selected["role"], "bracket_fill")
+
+    def test_closed_quality_safe_bracket_reports_both_sides_for_the_owner(self) -> None:
+        measured, result = self._bracket_search({61: 87_000_000, 62: 74_100_000})
+
+        self.assertIsInstance(result, TargetSizeSearchError)
+        assert isinstance(result, TargetSizeSearchError)
+        self.assertEqual(measured[MAX_TARGET_SIZE_CANDIDATES:], [62, 61])
+        self.assertLessEqual(len(measured), MAX_TARGET_SIZE_CANDIDATES + MAX_BRACKET_FILL_MEASUREMENTS)
+        self.assertEqual(result.status, "needs_review")
+        self.assertEqual(result.trace["selection_reason"], QUALITY_SAFE_BRACKET_MISS_REASON)
+        bracket = result.trace["quality_safe_bracket"]
+        self.assertEqual(bracket["larger_candidate"]["crf"], 61.0)
+        self.assertEqual(bracket["smaller_candidate"]["crf"], 62.0)
+        # Encode recovery reads the search's own message back into the sizes the trace measured.
+        analysis = encode_runtime._quality_safe_bracket_miss_analysis(str(result))
+        assert analysis is not None
+        self.assertEqual(analysis["target_size_bytes"], result.trace["target"]["total_target_bytes"])
+        self.assertEqual(
+            analysis["proposed_target_size_bytes"], bracket["larger_candidate"]["predicted_whole_episode_bytes"],
+        )
+        self.assertEqual(
+            analysis["smaller_quality_safe_bytes"], bracket["smaller_candidate"]["predicted_whole_episode_bytes"],
+        )
+
+    def test_bracket_below_the_quality_floor_is_not_filled(self) -> None:
+        measured, result = self._bracket_search({61: 83_600_000, 62: 78_800_000}, bracket_smaller_score=79.0)
+
+        self.assertIsInstance(result, TargetSizeSearchError)
+        assert isinstance(result, TargetSizeSearchError)
+        self.assertEqual(len(measured), MAX_TARGET_SIZE_CANDIDATES)
+        self.assertEqual(result.status, "quality_conflict")
+        self.assertNotIn("quality_safe_bracket", result.trace)
+
+    def test_unbracketed_exhaustion_keeps_the_bounded_search_outcome(self) -> None:
+        ledger = self._ledger(target_bytes=82_500_000, source_size_bytes=120_000_000)
+        _lower, upper = target_size_search._sample_bounds(ledger)
+        measured: list[int] = []
+
+        def run_sample(_path: Path, *, crf: float, **_kwargs: Any) -> SampleEncodeResult:
+            measured.append(int(crf))
+            video = upper + 1_000_000 + (63 - int(crf)) * 100_000
+            return SampleEncodeResult("VMAF", 95.0, video / 10_000_000, 30.0, video, "")
+
+        with self.assertRaises(TargetSizeSearchError) as context:
+            search_target_size(
+                Path("/tmp/source.mkv"),
+                self._policy(),
+                source_codec="h264",
+                metric_name="vmaf",
+                metric_target=85.0,
+                min_metric_score=80.0,
+                preset=4,
+                pixel_format="yuv420p10le",
+                sample_every="8m",
+                sample_duration="20s",
+                min_crf=18,
+                max_crf=38,
+                search_max_crf=63,
+                svt_params=[],
+                video_filter=None,
+                stream_budget_ledger=ledger,
+                transform_plan=self._transform_plan(),
+                process_controller=None,
+                host=None,
+                quality_temp_dir=None,
+                run_sample_encode=run_sample,
+            )
+
+        self.assertEqual(len(measured), MAX_TARGET_SIZE_CANDIDATES)
+        self.assertEqual(context.exception.trace["selection_reason"], "bounded_search_exhausted_before_upper_bound")
+        self.assertNotIn("quality_safe_bracket", context.exception.trace)
 
     def test_final_output_verification_allows_only_one_calibrated_retry(self) -> None:
         ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000)

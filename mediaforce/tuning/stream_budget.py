@@ -349,8 +349,8 @@ def stream_budget_projection_blocker(
             ledger,
             code="source_relative_cap_consumed_by_non_video_budget",
             message=(
-                f"Preserved streams consume the {_source_cap_label(ledger)} source cap. "
-                "Reduce preserved streams or increase the maximum encoded percent."
+                "The kept sound and subtitle tracks already use the whole size allowed for this file"
+                f"{_allowed_size_note(ledger)}. Keep fewer tracks or raise the largest allowed file."
             ),
             target_lower_bound=target_lower_bound,
         )
@@ -362,8 +362,8 @@ def stream_budget_projection_blocker(
         ledger,
         code="target_lower_bound_exceeds_source_relative_cap",
         message=(
-            f"Target size exceeds the {_source_cap_label(ledger)} source cap. "
-            "Lower the target or increase the maximum encoded percent."
+            f"The size goal is larger than this file is allowed to be{_allowed_size_note(ledger)}. "
+            "Lower the goal or raise the largest allowed file."
         ),
         target_lower_bound=target_lower_bound,
     )
@@ -852,10 +852,10 @@ def _target_lower_bound_bytes(ledger: StreamBudgetLedger) -> int | None:
     return int(round(ledger.total_target_bytes * (1.0 - normalized_tolerance / 100.0)))
 
 
-def _source_cap_label(ledger: StreamBudgetLedger) -> str:
+def _allowed_size_note(ledger: StreamBudgetLedger) -> str:
     if ledger.source_cap_percent is None:
-        return "configured"
-    return f"{ledger.source_cap_percent:g}%"
+        return ""
+    return f" ({ledger.source_cap_percent:g}% of the original)"
 
 
 def _source_cap_status(

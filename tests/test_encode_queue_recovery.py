@@ -54,6 +54,7 @@ from mediaforce.core.db_tables import production_holds
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
+from mediaforce.hosts.status_helpers import computer_check_failure_copy
 from mediaforce.web.runtime.size_exception import decide_size_exception
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.folder_tuning_advice import review_gate
@@ -95,7 +96,8 @@ from mediaforce.tuning.compression_intent import CompressionIntentV1
 from mediaforce.tuning.content_intent_observations import build_content_intent_boundary_compatibility, \
     content_intent_stream_plan_id
 from mediaforce.tuning.size_goals import SizeGoalIntent
-from mediaforce.tuning.target_size_search import TargetSizeSearchError
+from mediaforce.tuning import target_size_search
+from mediaforce.tuning.target_size_search import QUALITY_SAFE_BRACKET_MISS_REASON, TargetSizeSearchError
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.reviewing.helpers import ReviewMoment
 from mediaforce.web import app as web_app
@@ -1725,7 +1727,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
         self.assertIsNone(host_payload)
-        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on Remote A")
+        self.assertEqual(waiting_reason, "waiting for Remote A to recover from repeated failures")
 
     def test_host_selection_uses_startable_backup_when_active_host_is_globally_blocked(self) -> None:
         job = {}
@@ -1877,7 +1879,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                         self.assertIsNone(host_payload)
                         self.assertIsNotNone(waiting_reason)
                         assert waiting_reason is not None
-                        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on remote-a.internal")
+                        self.assertEqual(waiting_reason, "waiting for remote-a.internal to recover from repeated failures")
                     else:
                         self.assertIsNotNone(host_payload)
                         assert host_payload is not None
@@ -2203,7 +2205,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
         self.assertIsNone(host_payload)
-        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on Primary Encoder")
+        self.assertEqual(waiting_reason, "waiting for Primary Encoder to recover from repeated failures")
 
     def test_deterministic_failure_moves_job_to_needs_attention(self) -> None:
         source_path = self._create_source_file("episode-d.mkv")
@@ -2402,12 +2404,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             connection: Any,
             name: str,
             *,
-            best_reachable_bytes: int,
+            best_reachable_bytes: int = 0,
             compression_intent: dict[str, Any] | None = None,
+            error_message: str | None = None,
     ) -> tuple[dict[str, Any] | None, Path]:
         source_path = self._create_source_file(f"{name}.mkv")
         staging_path = self._staging_path(f"{name}.mkv")
-        error_message = (
+        error_message = error_message or (
             "The approved target size conflicts with the configured quality floor "
             "(target_band_violates_quality_floor); "
             f"target=200000000 bytes, best_reachable={best_reachable_bytes} bytes."
@@ -2537,6 +2540,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "rel_path": "tv/show/floor-conflict-question.mkv",
                 "goal_bytes": 200_000_000,
                 "smallest_quality_safe_bytes": 400_000_000,
+                "reason": encode_runtime.SIZE_QUESTION_QUALITY_NEEDS_MORE,
             },
         )
 
@@ -2600,6 +2604,105 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
         self.assertEqual(analysis["owner_size_decision"]["answer"], "allow")
         self.assertEqual(len(events), 1)
+
+    @staticmethod
+    def _quality_safe_bracket_miss_message(*, goal_bytes: int, larger_bytes: int, smaller_bytes: int) -> str:
+        """The search's own failure message for a closed quality-safe bracket around the goal."""
+        return target_size_search._failure_message(
+            "needs_review",
+            QUALITY_SAFE_BRACKET_MISS_REASON,
+            {
+                "target": {"total_target_bytes": goal_bytes},
+                "quality_safe_bracket": {
+                    "larger_candidate": {"predicted_whole_episode_bytes": larger_bytes},
+                    "smaller_candidate": {"predicted_whole_episode_bytes": smaller_bytes},
+                },
+            },
+        )
+
+    def test_quality_safe_bracket_miss_asks_the_owner_with_the_closest_larger_size(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated, manifest_path = self._quality_floor_conflict_job(
+                connection,
+                "bracket-question",
+                error_message=self._quality_safe_bracket_miss_message(
+                    goal_bytes=200_000_000, larger_bytes=212_000_000, smaller_bytes=186_000_000,
+                ),
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+        assert updated is not None
+        # Neither side breaks the quality floor, so nothing is raised automatically, even within the allowance.
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertEqual(manifest["items"][0]["resolved_policy"]["video"]["target_size_bytes"], 200_000_000)
+        self.assertNotIn("compression_escalation", manifest["items"][0])
+        self.assertEqual(
+            encode_runtime.size_exception_question(updated),
+            {
+                "job_id": "job-bracket-question",
+                "rel_path": "tv/show/bracket-question.mkv",
+                "goal_bytes": 200_000_000,
+                "smallest_quality_safe_bytes": 212_000_000,
+                "reason": encode_runtime.SIZE_QUESTION_NO_SETTING_FITS,
+            },
+        )
+
+    def test_bracket_miss_after_a_warm_start_final_size_miss_still_asks_the_owner(self) -> None:
+        bracket_miss = TargetSizeSearchError(
+            self._quality_safe_bracket_miss_message(
+                goal_bytes=200_000_000, larger_bytes=212_000_000, smaller_bytes=186_000_000,
+            ),
+            status="needs_review",
+            trace={},
+        )
+        speculative_miss = target_size_search.FinalSizeVerification(
+            status="over_target",
+            target_size_bytes=200_000_000,
+            lower_bound_bytes=190_000_000,
+            upper_bound_bytes=210_000_000,
+            actual_output_bytes=260_000_000,
+            tolerance_percent=5.0,
+            retry_allowed=True,
+            retry_reason=None,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            updated, _manifest_path = self._quality_floor_conflict_job(
+                connection,
+                "bracket-after-warm-start",
+                error_message=manifest_runtime._final_size_miss_after_failed_baseline_message(
+                    speculative_miss, bracket_miss,
+                ),
+            )
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        question = encode_runtime.size_exception_question(updated)
+        assert question is not None
+        self.assertEqual(question["smallest_quality_safe_bytes"], 212_000_000)
+        self.assertEqual(question["reason"], encode_runtime.SIZE_QUESTION_NO_SETTING_FITS)
+
+    def test_owner_allowing_a_bracket_miss_records_only_the_owner_as_evidence(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._quality_floor_conflict_job(
+                connection,
+                "bracket-allow",
+                error_message=self._quality_safe_bracket_miss_message(
+                    goal_bytes=200_000_000, larger_bytes=212_000_000, smaller_bytes=186_000_000,
+                ),
+            )
+            result = self._decide_size(connection, "job-bracket-allow", allow=True)
+            updated = load_encode_job(connection, "job-bracket-allow")
+        manifest = json.loads((self.root / "runs" / "manifest-bracket-allow.json").read_text())
+
+        self.assertTrue(result["ok"], result)
+        assert updated is not None
+        self.assertEqual(updated["status"], "queued")
+        item = manifest["items"][0]
+        self.assertEqual(item["resolved_policy"]["video"]["target_size_bytes"], 212_000_000)
+        escalation = item["compression_escalation"]
+        self.assertEqual(escalation["evidence"]["kind"], "operator_override")
+        self.assertEqual(escalation["evidence"]["owner_approval"]["kind"], "operator_override")
+        self.assertEqual(escalation["decision"]["outcome"], "authorized")
 
     def _floor_conflict_shard_under_running_folder(self, connection: DBClient, name: str) -> dict[str, Any]:
         child, _manifest_path = self._quality_floor_conflict_job(connection, name, best_reachable_bytes=400_000_000)
@@ -4449,7 +4552,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     host={},
                     status=status,
                     attempt_count=1,
-                    waiting_reason="waiting for a host window with enough time remaining" if status == "queued" else None,
+                    waiting_reason="waiting for a work window with enough time left" if status == "queued" else None,
                 )
                 job = load_encode_job(connection, job_id)
                 assert job is not None
@@ -4481,7 +4584,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self._save_job(
                     connection, job_id=f"schedule-episode-{index}",
                     manifest_name="manifest-schedule-parts.json", host={}, status="queued", attempt_count=0,
-                    waiting_reason="Estimated runtime about 1h 25m; waiting for a host window with enough time remaining.",
+                    waiting_reason="Estimated runtime about 1h 25m; waiting for a work window with enough time left.",
                 )
                 child = load_encode_job(connection, f"schedule-episode-{index}")
                 assert child is not None
@@ -4502,22 +4605,22 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
     def test_schedule_waiting_count_excludes_other_waits_and_bypassed_work(self) -> None:
         pending = [
             {"status": "queued", "host": {"schedule_profile": "never"}},
-            {"status": "queued", "waiting_reason": "waiting for a host schedule window"},
+            {"status": "queued", "waiting_reason": "waiting for a computer's work window"},
             {"status": "queued", "progress": {"progress_state": "schedule_waiting"}},
             {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
              "waiting_reason": "Waiting for shared storage."},
             {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
-             "waiting_reason": "waiting for an available encode host"},
+             "waiting_reason": "waiting for an available computer"},
             {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
-             "waiting_reason": "Estimated runtime about 1h 25m; waiting for a host window with enough time remaining."},
+             "waiting_reason": "Estimated runtime about 1h 25m; waiting for a work window with enough time left."},
             {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
              "host": {"schedule_profile": "never"}, "waiting_reason": "Waiting for shared storage."},
             {"status": "retry_backoff", "waiting_reason": "waiting before retrying"},
             {"status": "queued", "waiting_reason": "Waiting for shared storage."},
             {"status": "queued", "waiting_reason": "Waiting for an encode computer."},
-            {"status": "queued", "waiting_reason": "Estimated runtime longer than every configured host schedule window"},
+            {"status": "queued", "waiting_reason": "Estimated runtime longer than every work window"},
             {"status": "queued", "host": {"schedule_profile": "never"}, "bypass_schedule": True,
-             "waiting_reason": "waiting for a host schedule window"},
+             "waiting_reason": "waiting for a computer's work window"},
             {"status": "queued", "host": {"schedule_profile": "always"}},
         ]
         with patch.object(web_app, "runtime_encode_job_manifest_totals") as read_totals:
@@ -5520,7 +5623,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with patch("mediaforce.web.app._host_runtime_rows", return_value=[host]):
             selected_host, waiting_reason = web_app._select_encode_host(cast(Any, None), self.config, job)
         self.assertIsNone(selected_host)
-        self.assertEqual(waiting_reason, "waiting for an available encode host")
+        self.assertEqual(waiting_reason, "waiting for an available computer")
 
     def test_select_encode_host_respects_allowed_libraries(self) -> None:
         job = {"job_id": "job-1", "prefix": "tv/show", "bypass_schedule": False}
@@ -5581,7 +5684,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             selected_host, waiting_reason = web_app._select_encode_host(connection, self.config, job)
 
         self.assertIsNone(selected_host)
-        self.assertEqual(waiting_reason, "waiting for a host schedule window")
+        self.assertEqual(waiting_reason, "waiting for a computer's work window")
 
     def test_host_runtime_rows_include_host_lifecycle_commands(self) -> None:
         self.config.raw["remote_hosts"] = [
@@ -5689,7 +5792,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
             host_payload, waiting_reason = web_app._select_encode_host(cast(Any, None), self.config, job)
         self.assertIsNone(host_payload)
-        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on CT103")
+        self.assertEqual(waiting_reason, "waiting for CT103 to recover from repeated failures")
 
     def test_select_encode_host_does_not_choose_startable_host_when_capacity_full(self) -> None:
         statuses = [
@@ -5709,7 +5812,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             host_payload, waiting_reason = web_app._select_encode_host(cast(Any, None), self.config,
                                                                        {"bypass_schedule": False})
         self.assertIsNone(host_payload)
-        self.assertEqual(waiting_reason, "waiting for host capacity to free up")
+        self.assertEqual(waiting_reason, "waiting for a computer to finish its current work")
 
     def test_ensure_encode_host_ready_runs_start_command_and_waits_for_status(self) -> None:
         host = {
@@ -6488,12 +6591,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             waiting_reason=encode_runtime.SCHEDULE_CLOSE_WAITING_REASON,
         )
         draining = decorated(
-            waiting_reason="Estimated runtime about 2h; waiting for a host window with enough time remaining.",
+            waiting_reason="Estimated runtime about 2h; waiting for a work window with enough time left.",
         )
         impossible = decorated(
             waiting_reason=(
-                "Estimated runtime about 4h is longer than every configured host schedule window "
-                "(longest about 3h). Widen a host window or use Bypass scheduler."
+                "Estimated runtime about 4h is longer than every work window "
+                "(longest about 3h). Widen a computer's work window or intentionally bypass the work schedule."
             ),
         )
 
@@ -8650,7 +8753,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     status="queued",
                     manifest_indexes=[1],
                     item_count=1,
-                    waiting_reason="Waiting for available encode host capacity.",
+                    waiting_reason="Waiting for a computer to finish its current work.",
                 ),
             )
 
@@ -12917,7 +13020,7 @@ raise SystemExit(0)
 
         self.assertFalse(status.available)
         self.assertFalse(status.probe_available)
-        self.assertEqual(status.message, "Remote check returned unreadable output")
+        self.assertEqual(status.message, computer_check_failure_copy("unreadable_reply", "Encode Host")[0])
 
     def test_host_status_positional_optional_fields_remain_compatible(self) -> None:
         status = HostStatus(
@@ -13806,7 +13909,7 @@ raise SystemExit(0)
             priority=0,
             capabilities=["encode_queue"],
             available=False,
-            message="SSH access setup required",
+            message=computer_check_failure_copy("password_needed", "Sample Host")[0],
             missing_paths=[],
             repo_path=None,
             setup_supported=True,
@@ -13827,7 +13930,7 @@ raise SystemExit(0)
             priority=0,
             capabilities=["encode_queue"],
             available=False,
-            message="SSH access setup required",
+            message=computer_check_failure_copy("password_needed", "Sample Host")[0],
             missing_paths=[],
             repo_path=None,
             setup_supported=True,
@@ -16033,20 +16136,11 @@ raise SystemExit(0)
             self.assertEqual(stopped_details["error"], "Operation was cancelled.")
 
     def test_completed_history_distinguishes_failures_from_operator_stops(self) -> None:
-        self.assertEqual(
-            completed_runtime._history_event_copy(
-                "encoding_failed",
-                {"error": "ffmpeg exited with status 1"},
-            )[:2],
-            ("Encoding failed", "fail"),
-        )
-        self.assertEqual(
-            completed_runtime._history_event_copy(
-                "encoding_failed",
-                {"error": "Operation was cancelled."},
-            )[:2],
-            ("Encoding stopped", "idle"),
-        )
+        failed = completed_runtime._history_event_copy("encoding_failed", {"error": "ffmpeg exited with status 1"})
+        stopped = completed_runtime._history_event_copy("encoding_failed", {"error": "Operation was cancelled."})
+        self.assertEqual(failed.tone, "fail")
+        self.assertEqual(stopped.tone, "idle")
+        self.assertNotEqual(failed.label, stopped.label)
 
     def test_completed_history_lists_stopped_encode_events(self) -> None:
         source_path = self._create_source_file("completed-history-stopped.mkv")
@@ -16070,16 +16164,12 @@ raise SystemExit(0)
 
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0].event_type, "encoding_stopped")
-        self.assertEqual(history[0].label, "Encoding stopped")
         self.assertEqual(history[0].tone, "idle")
         self.assertEqual(history[0].domain, "tv")
-        self.assertEqual(
-            completed_runtime._history_event_copy(
-                "encoding_stopped",
-                {"error": "Stopped by operator."},
-            )[:2],
-            ("Encoding stopped", "idle"),
-        )
+        failed = completed_runtime._history_event_copy("encoding_failed", {"error": "ffmpeg exited with status 1"})
+        self.assertEqual(history[0].label, completed_runtime._history_event_copy("encoding_failed", {
+            "error": "Stopped by operator."}).label)
+        self.assertNotEqual(history[0].label, failed.label)
 
     def test_encode_one_item_records_cleanup_warning_in_failure_event(self) -> None:
         source_path = self._create_source_file("episode-cleanup-warning.mkv")
@@ -18400,7 +18490,7 @@ raise SystemExit(0)
                                                                        {"bypass_schedule": False})
 
         self.assertIsNone(host_payload)
-        self.assertEqual(waiting_reason, "waiting for an available encode host")
+        self.assertEqual(waiting_reason, "waiting for an available computer")
 
     def test_host_runtime_rows_prefer_current_host_over_last_host(self) -> None:
         statuses = [
@@ -21581,7 +21671,7 @@ raise SystemExit(0)
             self.assertEqual(selected["job_id"], "job-short-window")
             deferred = load_encode_job(connection, "job-long-window")
             assert deferred is not None
-            self.assertIn("waiting for a host window with enough time remaining", deferred["waiting_reason"])
+            self.assertIn("waiting for a work window with enough time left", deferred["waiting_reason"])
 
     def test_duration_aware_selection_drains_when_no_job_fits(self) -> None:
         close_at = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
@@ -21613,7 +21703,7 @@ raise SystemExit(0)
             assert deferred is not None
             self.assertEqual(deferred["status"], "queued")
             self.assertEqual(deferred["attempt_count"], 0)
-            self.assertIn("waiting for a host window with enough time remaining", deferred["waiting_reason"])
+            self.assertIn("waiting for a work window with enough time left", deferred["waiting_reason"])
             # The estimate is that computer's own, so the sentence names it.
             self.assertRegex(deferred["waiting_reason"], r"^Estimated runtime about [^;]+ on worker; ")
 
@@ -21645,11 +21735,11 @@ raise SystemExit(0)
             self.assertIsNone(selected)
             deferred = load_encode_job(connection, "job-never-fits")
             assert deferred is not None
-            self.assertIn("longer than every configured host schedule window", deferred["waiting_reason"])
-            self.assertIn("Widen a host window or use Bypass scheduler", deferred["waiting_reason"])
+            self.assertIn("longer than every work window", deferred["waiting_reason"])
+            self.assertIn("Widen a computer's work window or intentionally bypass the work schedule", deferred["waiting_reason"])
             self.assertRegex(
                 deferred["waiting_reason"],
-                r"^Estimated runtime about [^(]+ on worker is longer than every configured host schedule window "
+                r"^Estimated runtime about [^(]+ on worker is longer than every work window "
                 r"\(longest about 1h\)\.",
             )
 
@@ -21691,7 +21781,7 @@ raise SystemExit(0)
             self.assertIsNone(selected)
             deferred = load_encode_job(connection, "job-closed-never-fits")
             assert deferred is not None
-            self.assertIn("longer than every configured host schedule window", deferred["waiting_reason"])
+            self.assertIn("longer than every work window", deferred["waiting_reason"])
 
     def test_duration_aware_selection_routes_long_job_to_host_with_room(self) -> None:
         short_close = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
@@ -22902,10 +22992,10 @@ raise SystemExit(0)
             shards = [load_encode_job(connection, f"shard-waiting-{index}") for index in range(3)]
             self.assertIsNotNone(parent)
             assert parent is not None
-            self.assertEqual(parent["waiting_reason"], "waiting for an available encode host")
+            self.assertEqual(parent["waiting_reason"], "waiting for an available computer")
             self.assertTrue(all(shard is not None for shard in shards))
             self.assertTrue(
-                all(shard["waiting_reason"] == "waiting for an available encode host" for shard in shards if shard)
+                all(shard["waiting_reason"] == "waiting for an available computer" for shard in shards if shard)
             )
 
             manifest_reads.clear()
@@ -22913,7 +23003,7 @@ raise SystemExit(0)
             with patch(
                     "mediaforce.web.runtime.encode_runtime.select_encode_host",
                     side_effect=[
-                        (None, "waiting for an available encode host"),
+                        (None, "waiting for an available computer"),
                         ({"key": "local", "label": "Local", "mode": "local"}, None),
                     ],
             ), patch(
@@ -23076,7 +23166,7 @@ raise SystemExit(0)
                 side_effect=[
                     ({"key": "remote-a", "label": "Remote A", "mode": "ssh"}, None),
                     ({"key": "remote-b", "label": "Remote B", "mode": "ssh"}, None),
-                    (None, "waiting for host capacity to free up"),
+                    (None, "waiting for a computer to finish its current work"),
                 ],
         ):
             encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
@@ -23927,14 +24017,14 @@ raise SystemExit(0)
 
     def test_working_folder_lists_every_waiting_reason_and_keeps_owner_files_visible(self) -> None:
         impossible = (
-            "Estimated runtime 9h is longer than every configured host schedule window (longest 8h). "
-            "Widen a host window or use Bypass scheduler."
+            "Estimated runtime 9h is longer than every work window (longest 8h). "
+            "Widen a computer's work window or intentionally bypass the work schedule."
         )
         children = [
             ("needs_attention", {"failure_analysis": {"kind": "final_size_target_miss"}}, "deterministic", None),
             ("needs_attention", {}, "storage_io", None),
             ("running", {}, None, None),
-            ("queued", {}, None, "Waiting for a host schedule window."),
+            ("queued", {}, None, "Waiting for the next work window."),
             ("queued", {}, None, impossible),
             ("completed", {}, None, None),
         ]
@@ -29070,7 +29160,7 @@ raise SystemExit(0)
                 progress={"failure_analysis": {"kind": "final_size_target_miss", "manifest_indexes": [1]}},
             ))
             save_encode_job(connection, job(
-                "queued-sibling", manifest_indexes=[2], waiting_reason="Waiting for a host schedule window.",
+                "queued-sibling", manifest_indexes=[2], waiting_reason="Waiting for the next work window.",
             ))
             save_encode_job(connection, job(
                 "retrying-sibling", status="retry_backoff", manifest_indexes=[3], attempt_count=2,
@@ -32517,7 +32607,7 @@ raise SystemExit(0)
             "This host key is known by the following other names/addresses: chris-mini.shiny. "
             "Are you sure you want to continue connecting (yes/no/[fingerprint])?"
         )
-        self.assertEqual(classification["message"], "SSH trust needs confirmation")
+        self.assertEqual(classification["message"], computer_check_failure_copy("new_name", "This computer")[0])
         self.assertFalse(classification["setup_supported"])
         self.assertFalse(classification["trust_reset_supported"])
 
@@ -32539,7 +32629,7 @@ raise SystemExit(0)
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config,
                                                                            {"bypass_schedule": False})
         self.assertIsNone(host_payload)
-        self.assertEqual(waiting_reason, "waiting for host capacity to free up")
+        self.assertEqual(waiting_reason, "waiting for a computer to finish its current work")
 
     def test_load_job_state_preserves_old_stopped_sample_for_retry(self) -> None:
         prefix = "tv/show/season-1"

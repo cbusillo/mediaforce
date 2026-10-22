@@ -49,6 +49,8 @@ BoundaryAuthority = Literal["runtime_native", "correction"]
 BoundaryDisposition = Literal["active", "withdrawn"]
 BoundaryObservationKind = Literal["visual_approval", "visual_rejection"]
 BoundaryVerdict = Literal["acceptable", "unacceptable"]
+# Backfilled rows are rebuilt from the saved approval files, so their provenance says so.
+VisualBoundaryRecorder = Literal["approval_review", "approval_file_backfill"]
 BoundaryKind = Literal["upper_bound", "lower_bound"]
 BoundaryDirection = Literal["smaller", "same", "larger"]
 BoundaryMeasurementBasis = Literal["sample_projection", "full_output"]
@@ -433,6 +435,7 @@ def build_visual_content_intent_observation(
         recorded_at: str,
         personalization_eligible: bool = True,
         personalization_exclusion_reason: str | None = None,
+        recorded_by: VisualBoundaryRecorder = "approval_review",
 ) -> ContentIntentObservationBuildResult:
     normalized_recorded_at = _timestamp(recorded_at, "recorded timestamp")
     if personalization_eligible == (personalization_exclusion_reason is not None):
@@ -522,7 +525,6 @@ def build_visual_content_intent_observation(
         authoritative_anchor_bytes=authoritative_anchor_bytes,
         boundary_size_bytes=boundary_size_bytes,
         predicted_video_size_bytes=predicted_video_size_bytes,
-        sampled_clip_bytes=sampled_clip_bytes,
         quality_metric=quality_metric,
         quality_target=quality_target,
         minimum_quality_score=minimum_quality_score,
@@ -614,6 +616,7 @@ def build_visual_content_intent_observation(
     provenance = {
         "schema_version": CONTENT_INTENT_OBSERVATION_SCHEMA_VERSION,
         "source": "operator_visual_review",
+        **({"recorded_by": recorded_by} if recorded_by != "approval_review" else {}),
         "calibration_action": str(calibration_payload.get("action") or "sample"),
         "sample_job_id": job_id,
         "policy_hash": policy_hash,
@@ -1376,7 +1379,6 @@ def _visual_observation_exclusion_reason(
         authoritative_anchor_bytes: int,
         boundary_size_bytes: int,
         predicted_video_size_bytes: int,
-        sampled_clip_bytes: int | None,
         quality_metric: str,
         quality_target: float,
         minimum_quality_score: float,
@@ -1401,7 +1403,6 @@ def _visual_observation_exclusion_reason(
         (authoritative_anchor_bytes > 0, "size_anchor_missing"),
         (boundary_size_bytes > 0, "boundary_size_missing"),
         (predicted_video_size_bytes > 0, "video_boundary_size_missing"),
-        (sampled_clip_bytes is not None and sampled_clip_bytes > 0, "sample_measurement_missing"),
         (bool(quality_metric), "quality_metric_missing"),
         (quality_target > 0 and math.isfinite(quality_target), "quality_target_invalid"),
         (

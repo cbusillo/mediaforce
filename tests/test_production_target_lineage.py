@@ -22,6 +22,7 @@ from mediaforce.core.db import DBClient, open_db, open_readonly_db
 from mediaforce.encoding import staging as staging_module
 from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.core.db_tables import (
+    content_intent_boundary_observations,
     library_items,
     staged_artifacts,
     target_production_outcomes,
@@ -29,6 +30,7 @@ from mediaforce.core.db_tables import (
 from mediaforce.tuning.content_intent_observations import (
     _rehash_observation,
     append_content_intent_boundary_observation,
+    record_visual_content_intent_observation,
     withdraw_content_intent_boundary_observation,
 )
 from mediaforce.tuning.production_lineage import (
@@ -730,8 +732,28 @@ def test_persisted_manifest_encode_validate_promote_retains_eligible_lineage(
             predicted_video_size_bytes=4_800_000,
             predicted_total_size_bytes=5_000_000,
         )
-        row = fixtures._observation(item, calibration).values()
-        append_content_intent_boundary_observation(connection, _rehash_observation(row))
+        approval = record_visual_content_intent_observation(
+            connection,
+            prefix="tv/Futurama/Season 8",
+            sample_item=item,
+            calibration=calibration,
+            verdict="approved",
+            concern_tags=["other"],
+            evidence_ids=["ev1_fingerprint"],
+            moment_indexes=[1],
+            recorded_at="2026-07-26T21:00:00+00:00",
+        )
+        assert approval.status == "inserted", approval.exclusion_reason
+        row = dict(
+            connection.execute(
+                select(content_intent_boundary_observations).where(
+                    content_intent_boundary_observations.c.observation_id
+                    == approval.observation_id
+                )
+            )
+            .mappings()
+            .one()
+        )
         calibration.update(
             accepted_at=row["recorded_at"],
             accepted_draft_hash="approved-draft",
@@ -857,6 +879,8 @@ def test_persisted_manifest_encode_validate_promote_retains_eligible_lineage(
         assert report["eligible_outcome_count"] == 1, report
         assert report["outcomes"][0]["encode_identity"]["item_index"] == 0
         assert report["outcomes"][0]["production_crf"] == 31
+        receipt = connection.execute(select(target_production_outcomes)).mappings().one()
+        assert receipt["observation_id"] == row["observation_id"]
 
 
 def test_migration_cannot_drop_recorded_production_history(tmp_path: Path) -> None:

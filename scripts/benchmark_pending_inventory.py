@@ -23,10 +23,10 @@ from scripts import benchmark_activity_refresh as baseline
 CASES = (*baseline.CASES,
          baseline.WaitCase("never", True, profile="never"),
          baseline.WaitCase("retry_closed", False, status="retry_backoff", profile="fixture_night",
-                           reason="Waiting for a host schedule window."),
+                           reason="Waiting for the next work window."),
          baseline.WaitCase("closed_storage", True, profile="fixture_night", reason="Waiting for shared storage."),
          baseline.WaitCase("closed_impossible", True, profile="fixture_night",
-                           reason="Estimated runtime longer than every configured host schedule window"),
+                           reason="Estimated runtime longer than every work window"),
          baseline.WaitCase("closed_interrupted_storage", True, profile="fixture_night",
                            reason="Waiting for shared storage.", interrupted=True))
 # Explicit case expectations, independent of the scheduler's classification implementation.

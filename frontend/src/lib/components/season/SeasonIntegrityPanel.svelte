@@ -13,7 +13,7 @@
 	} = $props();
 
 	function recordPath(relPath: string | null, stagingPath: string | null): string {
-		return relPath || stagingPath || 'Unidentified staged file';
+		return relPath || stagingPath || 'Unnamed compressed file';
 	}
 </script>
 

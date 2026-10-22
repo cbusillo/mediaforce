@@ -29,7 +29,7 @@
 		hostStateCopy,
 		hostTone,
 		hostWorkReason,
-		opsWorkLabel,
+		opsRowWorkLabel,
 		rowRecoveryLabel,
 		rowRecoveryTitle,
 		RefreshCoordinator,
@@ -74,11 +74,7 @@
 		(hosts?.hosts ?? [])
 			.map((host) => ({
 				host,
-				schedule: activitySchedulePresentationCopy(hostSchedulePresentation(host, encodeQueue), [
-					host.key,
-					host.host ?? '',
-					host.label
-				])
+				schedule: activitySchedulePresentationCopy(hostSchedulePresentation(host, encodeQueue))
 			}))
 			.filter(
 				(entry) =>
@@ -319,7 +315,7 @@
 	}
 
 	function canOpenFolder(row: OpsQueueRow): boolean {
-		return row.prefix !== 'system scope';
+		return Boolean(row.prefix);
 	}
 
 	function queueKindLabel(row: OpsQueueRow): string {
@@ -464,12 +460,12 @@
 											<td data-label="Work">
 												{#if canOpenFolder(row)}
 													<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
-														<strong>{opsWorkLabel(row.prefix)}</strong>
+														<strong>{opsRowWorkLabel(row.prefix)}</strong>
 														<span>{queueKindCopy(row)}</span>
 													</a>
 												{:else}
 													<div class="work-link">
-														<strong>{opsWorkLabel(row.prefix)}</strong>
+														<strong>{opsRowWorkLabel(row.prefix)}</strong>
 														<span>{queueKindCopy(row)}</span>
 													</div>
 												{/if}
@@ -557,12 +553,12 @@
 											<td data-label="Work">
 												{#if canOpenFolder(row)}
 													<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
-														<strong>{opsWorkLabel(row.prefix)}</strong>
+														<strong>{opsRowWorkLabel(row.prefix)}</strong>
 														<span>{queueKindCopy(row)}</span>
 													</a>
 												{:else}
 													<div class="work-link">
-														<strong>{opsWorkLabel(row.prefix)}</strong>
+														<strong>{opsRowWorkLabel(row.prefix)}</strong>
 														<span>{queueKindCopy(row)}</span>
 													</div>
 												{/if}
@@ -612,8 +608,7 @@
 						<div class="host-list">
 							{#each hosts?.hosts ?? [] as host (host.key)}
 								{@const schedule = activitySchedulePresentationCopy(
-									hostSchedulePresentation(host, encodeQueue),
-									[host.key, host.host ?? '', host.label]
+									hostSchedulePresentation(host, encodeQueue)
 								)}
 								<div class="host-row host-row--{hostTone(host, fleetHasConnectedHost, dashboard)}">
 									<div class="host-row__head">

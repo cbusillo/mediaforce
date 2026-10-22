@@ -149,6 +149,10 @@ The item retries with an absolute item-local goal at the smallest quality-safe
 size, up to 1.5x the original goal. A larger gap, or an unconfirmed intent,
 waits for the user.
 
+When the search instead finds quality-safe sizes on both sides of the goal and
+nothing in between fits, no floor was violated. The user's yes is then the only
+evidence (`operator_override`), and without it the goal is not raised.
+
 User-approved measured recovery also writes only exact file overrides. The
 folder calibration policy and sibling items remain unchanged. Its saved
 recovery record carries the source, policy, intent, job, evidence, and decision

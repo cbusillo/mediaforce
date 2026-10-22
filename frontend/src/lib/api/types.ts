@@ -588,6 +588,11 @@ export interface EncodeSizeQuestion {
 	rel_path: string;
 	goal_bytes: number;
 	smallest_quality_safe_bytes: number;
+	/**
+	 * Why the goal does not fit: every size inside it hurts the picture, or no setting lands inside it
+	 * while one a little bigger and one a little smaller both keep the picture right.
+	 */
+	reason?: 'quality_needs_more' | 'no_setting_fits';
 }
 
 export type EpisodeStage =
@@ -692,6 +697,10 @@ export interface CalibrationJobProgress {
 	estimate?: CalibrationProgressEstimate | null;
 	terminal_status?: string;
 	total_elapsed_seconds?: number;
+	/** Set while a sample that lost its computer waits to try again: the reason names the computer. */
+	waiting_for_computer?: string;
+	waiting_reason?: string;
+	retry_not_before?: string;
 }
 
 export interface CalibrationJobPayload {
@@ -982,6 +991,8 @@ export interface CompletedHistoryEvent {
 	created_at: string;
 	detail: string;
 	size_bytes?: number | null;
+	file_name?: string;
+	technical_detail?: string;
 }
 
 export interface CompletedPayload {

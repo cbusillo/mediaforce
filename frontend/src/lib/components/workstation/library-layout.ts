@@ -25,6 +25,8 @@ export type LibraryNotice = {
 	title: string;
 	detail: string;
 	tone?: 'fail' | 'wait' | 'idle';
+	/** Raw diagnostic text, shown only behind a Details disclosure. */
+	technicalDetail?: string;
 };
 
 export function summarizeWorkStates<T>(

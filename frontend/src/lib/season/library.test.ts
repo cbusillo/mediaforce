@@ -284,17 +284,38 @@ describe('season library grouping', () => {
 		});
 	});
 
+	it('names each kept-back reason in plain words', () => {
+		const held = (...codes: string[]): SeasonLifecycleState => ({
+			...seasonLifecycle('tv/Alpha/Season 2', 4),
+			hold_reasons: codes.map((code) => ({ code, label: code, detail: '' }))
+		});
+		const labels = [
+			held('current_season'),
+			held('recent_acquisition'),
+			held('current_season', 'recent_acquisition'),
+			held('unknown_reason')
+		].map(seasonHoldLabel);
+
+		for (const label of labels) {
+			expect(label).toBeTruthy();
+			expect(label).not.toMatch(/\b(held|current|recent|lifecycle|policy|acquisition)\b/i);
+		}
+		expect(new Set(labels).size).toBe(labels.length);
+	});
+
 	it('shows a held season as held unless it has its own work or problem to show', () => {
 		const fullyHeld = seasonLifecycle('tv/Alpha/Season 2', 10);
 		const partlyHeld = seasonLifecycle('tv/Alpha/Season 2', 3);
 		const idle = { key: 'needs_test' };
 
 		expect(seasonHoldLabel(seasonLifecycle('tv/Alpha/Season 1', 0))).toBe('');
-		expect(seasonRowHoldLabel(fullyHeld, idle)).toBe('Current · held');
-		expect(seasonRowHoldLabel(fullyHeld, { key: 'ready_to_make' })).toBe('Current · held');
+		const heldLabel = seasonHoldLabel(fullyHeld);
+		expect(heldLabel).toBeTruthy();
+		expect(seasonRowHoldLabel(fullyHeld, idle)).toBe(heldLabel);
+		expect(seasonRowHoldLabel(fullyHeld, { key: 'ready_to_make' })).toBe(heldLabel);
 		expect(seasonRowHoldLabel(partlyHeld, idle)).toBe('');
 		expect(seasonRowHoldLabel(undefined, idle)).toBe('');
-		expect(seasonStateHoldLabel(partlyHeld, idle)).toBe('Current · held');
+		expect(seasonStateHoldLabel(partlyHeld, idle)).toBe(seasonHoldLabel(partlyHeld));
 		for (const key of [
 			'making_season',
 			'needs_help',

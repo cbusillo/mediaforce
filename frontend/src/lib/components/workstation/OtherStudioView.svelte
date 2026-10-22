@@ -195,8 +195,8 @@
 		}
 		if (blockedItemCount > 0) {
 			return {
-				title: 'Some files cannot use this compression profile.',
-				detail: `${blockedItemCount} ${blockedItemCount === 1 ? 'file needs' : 'files need'} a compatible profile before work can start.`
+				title: 'Some files cannot use this compression setting.',
+				detail: `${blockedItemCount} ${blockedItemCount === 1 ? 'file needs' : 'files need'} a compatible compression setting before work can start.`
 			};
 		}
 		return {
@@ -286,7 +286,7 @@
 				}
 			);
 			if (!response.ok)
-				throw new Error(response.message || 'This scope is not ready for sampling.');
+				throw new Error(response.message || `This ${scopeNoun} is not ready for a sample.`);
 			note = '';
 			return otherSampleSetupResult(response.proposal?.can_queue === true);
 		});
@@ -559,12 +559,14 @@
 
 	<section class="status-strip" aria-label="Other Studio status">
 		<div>
-			<span>Scope</span><strong
+			<span>Files included</span><strong
 				>{context?.item_count ?? 0} {context?.item_count === 1 ? 'file' : 'files'}</strong
 			>
 		</div>
-		<div><span>Profile</span><strong>{readiness?.profile_label ?? 'Loading'}</strong></div>
-		<div><span>Workflow</span><strong>{workflowLabel}</strong></div>
+		<div>
+			<span>Compression setting</span><strong>{readiness?.profile_label ?? 'Loading'}</strong>
+		</div>
+		<div><span>Status</span><strong>{workflowLabel}</strong></div>
 		<div>
 			<span>Sample</span><strong>{sampleState()}</strong>
 		</div>
@@ -605,8 +607,9 @@
 	{/if}
 	{#if isBrowseOnly}
 		<div class="notice">
-			<strong>Browse only</strong><span
-				>Turn on changes for this root in Settings before creating a sample or starting work.</span
+			<strong>View only</strong><span
+				>Let Mediaforce compress files in this library in Settings before creating a sample or
+				starting work.</span
 			>
 		</div>
 	{:else if readiness?.state === 'blocked'}
@@ -872,8 +875,8 @@
 		<aside class="membership-panel">
 			<header class="panel-heading">
 				<div>
-					<span class="eyebrow">Membership</span>
-					<h2>{context?.item_count === 1 ? 'File in this scope' : 'Files in this scope'}</h2>
+					<span class="eyebrow">Files</span>
+					<h2>{context?.item_count === 1 ? 'File included' : 'Files included'}</h2>
 				</div>
 				<span
 					>{context?.members.length ?? 0}{context?.membership_complete === false ? '+' : ''} shown</span
@@ -884,8 +887,8 @@
 				<div class="membership-warning">
 					<strong>Too many files to confirm safely.</strong>
 					<span
-						>Switch this root to one-file-at-a-time in Settings or split the source folder before
-						compressing.</span
+						>In Settings, set this library to work on one file at a time, or split the source folder
+						before compressing.</span
 					>
 				</div>
 			{/if}
