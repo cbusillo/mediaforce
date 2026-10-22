@@ -556,17 +556,38 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
                 raise subprocess.TimeoutExpired(["ssh"], REMOTE_QUALITY_TIMEOUT_SECONDS)
             return self.CONTAINED
 
-        with patch("mediaforce.remote._run_remote_ssh", side_effect=fake_ssh):
+        with patch("mediaforce.remote._run_remote_ssh", side_effect=fake_ssh), patch(
+                "mediaforce.remote.remote_shell_path_export_line", return_value=":",
+        ):
             exc = self._run_sample_encode_through_transport(temp_root)
 
         assert isinstance(exc, RemoteQualityTimeoutError)
         self.assertTrue(exc.remote_process_contained)
         script = next(script for script in scripts if REMOTE_QUALITY_CONTAINED_MARKER in script)
-        # The command follows the transport's own setup lines.
-        containment = shlex.split(script[script.index("\nsh -c ") + 1:])
-        self.assertEqual(containment[:4], ["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh"])
-        self.assertEqual(Path(containment[4]).parent, temp_root)
-        self.assertEqual(len(containment), 5)
+        containment = self._arguments_the_remote_shell_receives(script)
+        self.assertEqual(containment[:3], ["-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh"])
+        self.assertEqual(Path(containment[3]).parent, temp_root)
+        self.assertEqual(len(containment), 4)
+
+    @staticmethod
+    def _arguments_the_remote_shell_receives(script: str) -> list[str]:
+        """Run the transport's script with stand-ins on PATH and return what its ``sh`` was given."""
+        with tempfile.TemporaryDirectory() as raw_root:
+            tools = Path(raw_root)
+            received = tools / "received"
+            stand_ins = {
+                "sh": f"#!/bin/sh\nfor arg do printf '%s\\0' \"$arg\"; done > {shlex.quote(str(received))}\n",
+                "caffeinate": "#!/bin/sh\n",
+            }
+            for name, body in stand_ins.items():
+                (tools / name).write_text(body)
+                (tools / name).chmod(0o755)
+            subprocess.run(
+                ["/bin/sh", "-c", script],
+                env={**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ.get('PATH', '')}"},
+                check=True, timeout=10,
+            )
+            return received.read_text().split("\0")[:-1]
 
     def _run_sample_encode_through_transport(self, temp_root: Path) -> Exception:
         try:
