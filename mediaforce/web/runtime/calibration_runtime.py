@@ -37,7 +37,8 @@ from mediaforce.tuning.content_intent_observations import (
     content_intent_stream_plan_id,
 )
 from mediaforce.tuning.av1_cold_start import unavailable_av1_cold_start_prediction
-from mediaforce.tuning.calibration_jobs import COMPUTER_RETRY_RESULT_KEY, requeue_running_job_for_retry
+from mediaforce.tuning.calibration_jobs import COMPUTER_RETRY_RESULT_KEY, finish_running_job, \
+    requeue_running_job_for_retry
 from mediaforce.tuning.target_size_search import MAX_TARGET_SIZE_CANDIDATES, TargetSizeSearchError
 from mediaforce.web.runtime.encode_runtime import running_staged_scratch_reservations
 from mediaforce.web.runtime.scratch_reservations import host_identity_tokens
@@ -761,6 +762,36 @@ def _lost_sample_computer(exc: BaseException, host: Mapping[str, Any]) -> bool:
     return False
 
 
+def _fail_unless_ended(
+        *,
+        config: MediaforceConfig,
+        prefix: str,
+        job: dict[str, Any],
+        job_id: str,
+        deps: CalibrationRunDeps,
+        error: str,
+        result: dict[str, Any] | None = None,
+) -> str:
+    """Record a failed try unless the owner's Stop, or anything else, already ended the job.
+
+    Returns the job's status afterwards.
+    """
+    finished_at = deps.now_iso()
+    with open_db(config.paths.db_path) as connection:
+        status = finish_running_job(
+            connection, job_id, status="failed", finished_at=finished_at, error=error, result=result,
+        )
+        if status is not None:
+            return status
+        # No saved row to guard, so save the whole job as before.
+        payload: dict[str, Any] = {**job, "job_id": job_id, "status": "failed", "finished_at": finished_at,
+                                   "error": error}
+        if result is not None:
+            payload["result"] = result
+        deps.save_job_state(connection, config, prefix, payload)
+    return "failed"
+
+
 def _sample_computer_retry_delay_seconds(attempt: int) -> int:
     delay = SAMPLE_COMPUTER_RETRY_BASE_DELAY_SECONDS * (2 ** max(attempt - 1, 0))
     return min(delay, SAMPLE_COMPUTER_RETRY_MAX_DELAY_SECONDS)
@@ -804,27 +835,20 @@ def _handle_lost_sample_computer(
     attempt = int_value(previous.get("attempts")) + 1
     detail = quality_error_message(exc)
     if attempt > SAMPLE_COMPUTER_RETRY_LIMIT:
-        tries = attempt
-        with open_db(config.paths.db_path) as connection:
-            deps.save_job_state(
-                connection,
-                config,
-                prefix,
-                {
-                    **job,
-                    "job_id": job_id,
-                    "status": "failed",
-                    "finished_at": now_iso,
-                    "error": sample_computer_retries_used_message(host_data, tries),
-                    "result": {
-                        "failure_kind": "host_unreachable",
-                        "computer": computer,
-                        "tries": tries,
-                        "failure_detail": detail,
-                    },
-                },
-            )
-        return "failed"
+        return _fail_unless_ended(
+            config=config,
+            prefix=prefix,
+            job=job,
+            job_id=job_id,
+            deps=deps,
+            error=sample_computer_retries_used_message(host_data, attempt),
+            result={
+                "failure_kind": "host_unreachable",
+                "computer": computer,
+                "tries": attempt,
+                "failure_detail": detail,
+            },
+        )
     retry_not_before = (
         datetime.fromisoformat(now_iso) + timedelta(seconds=_sample_computer_retry_delay_seconds(attempt))
     ).isoformat(timespec="seconds")

@@ -193,6 +193,19 @@ class SampleComputerRetryTests(unittest.TestCase):
             job_runtime.process_calibration_queue_once(config_path=self.config.paths.config_path, deps=deps)
         return [str(call.args[1]["job_id"]) for call in dispatch.call_args_list]
 
+    def _owner_stops_then(self, error: Exception) -> Any:
+        """A sample step during which the owner's Stop commits, before the step fails with ``error``."""
+
+        def _step(*_args: object, **_kwargs: object) -> None:
+            with open_db(self.config.paths.db_path) as connection:
+                connection.execute(
+                    update(calibration_jobs).where(calibration_jobs.c.job_id == JOB_ID).values(status="stopped")
+                )
+                connection.commit()
+            raise error
+
+        return _step
+
     def _assert_waiting_for_computer(self, job: dict[str, Any], *, retry_not_before: str) -> None:
         self.assertEqual(job["status"], "queued")
         self.assertIsNone(job["error"])
@@ -297,18 +310,17 @@ class SampleComputerRetryTests(unittest.TestCase):
         with self.subTest("stop lands while the try is ending"):
             self._save_job(status="running")
 
-            def _owner_stops_then_link_drops(*_args: object, **_kwargs: object) -> None:
-                with open_db(self.config.paths.db_path) as connection:
-                    connection.execute(
-                        update(calibration_jobs).where(calibration_jobs.c.job_id == JOB_ID).values(status="stopped")
-                    )
-                    connection.commit()
-                raise QualitySearchError(HOST_DOWN_MID_ENCODE)
-
-            self._run(self._deps(search=_owner_stops_then_link_drops))
+            self._run(self._deps(search=self._owner_stops_then(QualitySearchError(HOST_DOWN_MID_ENCODE))))
 
             self.assertEqual(self._job()["status"], "stopped")
             self.assertEqual(self._queue_pass(now="2026-10-22T09:00:00+00:00"), [])
+
+        with self.subTest("stop lands while the last try is ending"):
+            self._save_job(status="running", result={"computer_retry": {"attempts": SAMPLE_COMPUTER_RETRY_LIMIT}})
+
+            self._run(self._deps(search=self._owner_stops_then(QualitySearchError(HOST_DOWN_MID_ENCODE))))
+
+            self.assertEqual(self._job()["status"], "stopped")
 
         with self.subTest("stop while waiting"):
             self._save_job(status="running")

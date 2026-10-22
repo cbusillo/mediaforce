@@ -287,6 +287,38 @@ def requeue_running_job_for_retry(
     return bool(outcome.rowcount)
 
 
+def finish_running_job(
+        connection: DBClient,
+        job_id: str,
+        *,
+        status: str,
+        finished_at: str,
+        error: str | None,
+        result: dict[str, Any] | None = None,
+) -> str | None:
+    """End a running job with ``status`` unless something else already ended it.
+
+    The owner's Stop, for example, wins over a failure that was still being recorded. Returns the
+    job's status afterwards, or None when there is no such job. ``result`` replaces the saved
+    result only when given.
+    """
+    values: dict[str, Any] = {"status": status, "finished_at": finished_at, "error": error, "updated_at": finished_at}
+    if result is not None:
+        values["result_json"] = json.dumps(result, sort_keys=True)
+    outcome = connection.execute(
+        update(calibration_jobs)
+        .where(calibration_jobs.c.job_id == job_id)
+        .where(calibration_jobs.c.status.in_(tuple(RUNNING_JOB_STATUSES)))
+        .values(**values)
+    )
+    if outcome.rowcount:
+        return status
+    current = connection.execute(
+        select(calibration_jobs.c.status).where(calibration_jobs.c.job_id == job_id)
+    ).scalar_one_or_none()
+    return str(current) if current is not None else None
+
+
 def queued_jobs_waiting_to_retry(connection: DBClient, *, lane: str, now: datetime) -> tuple[str, ...]:
     """Queued jobs that lost their computer and must not start again before their retry time."""
     rows = connection.execute(
