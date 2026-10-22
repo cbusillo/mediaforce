@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from collections.abc import Iterator
@@ -8,6 +9,8 @@ import pytest
 
 from mediaforce import state_cleanup
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.core.db import open_db
+from mediaforce.library.run_manifests import build_run_manifest, write_manifest
 
 DAY = 86400
 
@@ -18,7 +21,15 @@ def config(tmp_path: Path) -> Iterator[MediaforceConfig]:
     yield MediaforceConfig(
         raw={
             "state": {"cleanup": {"transient_artifact_retention_days": 14}},
-            "media": {"staging_root": str(tmp_path / "staging"), "source_roots": {}},
+            "media": {
+                "staging_root": str(tmp_path / "staging"),
+                "source_roots": {},
+                "output_container": "mkv",
+            },
+            "video": {},
+            "audio": {},
+            "subtitle": {},
+            "planning": {},
         },
         paths=ConfigPaths(
             project_root=tmp_path / "repo",
@@ -54,6 +65,70 @@ def _sweep(config: MediaforceConfig) -> None:
             return_value=state_cleanup.CleanupProcessSnapshot((), ()),
     ):
         state_cleanup.purge_transient_artifacts(config, force=True)
+
+
+def _old_run_plan(config: MediaforceConfig, trait_column: str | None = None) -> Path:
+    row = {
+        "id": 1,
+        "source_path": str(config.paths.project_root / "episode.mkv"),
+        "rel_path": "tv/Show/episode.mkv",
+        "media_root": "tv",
+        "fingerprint": "original-source",
+        "size_bytes": 1_000_000,
+        "duration_seconds": 60.0,
+        "video_codec": "h264",
+        "container": ".mkv",
+        "status": "discovered",
+        "audio_track_count": 1,
+        "english_audio_count": 1,
+        "english_subtitle_count": 0,
+        "audio_summary_json": "[]",
+        "subtitle_summary_json": "[]",
+    }
+    if trait_column:
+        analysis = (
+            {"sampled_frames": 120, "aggregate": {"dark_frame_fraction": 0.8}}
+            if trait_column == "media_fingerprint_json"
+            else {"sampled_frames": 120, "progressive_frames": 120, "repeated_neither": 120}
+        )
+        row[trait_column] = json.dumps({"analysis": analysis})
+    manifest = build_run_manifest([row], config)
+    with open_db(config.paths.db_path) as connection:
+        path = write_manifest(connection, config, manifest)
+    stamp = time.time() - 60 * DAY
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+@pytest.mark.parametrize("trait_column", ["media_fingerprint_json", "cadence_summary_json"])
+def test_old_run_plan_with_source_traits_is_kept(
+    config: MediaforceConfig, trait_column: str,
+) -> None:
+    path = _old_run_plan(config, trait_column)
+
+    _sweep(config)
+
+    assert path.exists()
+
+
+def test_old_run_plan_without_source_traits_is_removed(config: MediaforceConfig) -> None:
+    path = _old_run_plan(config)
+
+    _sweep(config)
+
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("contents", [b"{broken", b"\xff", b"[]", b'{"items": [null]}'])
+def test_malformed_old_run_plan_is_kept(config: MediaforceConfig, contents: bytes) -> None:
+    path = _old_run_plan(config)
+    path.write_bytes(contents)
+    stamp = time.time() - 60 * DAY
+    os.utime(path, (stamp, stamp))
+
+    _sweep(config)
+
+    assert path.exists()
 
 
 def test_keeps_only_the_newest_deploy_backups(config: MediaforceConfig) -> None:

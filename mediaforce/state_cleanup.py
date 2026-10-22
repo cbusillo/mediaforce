@@ -1,3 +1,4 @@
+import json
 import logging
 import shutil
 import subprocess
@@ -290,10 +291,35 @@ def _prune_run_manifests(config: MediaforceConfig, cutoff: float) -> None:
             continue
         if path.resolve() in protected_paths:
             continue
+        if _run_manifest_has_source_traits(path):
+            continue
         try:
             path.unlink(missing_ok=True)
         except OSError:
             continue
+
+
+def _run_manifest_has_source_traits(path: Path) -> bool:
+    try:
+        manifest = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return True
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("items"), list):
+        return True
+    # These may be the only remaining measurements of the original after publish.
+    return any(
+        not isinstance(item, dict)
+        or any(
+            item.get(key)
+            for key in (
+                "cadence_summary",
+                "cadence_evidence",
+                "media_fingerprint",
+                "media_fingerprint_evidence",
+            )
+        )
+        for item in manifest["items"]
+    )
 
 
 def _active_manifest_paths(config: MediaforceConfig) -> set[Path]:
