@@ -2076,7 +2076,9 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 str(archived_source),
                 "encoding_failed",
                 COMPLETED_PREFIX,
-                "Fixture encode failed before a successful retry.",
+                # Live shape: the encoder's banner was once stored as the failure text.
+                "ffmpeg version 8.1 Copyright (c) 2000-2026 the FFmpeg developers\n"
+                "  configuration: --prefix=/opt/homebrew/Cellar/ffmpeg-full/8.1 --enable-shared",
             ),
             (
                 blocked_completed_id,
@@ -2160,6 +2162,11 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                             "prefix": prefix,
                             "bytes_saved": 4 * 1024**3,
                             "note": "Fixture promoted item for browser QA.",
+                            "promoted_path": str(
+                                project_root
+                                / "scratch/web-smoke/source"
+                                / Path(row["rel_path"]).with_suffix(".av1.mkv")
+                            ),
                         }
                     ),
                 )
