@@ -6,6 +6,12 @@ settings history is missing. It uses the existing per-file
 `POST /api/folders/{prefix}/size-held-decision` action with
 `library_item_id` and `keep: false`.
 
+When the encoder stops retrying and keeps a copy that missed its final size, it
+records only that size miss. That copy counts as not yet checked, so automatic
+publishing runs its normal check like any other finished file. If the size
+goal is the only failed check, the file then asks **Keep this file** or
+**Make again** with no other action. Any other failed check stays a failure.
+
 Select several files on the show or season page and use **Make selected again**
 to queue them in one action. The same endpoint accepts `library_item_ids: [id, ...]`
 with `keep: false`; bulk Keep is not supported. Each file is rechecked separately.
@@ -104,9 +110,10 @@ finishes planning under those settings. **Keep this file** refuses a removed
 copy. When cleanup failed and the smaller-than-predicted copy is still present,
 Keep cancels the saved request and follows its existing validation contract.
 
-**Keep this file** remains available only for the existing smaller-than-predicted
-hold. It cannot waive a final-size failure, another failed check, or missing
-settings history. The integrity response includes per-file `remake.reason` and
+**Keep this file** is available for the smaller-than-predicted hold and for a
+copy whose only failed check is its final size. A final-size keep covers only
+that copy's exact size, so a remade file must meet its goal again. Keep cannot
+waive another failed check or missing settings history. The integrity response includes per-file `remake.reason` and
 `remake.blocked_reason` so the UI explains unavailable actions; the action
 rechecks these conditions rather than trusting the displayed response.
 

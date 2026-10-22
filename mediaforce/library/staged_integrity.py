@@ -22,7 +22,11 @@ from mediaforce.library.media_scopes import (
 )
 from mediaforce.library.movie_library import movie_promotion_conflicts
 from mediaforce.library.remake_intents import remake_intent
-from mediaforce.library.staged_validation import held_size_prediction, staged_validation_passed
+from mediaforce.library.staged_validation import (
+    awaits_check_after_final_size_miss,
+    held_size_prediction,
+    staged_validation_passed,
+)
 
 IntegrityDisposition = Literal[
     "promotable",
@@ -430,7 +434,12 @@ def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> Staged
             staging_path,
             "The local staged output no longer matches the recorded size or modification time.",
         )
-    validation_passed = staged_validation_passed(row["validation_json"])
+    # A size-only miss recorded by the encoder still needs its normal check before anyone can judge it.
+    validation_passed = (
+        None
+        if awaits_check_after_final_size_miss(row["validation_json"])
+        else staged_validation_passed(row["validation_json"])
+    )
     size_prediction = held_size_prediction(row["validation_json"])
     if size_prediction is not None:
         return replace(

@@ -26,10 +26,31 @@ def held_size_prediction(raw_validation: Any) -> dict[str, Any] | None:
     return size_prediction
 
 
+def awaits_check_after_final_size_miss(raw_validation: Any) -> bool:
+    """The encoder kept a copy that missed its final size goal, and the file's own checks have not run yet.
+
+    The encoder records only the size miss. The normal check still has to run before the owner can
+    keep the copy or make it again, and any other failure it finds stays a failure.
+    """
+    try:
+        payload = object_dict(json.loads(str(raw_validation or "{}")))
+    except json.JSONDecodeError:
+        return False
+    verification = object_dict(payload.get("target_size_verification"))
+    return (
+        payload.get("passed") is False
+        and "checks" not in payload
+        and verification.get("passed") is False
+        and verification.get("status") in {"over_target", "under_target"}
+    )
+
+
 def staged_validation_outcome(raw_validation: Any) -> Literal["size_held", "failed"] | None:
     """Whether a staged file's recorded check waits on the owner, and why; None when it does not."""
     if held_size_prediction(raw_validation) is not None:
         return "size_held"
+    if awaits_check_after_final_size_miss(raw_validation):
+        return None
     if staged_validation_passed(raw_validation) is False:
         return "failed"
     return None
