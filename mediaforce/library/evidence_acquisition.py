@@ -346,7 +346,8 @@ def _acquisition_item(
     cadence_summary = original_trait_summary(source_payload, EVIDENCE_KINDS[0])
     fingerprint_summary = original_trait_summary(source_payload, EVIDENCE_KINDS[1])
     profile = source.profile
-    if source.original_version_id is None:
+    use_original = fingerprint_summary is not None
+    if not use_original:
         profile = {**row, "source_size_bytes": row.get("size_bytes")}
         current_summaries = [parse_evidence_summary(row.get(column)) if project_library_item_evidence_state(
             row, kind, previous_state=current_states.get(kind),
@@ -361,7 +362,7 @@ def _acquisition_item(
     ).strip() or None
     item = {
         "library_item_id": int(row["id"]),
-        "trait_use": "advisory-original" if source.original_version_id else "direct-input",
+        "trait_use": "advisory-original" if use_original else "direct-input",
         "rel_path": str(row["rel_path"]),
         "source_fingerprint": source_fingerprint,
         "source_size_bytes": int_value(profile.get("source_size_bytes")),

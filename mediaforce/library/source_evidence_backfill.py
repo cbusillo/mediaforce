@@ -216,7 +216,7 @@ def _eligibility(connection: DBClient, catalog: Mapping[str, Any], stage: Mappin
     codecs = {normalize_codec(plan.item.get("video_codec")) for plan in source_plans}
     if len(codecs) != 1 or next(iter(codecs)) not in HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]:
         return None, {}, "excluded_or_unknown_input_codec"
-    if context.rule_conflicts(selected.item.get("video_codec")):
+    if context.known_rule_conflicts(selected.item.get("video_codec")):
         return None, {}, "historical_output_conflict"
     for event in events:
         if event["event_type"] not in {"encoding_started", "encoding_completed"}:
@@ -276,7 +276,7 @@ def _admission_conflict(original: Mapping[str, Any], checks: Mapping[str, Any], 
     output_check = context.output_check(original)
     if output_check in {"match", "unresolved"}:
         return "known_output_match" if output_check == "match" else "possible_output_match"
-    if context.rule_conflicts(original["video_codec"]):
+    if context.known_rule_conflicts(original["video_codec"]):
         return "historical_output_conflict"
     references = {(reference["plan_path"], reference["run_id"], reference["item_index"]) for reference in checks.get("plans", [])}
     source_plans = []

@@ -142,9 +142,12 @@ ineligibility correction against the admitted input and its retained evidence.
 Later encodes and publishes of its outputs do not replace that assessment's basis,
 even without production-lineage receipts. All AV1 encoders share the same codec
 exclusion; a recorded non-AV1 library output challenges only assessments of that
-codec. Sample and test outputs do not challenge the library rule. Output checks
-are collected once for each planning or recovery pass. Items without an original
-admission keep their current profile and current measurements for acquisition;
+codec, including recognized encoder-family aliases. An unrecognized library
+encoder leaves the rule unresolved for all input codecs. Sample and test outputs
+do not challenge the library rule. Output checks are collected once for each
+planning or recovery pass. Fingerprint acquisition uses the current profile and
+current measurements when there is no eligible original fingerprint summary,
+including corrected admissions and probable admissions missing that measurement;
 original-trait reads still require an eligible admission.
 Fresh measurements, owner admissions and catalog refresh
 cannot rebind or upgrade an imported measurement. Readable-source intake and
@@ -156,8 +159,11 @@ archive's hidden promotion backup. The active version advances with the catalog
 transaction. Recovery checks recorded identities and restores journaled moves;
 ambiguity retains an unresolved operation and blocks that item's late commits.
 Cleanup protects prepared and unresolved paths, records removed locations, and
-retains lineage and measurements after media or catalog removal. It continues to
-require the existing explicit owner Cleanup action.
+retains lineage and measurements after media or catalog removal. The next owner
+Cleanup action reconciles interrupted removal records before enumerating files:
+a remaining file rolls the removal back; a missing file commits it. An unreadable
+path stays pending for a later retry. Reconciliation itself never deletes media.
+Cleanup continues to require the existing explicit owner action.
 
 ## Where measurement runs
 

@@ -9,7 +9,7 @@ from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_items, staged_artifacts
 from mediaforce.encoding.delivery_lock import archive_activity
 from mediaforce.encoding.staging import safe_unlink
-from mediaforce.encoding.source_publication import commit_archive_removal, pending_archive_paths, prepare_archive_removal
+from mediaforce.encoding.source_publication import commit_archive_removal, pending_archive_paths, prepare_archive_removal, reconcile_archive_removals
 from mediaforce.web.settings_runtime import settings_archive_root
 
 
@@ -63,6 +63,9 @@ def _clear_archive_cleanup_action(
         transcode_root: str | None = None,
         on_removed: Callable[[Path], None] | None = None,
 ) -> dict[str, Any]:
+    if config.paths.db_path.is_file():
+        with open_db(config.paths.db_path) as connection:
+            reconcile_archive_removals(connection)
     archive_root = _archive_root_for_cleanup(config, transcode_root=transcode_root)
     summary = archive_cleanup_summary(config, transcode_root=transcode_root)
     if archive_root is None:

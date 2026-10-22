@@ -11,7 +11,7 @@ from sqlalchemy import select, update
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, source_generations, source_moves, source_transitions, source_versions
 from mediaforce.library.source_evidence import append_version, ensure_active_source_version, json_text, observe_file, \
-    pending_source_operation, version_location, version_locations
+    pending_source_operation, version_locations
 
 
 def _matches(path: Path, identity: Mapping[str, Any]) -> bool:
@@ -51,10 +51,12 @@ def prepare_source_publish(connection: DBClient, item_id: int, *, source_path: P
     archive_identity = observe_file(archive_path) if backup_path and source_identity is not None else None
     archive_version = None
     if archive_identity is not None:
-        candidates = connection.execute(select(source_versions)).mappings().all()
-        archive_version = next((row for row in candidates if row["size_bytes"] == archive_identity["size_bytes"]
-                                and row["sample_fingerprint"] == archive_identity["sample_fingerprint"]
-                                and version_location(connection, row) == str(archive_path)), None)
+        candidates = connection.execute(select(source_versions).where(
+            source_versions.c.size_bytes == archive_identity["size_bytes"],
+            source_versions.c.sample_fingerprint == archive_identity["sample_fingerprint"],
+        )).mappings().all()
+        locations = version_locations(connection, candidates)
+        archive_version = next((row for row in candidates if locations[row["version_id"]] == str(archive_path)), None)
     before = ensure_active_source_version(connection, item)
     current = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
     version = connection.execute(select(source_versions).where(source_versions.c.version_id == before)).mappings().one()
@@ -205,4 +207,28 @@ def commit_archive_removal(connection: DBClient, operations: list[str]) -> None:
     for operation in operations:
         connection.execute(update(source_moves).where(source_moves.c.operation_id == operation).values(phase="removed"))
         connection.execute(update(source_transitions).where(source_transitions.c.operation_id == operation).values(outcome="committed"))
+    connection.commit()
+
+
+def reconcile_archive_removals(connection: DBClient) -> None:
+    """Finish interrupted owner cleanup without attempting another deletion."""
+    moves = connection.execute(select(source_moves).join(source_transitions).where(
+        source_transitions.c.kind == "owner-cleanup",
+        source_transitions.c.outcome.in_(("prepared", "unresolved")),
+    )).mappings().all()
+    for move in moves:
+        try:
+            Path(move["from_path"]).stat()
+        except FileNotFoundError:
+            outcome, phase = "committed", "removed"
+        except OSError:
+            continue
+        else:
+            outcome, phase = "rolled_back", "rolled_back"
+        connection.execute(update(source_moves).where(
+            source_moves.c.operation_id == move["operation_id"], source_moves.c.ordinal == move["ordinal"],
+        ).values(phase=phase))
+        connection.execute(update(source_transitions).where(
+            source_transitions.c.operation_id == move["operation_id"],
+        ).values(outcome=outcome))
     connection.commit()

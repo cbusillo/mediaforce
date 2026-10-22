@@ -73,9 +73,12 @@ def json_text(payload: object) -> str:
 
 def normalize_codec(codec: object) -> str:
     value = str(codec or "").strip().casefold()
+    for family in ("hevc", "h264", "av1", "prores"):
+        if value.startswith(f"{family}_"):
+            return family
     return {"h265": "hevc", "h.265": "hevc", "h.264": "h264", "avc": "h264", "libx265": "hevc",
-            "libx264": "h264", "libsvtav1": "av1", "av1_videotoolbox": "av1", "libaom-av1": "av1",
-            "librav1e": "av1"}.get(value, value)
+            "libx264": "h264", "libsvtav1": "av1", "libaom-av1": "av1",
+            "librav1e": "av1", "libvpx-vp9": "vp9", "libvpx": "vp8"}.get(value, value)
 
 
 def observe_file(path: Path, *, full_digest: bool = False,
@@ -228,8 +231,13 @@ class SourceEvidenceContext:
     conflicting_output_codecs: frozenset[str]
     outputs: tuple[Mapping[str, Any], ...]
     sampled_outputs: Mapping[tuple[str, int], tuple[Mapping[str, Any], ...]]
+    unresolved_output_rule: bool
 
     def rule_conflicts(self, codec: object) -> bool:
+        return self.unresolved_output_rule or self.known_rule_conflicts(codec)
+
+    def known_rule_conflicts(self, codec: object) -> bool:
+        # Unrecognized encoder names hide traits on read but never append permanent corrections.
         return normalize_codec(codec) in self.conflicting_output_codecs
 
     def output_check(self, candidate: Mapping[str, Any] | DBRow) -> str:
@@ -281,14 +289,14 @@ def load_source_evidence_context(connection: DBClient) -> SourceEvidenceContext:
         if not isinstance(command, list):
             continue
         conflicts.update(normalize_codec(command[index + 1]) for index, argument in enumerate(command[:-1])
-                         if str(argument) in {"-c:v", "-codec:v", "-vcodec", "-c:v:0"}
-                         and normalize_codec(command[index + 1]) in HISTORICAL_OUTPUT_PROFILES["known_input_codecs"])
+                         if str(argument) in {"-c:v", "-codec:v", "-vcodec", "-c:v:0"})
+    known_codecs = set(HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]) | set(HISTORICAL_OUTPUT_PROFILES["codecs"])
     sampled: dict[tuple[str, int], list[Mapping[str, Any]]] = defaultdict(list)
     for output in outputs:
         if output["sample_fingerprint"] and output["size_bytes"] is not None:
             sampled[(output["sample_fingerprint"], output["size_bytes"])].append(output)
     return SourceEvidenceContext(frozenset(conflicts - set(HISTORICAL_OUTPUT_PROFILES["codecs"])), outputs,
-                                 {key: tuple(rows) for key, rows in sampled.items()})
+                                 {key: tuple(rows) for key, rows in sampled.items()}, bool(conflicts - known_codecs))
 
 
 def known_output_check(candidate: Mapping[str, Any] | DBRow,
