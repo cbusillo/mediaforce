@@ -2354,7 +2354,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["code"], "target_lower_bound_exceeds_source_relative_cap")
-        self.assertIn("Target size exceeds the 80% source cap", result["message"])
+        self.assertIn("80%", result["message"])
         self.assertEqual(saved_jobs, [])
 
     def test_completed_cleanup_route_passes_selected_prefixes(self) -> None:

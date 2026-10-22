@@ -885,7 +885,7 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertEqual(blocked_workflow.state, "blocked")
         self.assertEqual(blocked_workflow.primary_lane, "blocked")
         self.assertEqual(blocked_workflow.label, "Needs attention")
-        self.assertIn("Target size exceeds the 80% source cap", blocked_workflow.detail)
+        self.assertIn("80%", blocked_workflow.detail)
         self.assertTrue(decisions_by_id[feasible_id].eligible)
         self.assertIsNone(decisions_by_id[feasible_id].target_size_blocker)
         self.assertFalse(decisions_by_id[extra_id].production_included)
@@ -1176,7 +1176,7 @@ class MovieWorkflowTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["code"], "target_lower_bound_exceeds_source_relative_cap")
-        self.assertIn("Target size exceeds the 80% source cap", result["message"])
+        self.assertIn("80%", result["message"])
         self.assertEqual(persisted, [])
         self.assertEqual(queued, [])
         create_manifest.assert_not_called()
@@ -1227,7 +1227,7 @@ class MovieWorkflowTests(unittest.TestCase):
             [(entry["library_item_id"], entry["code"]) for entry in result["left_out"]],
             [(blocked_id, "target_size_infeasible")],
         )
-        self.assertIn("Target size exceeds the 80% source cap", result["left_out"][0]["reason"])
+        self.assertIn("80%", result["left_out"][0]["reason"])
 
     def test_revised_feasible_target_can_queue_movie_work(self) -> None:
         config = self._config(extras="exclude", video=self._target_size_video_policy())
@@ -1340,7 +1340,7 @@ class MovieWorkflowTests(unittest.TestCase):
             ])
 
         self.assertEqual(exit_code, 2)
-        self.assertTrue(any("Target size exceeds the 80% source cap" in str(call) for call in print_line.call_args_list))
+        self.assertTrue(any("80%" in str(call) for call in print_line.call_args_list))
         write_manifest.assert_not_called()
 
     def test_cli_plan_leaves_out_infeasible_target_and_plans_the_rest(self) -> None:

@@ -981,7 +981,7 @@
 			checks > 0
 				? `It starts motion-pattern checks for ${episodes(checks)}, and each compresses once its check passes.`
 				: '',
-			'It bypasses only lifecycle timing holds; normal file, validation, and active-work safeguards still apply.',
+			'It includes episodes normally kept back as new; the usual file, check, and running-work safeguards still apply.',
 			admission.motionHeldCount > 0
 				? `${admission.motionHeldCount} ${admission.motionHeldCount === 1 ? 'episode stays' : 'episodes stay'} original because Mediaforce can’t convert ${admission.motionHeldCount === 1 ? 'its' : 'their'} motion pattern safely.`
 				: ''
@@ -1048,8 +1048,8 @@
 				? `${cadenceEvidenceRequiredEpisodeCount} ${cadenceEvidenceRequiredEpisodeCount === 1 ? 'episode still needs' : 'episodes still need'} motion-pattern analysis and will stay original for now.`
 				: '',
 			selection.overridden_candidate_count > 0
-				? `${selection.overridden_candidate_count} ${selection.overridden_candidate_count === 1 ? 'episode bypasses' : 'episodes bypass'} lifecycle timing holds.`
-				: 'No lifecycle hold is bypassed; this action only excludes the latest season.',
+				? `${selection.overridden_candidate_count} ${selection.overridden_candidate_count === 1 ? 'episode' : 'episodes'} normally kept back as new ${selection.overridden_candidate_count === 1 ? 'is' : 'are'} included.`
+				: 'No episode kept back as new is included; this only leaves out the latest season.',
 			selection.already_eligible_candidate_count > 0
 				? `${selection.already_eligible_candidate_count} already-eligible ${selection.already_eligible_candidate_count === 1 ? 'episode is' : 'episodes are'} included.`
 				: '',
@@ -1452,7 +1452,7 @@
 			},
 			deciding: {
 				title: 'Saving your decision',
-				detail: 'Recording that these episodes can be encoded as they are.'
+				detail: 'Recording that these episodes can be compressed as they are.'
 			},
 			approving: {
 				title: 'Saving your decision',
@@ -1883,15 +1883,15 @@
 						<p>
 							{ambiguousMotion.eligible_count === 1 ? 'It was' : 'They were'} fully checked, but Mediaforce
 							can’t tell how {ambiguousMotion.eligible_count === 1 ? 'it was' : 'they were'} recorded.
-							Encode
+							Compress
 							{ambiguousMotion.eligible_count === 1 ? 'it' : 'them'} as-is? Nothing is converted, and
 							the usual quality check still has to pass.
 						</p>
 						<details>
 							<summary>
 								{ambiguousMotion.eligible_count === 1
-									? 'Show the episode to encode'
-									: `Show the ${ambiguousMotion.eligible_count} episodes to encode`}
+									? 'Show the episode to compress'
+									: `Show the ${ambiguousMotion.eligible_count} episodes to compress`}
 							</summary>
 							<ul>
 								{#each ambiguousMotion.eligible_files as relPath (relPath)}
@@ -1937,7 +1937,7 @@
 						disabled={actionPending}
 						onclick={encodeAmbiguousMotionAsIs}
 					>
-						{actionPhase === 'deciding' ? 'Recording…' : 'Encode as-is'}
+						{actionPhase === 'deciding' ? 'Recording…' : 'Compress as-is'}
 					</button>
 				{/if}
 			</section>
@@ -2061,7 +2061,7 @@
 					</p>
 				</div>
 				<div class="scope-activity-facts">
-					<div><span>Activity scope</span><strong>{scopeActivityOwnerTitle}</strong></div>
+					<div><span>Working on</span><strong>{scopeActivityOwnerTitle}</strong></div>
 					<div><span>Requested target</span><strong>{scopeActivityTargetLabel}</strong></div>
 					<div>
 						<span>Target mode</span><strong
@@ -3072,7 +3072,7 @@
 							<span>Current size</span><strong
 								>{formatDecimalFileSize(production.currentSizeBytes)}</strong
 							>
-							{#if isSeriesScope}<small>Whole selected show scope.</small>{/if}
+							{#if isSeriesScope}<small>Whole show</small>{/if}
 						</div>
 						<div>
 							<span>Estimated output</span><strong
@@ -3113,12 +3113,15 @@
 									first and {olderSeasonCheckCount === 1 ? 'compresses' : 'compress'} once it passes.
 								{/if}
 								{#if olderSeasonOverride.overridden_candidate_count > 0}
-									{olderSeasonOverride.overridden_candidate_count} protected
-									{olderSeasonOverride.overridden_candidate_count === 1 ? 'episode' : 'episodes'} will
-									bypass lifecycle timing holds; the policy itself stays unchanged.
+									{olderSeasonOverride.overridden_candidate_count}
+									{olderSeasonOverride.overridden_candidate_count === 1 ? 'episode' : 'episodes'} normally
+									kept back as new {olderSeasonOverride.overridden_candidate_count === 1
+										? 'is'
+										: 'are'}
+									included; your newest-season setting doesn’t change.
 								{:else}
-									No lifecycle hold is bypassed; this action only keeps the latest season out of the
-									queue.
+									No episode kept back as new is included; this only keeps the latest season out of
+									the queue.
 								{/if}
 							</p>
 							{#if olderSeasonOverride.candidate_count > 0}
@@ -3169,8 +3172,8 @@
 						: `${motionHeldEpisodeCount} ${motionHeldEpisodeCount === 1 ? 'episode stays' : 'episodes stay'} original because Mediaforce can’t convert ${motionHeldEpisodeCount === 1 ? 'its' : 'their'} motion pattern safely.`}
 					{motionDecisionPending
 						? isSeriesScope
-							? `You can decide above whether to encode ${admission.asIsCount} with an unclear motion pattern as-is.`
-							: `The show page can encode ${admission.asIsCount === motionHeldEpisodeCount ? (motionHeldEpisodeCount === 1 ? 'it' : 'them') : admission.asIsCount} as-is.`
+							? `You can decide above whether to compress ${admission.asIsCount} with an unclear motion pattern as-is.`
+							: `The show page can compress ${admission.asIsCount === motionHeldEpisodeCount ? (motionHeldEpisodeCount === 1 ? 'it' : 'them') : admission.asIsCount} as-is.`
 						: ''}
 				</p>
 				{#if motionDecisionPending && folder.series_context && !isSeriesScope}
@@ -3365,7 +3368,7 @@
 					</div>
 				{:else}
 					<div class="integrity-loading" role="status">
-						<strong>Checking every staged file</strong>
+						<strong>Checking every compressed file</strong>
 						<span>The finish action stays unavailable until the complete inventory is loaded.</span>
 					</div>
 				{/if}
@@ -3448,7 +3451,7 @@
 				</div>
 				{#if humanState.recoveryKind === 'test' && !targetConstraint}
 					<div class="recovery-plan" aria-label="Saved sample plan">
-						<div><span>Sample scope</span><strong>{recoveryScopeTitle}</strong></div>
+						<div><span>Sample covers</span><strong>{recoveryScopeTitle}</strong></div>
 						<div><span>Saved target</span><strong>{sizeTargetLabel}</strong></div>
 						<div>
 							<span>Target mode</span><strong
@@ -3716,11 +3719,7 @@
 					</div>
 					{#if targetSummary}
 						<div>
-							<span>Target mode</span><strong
-								>{targetSummary.mode === 'normalized'
-									? 'Runtime-normalized'
-									: 'Absolute per episode'}</strong
-							>
+							<span>Target mode</span><strong>{calibrationTargetModeLabel(targetSummary)}</strong>
 						</div>
 						<div>
 							<span>Sample band</span><strong

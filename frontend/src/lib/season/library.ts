@@ -36,11 +36,11 @@ export function seasonHoldLabel(season: SeasonLifecycleState | null | undefined)
 	if (!season?.held_candidate_count) return '';
 	const reasonCodes = new Set(season.hold_reasons.map((reason) => reason.code));
 	if (reasonCodes.has('current_season') && reasonCodes.has('recent_acquisition')) {
-		return 'Current + recent · held';
+		return 'Newest season, just added · kept for now';
 	}
-	if (reasonCodes.has('current_season')) return 'Current · held';
-	if (reasonCodes.has('recent_acquisition')) return 'Recent · held';
-	return `${season.held_candidate_count} held`;
+	if (reasonCodes.has('current_season')) return 'Newest season · kept for now';
+	if (reasonCodes.has('recent_acquisition')) return 'Just added · kept for now';
+	return `${season.held_candidate_count} kept for now`;
 }
 
 // Season states that only say no work has started, or no state at all; a hold explains them better.

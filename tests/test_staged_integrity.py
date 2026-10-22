@@ -103,6 +103,13 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertFalse(integrity_disposition_blocks_promotion("retained"))
         self.assertTrue(integrity_disposition_blocks_promotion("partial_or_temporary"))
         self.assertFalse(report.discovery_truncated)
+        shown_details = [
+            record.detail for record in report.records
+            if record.disposition in {"tracked", "not_started", "validation_failed"}
+        ]
+        self.assertEqual(len(shown_details), 3)
+        for detail in shown_details:
+            self.assertNotRegex(detail, r"(?i)\b(promot\w*|tracked|staged|artifact|machine validation)\b")
 
     @staticmethod
     def _held_validation(*, other_failure: str | None = None) -> str:

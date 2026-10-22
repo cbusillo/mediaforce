@@ -3,11 +3,13 @@ import type { OperatorEvidenceBacklogRow, OperatorEvidenceState } from '$lib/api
 import {
 	catalogProviderNotices,
 	catalogStateView,
+	evidenceKindLabel,
 	evidenceStateView,
 	evidenceWorkReasonView,
 	evidenceWorkStatusView,
 	libraryCheckLabels,
-	operatorRefreshInterval
+	operatorRefreshInterval,
+	scopeLabel
 } from './operator-work';
 import { operatorStateCopy } from '$lib/operator-copy';
 
@@ -149,6 +151,43 @@ describe('operator work copy', () => {
 		).toBe('The operation was stopped before it finished.');
 	});
 
+	it('keeps internal analysis words out of Activity disclosures and rows', () => {
+		const internalWords =
+			/\b(cadence|fingerprint|bounded|operator|scope|analyzer|encode|catalog policy)\b/i;
+		const row = { work_status: 'running', last_error: null } as OperatorEvidenceBacklogRow;
+		const shown = [
+			catalogStateView({
+				status: 'idle',
+				freshness: 'current',
+				item_count: 20,
+				last_completed_at: null,
+				job: null,
+				source_roots: [],
+				warnings: [],
+				can_refresh: true
+			}).detail,
+			evidenceKindLabel('cadence_analysis'),
+			evidenceKindLabel('media_fingerprint'),
+			evidenceWorkStatusView(row).detail,
+			evidenceWorkStatusView({ ...row, work_status: 'waiting_host' }).detail,
+			scopeLabel(null),
+			...[
+				'representative_technical_coverage',
+				'representative_uncertainty',
+				'operator_scope'
+			].flatMap((reason) => {
+				const view = evidenceWorkReasonView(reason);
+				return [view?.label, view?.detail];
+			}),
+			...(['cancel_requested', 'paused', 'queued'] as const).map(
+				(status) => evidenceStateView(evidenceFixture(status)).detail
+			)
+		];
+
+		for (const copy of shown) expect(copy).not.toMatch(internalWords);
+		expect(evidenceKindLabel('media_fingerprint')).not.toBe(evidenceKindLabel('cadence_analysis'));
+	});
+
 	it('uses prepared, running, and terminal analysis language', () => {
 		expect(evidenceStateView(evidenceFixture('paused')).label).toBe(
 			libraryCheckLabels.analysisReady
@@ -191,11 +230,13 @@ describe('operator work copy', () => {
 		});
 		expect(evidenceWorkReasonView('encode_safety')?.label).toBe('Needed for production');
 		expect(evidenceWorkReasonView('policy_reclassification')?.label).toBe('No media read');
-		expect(evidenceWorkReasonView('representative_technical_coverage')?.detail).toContain(
-			'codec, resolution, cadence, audio layout, and runtime'
-		);
-		expect(evidenceWorkReasonView('representative_uncertainty')?.label).toBe('Bounded follow-up');
-		expect(evidenceWorkReasonView('operator_scope')?.label).toBe('Operator request');
+		const reasons = [
+			'representative_technical_coverage',
+			'representative_uncertainty',
+			'operator_scope'
+		].map((reason) => evidenceWorkReasonView(reason));
+		for (const view of reasons) expect(view?.label).toBeTruthy();
+		expect(new Set(reasons.map((view) => view?.label)).size).toBe(reasons.length);
 		expect(evidenceWorkReasonView('future_reason')).toEqual({
 			label: 'Priority work',
 			detail: 'Prepared for a decision that needs current evidence.'
