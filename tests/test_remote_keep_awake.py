@@ -23,7 +23,9 @@ from mediaforce.core.process_control import ManagedProcessController, ProcessCan
 from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, SCHEDULE_DEADLINE_EXIT_CODE
 from mediaforce.encoding import runner
 from mediaforce.encoding.staged_host import STAGED_JOB_KEY, StagedJob, staged_job
-from mediaforce.hosts.transport import run_remote_command
+from mediaforce.hosts import setup_runtime
+from mediaforce.hosts.transport import keep_awake_while_running, run_remote_command
+from mediaforce.hosts.types import HostSetupResult
 
 _FAKE_CAFFEINATE = """#!/bin/sh
 printf '%s %s\\n' "$$" "$*" >> "$KEEP_AWAKE_LOG"
@@ -291,6 +293,54 @@ class RemoteKeepAwakeTests(unittest.TestCase):
             self.assertTrue(_process_exists(keep_awake_pid))
 
         self._assert_released(keep_awake_pid)
+
+
+
+class SetupKeepAwakeTests(unittest.TestCase):
+    """Setup scripts install software on the computer itself, so they are checked without running them."""
+
+    def _assert_kept_awake(self, script: str) -> None:
+        keep_awake = keep_awake_while_running("")
+        self.assertTrue(script.startswith(keep_awake), "a long setup step must keep the computer awake")
+        self.assertEqual(keep_awake_while_running(script.removeprefix(keep_awake)), script)
+
+    def test_preparing_a_computer_keeps_it_awake_through_its_installs(self) -> None:
+        run_remote_ssh = Mock(return_value=subprocess.CompletedProcess(["ssh"], 1, "", "stopped by the test"))
+        config = Mock()
+        config.staging_root_for_host.return_value = Path("/staging")
+        config.archive_root_for_host.return_value = Path("/archive")
+
+        setup_runtime._finish_remote_host_prepare(
+            config,
+            {"host": "mac.example", "capabilities": ["encode_queue", "sample_calibration"]},
+            [],
+            run_remote_ssh=run_remote_ssh,
+            remote_host_status=Mock(side_effect=AssertionError("the failed step must stop preparation")),
+        )
+
+        program, flag, script = run_remote_ssh.call_args.args[1:]
+        self.assertEqual((program, flag), ("sh", "-lc"))
+        self._assert_kept_awake(script)
+
+    def test_installing_homebrew_keeps_the_computer_awake(self) -> None:
+        run_remote_ssh = Mock(return_value=subprocess.CompletedProcess(["ssh"], 0, "", ""))
+        with TemporaryDirectory() as raw_root:
+            public_key = Path(raw_root) / "id_ed25519.pub"
+
+            setup_runtime._bootstrap_remote_macos(
+                {"host": "mac.example"},
+                "secret",
+                issues=["Homebrew is not installed on the remote Mac."],
+                default_public_key_path=lambda: public_key,
+                private_key_path_for_public_key=lambda key: key.with_suffix(""),
+                request_remote_xcode_install=Mock(
+                    return_value=HostSetupResult(ok=False, message="not this step"),
+                ),
+                run_remote_ssh=run_remote_ssh,
+            )
+
+        self.assertEqual(run_remote_ssh.call_args.args[1:], ("sh", "-s"))
+        self._assert_kept_awake(run_remote_ssh.call_args.kwargs["input_text"])
 
 
 if __name__ == "__main__":
