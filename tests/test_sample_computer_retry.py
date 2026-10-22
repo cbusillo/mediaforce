@@ -13,10 +13,11 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.process_control import ManagedProcessController
-from mediaforce.encoding.quality import QualitySearchError
+from mediaforce.encoding.quality import QualitySearchError, RemoteQualityTimeoutError
 from mediaforce.execution import resolve_stream_budget_ledger
 from mediaforce.hosts.types import HostReadinessError, HostStatus
 from mediaforce.tuning.calibration_jobs import load_job, save_job, update_job_telemetry
+from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import job_runtime
 from mediaforce.web.runtime.calibration_runtime import SAMPLE_COMPUTER_RETRY_LIMIT, CalibrationRunDeps, \
@@ -292,6 +293,26 @@ class SampleComputerRetryTests(unittest.TestCase):
             waits.append(datetime.fromisoformat(job["progress"]["retry_not_before"]) - datetime.fromisoformat(NOW))
         self.assertEqual(waits, sorted(waits))
         self.assertLess(waits[0], waits[-1])
+
+    def test_the_owners_stop_wins_over_any_failure_recorded_after_it(self) -> None:
+        failures: dict[str, Exception] = {
+            "size search": TargetSizeSearchError("No setting landed in the band.", status="bound_exhausted", trace={}),
+            "remote quality timeout": RemoteQualityTimeoutError(
+                phase="sample_encode",
+                timeout_seconds=60,
+                host_key=HOST["key"],
+                host_label=COMPUTER,
+                remote_process_contained=True,
+            ),
+            "other failure": QualitySearchError("ab-av1: no crf found"),
+        }
+        for name, error in failures.items():
+            with self.subTest(name):
+                self._save_job(status="running")
+
+                self._run(self._deps(search=self._owner_stops_then(error)))
+
+                self.assertEqual(self._job()["status"], "stopped")
 
     def test_the_owners_stop_is_not_undone_by_a_retry(self) -> None:
         with self.subTest("stop ends the link"):

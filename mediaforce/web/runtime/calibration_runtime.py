@@ -631,45 +631,33 @@ def run_calibration_job(
                 },
             )
     except TargetSizeSearchError as exc:
-        terminal_status = "failed"
-        with open_db(config.paths.db_path) as connection:
-            deps.save_job_state(
-                connection,
-                config,
-                prefix,
-                {
-                    **job,
-                    "job_id": job_id,
-                    "status": "failed",
-                    "finished_at": deps.now_iso(),
-                    "error": quality_error_message(exc),
-                    "result": {
-                        "target_size_status": exc.status,
-                        "target_size_trace": exc.trace,
-                    },
-                },
-            )
+        terminal_status = _fail_unless_ended(
+            config=config,
+            prefix=prefix,
+            job=job,
+            job_id=job_id,
+            deps=deps,
+            error=quality_error_message(exc),
+            result={
+                "target_size_status": exc.status,
+                "target_size_trace": exc.trace,
+            },
+        )
     except RemoteQualityTimeoutError as exc:
-        terminal_status = "failed"
-        with open_db(config.paths.db_path) as connection:
-            deps.save_job_state(
-                connection,
-                config,
-                prefix,
-                {
-                    **job,
-                    "job_id": job_id,
-                    "status": "failed",
-                    "finished_at": deps.now_iso(),
-                    "error": quality_error_message(exc),
-                    "result": {
-                        "failure_kind": exc.failure_kind,
-                        "failure_message": str(exc),
-                        "host_key": exc.host_key,
-                        "remote_process_contained": exc.remote_process_contained,
-                    },
-                },
-            )
+        terminal_status = _fail_unless_ended(
+            config=config,
+            prefix=prefix,
+            job=job,
+            job_id=job_id,
+            deps=deps,
+            error=quality_error_message(exc),
+            result={
+                "failure_kind": exc.failure_kind,
+                "failure_message": str(exc),
+                "host_key": exc.host_key,
+                "remote_process_contained": exc.remote_process_contained,
+            },
+        )
     except Exception as exc:
         if _lost_sample_computer(exc, host_data):
             terminal_status = _handle_lost_sample_computer(
@@ -684,20 +672,9 @@ def run_calibration_job(
                 deps=deps,
             )
         else:
-            terminal_status = "failed"
-            with open_db(config.paths.db_path) as connection:
-                deps.save_job_state(
-                    connection,
-                    config,
-                    prefix,
-                    {
-                        **job,
-                        "job_id": job_id,
-                        "status": "failed",
-                        "finished_at": deps.now_iso(),
-                        "error": quality_error_message(exc),
-                    },
-                )
+            terminal_status = _fail_unless_ended(
+                config=config, prefix=prefix, job=job, job_id=job_id, deps=deps, error=quality_error_message(exc),
+            )
     finally:
         telemetry.finish(terminal_status)
         if library_item_id is not None:
