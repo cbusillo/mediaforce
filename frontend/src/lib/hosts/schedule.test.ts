@@ -121,18 +121,16 @@ describe('schedule presentation', () => {
 	});
 
 	it('makes impossible schedule fit actionable', () => {
+		const reason =
+			"Estimated runtime about 4h is longer than every work window. Widen a computer's work window or intentionally bypass the work schedule.";
 		const presentation = jobSchedulePresentation(
-			job({
-				schedule_state: 'draining_impossible',
-				waiting_reason:
-					'Estimated runtime about 4h is longer than every configured host schedule window. Widen a host window or use Bypass scheduler.'
-			}),
+			job({ schedule_state: 'draining_impossible', waiting_reason: reason }),
 			[host()],
 			NOW
 		);
 
 		expect(presentation).toMatchObject({ label: 'Window too short', tone: 'fail' });
-		expect(presentation.detail).toContain('Widen a host window or use Bypass scheduler');
+		expect(presentation.detail).toBe(reason);
 	});
 
 	it('distinguishes off-schedule and draining workers', () => {
@@ -172,5 +170,28 @@ describe('schedule presentation', () => {
 
 		expect(presentation).toMatchObject({ label: scheduleLabels.bypassed, tone: 'wait' });
 		expect(workerPresentation).toMatchObject({ label: scheduleLabels.bypassed, tone: 'wait' });
+	});
+
+	it('says computer and work window, never worker, host, or scheduler', () => {
+		const details = [
+			...(['bypassed', 'draining_impossible', 'off_schedule', 'running', 'ready'] as const).map(
+				(state) =>
+					jobSchedulePresentation(job({ schedule_state: state, bypass_schedule: true }), [], NOW)
+						.detail
+			),
+			hostSchedulePresentation(
+				host(),
+				queue({
+					running: [job({ status: 'running', bypass_schedule: true, host: { key: 'worker-1' } })]
+				}),
+				NOW
+			)?.detail,
+			hostSchedulePresentation(host({ schedule_profile_label: 'Never' }), queue(), NOW)?.detail
+		];
+
+		expect(details.every(Boolean)).toBe(true);
+		for (const detail of details) {
+			expect(detail).not.toMatch(/\b(workers?|hosts?|scheduler)\b/i);
+		}
 	});
 });

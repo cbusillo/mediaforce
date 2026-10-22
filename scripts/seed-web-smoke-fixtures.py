@@ -2644,7 +2644,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 prefix=ENCODE_WAITING_PREFIX,
                 rel_path="movies/Waiting Encode/Feature.mkv",
                 status="queued",
-                waiting_reason="Waiting for a host schedule window.",
+                waiting_reason="Waiting for the next work window.",
                 progress={"progress_state": "schedule_waiting"},
             ),
             _encode_job(
@@ -2654,8 +2654,8 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 rel_path="movies/Window Too Short/Feature.mkv",
                 status="queued",
                 waiting_reason=(
-                    "Estimated runtime about 4h is longer than every configured host schedule window "
-                    "(longest about 3h on Smoke Worker). Widen a host window or use Bypass scheduler."
+                    "Estimated runtime about 4h is longer than every work window "
+                    "(longest about 3h on Smoke Worker). Widen a computer's work window or intentionally bypass the work schedule."
                 ),
             ),
             _encode_job(
@@ -2665,7 +2665,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 rel_path="tv/Waiting for Full Window/Season 1/Episode 01.mkv",
                 status="queued",
                 waiting_reason=(
-                    "Estimated runtime about 2h; waiting for a host window with enough time remaining."
+                    "Estimated runtime about 2h; waiting for a work window with enough time left."
                 ),
             ),
             _encode_job(

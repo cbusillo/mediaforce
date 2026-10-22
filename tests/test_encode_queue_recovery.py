@@ -54,6 +54,7 @@ from mediaforce.core.db_tables import production_holds
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
+from mediaforce.hosts.status_helpers import computer_check_failure_copy
 from mediaforce.web.runtime.size_exception import decide_size_exception
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.folder_tuning_advice import review_gate
@@ -1726,7 +1727,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
         self.assertIsNone(host_payload)
-        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on Remote A")
+        self.assertEqual(waiting_reason, "waiting for Remote A to recover from repeated failures")
 
     def test_host_selection_uses_startable_backup_when_active_host_is_globally_blocked(self) -> None:
         job = {}
@@ -1878,7 +1879,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                         self.assertIsNone(host_payload)
                         self.assertIsNotNone(waiting_reason)
                         assert waiting_reason is not None
-                        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on remote-a.internal")
+                        self.assertEqual(waiting_reason, "waiting for remote-a.internal to recover from repeated failures")
                     else:
                         self.assertIsNotNone(host_payload)
                         assert host_payload is not None
@@ -2204,7 +2205,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
         self.assertIsNone(host_payload)
-        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on Primary Encoder")
+        self.assertEqual(waiting_reason, "waiting for Primary Encoder to recover from repeated failures")
 
     def test_deterministic_failure_moves_job_to_needs_attention(self) -> None:
         source_path = self._create_source_file("episode-d.mkv")
@@ -4551,7 +4552,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     host={},
                     status=status,
                     attempt_count=1,
-                    waiting_reason="waiting for a host window with enough time remaining" if status == "queued" else None,
+                    waiting_reason="waiting for a work window with enough time left" if status == "queued" else None,
                 )
                 job = load_encode_job(connection, job_id)
                 assert job is not None
@@ -4583,7 +4584,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self._save_job(
                     connection, job_id=f"schedule-episode-{index}",
                     manifest_name="manifest-schedule-parts.json", host={}, status="queued", attempt_count=0,
-                    waiting_reason="Estimated runtime about 1h 25m; waiting for a host window with enough time remaining.",
+                    waiting_reason="Estimated runtime about 1h 25m; waiting for a work window with enough time left.",
                 )
                 child = load_encode_job(connection, f"schedule-episode-{index}")
                 assert child is not None
@@ -4604,22 +4605,22 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
     def test_schedule_waiting_count_excludes_other_waits_and_bypassed_work(self) -> None:
         pending = [
             {"status": "queued", "host": {"schedule_profile": "never"}},
-            {"status": "queued", "waiting_reason": "waiting for a host schedule window"},
+            {"status": "queued", "waiting_reason": "waiting for a computer's work window"},
             {"status": "queued", "progress": {"progress_state": "schedule_waiting"}},
             {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
              "waiting_reason": "Waiting for shared storage."},
             {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
-             "waiting_reason": "waiting for an available encode host"},
+             "waiting_reason": "waiting for an available computer"},
             {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
-             "waiting_reason": "Estimated runtime about 1h 25m; waiting for a host window with enough time remaining."},
+             "waiting_reason": "Estimated runtime about 1h 25m; waiting for a work window with enough time left."},
             {"status": "queued", "progress": {"progress_state": "schedule_waiting"},
              "host": {"schedule_profile": "never"}, "waiting_reason": "Waiting for shared storage."},
             {"status": "retry_backoff", "waiting_reason": "waiting before retrying"},
             {"status": "queued", "waiting_reason": "Waiting for shared storage."},
             {"status": "queued", "waiting_reason": "Waiting for an encode computer."},
-            {"status": "queued", "waiting_reason": "Estimated runtime longer than every configured host schedule window"},
+            {"status": "queued", "waiting_reason": "Estimated runtime longer than every work window"},
             {"status": "queued", "host": {"schedule_profile": "never"}, "bypass_schedule": True,
-             "waiting_reason": "waiting for a host schedule window"},
+             "waiting_reason": "waiting for a computer's work window"},
             {"status": "queued", "host": {"schedule_profile": "always"}},
         ]
         with patch.object(web_app, "runtime_encode_job_manifest_totals") as read_totals:
@@ -5622,7 +5623,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with patch("mediaforce.web.app._host_runtime_rows", return_value=[host]):
             selected_host, waiting_reason = web_app._select_encode_host(cast(Any, None), self.config, job)
         self.assertIsNone(selected_host)
-        self.assertEqual(waiting_reason, "waiting for an available encode host")
+        self.assertEqual(waiting_reason, "waiting for an available computer")
 
     def test_select_encode_host_respects_allowed_libraries(self) -> None:
         job = {"job_id": "job-1", "prefix": "tv/show", "bypass_schedule": False}
@@ -5683,7 +5684,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             selected_host, waiting_reason = web_app._select_encode_host(connection, self.config, job)
 
         self.assertIsNone(selected_host)
-        self.assertEqual(waiting_reason, "waiting for a host schedule window")
+        self.assertEqual(waiting_reason, "waiting for a computer's work window")
 
     def test_host_runtime_rows_include_host_lifecycle_commands(self) -> None:
         self.config.raw["remote_hosts"] = [
@@ -5791,7 +5792,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
             host_payload, waiting_reason = web_app._select_encode_host(cast(Any, None), self.config, job)
         self.assertIsNone(host_payload)
-        self.assertEqual(waiting_reason, "waiting for host cooldown to expire on CT103")
+        self.assertEqual(waiting_reason, "waiting for CT103 to recover from repeated failures")
 
     def test_select_encode_host_does_not_choose_startable_host_when_capacity_full(self) -> None:
         statuses = [
@@ -5811,7 +5812,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             host_payload, waiting_reason = web_app._select_encode_host(cast(Any, None), self.config,
                                                                        {"bypass_schedule": False})
         self.assertIsNone(host_payload)
-        self.assertEqual(waiting_reason, "waiting for host capacity to free up")
+        self.assertEqual(waiting_reason, "waiting for a computer to finish its current work")
 
     def test_ensure_encode_host_ready_runs_start_command_and_waits_for_status(self) -> None:
         host = {
@@ -6590,12 +6591,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             waiting_reason=encode_runtime.SCHEDULE_CLOSE_WAITING_REASON,
         )
         draining = decorated(
-            waiting_reason="Estimated runtime about 2h; waiting for a host window with enough time remaining.",
+            waiting_reason="Estimated runtime about 2h; waiting for a work window with enough time left.",
         )
         impossible = decorated(
             waiting_reason=(
-                "Estimated runtime about 4h is longer than every configured host schedule window "
-                "(longest about 3h). Widen a host window or use Bypass scheduler."
+                "Estimated runtime about 4h is longer than every work window "
+                "(longest about 3h). Widen a computer's work window or intentionally bypass the work schedule."
             ),
         )
 
@@ -8752,7 +8753,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     status="queued",
                     manifest_indexes=[1],
                     item_count=1,
-                    waiting_reason="Waiting for available encode host capacity.",
+                    waiting_reason="Waiting for a computer to finish its current work.",
                 ),
             )
 
@@ -13019,7 +13020,7 @@ raise SystemExit(0)
 
         self.assertFalse(status.available)
         self.assertFalse(status.probe_available)
-        self.assertEqual(status.message, "Remote check returned unreadable output")
+        self.assertEqual(status.message, computer_check_failure_copy("unreadable_reply", "Encode Host")[0])
 
     def test_host_status_positional_optional_fields_remain_compatible(self) -> None:
         status = HostStatus(
@@ -13908,7 +13909,7 @@ raise SystemExit(0)
             priority=0,
             capabilities=["encode_queue"],
             available=False,
-            message="SSH access setup required",
+            message=computer_check_failure_copy("password_needed", "Sample Host")[0],
             missing_paths=[],
             repo_path=None,
             setup_supported=True,
@@ -13929,7 +13930,7 @@ raise SystemExit(0)
             priority=0,
             capabilities=["encode_queue"],
             available=False,
-            message="SSH access setup required",
+            message=computer_check_failure_copy("password_needed", "Sample Host")[0],
             missing_paths=[],
             repo_path=None,
             setup_supported=True,
@@ -18489,7 +18490,7 @@ raise SystemExit(0)
                                                                        {"bypass_schedule": False})
 
         self.assertIsNone(host_payload)
-        self.assertEqual(waiting_reason, "waiting for an available encode host")
+        self.assertEqual(waiting_reason, "waiting for an available computer")
 
     def test_host_runtime_rows_prefer_current_host_over_last_host(self) -> None:
         statuses = [
@@ -21670,7 +21671,7 @@ raise SystemExit(0)
             self.assertEqual(selected["job_id"], "job-short-window")
             deferred = load_encode_job(connection, "job-long-window")
             assert deferred is not None
-            self.assertIn("waiting for a host window with enough time remaining", deferred["waiting_reason"])
+            self.assertIn("waiting for a work window with enough time left", deferred["waiting_reason"])
 
     def test_duration_aware_selection_drains_when_no_job_fits(self) -> None:
         close_at = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
@@ -21702,7 +21703,7 @@ raise SystemExit(0)
             assert deferred is not None
             self.assertEqual(deferred["status"], "queued")
             self.assertEqual(deferred["attempt_count"], 0)
-            self.assertIn("waiting for a host window with enough time remaining", deferred["waiting_reason"])
+            self.assertIn("waiting for a work window with enough time left", deferred["waiting_reason"])
             # The estimate is that computer's own, so the sentence names it.
             self.assertRegex(deferred["waiting_reason"], r"^Estimated runtime about [^;]+ on worker; ")
 
@@ -21734,11 +21735,11 @@ raise SystemExit(0)
             self.assertIsNone(selected)
             deferred = load_encode_job(connection, "job-never-fits")
             assert deferred is not None
-            self.assertIn("longer than every configured host schedule window", deferred["waiting_reason"])
-            self.assertIn("Widen a host window or use Bypass scheduler", deferred["waiting_reason"])
+            self.assertIn("longer than every work window", deferred["waiting_reason"])
+            self.assertIn("Widen a computer's work window or intentionally bypass the work schedule", deferred["waiting_reason"])
             self.assertRegex(
                 deferred["waiting_reason"],
-                r"^Estimated runtime about [^(]+ on worker is longer than every configured host schedule window "
+                r"^Estimated runtime about [^(]+ on worker is longer than every work window "
                 r"\(longest about 1h\)\.",
             )
 
@@ -21780,7 +21781,7 @@ raise SystemExit(0)
             self.assertIsNone(selected)
             deferred = load_encode_job(connection, "job-closed-never-fits")
             assert deferred is not None
-            self.assertIn("longer than every configured host schedule window", deferred["waiting_reason"])
+            self.assertIn("longer than every work window", deferred["waiting_reason"])
 
     def test_duration_aware_selection_routes_long_job_to_host_with_room(self) -> None:
         short_close = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
@@ -22991,10 +22992,10 @@ raise SystemExit(0)
             shards = [load_encode_job(connection, f"shard-waiting-{index}") for index in range(3)]
             self.assertIsNotNone(parent)
             assert parent is not None
-            self.assertEqual(parent["waiting_reason"], "waiting for an available encode host")
+            self.assertEqual(parent["waiting_reason"], "waiting for an available computer")
             self.assertTrue(all(shard is not None for shard in shards))
             self.assertTrue(
-                all(shard["waiting_reason"] == "waiting for an available encode host" for shard in shards if shard)
+                all(shard["waiting_reason"] == "waiting for an available computer" for shard in shards if shard)
             )
 
             manifest_reads.clear()
@@ -23002,7 +23003,7 @@ raise SystemExit(0)
             with patch(
                     "mediaforce.web.runtime.encode_runtime.select_encode_host",
                     side_effect=[
-                        (None, "waiting for an available encode host"),
+                        (None, "waiting for an available computer"),
                         ({"key": "local", "label": "Local", "mode": "local"}, None),
                     ],
             ), patch(
@@ -23165,7 +23166,7 @@ raise SystemExit(0)
                 side_effect=[
                     ({"key": "remote-a", "label": "Remote A", "mode": "ssh"}, None),
                     ({"key": "remote-b", "label": "Remote B", "mode": "ssh"}, None),
-                    (None, "waiting for host capacity to free up"),
+                    (None, "waiting for a computer to finish its current work"),
                 ],
         ):
             encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
@@ -24016,14 +24017,14 @@ raise SystemExit(0)
 
     def test_working_folder_lists_every_waiting_reason_and_keeps_owner_files_visible(self) -> None:
         impossible = (
-            "Estimated runtime 9h is longer than every configured host schedule window (longest 8h). "
-            "Widen a host window or use Bypass scheduler."
+            "Estimated runtime 9h is longer than every work window (longest 8h). "
+            "Widen a computer's work window or intentionally bypass the work schedule."
         )
         children = [
             ("needs_attention", {"failure_analysis": {"kind": "final_size_target_miss"}}, "deterministic", None),
             ("needs_attention", {}, "storage_io", None),
             ("running", {}, None, None),
-            ("queued", {}, None, "Waiting for a host schedule window."),
+            ("queued", {}, None, "Waiting for the next work window."),
             ("queued", {}, None, impossible),
             ("completed", {}, None, None),
         ]
@@ -29159,7 +29160,7 @@ raise SystemExit(0)
                 progress={"failure_analysis": {"kind": "final_size_target_miss", "manifest_indexes": [1]}},
             ))
             save_encode_job(connection, job(
-                "queued-sibling", manifest_indexes=[2], waiting_reason="Waiting for a host schedule window.",
+                "queued-sibling", manifest_indexes=[2], waiting_reason="Waiting for the next work window.",
             ))
             save_encode_job(connection, job(
                 "retrying-sibling", status="retry_backoff", manifest_indexes=[3], attempt_count=2,
@@ -32606,7 +32607,7 @@ raise SystemExit(0)
             "This host key is known by the following other names/addresses: chris-mini.shiny. "
             "Are you sure you want to continue connecting (yes/no/[fingerprint])?"
         )
-        self.assertEqual(classification["message"], "SSH trust needs confirmation")
+        self.assertEqual(classification["message"], computer_check_failure_copy("new_name", "This computer")[0])
         self.assertFalse(classification["setup_supported"])
         self.assertFalse(classification["trust_reset_supported"])
 
@@ -32628,7 +32629,7 @@ raise SystemExit(0)
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config,
                                                                            {"bypass_schedule": False})
         self.assertIsNone(host_payload)
-        self.assertEqual(waiting_reason, "waiting for host capacity to free up")
+        self.assertEqual(waiting_reason, "waiting for a computer to finish its current work")
 
     def test_load_job_state_preserves_old_stopped_sample_for_retry(self) -> None:
         prefix = "tv/show/season-1"

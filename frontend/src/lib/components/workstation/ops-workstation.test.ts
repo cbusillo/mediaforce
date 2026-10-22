@@ -340,11 +340,11 @@ describe('Ops workstation mapping', () => {
 				state: 'host_open' as const,
 				label,
 				tone: 'ready' as const,
-				detail: '2 workers are ready'
+				detail: '2 computers are ready'
 			};
 			expect(activitySchedulePresentationCopy(shared)).toMatchObject({
 				label: expected,
-				detail: '2 computers are ready'
+				detail: shared.detail
 			});
 			expect(shared.label).toBe(label);
 		}
@@ -361,15 +361,12 @@ describe('Ops workstation mapping', () => {
 			activityScheduleDetailCopy('Mediaforce cannot access /Volumes/worker-staging on host-nuc.')
 		).toBe('Mediaforce cannot access /Volumes/worker-staging on host-nuc.');
 		expect(
-			activitySchedulePresentationCopy(
-				{
-					state: 'host_off_schedule',
-					label: 'Off schedule',
-					tone: 'wait',
-					detail: 'Starts automatically when Smoke Drain Worker opens.'
-				},
-				['Smoke Drain Worker']
-			)?.detail
+			activitySchedulePresentationCopy({
+				state: 'host_off_schedule',
+				label: 'Off schedule',
+				tone: 'wait',
+				detail: 'Starts automatically when Smoke Drain Worker opens.'
+			})?.detail
 		).toBe('Starts automatically when Smoke Drain Worker opens.');
 	});
 
@@ -453,6 +450,8 @@ describe('Ops workstation mapping', () => {
 	});
 
 	it('surfaces impossible work windows as actionable instead of passive waiting', () => {
+		const impossibleWindowReason =
+			"Estimated runtime about 4h is longer than every work window. Widen a computer's work window or intentionally bypass the work schedule.";
 		const dashboard = dashboardFixture();
 		dashboard.encode_queue.running = [];
 		dashboard.encode_queue.running_count = 0;
@@ -465,8 +464,7 @@ describe('Ops workstation mapping', () => {
 				media_scope: mediaScope('tv/Long Show/Season 1', 'tv', 'tv_season'),
 				status: 'queued',
 				schedule_state: 'draining_impossible',
-				waiting_reason:
-					'Estimated runtime about 4h is longer than every configured host schedule window. Widen a host window or use Bypass scheduler.'
+				waiting_reason: impossibleWindowReason
 			}
 		];
 		dashboard.encode_queue.queued_count = 1;
@@ -478,8 +476,8 @@ describe('Ops workstation mapping', () => {
 			key: 'schedule-window-impossible',
 			tone: 'fail',
 			title: 'Long Show · Season 1 needs a longer work window',
-			detail:
-				'Estimated runtime about 4h is longer than every configured computer work window. Widen a computer work window or bypass the work schedule.',
+			// The scheduler's own sentence, shown as it is written.
+			detail: impossibleWindowReason,
 			href: '/settings',
 			linkLabel: 'Edit work windows'
 		});
@@ -1583,6 +1581,32 @@ describe('Ops workstation mapping', () => {
 		expect(hostWorkReason(needsSomeone, hosts, null, now)).toBe(
 			`Worker needs its share password saved. Last checked ${at('2026-10-19T14:28:00Z')}.`
 		);
+	});
+
+	it("shows a computer's own plain status on its card without rewriting it", () => {
+		const now = new Date('2026-10-19T14:30:00Z');
+		const asleep = {
+			...hostsFixture().hosts[0],
+			label: 'M2 MBP',
+			available: false,
+			queue_active: false,
+			active_encode_count: 0,
+			storage_recovery_available: false,
+			message: "Can't reach M2 MBP. Is it on and awake?",
+			recovery: {
+				status: 'retrying' as const,
+				reason: "Can't reach M2 MBP. Is it on and awake?",
+				first_failure_at: '2026-10-19T13:58:00Z',
+				next_retry_at: '2026-10-19T14:42:00Z',
+				failure_count: 2
+			}
+		};
+		const hosts = { compact: true, hosts: [asleep] };
+
+		expect(hostStateCopy(asleep)).toBe('Unavailable');
+		const reason = hostWorkReason(asleep, hosts, null, now);
+		expect(reason.startsWith(`${asleep.message} Retrying, next check`)).toBe(true);
+		expect(reason).not.toMatch(/\b(ssh|host|worker)\b/i);
 	});
 
 	it('offers Retry connection only for a computer that background reconnects are working on', () => {

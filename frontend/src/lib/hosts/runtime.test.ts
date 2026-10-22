@@ -66,7 +66,10 @@ describe('host runtime status', () => {
 			message: 'Storage is reconnecting in the background'
 		});
 		const needsSetup = runtime({ probe_available: true, issues: ['Install ffmpeg first'] });
-		const offline = runtime({ probe_available: false, message: 'Turn on SSH first' });
+		const offline = runtime({
+			probe_available: false,
+			message: "Can't reach Worker. Is it on and awake?"
+		});
 
 		expect(hostRuntimeBadgeState(ready)).toEqual({ tone: 'ready', label: 'Ready' });
 		expect(hostRuntimeBadgeState(reachable)).toEqual({ tone: 'wait', label: 'Reachable' });
