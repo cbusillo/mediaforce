@@ -277,6 +277,14 @@ def staged_size_prediction(stored_validation: dict[str, Any], staged_size_bytes:
     }
 
 
+def encoder_final_size_miss(stored_validation: dict[str, Any]) -> dict[str, Any] | None:
+    """The encoder's own record that the finished copy missed its final size band, or None."""
+    verification = object_dict(stored_validation.get("target_size_verification"))
+    if verification.get("passed") is False and verification.get("status") in {"over_target", "under_target"}:
+        return verification
+    return None
+
+
 def _stored_validation(row: Any) -> dict[str, Any]:
     try:
         return object_dict(json.loads(str(row.get("validation_json") or "{}")))
@@ -378,6 +386,13 @@ def validate_one_item(
     resolved_size_goal = object_dict(object_dict(item.get("resolved_operator_intent")).get("size_goal"))
     final_lower_bound_bytes = int_value(resolved_size_goal.get("final_lower_bound_bytes"))
     final_upper_bound_bytes = int_value(resolved_size_goal.get("final_upper_bound_bytes"))
+    # The encoder's size miss is the size result and is carried on every later check; only the owner's keep clears it.
+    encoder_size_miss = encoder_final_size_miss(_stored_validation(row))
+    if encoder_size_miss is not None:
+        validation["target_size_verification"] = encoder_size_miss
+    # The owner's keep covers only the exact copy they saw; a remade file must meet its goal again.
+    kept = object_dict(_stored_validation(row).get("final_size_goal"))
+    owner_kept = bool(kept.get("owner_kept_at")) and int_value(kept.get("owner_kept_bytes")) == staged_size_bytes
     if final_lower_bound_bytes > 0 and final_upper_bound_bytes >= final_lower_bound_bytes:
         compression_intent = compression_intent_from_item(item)
         quality_score = float_value(row.get("quality_score"))
@@ -392,9 +407,6 @@ def validate_one_item(
                 and quality_target_met
             )
         )
-        # The owner's keep covers only the exact copy they saw; a remade file must meet its goal again.
-        kept = object_dict(_stored_validation(row).get("final_size_goal"))
-        owner_kept = bool(kept.get("owner_kept_at")) and int_value(kept.get("owner_kept_bytes")) == staged_size_bytes
         validation["final_size_goal"] = {
             "target_size_bytes": int_value(resolved_size_goal.get("target_size_bytes")) or None,
             "lower_bound_bytes": final_lower_bound_bytes,
@@ -406,10 +418,23 @@ def validate_one_item(
         }
         check(
             validation,
-            owner_kept or accepted_under_target
-            or final_lower_bound_bytes <= staged_size_bytes <= final_upper_bound_bytes,
+            owner_kept or (
+                encoder_size_miss is None
+                and (accepted_under_target or final_lower_bound_bytes <= staged_size_bytes <= final_upper_bound_bytes)
+            ),
             FINAL_SIZE_GOAL_CHECK,
         )
+    elif encoder_size_miss is not None:
+        # Without a band to measure against, only the owner's keep of this exact copy clears the encoder's miss.
+        validation["final_size_goal"] = {
+            "target_size_bytes": int_value(encoder_size_miss.get("target_size_bytes")) or None,
+            "lower_bound_bytes": int_value(encoder_size_miss.get("lower_bound_bytes")) or None,
+            "upper_bound_bytes": int_value(encoder_size_miss.get("upper_bound_bytes")) or None,
+            "tolerance_percent": float_value(encoder_size_miss.get("tolerance_percent")) or None,
+            "accepted_under_target": False,
+            **({"owner_kept_at": kept["owner_kept_at"], "owner_kept_bytes": staged_size_bytes} if owner_kept else {}),
+        }
+        check(validation, owner_kept, FINAL_SIZE_GOAL_CHECK)
 
     size_prediction = staged_size_prediction(_stored_validation(row), staged_size_bytes)
     if size_prediction is not None:

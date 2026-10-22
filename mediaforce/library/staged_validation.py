@@ -4,7 +4,7 @@ import json
 from typing import Any, Literal
 
 from mediaforce.core.type_defs import object_dict, object_list
-from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
+from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK, encoder_final_size_miss
 
 
 def held_size_prediction(raw_validation: Any) -> dict[str, Any] | None:
@@ -26,10 +26,25 @@ def held_size_prediction(raw_validation: Any) -> dict[str, Any] | None:
     return size_prediction
 
 
+def awaits_check_after_final_size_miss(raw_validation: Any) -> bool:
+    """The encoder kept a copy that missed its final size goal, and the file's own checks have not run yet.
+
+    The encoder records only the size miss. The normal check still has to run before the owner can
+    keep the copy or make it again, and any other failure it finds stays a failure.
+    """
+    try:
+        payload = object_dict(json.loads(str(raw_validation or "{}")))
+    except json.JSONDecodeError:
+        return False
+    return payload.get("passed") is False and "checks" not in payload and encoder_final_size_miss(payload) is not None
+
+
 def staged_validation_outcome(raw_validation: Any) -> Literal["size_held", "failed"] | None:
     """Whether a staged file's recorded check waits on the owner, and why; None when it does not."""
     if held_size_prediction(raw_validation) is not None:
         return "size_held"
+    if awaits_check_after_final_size_miss(raw_validation):
+        return None
     if staged_validation_passed(raw_validation) is False:
         return "failed"
     return None
