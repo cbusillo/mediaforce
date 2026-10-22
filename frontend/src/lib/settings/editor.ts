@@ -330,13 +330,13 @@ export function libraryReadiness(
 		return {
 			state: 'incomplete',
 			label: 'Incomplete',
-			detail: 'Add a label, root ID, and local path.'
+			detail: 'Add a label and a folder path.'
 		};
 	}
 	if (library.availability === 'disabled') {
 		return {
 			state: 'disabled',
-			label: 'Disabled',
+			label: 'Off',
 			detail: 'Mediaforce will not scan or process this library.'
 		};
 	}
@@ -350,47 +350,48 @@ export function libraryReadiness(
 			return {
 				state: 'incomplete',
 				label: 'Incomplete',
-				detail: `Add ${missing.join(', ')} before playback qualification.`
+				detail: `Add ${missing.join(', ')} so playback can be checked later.`
 			};
 		}
 		return {
 			state: 'blocked',
-			label: 'Safety blocked',
-			detail: 'Browse-only until 3D / VR playback qualification is implemented.'
+			label: 'View only for now',
+			detail: 'Mediaforce shows 3D and VR files but cannot compress them safely yet.'
 		};
 	}
 	if (library.availability === 'browse_only') {
 		return {
 			state: 'browse_only',
-			label: 'Browse only',
-			detail: 'Mediaforce scans and shows this library but never processes it.'
+			label: 'View only',
+			detail: 'Mediaforce scans and shows this library but never changes its files.'
 		};
 	}
 	if (!['tv', 'movie', 'other'].includes(library.library_type)) {
 		return {
 			state: 'blocked',
-			label: 'Workflow blocked',
-			detail: 'Production is not available for this library type yet.'
+			label: 'Not supported yet',
+			detail: 'Mediaforce cannot compress this kind of library yet.'
 		};
 	}
 	if (library.library_type === 'other') {
 		if (!library.default_profile?.trim()) {
 			return {
 				state: 'incomplete',
-				label: 'Profile needed',
-				detail: 'Choose an explicit Other processing profile before enabling Production.'
+				label: 'Choose a setting',
+				detail:
+					'Choose a default compression setting before letting Mediaforce compress files here.'
 			};
 		}
 		return {
 			state: 'ready',
 			label: 'Ready',
-			detail: 'Generic file and folder scopes use the selected profile and require probe readiness.'
+			detail: 'Files and folders here use the default compression setting.'
 		};
 	}
 	return {
 		state: 'ready',
 		label: 'Ready',
-		detail: 'Scanning and production processing are enabled.'
+		detail: 'Mediaforce scans this library and can compress its files.'
 	};
 }
 

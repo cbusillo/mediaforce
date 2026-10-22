@@ -76,18 +76,19 @@
 		return 'idle';
 	}
 
-	function availabilityLabel(availability: LibraryAvailability): string {
-		if (availability === 'production') return 'Production';
-		if (availability === 'browse_only') return 'Browse only';
-		return 'Disabled';
+	function availabilityDetail(availability: LibraryAvailability): string {
+		if (availability === 'production') return 'Mediaforce can compress and replace files here.';
+		if (availability === 'browse_only')
+			return 'Mediaforce shows these files but never changes them.';
+		return 'Mediaforce leaves this library alone.';
 	}
 </script>
 
 <div class="library-workstation">
-	<section class="library-master" aria-label="Configured library roots">
+	<section class="library-master" aria-label="Library folders">
 		<header class="library-master__head">
 			<div>
-				<strong>Library roots</strong>
+				<strong>Library folders</strong>
 				<span>{libraries.length.toLocaleString('en-US')} configured</span>
 			</div>
 			<button type="button" class="control" onclick={onAdd}>Add library</button>
@@ -104,7 +105,7 @@
 					<span class="library-root-row__order mf-mono">{String(index + 1).padStart(2, '0')}</span>
 					<span class="library-root-row__identity">
 						<strong>{library.label || 'Untitled library'}</strong>
-						<small>{library.path || 'Local path needed'}</small>
+						<small>{library.path || 'Folder path needed'}</small>
 					</span>
 					<span class="library-root-row__signals">
 						<small>{typeOptions.find((option) => option.key === library.library_type)?.label}</small
@@ -123,7 +124,7 @@
 		{#if selected}
 			<header class="library-inspector__head">
 				<div>
-					<span class="mf-eyebrow">Selected root</span>
+					<span class="mf-eyebrow">Selected library</span>
 					<h3>{selected.label || 'New library'}</h3>
 					<p>{libraryReadiness(selected).detail}</p>
 				</div>
@@ -166,12 +167,12 @@
 					/>
 				</label>
 				<label class="stacked-field">
-					<span>Root ID</span>
+					<span>Library ID</span>
 					<input class="field mf-mono" value={selected.key} readonly />
-					<small>Stable identity for scans, computers, and saved work.</small>
+					<small>Set automatically. Computer folder overrides use it.</small>
 				</label>
 				<label class="stacked-field library-form-grid__wide">
-					<span>Local path</span>
+					<span>Folder path</span>
 					<input
 						class="field field--path"
 						value={selected.path}
@@ -196,7 +197,7 @@
 					</select>
 				</label>
 				<label class="stacked-field">
-					<span>Availability</span>
+					<span>What Mediaforce may do</span>
 					<select
 						class="field"
 						value={selected.availability}
@@ -204,15 +205,15 @@
 							patchSelected({ availability: selectValue(event) as LibraryAvailability })}
 					>
 						<option value="production" disabled={selected.library_type === 'spatial'}
-							>Production</option
+							>Compress files</option
 						>
-						<option value="browse_only">Browse only</option>
-						<option value="disabled">Disabled</option>
+						<option value="browse_only">View only</option>
+						<option value="disabled">Off</option>
 					</select>
-					<small>{availabilityLabel(selected.availability)}</small>
+					<small>{availabilityDetail(selected.availability)}</small>
 				</label>
 				<label class="stacked-field">
-					<span>Default processing profile</span>
+					<span>Default compression setting</span>
 					<select
 						class="field"
 						value={selected.default_profile}
@@ -224,7 +225,7 @@
 						{/each}
 					</select>
 					{#if selected.availability !== 'production'}
-						<small>No processing profile is required outside Production.</small>
+						<small>Only needed when Mediaforce may compress files.</small>
 					{/if}
 				</label>
 				<label class="stacked-field">
@@ -240,10 +241,10 @@
 				</label>
 			</div>
 
-			<section class="library-policy" aria-label="Library-specific policy">
+			<section class="library-policy" aria-label="Settings for this kind of library">
 				<header>
 					<div>
-						<span class="mf-eyebrow">Type policy</span>
+						<span class="mf-eyebrow">Settings for this kind of library</span>
 						<h4>{typeOptions.find((option) => option.key === selected.library_type)?.label}</h4>
 					</div>
 					<small>Only settings relevant to this library type appear here.</small>
@@ -394,21 +395,21 @@
 						</div>
 					</div>
 					<p class="policy-warning">
-						Production remains blocked until #188 validates geometry, streams, metadata, audio, and
-						target-device playback.
+						Mediaforce can't compress 3D or VR video yet. It first needs a way to check the picture
+						shape, tracks, sound, and playback on your headset.
 					</p>
 				{:else}
 					<div class="policy-grid">
 						<label class="stacked-field">
-							<span>Default work unit</span>
+							<span>Work on</span>
 							<select
 								class="field"
 								value={selected.policy.grouping ?? 'folder'}
 								onchange={(event) =>
 									patchPolicy({ grouping: selectValue(event) as 'folder' | 'file' })}
 							>
-								<option value="folder">Bounded folder</option>
-								<option value="file">Exact file</option>
+								<option value="folder">Whole folder</option>
+								<option value="file">One file</option>
 							</select>
 						</label>
 						<p class="policy-copy">
