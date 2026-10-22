@@ -92,6 +92,18 @@ Monotonic curves select a
 candidate inside the sample band when one exists. Arithmetic impossibility,
 quality-floor conflict, and exhausted or noisy non-monotonic searches surface as
 structured infeasibility, quality-conflict, or needs-review outcomes.
+The main search measures at most six settings. When that budget ends with the
+band between two adjacent measured settings that both meet the quality floor
+and the source cap on a monotonic curve, it measures up to three more settings
+strictly between them, halving the gap each time, and selects the first one
+that lands in the band. A bracket that fails the quality floor, a
+non-monotonic curve, or no bracket at all keeps the earlier outcome. When every
+setting between the two was measured and none lands in the band, the search
+reports `quality_safe_bracket_misses_target_band` with both sides' sizes, and
+encode recovery asks the user the same one-file size question, proposing the
+larger quality-safe size. Nothing is raised without that answer, because no
+quality floor was broken.
+
 Target-size search never changes the goal itself. When a measured
 quality-floor violation shows the goal is too small for one file, encode
 recovery records an item-local size exception at the smallest quality-safe

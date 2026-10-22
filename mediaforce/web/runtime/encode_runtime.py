@@ -68,8 +68,10 @@ from mediaforce.encoding.streams import StreamPlanIdentityError
 from mediaforce.tuning.av1_cold_start import AV1ColdStartContractError
 from mediaforce.tuning.content_intent_observations import ContentIntentObservationConflictError
 from mediaforce.tuning.quality_observations import QualityObservationConflictError
-from mediaforce.tuning.target_size_search import FinalSizeMissError, TargetSizeSearchError
+from mediaforce.tuning.target_size_search import QUALITY_SAFE_BRACKET_MISS_REASON, FinalSizeMissError, \
+    TargetSizeSearchError
 from mediaforce.tuning.compression_intent import (
+    CompressionEvidenceKind,
     CompressionEvidenceRef,
     authorize_compression_change,
     compression_intent_from_item,
@@ -298,6 +300,14 @@ QUALITY_FLOOR_CONFLICT_RE = re.compile(
     r"\((?P<reason>target_band_violates_quality_floor|target_requires_crossing_quality_floor)\); "
     r"target=(?P<target>\d+) bytes, best_reachable=(?P<best>\d+) bytes\."
 )
+QUALITY_SAFE_BRACKET_MISS_RE = re.compile(
+    r"No setting lands inside the approved target size between two adjacent quality-safe settings "
+    rf"\((?P<reason>{re.escape(QUALITY_SAFE_BRACKET_MISS_REASON)})\); "
+    r"target=(?P<target>\d+) bytes, larger_quality_safe=(?P<larger>\d+) bytes, "
+    r"smaller_quality_safe=(?P<smaller>\d+) bytes\."
+)
+SIZE_QUESTION_QUALITY_NEEDS_MORE = "quality_needs_more"
+SIZE_QUESTION_NO_SETTING_FITS = "no_setting_fits"
 # A measured quality-floor conflict may raise one item's size goal this far without an operator.
 QUALITY_FLOOR_EXCEPTION_MAX_GROWTH = 1.5
 
@@ -1674,6 +1684,13 @@ def size_exception_question(child: Mapping[str, Any]) -> dict[str, Any] | None:
         "rel_path": rel_path,
         "goal_bytes": goal_bytes,
         "smallest_quality_safe_bytes": safe_bytes,
+        # Why the goal does not fit: every size inside it breaks the quality floor, or no setting lands
+        # inside it while a slightly larger and a slightly smaller one both keep the picture right.
+        "reason": (
+            SIZE_QUESTION_NO_SETTING_FITS
+            if str(analysis.get("reason") or "") == QUALITY_SAFE_BRACKET_MISS_REASON
+            else SIZE_QUESTION_QUALITY_NEEDS_MORE
+        ),
     }
 
 
@@ -2168,7 +2185,12 @@ def _encode_failure_analysis(
     indexes = _manifest_indexes_for_job(job, manifest_items)
     if not indexes:
         return None
-    final_size_analysis = _final_size_failure_analysis(error_message)
+    # A speculative output can miss its final size and the fresh baseline search that follows can then
+    # measure every setting between two quality-safe ones. That newer measurement is a one-file size
+    # question, so it leads over the miss instead of asking for a fresh goal and sample.
+    final_size_analysis = (
+        None if QUALITY_SAFE_BRACKET_MISS_RE.search(error_message) else _final_size_failure_analysis(error_message)
+    )
     if final_size_analysis is not None:
         valid_indexes = [index for index in indexes if 0 <= index < len(manifest_items)]
         if len(valid_indexes) != 1:
@@ -2190,7 +2212,9 @@ def _encode_failure_analysis(
             }
         )
         return _aggregate_quality_failure_analysis(indexes, [final_size_analysis])
-    floor_analysis = _quality_floor_conflict_analysis(error_message)
+    floor_analysis = _quality_floor_conflict_analysis(error_message) or _quality_safe_bracket_miss_analysis(
+        error_message
+    )
     if floor_analysis is not None:
         valid_indexes = [index for index in indexes if 0 <= index < len(manifest_items)]
         if len(valid_indexes) != 1:
@@ -2296,6 +2320,36 @@ def _quality_floor_conflict_analysis(error_message: str) -> dict[str, Any] | Non
                 "Keeping the picture quality needs a much bigger file than the size goal allows. "
                 "Allow that size for this file, or keep the original."
             )
+        ),
+    }
+
+
+def _quality_safe_bracket_miss_analysis(error_message: str) -> dict[str, Any] | None:
+    """The search measured every setting between two quality-safe results and none fits the goal.
+
+    Neither result breaks the quality floor, so nothing authorizes a larger file automatically: the
+    file asks the owner the one-file size question, proposing the closest quality-safe size above
+    the goal. A no keeps the original, as it does for any size question.
+    """
+    match = QUALITY_SAFE_BRACKET_MISS_RE.search(error_message)
+    if match is None:
+        return None
+    target = int(match.group("target"))
+    larger = int(match.group("larger"))
+    if target <= 0 or larger <= target:
+        return None
+    return {
+        "kind": "quality_floor_size_conflict",
+        "reason": match.group("reason"),
+        "retry_strategy": "needs_operator_approval",
+        "auto_retry_allowed": False,
+        "target_size_bytes": target,
+        "proposed_target_size_bytes": larger,
+        "smaller_quality_safe_bytes": int(match.group("smaller")),
+        "summary": (
+            "No setting fits the size goal while keeping the picture quality: one is a little bigger, "
+            "the next a little smaller than the goal allows. Allow the bigger size for this file, "
+            "or keep the original."
         ),
     }
 
@@ -2491,16 +2545,24 @@ def apply_quality_floor_size_exception(
 ) -> bool:
     """Record an item-local size exception at the smallest quality-safe size.
 
-    The measured floor violation is the evidence either way. Within the automatic allowance it
+    A measured floor violation is evidence on its own. Within the automatic allowance it
     authorizes the exception alone; beyond it the owner's yes is recorded as a second piece of
-    evidence, and the saved compression goal still has to authorize a larger result.
+    evidence, and the saved compression goal still has to authorize a larger result. When the
+    search instead found quality-safe sizes on both sides of the goal, no floor was violated, so
+    the owner's yes is the only evidence and nothing is recorded without it.
     """
     index = int_value(analysis.get("manifest_index"))
     proposed_bytes = int_value(analysis.get("proposed_target_size_bytes"))
     current_bytes = int_value(analysis.get("target_size_bytes"))
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
+    floor_violated = str(analysis.get("reason") or "") != QUALITY_SAFE_BRACKET_MISS_REASON
     if index < 0 or proposed_bytes <= current_bytes or not manifest_path.exists():
         return False
+    if not floor_violated and not owner_approved:
+        return False
+    evidence_kind: CompressionEvidenceKind = (
+        "measured_quality_floor_violation" if floor_violated else "operator_override"
+    )
     with _locked_manifest_file(manifest_path):
         try:
             manifest = json.loads(manifest_path.read_text())
@@ -2517,7 +2579,7 @@ def apply_quality_floor_size_exception(
         policy_hash = stable_policy_hash(policy)
         job_id = str(job.get("id") or job.get("job_id") or "").strip() or None
         evidence_identity = {
-            "kind": "measured_quality_floor_violation",
+            "kind": evidence_kind,
             "source_id": source_id,
             "policy_hash": policy_hash,
             "intent_id": intent.semantic_id,
@@ -2527,7 +2589,7 @@ def apply_quality_floor_size_exception(
             "proposed_target_size_bytes": proposed_bytes,
         }
         evidence = CompressionEvidenceRef(
-            kind="measured_quality_floor_violation",
+            kind=evidence_kind,
             evidence_id=f"ce1_{stable_json_hash(evidence_identity)[:32]}",
             intent_id=intent.semantic_id,
             observed_bytes=proposed_bytes,
@@ -2536,7 +2598,7 @@ def apply_quality_floor_size_exception(
             job_id=job_id,
         )
         evidence_refs = [evidence]
-        if owner_approved:
+        if owner_approved and floor_violated:
             evidence_refs.append(
                 CompressionEvidenceRef(
                     kind="operator_override",
@@ -2561,7 +2623,7 @@ def apply_quality_floor_size_exception(
         if owner_approved:
             evidence_payload = {
                 **evidence_payload,
-                "owner_approval": evidence_refs[1].to_payload(),
+                "owner_approval": evidence_refs[-1].to_payload(),
             }
         analysis["compression_evidence"] = evidence_payload
         analysis["compression_authorization"] = decision_payload
@@ -2570,8 +2632,15 @@ def apply_quality_floor_size_exception(
             analysis["retry_strategy"] = "needs_operator_approval"
             analysis["compression_authorization_reason"] = decision.reason_code
             analysis["summary"] = (
-                "Every size inside the goal broke the quality floor, but the saved compression goal does not "
-                "authorize a larger result automatically. Review this item before retrying."
+                (
+                    "Every size inside the goal broke the quality floor, but the saved compression goal does not "
+                    "authorize a larger result automatically. Review this item before retrying."
+                )
+                if floor_violated
+                else (
+                    "No setting fits the size goal while keeping the picture quality, and the saved compression "
+                    "goal does not allow a larger result. Review this item before retrying."
+                )
             )
             return False
         current_goal = size_goal_from_policy(video_policy)

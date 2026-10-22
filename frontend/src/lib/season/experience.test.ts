@@ -15,6 +15,7 @@ import type {
 	SizeGoalOptionPayload
 } from '$lib/api/types';
 import {
+	sizeQuestionFinding,
 	waitingScopeName,
 	encodeWaitingReasons,
 	approvalGuardFromMessage,
@@ -2589,6 +2590,23 @@ describe('encodeWaitingReasons', () => {
 
 		expect(reasons.needsYou.map((group) => group.reason)).toEqual(['stopped']);
 		expect(reasons.waiting.map((group) => group.reason)).toEqual(['retrying']);
+	});
+
+	it('says why a file does not fit its size goal in plain words', () => {
+		const question = {
+			job_id: 'shard-1',
+			rel_path: 'tv/Futurama/Season 8/Futurama S08E02.mkv',
+			goal_bytes: 82_500_000,
+			smallest_quality_safe_bytes: 88_700_000
+		};
+
+		expect(sizeQuestionFinding(question)).toBe('Keeping the picture quality needs 88.7 MB.');
+		expect(sizeQuestionFinding({ ...question, reason: 'quality_needs_more' })).toBe(
+			'Keeping the picture quality needs 88.7 MB.'
+		);
+		expect(sizeQuestionFinding({ ...question, reason: 'no_setting_fits' })).toBe(
+			'No setting lands in the size range. The closest one that keeps the picture right is 88.7 MB.'
+		);
 	});
 
 	it('lists files the owner already answered for apart from what is waiting', () => {

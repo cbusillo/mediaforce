@@ -1,5 +1,9 @@
 <script lang="ts">
-	import { formatDecimalFileSize, type WaitingReasons } from '$lib/season/experience';
+	import {
+		formatDecimalFileSize,
+		sizeQuestionFinding,
+		type WaitingReasons
+	} from '$lib/season/experience';
 
 	let {
 		reasons,
@@ -38,8 +42,9 @@
 										<li class="size-question">
 											<span class="size-question__file">{fileName(question.rel_path)}</span>
 											<span class="size-question__detail">
-												Size goal {formatDecimalFileSize(question.goal_bytes)}. Keeping the picture
-												quality needs {formatDecimalFileSize(question.smallest_quality_safe_bytes)}.
+												Size goal {formatDecimalFileSize(question.goal_bytes)}. {sizeQuestionFinding(
+													question
+												)}
 											</span>
 											<span class="size-question__actions">
 												<button

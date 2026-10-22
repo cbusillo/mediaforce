@@ -588,6 +588,11 @@ export interface EncodeSizeQuestion {
 	rel_path: string;
 	goal_bytes: number;
 	smallest_quality_safe_bytes: number;
+	/**
+	 * Why the goal does not fit: every size inside it hurts the picture, or no setting lands inside it
+	 * while one a little bigger and one a little smaller both keep the picture right.
+	 */
+	reason?: 'quality_needs_more' | 'no_setting_fits';
 }
 
 export type EpisodeStage =

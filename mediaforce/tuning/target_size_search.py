@@ -34,6 +34,11 @@ from mediaforce.tuning.stream_budget import (
 TARGET_SIZE_SEARCH_SCHEMA_VERSION = 1
 TARGET_SIZE_TRANSFORM_PLAN_SCHEMA_VERSION = 1
 MAX_TARGET_SIZE_CANDIDATES = 6
+# When the main budget ends with the band between two adjacent quality-safe settings, the search may
+# measure this many settings strictly between them. Bisection settles a gap of up to seven untried
+# settings within it, so a size that lands in the band is never left unmeasured for want of one sample.
+MAX_BRACKET_FILL_MEASUREMENTS = 3
+QUALITY_SAFE_BRACKET_MISS_REASON = "quality_safe_bracket_misses_target_band"
 TARGET_SIZE_BOUND_EXPANSION_STEP = 8
 MAX_FINAL_OUTPUT_RETRIES = 1
 MAX_FINAL_RETRY_MEASUREMENTS = 3
@@ -252,6 +257,7 @@ def search_target_size(
 
     candidates: list[TargetSizeCandidate] = []
     measured_crfs: set[int] = set()
+    progress_total = MAX_TARGET_SIZE_CANDIDATES
     seed_crf = _seed_crf(stream_budget_ledger, min_crf=normalized_min_crf, max_crf=configured_max_crf)
 
     def measure(crf: int, role: str) -> None:
@@ -272,7 +278,7 @@ def search_target_size(
             )
         )
         if candidate_progress_callback is not None:
-            candidate_progress_callback(len(candidates), MAX_TARGET_SIZE_CANDIDATES)
+            candidate_progress_callback(len(candidates), progress_total)
 
     measure(seed_crf, "target_seed")
     _, upper_bound_bytes = _sample_bounds(stream_budget_ledger)
@@ -301,6 +307,19 @@ def search_target_size(
         measure(next_crf, "expanded_bound" if next_crf > configured_max_crf else "refine")
 
     selected = _select_candidate(candidates, compression_intent, upper_bound_bytes=upper_bound_bytes)
+    if selected is None and _bracket_fill_crf(candidates, stream_budget_ledger) is not None:
+        progress_total = len(candidates) + MAX_BRACKET_FILL_MEASUREMENTS
+        for _ in range(MAX_BRACKET_FILL_MEASUREMENTS):
+            fill_crf = _bracket_fill_crf(candidates, stream_budget_ledger)
+            if fill_crf is None:
+                break
+            try:
+                measure(fill_crf, "bracket_fill")
+            except SampleEncodeError:
+                break
+            selected = _select_candidate(candidates, compression_intent, upper_bound_bytes=upper_bound_bytes)
+            if selected is not None:
+                break
     if selected is not None:
         trace = _trace_payload(
             status="selected",
@@ -350,6 +369,13 @@ def search_target_size(
         configured_max_crf=configured_max_crf,
         transform_plan=validated_transform_plan,
     )
+    bracket = _quality_safe_bracket(candidates, stream_budget_ledger)
+    if bracket is not None:
+        trace["quality_safe_bracket"] = {
+            "larger_candidate": bracket[0].to_payload(),
+            "smaller_candidate": bracket[1].to_payload(),
+            "max_fill_measurements": MAX_BRACKET_FILL_MEASUREMENTS,
+        }
     trace = _trace_with_warm_start(trace, warm_trace)
     raise TargetSizeSearchError(_failure_message(status, reason, trace), status=status, trace=trace)
 
@@ -2184,6 +2210,42 @@ def _next_intent_probe_crf(
     return _nearest_unmeasured(selected_crf + 1, measured_crfs, selected_crf + 1, max_crf)
 
 
+def _quality_safe_bracket(
+        candidates: list[TargetSizeCandidate],
+        ledger: StreamBudgetLedger,
+) -> tuple[TargetSizeCandidate, TargetSizeCandidate] | None:
+    """The adjacent measured pair whose sizes straddle the whole band, when both are quality-safe.
+
+    Only a monotonic curve gives the pair meaning: a setting between them can then only land between
+    their sizes. The first item is the larger file (lower setting), the second the smaller one.
+    """
+    if _curve_shape(candidates) != "monotonic":
+        return None
+    lower, upper = _sample_bounds(ledger)
+    ordered = sorted(
+        (candidate for candidate in candidates if candidate.predicted_whole_episode_bytes is not None),
+        key=lambda candidate: candidate.crf,
+    )
+    for larger, smaller in zip(ordered, ordered[1:]):
+        larger_bytes = larger.predicted_whole_episode_bytes or 0
+        smaller_bytes = smaller.predicted_whole_episode_bytes or 0
+        if larger_bytes > upper and smaller_bytes < lower:
+            if all(candidate.quality_floor_met and not candidate.violates_source_cap for candidate in (larger, smaller)):
+                return larger, smaller
+            return None
+    return None
+
+
+def _bracket_fill_crf(candidates: list[TargetSizeCandidate], ledger: StreamBudgetLedger) -> int | None:
+    """The untried setting halfway inside the quality-safe bracket, or None when nothing is between."""
+    bracket = _quality_safe_bracket(candidates, ledger)
+    if bracket is None:
+        return None
+    larger_crf, smaller_crf = int(round(bracket[0].crf)), int(round(bracket[1].crf))
+    measured = {int(round(candidate.crf)) for candidate in candidates}
+    return _nearest_unmeasured(round((larger_crf + smaller_crf) / 2), measured, larger_crf + 1, smaller_crf - 1)
+
+
 def _nearest_unmeasured(seed: int, measured: set[int], min_crf: int, max_crf: int) -> int | None:
     for offset in range(0, max(max_crf - min_crf, 0) + 1):
         for candidate in (seed + offset, seed - offset):
@@ -2229,6 +2291,10 @@ def _failure_status(
         if any(math.isclose(candidate.crf, min_crf) for candidate in candidates):
             return "bound_exhausted", "largest_quality_safe_candidate_under_target_band"
         return "needs_review", "bounded_search_exhausted_before_lower_bound"
+    if _quality_safe_bracket(candidates, ledger) is not None and _bracket_fill_crf(candidates, ledger) is None:
+        # Every setting between two quality-safe results was measured and none fits the band: the
+        # choice between a slightly larger and a slightly smaller file is the owner's.
+        return "needs_review", QUALITY_SAFE_BRACKET_MISS_REASON
     return "needs_review", "bounded_search_exhausted"
 
 
@@ -2248,6 +2314,16 @@ def _failure_message(status: SearchStatus, reason: str, trace: dict[str, Any]) -
         )
     if status == "infeasible":
         return "The approved target size leaves no positive production video budget."
+    if reason == QUALITY_SAFE_BRACKET_MISS_REASON:
+        bracket = object_dict(trace.get("quality_safe_bracket"))
+        larger = object_dict(bracket.get("larger_candidate"))
+        smaller = object_dict(bracket.get("smaller_candidate"))
+        return (
+            "No setting lands inside the approved target size between two adjacent quality-safe settings "
+            f"({reason}); target={target.get('total_target_bytes')} bytes, "
+            f"larger_quality_safe={larger.get('predicted_whole_episode_bytes')} bytes, "
+            f"smaller_quality_safe={smaller.get('predicted_whole_episode_bytes')} bytes."
+        )
     return f"Target-size search needs review after bounded measurements ({reason})."
 
 
@@ -2313,6 +2389,7 @@ def _trace_payload(
             "shape": _curve_shape(candidates),
             "candidate_count": len(candidates),
             "max_candidates": MAX_TARGET_SIZE_CANDIDATES,
+            "max_bracket_fill_measurements": MAX_BRACKET_FILL_MEASUREMENTS,
         },
         "retry_policy": {
             "max_final_output_retries": MAX_FINAL_OUTPUT_RETRIES,
