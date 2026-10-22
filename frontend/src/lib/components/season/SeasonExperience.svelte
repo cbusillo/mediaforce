@@ -552,6 +552,8 @@
 	);
 	const activeSampleJob = $derived(asRecord(exactCalibrationJob));
 	const activeSampleProgress = $derived(asRecord(activeSampleJob.progress));
+	// A sample that lost its computer says which computer it waits for.
+	const activeSampleWaitingReason = $derived(asText(activeSampleProgress.waiting_reason));
 	const activeSampleStatusLabel = $derived(calibrationActivityStatusLabel(exactCalibrationJob));
 	const activeSampleWorker = $derived(
 		asText(asRecord(activeSampleJob.host).label) || selectedHost?.label || 'Choosing one'
@@ -2363,8 +2365,12 @@
 				<div class="active-copy">
 					<h1>Sample waiting for {sampleEpisode || scopeTitle}</h1>
 					<p class="lede">
-						This sample has not started yet. It is waiting for an available computer. Nothing has
-						been compressed and nothing in your library is changed.
+						{#if activeSampleWaitingReason}
+							{activeSampleWaitingReason} Nothing in your library is changed.
+						{:else}
+							This sample has not started yet. It is waiting for an available computer. Nothing has
+							been compressed and nothing in your library is changed.
+						{/if}
 					</p>
 					<div class="active-facts">
 						<div>

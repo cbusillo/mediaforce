@@ -928,6 +928,20 @@ describe('season experience translation', () => {
 				progress: { schema_version: 1, stage: 'checking_sound' }
 			})
 		).toBe('Checking the sound');
+		const waitingReason =
+			'Waiting for M2 MBP to be available, such as in its next work window, to make this sample. It starts again then, with no need to retry it.';
+		expect(
+			calibrationStageLabel({
+				job_id: 'sample-1',
+				status: 'queued',
+				progress: {
+					schema_version: 1,
+					stage: 'waiting_for_computer',
+					waiting_for_computer: 'M2 MBP',
+					waiting_reason: waitingReason
+				}
+			})
+		).toBe(waitingReason);
 	});
 
 	it('identifies a blocked cadence decision that needs Activity resolution', () => {

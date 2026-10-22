@@ -692,6 +692,10 @@ export interface CalibrationJobProgress {
 	estimate?: CalibrationProgressEstimate | null;
 	terminal_status?: string;
 	total_elapsed_seconds?: number;
+	/** Set while a sample that lost its computer waits to try again: the reason names the computer. */
+	waiting_for_computer?: string;
+	waiting_reason?: string;
+	retry_not_before?: string;
 }
 
 export interface CalibrationJobPayload {
