@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.db import DBClient
+from mediaforce.library.source_evidence import load_source_evidence
 from mediaforce.core.db_tables import content_intent_boundary_observations
 from mediaforce.core.evidence import canonical_json_text, stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
@@ -616,6 +617,8 @@ def build_visual_content_intent_observation(
     provenance = {
         "schema_version": CONTENT_INTENT_OBSERVATION_SCHEMA_VERSION,
         "source": "operator_visual_review",
+        "reviewed_input_version_id": item.get("source_version_id"),
+        "original_source_reference": object_dict(item.get("original_source_evidence")),
         **({"recorded_by": recorded_by} if recorded_by != "approval_review" else {}),
         "calibration_action": str(calibration_payload.get("action") or "sample"),
         "sample_job_id": job_id,
@@ -690,6 +693,9 @@ def record_visual_content_intent_observation(
         moment_indexes: Sequence[int],
         recorded_at: str,
 ) -> ContentIntentObservationRecordResult:
+    sample_item = dict(sample_item)
+    original = load_source_evidence(connection, int_value(sample_item.get("library_item_id")))
+    sample_item["original_source_evidence"] = original.to_reference()
     result = build_visual_content_intent_observation(
         prefix=prefix,
         sample_item=sample_item,
@@ -1520,6 +1526,8 @@ def _same_visual_review(
 
 
 def _content_traits(item: Mapping[str, Any]) -> tuple[str, ...]:
+    if item.get("trait_use") == "advisory-original":
+        return ()
     decision = object_dict(item.get("media_fingerprint_decision"))
     traits = [str(value).strip().lower() for value in object_list(decision.get("traits")) if str(value).strip()]
     if not traits:

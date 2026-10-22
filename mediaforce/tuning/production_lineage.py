@@ -67,6 +67,7 @@ def production_item_identity(item: Mapping[str, Any]) -> dict[str, Any]:
         "source_id": stable_source_id(item),
         "source_rel_path": item.get("rel_path"),
         "source_fingerprint": item.get("source_fingerprint"),
+        "source_size_bytes": item.get("source_size_bytes"),
         "content_fingerprint": item.get("content_version_fingerprint"),
         "duration_seconds": item.get("duration_seconds"),
         "policy_hash": stable_policy_hash(object_dict(item.get("resolved_policy"))),

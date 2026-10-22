@@ -4,14 +4,11 @@ import json
 import math
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
-
-from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_item_evidence_state
 from mediaforce.core.evidence import stable_source_id
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.fingerprint import (
@@ -19,7 +16,9 @@ from mediaforce.encoding.fingerprint import (
     DEFAULT_FINGERPRINT_RANGE_COUNT,
     DEFAULT_FINGERPRINT_SAMPLE_FPS,
 )
-from mediaforce.library.evidence_state import EVIDENCE_KINDS, parse_evidence_summary
+from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_CURRENT, load_library_item_evidence_states, \
+    parse_evidence_summary, project_library_item_evidence_state
+from mediaforce.library.source_evidence import SourceEvidence, load_source_evidence, load_source_evidence_context, original_trait_summary, source_trait_coverage
 from mediaforce.library.media_scopes import MediaScope
 from mediaforce.library.representatives import FINGERPRINT_DIMENSIONS, MEANINGFUL_CLUSTER_FRACTION, \
     TECHNICAL_PROFILE_DIMENSIONS, RepresentativeSelection, load_representative_candidate_rows, \
@@ -67,6 +66,7 @@ class FingerprintAcquisitionCoverage:
     global_fingerprint_coverage: float
     technical_representative_coverage: float
     all_dimension_representative_coverage: float
+    source_traits: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,38 +137,16 @@ def load_fingerprint_acquisition_items(
     scope, rows = load_representative_candidate_rows(connection, config, prefix)
     if not rows:
         return scope, [], frozenset()
-    item_ids = {int(row["id"]) for row in rows}
-    current_rows = connection.execute(
-        select(
-            library_item_evidence_state.c.library_item_id,
-            library_item_evidence_state.c.evidence_kind,
-        )
-        .where(
-            library_item_evidence_state.c.library_item_id.in_(item_ids),
-            library_item_evidence_state.c.evidence_kind.in_(EVIDENCE_KINDS),
-            library_item_evidence_state.c.state == "current",
-        )
-    ).mappings().fetchall()
-    current_item_ids_by_kind = {
-        evidence_kind: {
-            int(row["library_item_id"])
-            for row in current_rows
-            if str(row["evidence_kind"]) == evidence_kind
-        }
-        for evidence_kind in EVIDENCE_KINDS
-    }
+    context = load_source_evidence_context(connection)
     items = [
-        _acquisition_item(
-            row,
-            cadence_current=int(row["id"]) in current_item_ids_by_kind[EVIDENCE_KINDS[0]],
-            fingerprint_current=int(row["id"]) in current_item_ids_by_kind[EVIDENCE_KINDS[1]],
-        )
+        _acquisition_item(row, load_source_evidence(connection, int(row["id"]), context=context),
+                          load_library_item_evidence_states(connection, int(row["id"])))
         for row in rows
     ]
     measured_source_ids = frozenset(
         stable_source_id(item)
         for item in items
-        if int(item["library_item_id"]) in current_item_ids_by_kind[EVIDENCE_KINDS[1]]
+        if _fingerprint_is_measured(item)
     )
     return scope, items, measured_source_ids
 
@@ -361,34 +339,40 @@ def replay_representative_dimensions(
 
 def _acquisition_item(
         row: Mapping[str, Any],
-        *,
-        cadence_current: bool,
-        fingerprint_current: bool,
+        source: SourceEvidence,
+        current_states: Mapping[str, Any],
 ) -> dict[str, Any]:
-    cadence_summary = parse_evidence_summary(row.get("cadence_summary_json")) if cadence_current else None
-    fingerprint_summary = (
-        parse_evidence_summary(row.get("media_fingerprint_json"))
-        if fingerprint_current
-        else None
-    )
+    source_payload = {"original_source_evidence": source.to_payload()}
+    cadence_summary = original_trait_summary(source_payload, EVIDENCE_KINDS[0])
+    fingerprint_summary = original_trait_summary(source_payload, EVIDENCE_KINDS[1])
+    profile = source.profile
+    use_original = fingerprint_summary is not None
+    if not use_original:
+        profile = {**row, "source_size_bytes": row.get("size_bytes")}
+        current_summaries = [parse_evidence_summary(row.get(column)) if project_library_item_evidence_state(
+            row, kind, previous_state=current_states.get(kind),
+        ).state == EVIDENCE_STATE_CURRENT else None for kind, column in
+            ((EVIDENCE_KINDS[0], "cadence_summary_json"), (EVIDENCE_KINDS[1], "media_fingerprint_json"))]
+        cadence_summary, fingerprint_summary = current_summaries
     cadence_decision = object_dict(cadence_summary.get("decision")) if cadence_summary else {}
     fingerprint_decision = object_dict(fingerprint_summary.get("decision")) if fingerprint_summary else {}
     source_fingerprint = str(
-        row.get("content_version_fingerprint")
-        or row.get("fingerprint")
+        profile.get("content_version_fingerprint") or profile.get("fingerprint")
         or ""
     ).strip() or None
     item = {
         "library_item_id": int(row["id"]),
+        "trait_use": "advisory-original" if use_original else "direct-input",
         "rel_path": str(row["rel_path"]),
         "source_fingerprint": source_fingerprint,
-        "source_size_bytes": int_value(row.get("size_bytes")),
-        "video_codec": row.get("video_codec"),
-        "width": row.get("width"),
-        "height": row.get("height"),
+        "source_size_bytes": int_value(profile.get("source_size_bytes")),
+        "video_codec": profile.get("video_codec"),
+        "width": profile.get("width"),
+        "height": profile.get("height"),
         "cadence_class": str(cadence_decision.get("classification") or "unknown"),
-        "duration_seconds": row.get("duration_seconds"),
-        "audio_summary": _json_list(row.get("audio_summary_json")),
+        "duration_seconds": profile.get("duration_seconds"),
+        "audio_summary": _json_list(profile.get("audio_summary") or profile.get("audio_summary_json")),
+        **source_payload,
     }
     if fingerprint_decision:
         item["media_fingerprint_decision"] = fingerprint_decision
@@ -562,6 +546,7 @@ def _acquisition_coverage(
             all_dimension_current_count,
             len(all_dimension_representative_ids),
         ),
+        source_traits=source_trait_coverage([object_dict(item.get("original_source_evidence")) for item in item_by_source_id.values()]),
     )
 
 

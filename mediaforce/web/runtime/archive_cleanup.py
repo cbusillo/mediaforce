@@ -9,6 +9,7 @@ from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_items, staged_artifacts
 from mediaforce.encoding.delivery_lock import archive_activity
 from mediaforce.encoding.staging import safe_unlink
+from mediaforce.encoding.source_publication import commit_archive_removal, pending_archive_paths, prepare_archive_removal, reconcile_archive_removals
 from mediaforce.web.settings_runtime import settings_archive_root
 
 
@@ -62,6 +63,9 @@ def _clear_archive_cleanup_action(
         transcode_root: str | None = None,
         on_removed: Callable[[Path], None] | None = None,
 ) -> dict[str, Any]:
+    if config.paths.db_path.is_file():
+        with open_db(config.paths.db_path) as connection:
+            reconcile_archive_removals(connection)
     archive_root = _archive_root_for_cleanup(config, transcode_root=transcode_root)
     summary = archive_cleanup_summary(config, transcode_root=transcode_root)
     if archive_root is None:
@@ -93,7 +97,10 @@ def _clear_archive_cleanup_action(
             removed_size_bytes += path.stat().st_size
         except FileNotFoundError:
             pass
-        safe_unlink(path)
+        with open_db(config.paths.db_path) as connection:
+            operations = prepare_archive_removal(connection, path)
+            safe_unlink(path)
+            commit_archive_removal(connection, operations)
         removed_count += 1
         if on_removed is not None:
             on_removed(path)
@@ -138,7 +145,8 @@ def recovery_archive_paths(config: MediaforceConfig, archive_root: Path) -> set[
             .join(staged_artifacts, library_items.c.id == staged_artifacts.c.library_item_id)
             .where(staged_artifacts.c.promoted_at.is_(None))
         ).mappings().all()
-    return {path for row in rows for path in (
+        pending = pending_archive_paths(connection)
+    return pending | {path for row in rows for path in (
         (archive_root / str(row["rel_path"])).resolve(),
         *((Path(str(row["archived_source_path"])).resolve(),) if row["archived_source_path"] else ()),
     )}

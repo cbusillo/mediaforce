@@ -31,6 +31,7 @@ from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, 
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, parse_evidence_summary, \
     sync_library_item_evidence_state
 from mediaforce.library.probe import probe_evidence
+from mediaforce.library.source_evidence import observe_file, pending_source_operation, record_current_measurement
 
 EVIDENCE_JOB_LEASE_SECONDS = 45
 EVIDENCE_JOB_HEARTBEAT_SECONDS = 5.0
@@ -219,6 +220,7 @@ def _run_evidence_claim(
             if analysis_target.command_runner is not None
             else {}
         )
+        measurement_before = observe_file(source_path)
         summary = deps.analyze_evidence(
             analysis_target.source_path,
             claim.evidence_kind,
@@ -227,6 +229,9 @@ def _run_evidence_claim(
         )
         process_controller.throw_if_cancelled()
         remote_source_unchanged = _remote_source_matches(analysis_target, source_path, process_controller)
+        measurement_after = observe_file(source_path)
+        if measurement_before != measurement_after:
+            raise RuntimeError("Source changed during evidence measurement")
     except ProcessCancelledError:
         heartbeat.stop()
         _finish_claim(
@@ -298,6 +303,10 @@ def _run_evidence_claim(
         summary,
         actual_fingerprint=final_fingerprint,
         classification_only=False,
+        observation={"before": measurement_before, "after": measurement_after,
+                     "worker_id": claim.worker_id, "lease_batch_id": claim.batch_id,
+                     "source_revision": claim.source_revision,
+                     "remote_stat_only": analysis_target.command_runner is not None},
     )
 
 
@@ -336,6 +345,7 @@ def _commit_evidence_summary(
         *,
         actual_fingerprint: str | None,
         classification_only: bool,
+        observation: dict[str, Any] | None = None,
 ) -> None:
     summary_json = json.dumps(summary, separators=(",", ":"), sort_keys=True)
     with open_db(config.paths.db_path) as connection:
@@ -359,10 +369,18 @@ def _commit_evidence_summary(
             connection,
             claim.library_item_id,
         )
+        same_identity = (claim.uses_content_fingerprint and current_source_fingerprint == claim.expected_source_fingerprint
+                         and claim.source_size_bytes is not None and active_claim.source_size_bytes == claim.source_size_bytes)
+        if (pending_source_operation(connection, claim.library_item_id)
+                or (active_claim.source_revision != claim.source_revision and not same_identity)):
+            transition_evidence_work(connection, claim, work_status="failed",
+                                     last_error="Source revision changed before evidence commit.", restore_attempt=True)
+            return
         if (
                 actual_fingerprint is None
                 or actual_fingerprint != claim.expected_source_fingerprint
                 or current_source_fingerprint != claim.expected_source_fingerprint
+                or (claim.source_size_bytes is not None and active_claim.source_size_bytes != claim.source_size_bytes)
         ):
             transition_evidence_work(
                 connection,
@@ -385,6 +403,12 @@ def _commit_evidence_summary(
         item = connection.execute(
             select(library_items).where(library_items.c.id == claim.library_item_id)
         ).mappings().one()
+        if not classification_only:
+            record_current_measurement(
+                connection, item, kind=claim.evidence_kind, summary=summary,
+                provenance=observation or {"reason": "measurement observation unavailable"},
+                binding="observed" if observation and not observation.get("remote_stat_only") else "unbound",
+            )
         projection = sync_library_item_evidence_state(
             connection,
             item,

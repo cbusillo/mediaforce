@@ -27,6 +27,7 @@ from mediaforce.library.motion_keep_state import reconcile_motion_keep_with_sour
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_is_missing
 from mediaforce.library.media_scopes import logical_library_rel_path, path_matches_scope
 from mediaforce.library.planner import recommend_item
+from mediaforce.library.source_evidence import ensure_active_source_version, pending_source_operation
 from mediaforce.library.probe import probe_media
 from mediaforce.core.type_defs import float_value, int_value, object_list
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint, timestamp
@@ -175,6 +176,8 @@ def _execute_scan_library(
             ).mappings().fetchone()
             _throw_if_scan_cancelled(process_controller)
 
+            if row is not None and pending_source_operation(connection, int(row["id"])):
+                continue
             if (
                     row
                     and _source_content_unchanged(
@@ -354,6 +357,7 @@ def _execute_scan_library(
                     previous_source_fingerprint=library_item_source_fingerprint(row),
                     now_iso=started_at,
                 )
+            ensure_active_source_version(connection, item)
             sync_library_item_evidence_states(
                 connection,
                 item,
