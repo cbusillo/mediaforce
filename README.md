@@ -638,10 +638,10 @@ checked-in hooks once per clone:
 git config core.hooksPath .githooks
 ```
 
-That pre-commit hook runs `scripts/pre-commit-check.sh`, which executes the
-full backend pytest suite, CLI smoke, frontend type checks, frontend lint,
-frontend unit tests, frontend build, and the managed web route smoke
-(`npm --prefix frontend run smoke:web`).
+That pre-commit hook runs `scripts/pre-commit-check.sh` for static checks and
+CLI smoke. Select focused local tests through
+[the testing guide](docs/style/testing.md); the complete backend/frontend
+suites, full web route smoke and macOS custody tests run in CI before ready or merge.
 
 See [Local web development](#local-web-development) for platform-specific
 backend/frontend startup and [Production-style build](frontend/README.md#production-style-build)

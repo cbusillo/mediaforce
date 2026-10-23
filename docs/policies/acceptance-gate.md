@@ -6,7 +6,7 @@ We do not stop at "it works." We stop when we fully like the result.
 
 - We should 100% love the code we are about to commit
 - Remove code smells, bad practices, stale naming, and obvious design issues
-- Run the full available test suite before commits or ending a session
+- Follow the [local/CI test selection](../style/testing.md) before commits or ending a session
 - Run browser validation for UI changes; for primary user surfaces, read
   `docs/style/workstation-ui.md` together with `docs/style/frontend.md`
 - Use `docs/development/browser-qa-matrix.md` for route, fixture, and narrow
@@ -16,11 +16,13 @@ We do not stop at "it works." We stop when we fully like the result.
 
 ## Minimum checklist
 
-- Backend tests pass
-- Frontend checks, lint, unit tests, and build pass
+Local checks apply before committing. CI checks apply before ready or merge.
+
+- Focused local tests and complete affected safety modules pass
+- Frontend checks, lint, and build pass; full backend/frontend tests pass in CI
 - CLI smoke passes
-- Web route smoke passes (`npm --prefix frontend run smoke:web`)
-- `bash scripts/pre-commit-check.sh` runs the whole local gate in one step
+- The complete web route smoke passes in CI; local UI review covers changed routes at desktop width and 390px
+- `bash scripts/pre-commit-check.sh` runs static checks and CLI smoke; select local tests separately
 - Package-sensitive changes pass `uv build` and
   `scripts/verify_package_contents.py`
 - Docs are updated when behavior, workflow, operations, or user-facing
