@@ -37,8 +37,8 @@ in an `AGENTS.md` too.
   web server is running; enable it intentionally when needed.
 - Before changing primary user surfaces, read
   `docs/style/workstation-ui.md` together with `docs/style/frontend.md`
-- For browser exploration by subagents, explicitly use the `browser-ui-review`
-  skill and follow `docs/development/browser-review-guidance.md`.
+- For browser exploration by subagents, follow
+  `docs/development/browser-review-guidance.md`.
 - Follow `docs/style/index.md` plus
   `docs/policies/coding-standards.md`
 - Before commits or ending a session, satisfy

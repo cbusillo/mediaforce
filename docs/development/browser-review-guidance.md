@@ -13,8 +13,8 @@ visual and interaction judgment on top of that automated matrix, not replace it.
   before the full critique: open the page, wait for a known selector, capture a
   screenshot, and confirm the page title/URL.
 - Launch browser-review subagents with permission to write screenshots to a
-  folder outside the checkout, such as the session scratchpad, and explicitly
-  mention the `browser-ui-review` skill in the task prompt. Ignored files left in
+  folder outside the checkout, such as the session scratchpad, and tell them to
+  use the harness's own browser tools. Ignored files left in
   the checkout keep a finished worktree from being retired.
 - The prompt should require this exact order:
   1. open the live page in a browser
