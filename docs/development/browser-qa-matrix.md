@@ -183,8 +183,10 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   reloads `/`, `/folders`, `/movies`, `/other`, `/ops`, and `/completed`.
 
 Seeded rows use `last_scan_id = web-smoke-fixtures` and are replaced on each
-managed smoke run. Runtime state remains under `state/web-smoke/` and
-`scratch/web-smoke/`.
+managed smoke run. The managed smoke keeps its config copy, runtime state, fake
+media and screenshots outside the checkout, in one folder per checkout under
+`$TMPDIR/mediaforce-web-smoke/`, or in `MEDIAFORCE_WEB_SMOKE_ROOT` when set. A
+passing run prints the folder.
 
 ## Activity Work-State Matrix
 
@@ -285,8 +287,8 @@ The automated narrow smoke uses a 390px viewport and fails when:
 - a visible table is wider than the viewport.
 
 Those checks are intentionally short and mechanical. For visual redesign or
-interaction work, add a manual browser review with screenshots under
-`scratch/ui-checks/` and inspect the actual starting viewport, post-interaction
+interaction work, add a manual browser review with screenshots saved outside the
+checkout and inspect the actual starting viewport, post-interaction
 state, and narrow layout.
 
 For saved-remake banner changes, add a manual TV workspace check with blocked
@@ -519,8 +521,8 @@ request and its reply, checks that polling does not duplicate incident warnings,
 them after a recovered response. Queue-first placement is measured within the
 workspace beneath global notices, while still requiring the queue in the first
 viewport. Fixture seeding clears only its own synthetic computers' prior outage
-history so repeated runs have the same initial state. Screenshots live in
-`scratch/ui-checks/`. These
+history so repeated runs have the same initial state. Screenshots live in the
+smoke folder's `ui-checks/`. These
 checks prove rendering and refresh behavior, not installed Keychain access.
 
 ### Saved sample coverage

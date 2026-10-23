@@ -12,14 +12,15 @@ visual and interaction judgment on top of that automated matrix, not replace it.
 - For the first browser-review subagent in a session, run a tiny smoke pass
   before the full critique: open the page, wait for a known selector, capture a
   screenshot, and confirm the page title/URL.
-- Launch browser-review subagents with permission to write screenshots under
-  `scratch/ui-checks/`, and explicitly mention the `browser-ui-review` skill in
-  the task prompt.
+- Launch browser-review subagents with permission to write screenshots to a
+  folder outside the checkout, such as the session scratchpad, and explicitly
+  mention the `browser-ui-review` skill in the task prompt. Ignored files left in
+  the checkout keep a finished worktree from being retired.
 - The prompt should require this exact order:
   1. open the live page in a browser
   2. wait for an app-specific ready selector
   3. interact enough to inspect the real UI state
-  4. capture at least one screenshot artifact under `scratch/ui-checks/`
+  4. capture at least one screenshot artifact in that folder
   5. report findings from the browser-visible result
 - The prompt should also require the result to begin with a one-line browser
   status: `Browser review succeeded` or `BROWSER BLOCKED`.
