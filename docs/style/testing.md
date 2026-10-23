@@ -6,18 +6,19 @@ Tests should prove the behavior that changed, not just exercise code paths.
 
 - Keep test work focused on behavioral proof, not nominal coverage.
 
-## Default checks
+## Local tests and CI
 
-- Backend: `uv run --with pytest pytest`
-- Frontend types: `cd frontend && npm run check`
-- Frontend lint: `cd frontend && npm run lint`
-- Frontend unit tests: `cd frontend && npm test`
-- Frontend build: `cd frontend && npm run build`
-- CLI smoke: `uv run mediaforce --help`
-- Web route smoke: `npm --prefix frontend run smoke:web`
-- Whole local gate: `bash scripts/pre-commit-check.sh`
+`.github/github.json` `qualityGate` is the canonical command list. Follow the
+[local/CI test contract](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/config-schema.md#workflow-metadata).
+Replace `{test_paths}` in `test.local` with affected backend test paths, or in
+`test.frontendLocal` with affected paths relative to `frontend/`.
 
-`.github/github.json` `qualityGate` is the canonical command list.
+File-integrity and database-custody changes include the complete modules in
+`test.fileIntegrityMacos`; trace callers for other affected safety modules.
+Keep lint, types, inspection, build and applicable smoke checks alongside local
+tests. The pre-commit hook runs static checks and smokes; agents select local
+tests separately. CI runs `test.ci` for the complete backend/frontend suites,
+plus its macOS file-integrity lane, before ready or merge.
 
 ## Rules
 
@@ -26,7 +27,6 @@ must not assert or depend on.
 
 ## Expectations
 
-- Run the full available test suite before commits or ending a session
 - Add or update targeted tests when behavior changes
 - Use browser validation for UI work in addition to automated checks
 - Prefer the narrowest concrete acceptance check that proves the change

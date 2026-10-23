@@ -210,8 +210,11 @@ jobs:
           echo "Media tools installed in ${elapsed}s."
           echo "Media tools install: ${elapsed}s (cache hit: ${{ steps.media-tools-cache.outputs.cache-hit }})." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Run backend tests
-        run: uv run --with pytest pytest -q --durations=20
+      - name: Run complete backend and frontend tests
+        run: |
+          set -euo pipefail
+          test_command="$(jq -er '.qualityGate.test.ci | select(type == "string" and length > 0)' .github/github.json)"
+          bash -euo pipefail -c "$test_command"
 
       - name: Run CLI smoke
         run: uv run mediaforce --help
@@ -221,9 +224,6 @@ jobs:
 
       - name: Run frontend lint
         run: npm --prefix frontend run lint
-
-      - name: Run frontend unit tests
-        run: npm --prefix frontend test
 
       - name: Build frontend
         run: npm --prefix frontend run build
