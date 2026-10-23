@@ -25,9 +25,6 @@ const smokeRoot = path.resolve(
     ),
 );
 const screenshotDir = path.join(smokeRoot, "ui-checks");
-// Some media paths, such as the staging root, resolve against the working directory
-// rather than the config, so the seeder and server run from the folder that holds it.
-const smokeCwd = smokeRoot;
 const require = createRequire(path.join(rootDir, "frontend", "package.json"));
 const { chromium, expect } = require("@playwright/test");
 
@@ -561,7 +558,6 @@ async function seedSmokeFixtures(configPath, profile = "default") {
       profile,
     ],
     {
-      cwd: smokeCwd,
       timeout: 15000,
       maxBuffer: 1024 * 1024,
     },
@@ -655,7 +651,6 @@ async function startServer(configPath) {
       "--no-reload",
     ],
     {
-      cwd: smokeCwd,
       env: {
         ...process.env,
         MEDIAFORCE_WEB_RELOAD: "0",

@@ -1,3 +1,4 @@
+import contextlib
 import json
 import tempfile
 import shlex
@@ -11,7 +12,7 @@ from unittest.mock import Mock, patch
 
 from sqlalchemy import select, update
 
-from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.core.config import ConfigPaths, MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import calibration_jobs, encode_jobs, item_events, library_items, run_manifests, staged_artifacts
 from mediaforce.library.staged_integrity import (
@@ -110,6 +111,71 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertEqual(len(shown_details), 3)
         for detail in shown_details:
             self.assertNotRegex(detail, r"(?i)\b(promot\w*|tracked|staged|artifact|machine validation)\b")
+
+    def test_relative_media_paths_mean_the_same_folders_from_any_working_directory(self) -> None:
+        config_path = self.root / "config" / "mediaforce.toml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            '[state]\n'
+            'db_path = "state/library.sqlite3"\n'
+            'run_manifest_dir = "state/runs"\n'
+            '[media]\n'
+            'staging_root = "staging"\n'
+            'archive_root = "archive"\n'
+            'output_container = "mkv"\n'
+            '[media.source_roots]\n'
+            'tv = "source/tv"\n'
+            '[[media.libraries]]\n'
+            'key = "tv"\n'
+            'path = "source/tv"\n'
+            'type = "tv"\n'
+            '[[remote_hosts]]\n'
+            'key = "remote-a"\n'
+            'staging_root = "remote-staging"\n'
+            'archive_root = "remote-archive"\n'
+            '[remote_hosts.source_roots]\n'
+            'tv = "remote-source/tv"\n'
+        )
+        rel_path = "tv/Show/Season 1/Episode.mkv"
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+
+        def observe(working_directory: Path) -> dict[str, object]:
+            with contextlib.chdir(working_directory):
+                config = load_config(config_path)
+                remote_host = config.remote_hosts[0]
+                with open_db(config.paths.db_path) as connection:
+                    report = staged_integrity_report(connection, config, "tv/Show/Season 1", discover=True)
+                return {
+                    "staging_root": config.staging_root,
+                    "archive_root": config.archive_root,
+                    "source_roots": config.source_root_map,
+                    "scan_source_roots": config.scan_source_root_map,
+                    "local_staging_root": config.staging_root_for_host(None),
+                    "local_archive_root": config.archive_root_for_host(None),
+                    "remote_staging_root": config.staging_root_for_host(remote_host),
+                    "remote_archive_root": config.archive_root_for_host(remote_host),
+                    "remote_source_roots": config.explicit_source_root_map_for_host(remote_host),
+                    "verdicts": [(record.rel_path, record.disposition) for record in report.records],
+                }
+
+        config = load_config(config_path)
+        with open_db(config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, rel_path, status="validated")
+            stage = self._write_stage(rel_path, b"staged")
+            self._insert_artifact(connection, item_id, stage, passed=True)
+
+        from_project_root = observe(self.root)
+        from_elsewhere = observe(elsewhere)
+
+        self.assertEqual(from_project_root, from_elsewhere)
+        self.assertEqual(from_elsewhere["verdicts"], [(rel_path, "promotable")])
+        self.assertEqual(from_elsewhere["staging_root"], config.paths.project_root / "staging")
+        self.assertEqual(from_elsewhere["source_roots"], {"tv": config.paths.project_root / "source/tv"})
+        # A remote computer's folders are its own; the controller never anchors them locally.
+        self.assertFalse(Path(str(from_elsewhere["remote_staging_root"])).is_absolute())
+        self.assertFalse(Path(str(from_elsewhere["remote_archive_root"])).is_absolute())
+        self.assertFalse(any(path.is_absolute() for path in dict(from_elsewhere["remote_source_roots"]).values()))
 
     @staticmethod
     def _held_validation(*, other_failure: str | None = None) -> str:
