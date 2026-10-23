@@ -46,9 +46,6 @@
       "cli": "uv run mediaforce --help",
       "web": "npm --prefix frontend run smoke:web"
     },
-    "acceptance": {
-      "default": "bash scripts/pre-commit-check.sh"
-    },
     "inspection": {
       "scopePreference": ["changed_files", "directory", "whole_project"],
       "profile": "Mediaforce",

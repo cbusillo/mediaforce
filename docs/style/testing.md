@@ -10,7 +10,7 @@ Tests should prove the behavior that changed, not just exercise code paths.
 
 `.github/github.json` `qualityGate` is the canonical command list. Follow the
 [local/CI test contract](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/config-schema.md#workflow-metadata).
-Replace `{test_paths}` in `test.local` with affected backend test paths, or in
+Replace `{test_paths}` with a nonempty selection in `test.local` for backend paths, or in
 `test.frontendLocal` with affected paths relative to `frontend/`.
 
 File-integrity and database-custody changes include the complete modules in
@@ -19,7 +19,8 @@ Keep lint, types, inspection, build and applicable smoke checks alongside local
 tests. The pre-commit hook runs static checks and CLI smoke; agents select local
 tests separately. CI runs `test.ci` for the complete backend/frontend suites,
 the complete web route smoke and its macOS file-integrity lane before ready or
-merge. UI changes use the focused browser coverage in the browser QA matrix.
+merge. Local UI checks exercise the changed routes and fixture states in a
+headless real browser at desktop width and 390px; see the browser QA matrix.
 
 ## Rules
 

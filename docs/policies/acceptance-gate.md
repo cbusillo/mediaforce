@@ -16,10 +16,12 @@ We do not stop at "it works." We stop when we fully like the result.
 
 ## Minimum checklist
 
+Local checks apply before committing. CI checks apply before ready or merge.
+
 - Focused local tests and complete affected safety modules pass
 - Frontend checks, lint, and build pass; full backend/frontend tests pass in CI
 - CLI smoke passes
-- The complete web route smoke passes in CI; UI changes get focused local browser checks
+- The complete web route smoke passes in CI; local UI review covers changed routes at desktop width and 390px
 - `bash scripts/pre-commit-check.sh` runs static checks and CLI smoke; select local tests separately
 - Package-sensitive changes pass `uv build` and
   `scripts/verify_package_contents.py`
