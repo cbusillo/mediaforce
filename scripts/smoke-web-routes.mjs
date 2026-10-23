@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
 import { execFile as execFileCallback, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import net from "node:net";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
+import { copyFile, mkdir, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -12,6 +14,20 @@ const rootDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
+// Managed smoke state and screenshots live outside the checkout, one folder per
+// checkout, so a finished worktree holds nothing that blocks its retirement.
+const smokeRoot = path.resolve(
+  process.env.MEDIAFORCE_WEB_SMOKE_ROOT ||
+    path.join(
+      os.tmpdir(),
+      "mediaforce-web-smoke",
+      createHash("sha256").update(rootDir).digest("hex").slice(0, 12),
+    ),
+);
+const screenshotDir = path.join(smokeRoot, "ui-checks");
+// Some media paths, such as the staging root, resolve against the working directory
+// rather than the config, so the seeder and server run from the folder that holds it.
+const smokeCwd = smokeRoot;
 const require = createRequire(path.join(rootDir, "frontend", "package.json"));
 const { chromium, expect } = require("@playwright/test");
 
@@ -133,7 +149,6 @@ async function checkMultiFileRemake(baseUrl, timeoutMs) {
       if (await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)) {
         throw new Error("Multi-file remake overflows the viewport.");
       }
-      const screenshotDir = path.join(rootDir, "scratch/ui-checks");
       await mkdir(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `multi-file-remake-${viewport.width}.png`) });
       records = originalRecords;
@@ -420,7 +435,7 @@ const routeChecks = [
 function parseArgs(argv) {
   const parsed = {
     baseUrl: "",
-    config: path.join(rootDir, "config", "web-smoke.toml"),
+    config: path.join(smokeRoot, "config", "web-smoke.toml"),
     endpointTimeoutMs: DEFAULT_ENDPOINT_TIMEOUT_MS,
     routeTimeoutMs: DEFAULT_ROUTE_TIMEOUT_MS,
     seedFixtures: null,
@@ -481,7 +496,27 @@ async function freePort() {
   });
 }
 
+async function linkFrontend() {
+  const link = path.join(smokeRoot, "frontend");
+  const target = path.join(rootDir, "frontend");
+  try {
+    if ((await readlink(link)) === target) return;
+    await rm(link);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  await symlink(target, link);
+}
+
 async function prepareSmokeState() {
+  // The config resolves its relative paths and the frontend build from the folder
+  // above it, so this copy moves every smoke path under smokeRoot.
+  await mkdir(path.join(smokeRoot, "config"), { recursive: true });
+  await copyFile(
+    path.join(rootDir, "config", "web-smoke.toml"),
+    path.join(smokeRoot, "config", "web-smoke.toml"),
+  );
+  await linkFrontend();
   const paths = [
     ["scratch", "web-smoke", "source", "movies"],
     ["scratch", "web-smoke", "source", "tv"],
@@ -492,7 +527,7 @@ async function prepareSmokeState() {
   ];
   await Promise.all(
     paths.map((parts) =>
-      mkdir(path.join(rootDir, ...parts), { recursive: true }),
+      mkdir(path.join(smokeRoot, ...parts), { recursive: true }),
     ),
   );
 }
@@ -516,15 +551,17 @@ async function seedSmokeFixtures(configPath, profile = "default") {
     "uv",
     [
       "run",
+      "--project",
+      rootDir,
       "python",
-      "scripts/seed-web-smoke-fixtures.py",
+      path.join(rootDir, "scripts", "seed-web-smoke-fixtures.py"),
       "--config",
       configPath,
       "--profile",
       profile,
     ],
     {
-      cwd: rootDir,
+      cwd: smokeCwd,
       timeout: 15000,
       maxBuffer: 1024 * 1024,
     },
@@ -606,6 +643,8 @@ async function startServer(configPath) {
     "uv",
     [
       "run",
+      "--project",
+      rootDir,
       "mediaforce-web",
       "--config",
       configPath,
@@ -616,7 +655,7 @@ async function startServer(configPath) {
       "--no-reload",
     ],
     {
-      cwd: rootDir,
+      cwd: smokeCwd,
       env: {
         ...process.env,
         MEDIAFORCE_WEB_RELOAD: "0",
@@ -2422,7 +2461,7 @@ async function checkUnderTargetSampleRecovery(baseUrl, timeoutMs) {
     await expect(
       page.getByRole("button", { name: "Keep this version", exact: true }),
     ).toHaveCount(0);
-    const outputDir = path.join(rootDir, "scratch", "web-review");
+    const outputDir = process.env.MEDIAFORCE_WEB_REVIEW_ARTIFACTS || screenshotDir;
     await mkdir(outputDir, { recursive: true });
     await page.screenshot({
       path: path.join(outputDir, "591-recovery-wide.png"),
@@ -2569,7 +2608,7 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
         }
         if (waitingCount === 10) {
           await schedule.scrollIntoViewIfNeeded();
-          const directory = path.join(rootDir, "scratch", "ui-checks");
+          const directory = screenshotDir;
           await mkdir(directory, { recursive: true });
           await page.screenshot({
             path: path.join(directory, `731-work-windows-${width}.png`),
@@ -2588,9 +2627,8 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
       await expect(computers.locator(".host-row").filter({ hasText: "Working" })).toHaveCount(1);
       await expect(computers.locator(".host-row").filter({ hasText: "Off schedule" })).not.toHaveCount(0);
       await computers.scrollIntoViewIfNeeded();
-      const screenshots = path.join(rootDir, "scratch/ui-checks");
-      await mkdir(screenshots, { recursive: true });
-      await page.screenshot({ path: path.join(screenshots, `computer-connections-${width}.png`) });
+      await mkdir(screenshotDir, { recursive: true });
+      await page.screenshot({ path: path.join(screenshotDir, `computer-connections-${width}.png`) });
       mixedFleet = false;
       waitingCount = 10;
       for (queuedShow of [false, true]) {
@@ -2617,7 +2655,7 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
           );
         }
         console.log(`Activity resolved font families at ${width}px: ${JSON.stringify(fonts)}`);
-        const directory = path.join(rootDir, "scratch", "ui-checks");
+        const directory = screenshotDir;
         await mkdir(directory, { recursive: true });
         await page.screenshot({
           path: path.join(directory, `756-${queuedShow ? "queued" : "fallback"}-${width}.png`),
@@ -2642,7 +2680,7 @@ async function checkActivityWorkWindows(baseUrl, timeoutMs) {
         page.getByText(/^\d+ (file is|files are) waiting for a work window$/),
       ).toHaveCount(0);
       await pausedSchedule.scrollIntoViewIfNeeded();
-      const pausedDirectory = path.join(rootDir, "scratch", "ui-checks");
+      const pausedDirectory = screenshotDir;
       await mkdir(pausedDirectory, { recursive: true });
       await page.screenshot({
         path: path.join(
@@ -4174,7 +4212,6 @@ async function checkRecoveryAlerts(baseUrl, timeoutMs) {
       if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) {
         throw new Error("Recovery warning overflows the page");
       }
-      const screenshotDir = path.join(rootDir, "scratch/ui-checks");
       await mkdir(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `recovery-alerts-${viewport.width}.png`) });
       alerts = [];
@@ -4236,7 +4273,6 @@ async function checkSampleHistory(baseUrl, timeoutMs) {
       if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) {
         throw new Error("Sample history overflows the page");
       }
-      const screenshotDir = path.join(rootDir, "scratch/ui-checks");
       await mkdir(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `sample-history-${viewport.width}.png`) });
       await history.locator("summary").click();
@@ -4382,6 +4418,7 @@ async function main() {
       );
     }
     console.log(`web route smoke passed: ${targetUrl}`);
+    console.log(`smoke state and screenshots: ${smokeRoot}`);
   } catch (error) {
     if (managedServer) {
       const logs = managedServer.logs();
