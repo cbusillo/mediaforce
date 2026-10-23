@@ -168,11 +168,11 @@ class MediaforceConfig:
     def configured_source_root_map(self) -> dict[str, Path]:
         if isinstance(self.media.get("libraries"), list):
             return {
-                str(definition["key"]): Path(str(definition["path"])).expanduser()
+                str(definition["key"]): self.local_media_path(str(definition["path"]))
                 for definition in self.library_definitions
             }
         return {
-            key: Path(value).expanduser()
+            key: self.local_media_path(value)
             for key, value in self.media["source_roots"].items()
         }
 
@@ -236,9 +236,13 @@ class MediaforceConfig:
             resolved[key_text] = Path(path_text).expanduser()
         return resolved
 
+    def local_media_path(self, value: str) -> Path:
+        """Resolve a controller-side media path the way [state] paths resolve: against the project root."""
+        return _resolve_path(self.paths.project_root, value)
+
     @property
     def staging_root(self) -> Path:
-        return Path(self.media["staging_root"]).expanduser()
+        return self.local_media_path(self.media["staging_root"])
 
     def staging_root_for_host(self, host: dict[str, Any] | None = None) -> Path:
         if not isinstance(host, dict):
@@ -250,7 +254,7 @@ class MediaforceConfig:
 
     @property
     def archive_root(self) -> Path:
-        return Path(self.media["archive_root"]).expanduser()
+        return self.local_media_path(self.media["archive_root"])
 
     def archive_root_for_host(self, host: dict[str, Any] | None = None) -> Path:
         if not isinstance(host, dict):

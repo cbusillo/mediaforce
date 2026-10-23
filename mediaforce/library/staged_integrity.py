@@ -475,9 +475,10 @@ class _StagingRoot:
 
 def _configured_staging_roots(config: MediaforceConfig) -> tuple[_StagingRoot, ...]:
     configured_root = str(config.media.get("staging_root") or "").strip()
-    roots = [_StagingRoot(_normalized_path(configured_root), remote=False)] if configured_root else []
+    roots = [_StagingRoot(_normalized_path(config.staging_root), remote=False)] if configured_root else []
     for host in config.remote_hosts:
-        configured_host_root = str(host.get("staging_root") or configured_root).strip()
+        # A host without its own staging root shares the controller's, which is already listed.
+        configured_host_root = str(host.get("staging_root") or "").strip()
         if not configured_host_root:
             continue
         host_root = _normalized_path(configured_host_root)

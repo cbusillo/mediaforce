@@ -167,10 +167,6 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def _resolve_under_project(project_root: Path, value: Path) -> Path:
-    return value if value.is_absolute() else (project_root / value).resolve()
-
-
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
@@ -258,9 +254,7 @@ def _library_item(
     height: int | None = 1080,
 ) -> dict[str, Any]:
     timestamp = (datetime.now(UTC) - timedelta(days=age_days)).isoformat(timespec="seconds")
-    source_path = _resolve_under_project(
-        project_root, Path("scratch/web-smoke/source") / rel_path
-    )
+    source_path = (project_root / "scratch/web-smoke/source" / rel_path).resolve()
     return {
         "source_path": str(source_path),
         "rel_path": rel_path,
@@ -1118,8 +1112,8 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
     fixture_now = datetime.now(UTC)
     schedule_closes_at = _seed_schedule_settings(config, fixture_now)
     project_root = config.paths.project_root
-    archive_root = _resolve_under_project(project_root, config.archive_root)
-    staging_root = _resolve_under_project(project_root, config.staging_root)
+    archive_root = config.archive_root
+    staging_root = config.staging_root
     archive_root.mkdir(parents=True, exist_ok=True)
     staging_root.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(staging_root / PARTIAL_PROMOTION_PREFIX, ignore_errors=True)
