@@ -19,8 +19,8 @@ We do not stop at "it works." We stop when we fully like the result.
 - Focused local tests and complete affected safety modules pass
 - Frontend checks, lint, and build pass; full backend/frontend tests pass in CI
 - CLI smoke passes
-- Web route smoke passes (`npm --prefix frontend run smoke:web`)
-- `bash scripts/pre-commit-check.sh` runs static checks and smokes; select local tests separately
+- The complete web route smoke passes in CI; UI changes get focused local browser checks
+- `bash scripts/pre-commit-check.sh` runs static checks and CLI smoke; select local tests separately
 - Package-sensitive changes pass `uv build` and
   `scripts/verify_package_contents.py`
 - Docs are updated when behavior, workflow, operations, or user-facing

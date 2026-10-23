@@ -16,9 +16,10 @@ Replace `{test_paths}` in `test.local` with affected backend test paths, or in
 File-integrity and database-custody changes include the complete modules in
 `test.fileIntegrityMacos`; trace callers for other affected safety modules.
 Keep lint, types, inspection, build and applicable smoke checks alongside local
-tests. The pre-commit hook runs static checks and smokes; agents select local
+tests. The pre-commit hook runs static checks and CLI smoke; agents select local
 tests separately. CI runs `test.ci` for the complete backend/frontend suites,
-plus its macOS file-integrity lane, before ready or merge.
+the complete web route smoke and its macOS file-integrity lane before ready or
+merge. UI changes use the focused browser coverage in the browser QA matrix.
 
 ## Rules
 

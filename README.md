@@ -639,9 +639,9 @@ git config core.hooksPath .githooks
 ```
 
 That pre-commit hook runs `scripts/pre-commit-check.sh` for static checks and
-smokes. Select focused local tests through
+CLI smoke. Select focused local tests through
 [the testing guide](docs/style/testing.md); the complete backend/frontend
-suites and macOS custody tests run in CI before ready or merge.
+suites, full web route smoke and macOS custody tests run in CI before ready or merge.
 
 See [Local web development](#local-web-development) for platform-specific
 backend/frontend startup and [Production-style build](frontend/README.md#production-style-build)
