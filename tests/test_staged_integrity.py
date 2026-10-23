@@ -24,12 +24,14 @@ from mediaforce.library.staged_integrity import (
 )
 from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK, FINAL_SIZE_GOAL_CHECK, partial_output_path
 from mediaforce.execution import PromotionResult
+from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
     production_approval_matches
 from mediaforce.web.runtime import folder_actions, size_held
 from mediaforce.web.runtime.size_held import decide_size_held_file, staged_remake_records
+from mediaforce.web.settings_runtime import settings_transcode_root_value
 
 
 class StagedIntegrityTests(unittest.TestCase):
@@ -135,6 +137,8 @@ class StagedIntegrityTests(unittest.TestCase):
             'archive_root = "remote-archive"\n'
             '[remote_hosts.source_roots]\n'
             'tv = "remote-source/tv"\n'
+            '[[remote_hosts]]\n'
+            'key = "remote-b"\n'
         )
         rel_path = "tv/Show/Season 1/Episode.mkv"
         elsewhere = self.root / "elsewhere"
@@ -143,7 +147,7 @@ class StagedIntegrityTests(unittest.TestCase):
         def observe(working_directory: Path) -> dict[str, object]:
             with contextlib.chdir(working_directory):
                 config = load_config(config_path)
-                remote_host = config.remote_hosts[0]
+                remote_host, inheriting_host = config.remote_hosts
                 with open_db(config.paths.db_path) as connection:
                     report = staged_integrity_report(connection, config, "tv/Show/Season 1", discover=True)
                 return {
@@ -156,6 +160,11 @@ class StagedIntegrityTests(unittest.TestCase):
                     "remote_staging_root": config.staging_root_for_host(remote_host),
                     "remote_archive_root": config.archive_root_for_host(remote_host),
                     "remote_source_roots": config.explicit_source_root_map_for_host(remote_host),
+                    "inherited_staging_root": config.staging_root_for_host(inheriting_host),
+                    "inherited_archive_root": config.archive_root_for_host(inheriting_host),
+                    "archive_cleanup": archive_cleanup_summary(
+                        config, transcode_root=settings_transcode_root_value(config)
+                    ),
                     "verdicts": [(record.rel_path, record.disposition) for record in report.records],
                 }
 
@@ -164,6 +173,9 @@ class StagedIntegrityTests(unittest.TestCase):
             item_id = self._insert_item(connection, rel_path, status="validated")
             stage = self._write_stage(rel_path, b"staged")
             self._insert_artifact(connection, item_id, stage, passed=True)
+        kept_original = self.root / "staging" / "_replaced" / rel_path
+        kept_original.parent.mkdir(parents=True)
+        kept_original.write_bytes(b"original")
 
         from_project_root = observe(self.root)
         from_elsewhere = observe(elsewhere)
@@ -172,6 +184,10 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertEqual(from_elsewhere["verdicts"], [(rel_path, "promotable")])
         self.assertEqual(from_elsewhere["staging_root"], config.paths.project_root / "staging")
         self.assertEqual(from_elsewhere["source_roots"], {"tv": config.paths.project_root / "source/tv"})
+        self.assertEqual(dict(from_elsewhere["archive_cleanup"])["file_count"], 1)
+        # A host without folders of its own uses the controller's.
+        self.assertEqual(from_elsewhere["inherited_staging_root"], from_elsewhere["staging_root"])
+        self.assertEqual(from_elsewhere["inherited_archive_root"], from_elsewhere["archive_root"])
         # A remote computer's folders are its own; the controller never anchors them locally.
         self.assertFalse(Path(str(from_elsewhere["remote_staging_root"])).is_absolute())
         self.assertFalse(Path(str(from_elsewhere["remote_archive_root"])).is_absolute())

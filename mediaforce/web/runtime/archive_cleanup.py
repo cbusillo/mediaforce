@@ -128,7 +128,7 @@ def _clear_archive_cleanup_action(
 
 def _archive_root_for_cleanup(config: MediaforceConfig, *, transcode_root: str | None = None) -> Path | None:
     if transcode_root is not None and transcode_root.strip():
-        return Path(settings_archive_root(transcode_root)).expanduser()
+        return config.local_media_path(settings_archive_root(transcode_root))
     try:
         return config.archive_root
     except KeyError:
