@@ -1,6 +1,8 @@
 # Browser QA Matrix
 
-Use this matrix when signing off user-facing UI work. The goal is to prove
+The complete managed matrix runs in CI. For local UI review, use a headless
+real browser to exercise the changed routes and relevant fixture states at
+desktop width and 390px. The goal is to prove
 the app fully loads and remains usable across route and workflow states, not just
 that a single live machine state happens to render.
 
@@ -220,7 +222,7 @@ real browser at desktop and 390px widths:
 
 ## Required Route Coverage
 
-Every browser QA pass should cover these routes:
+The complete CI browser smoke covers these routes:
 
 - `/`: TV library (shows, seasons, savings, and selection detail).
 - `/folders`: compatibility alias that renders the TV library.
