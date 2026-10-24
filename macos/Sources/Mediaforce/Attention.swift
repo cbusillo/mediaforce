@@ -8,7 +8,6 @@ struct AttentionNotice: Equatable, Sendable {
 
 struct AttentionMemory: Codable, Equatable, Sendable {
     var lastFinishedAt = ""
-    var finishedCount = 0
     var waiting: Set<String> = []
     var backupCount = 0
 }
@@ -25,7 +24,6 @@ struct Attention: Equatable, Sendable {
         let waiting = waitingNotices(facts)
         let memory = AttentionMemory(
             lastFinishedAt: ([remembered?.lastFinishedAt ?? ""] + facts.recentlyFinishedSeasons.compactMap(\.finishedAt)).max() ?? "",
-            finishedCount: facts.spaceSaved.seasonCount,
             waiting: Set(waiting.map(\.id)),
             backupCount: facts.originalBackups.count
         )
@@ -47,23 +45,22 @@ struct Attention: Equatable, Sendable {
     }
 
     private static func finishedNotices(_ facts: MainWindowFacts, since remembered: AttentionMemory) -> [AttentionNotice] {
-        let newlyFinished = facts.spaceSaved.seasonCount - remembered.finishedCount
-        guard newlyFinished > 0 else { return [] }
-        let named = facts.recentlyFinishedSeasons.filter { ($0.finishedAt ?? "") > remembered.lastFinishedAt }
-        guard newlyFinished <= mostSeasonsNamedSeparately, named.count >= newlyFinished else {
-            return [AttentionNotice(
-                id: "finished:\(newlyFinished)",
-                title: "\(Words.count(newlyFinished, "season")) finished",
-                body: "See Finished lately in Mediaforce for what was saved."
-            )]
+        let newlyFinished = facts.recentlyFinishedSeasons.filter { ($0.finishedAt ?? "") > remembered.lastFinishedAt }
+        guard newlyFinished.count > mostSeasonsNamedSeparately else {
+            return newlyFinished.map { season in
+                AttentionNotice(
+                    id: "finished:\(season.prefix)",
+                    title: "\(Words.season(season.show, season.season)) is finished",
+                    body: "\(Words.count(season.episodeCount, "episode")) compressed, checked and replaced. \(Words.size(season.bytesSaved)) saved."
+                )
+            }
         }
-        return named.prefix(newlyFinished).map { season in
-            AttentionNotice(
-                id: "finished:\(season.prefix)",
-                title: "\(Words.season(season.show, season.season)) is finished",
-                body: "\(Words.count(season.episodeCount, "episode")) compressed, checked and replaced. \(Words.size(season.bytesSaved)) saved."
-            )
-        }
+        let mayHaveMore = newlyFinished.count == facts.recentlyFinishedSeasons.count
+        return [AttentionNotice(
+            id: "finished:\(newlyFinished.count)",
+            title: mayHaveMore ? "At least \(newlyFinished.count) seasons finished" : "\(newlyFinished.count) seasons finished",
+            body: "See Finished lately in Mediaforce for what was saved."
+        )]
     }
 
     private static func waitingNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {

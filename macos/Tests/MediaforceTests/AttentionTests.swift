@@ -10,7 +10,6 @@ final class AttentionTests: XCTestCase {
 
     private func facts(
         finished: [Finished] = [],
-        seasonCount: Int? = nil,
         waitingSamples: [(prefix: String, state: String, action: String)] = [],
         computers: [(key: String, state: String)] = [],
         backups: Int = 0
@@ -30,7 +29,7 @@ final class AttentionTests: XCTestCase {
          "library": {"tv": {"show_count": 0, "season_count": 0, "episode_count": 0, "total_bytes": 0, "original_bytes": 0},
                      "movies": {"title_count": 0, "total_bytes": 0, "original_bytes": 0},
                      "other": {"item_count": 0, "total_bytes": 0, "original_bytes": 0}},
-         "space_saved": {"bytes": 0, "item_count": 0, "episode_count": 0, "season_count": \(seasonCount ?? finished.count)},
+         "space_saved": {"bytes": 0, "item_count": 0, "episode_count": 0, "season_count": \(finished.count)},
          "recently_finished_seasons": [\(finishedJSON.joined(separator: ","))],
          "biggest_not_started": [],
          "samples": {"waiting_on_you": [\(samplesJSON.joined(separator: ","))], "approved_not_started": []},
@@ -73,19 +72,28 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(first.badgeCount, 3)
     }
 
-    func testManySeasonsFinishedWhileClosedNotifyOnceWithTheirTrueCount() throws {
+    func testManySeasonsFinishedWhileClosedNotifyOnce() throws {
         let before = Attention.review(try facts(finished: [older]), remembered: nil).memory
         let visible = (1...12).map { Finished(prefix: "tv/F/Season \($0 + 10)", at: "2026-10-23T00:00:\(String(format: "%02d", $0))+00:00") }
 
-        let attention = Attention.review(try facts(finished: visible, seasonCount: 14), remembered: before)
+        let allNew = Attention.review(try facts(finished: visible), remembered: before)
+        let someNew = Attention.review(try facts(finished: Array(visible.suffix(4)) + [older]), remembered: before)
 
-        XCTAssertEqual(attention.notices.map(\.title), ["13 seasons finished"])
+        XCTAssertEqual(allNew.notices.map(\.title), ["At least 12 seasons finished"])
+        XCTAssertEqual(someNew.notices.map(\.title), ["4 seasons finished"])
     }
 
-    func testAnOlderSeasonMovingIntoTheListDoesNotNotify() throws {
-        let shown = Attention.review(try facts(finished: [newer], seasonCount: 2), remembered: AttentionMemory())
-        let afterRemoval = Attention.review(try facts(finished: [newer, older], seasonCount: 2), remembered: shown.memory)
-        XCTAssertEqual(afterRemoval.notices, [])
+    func testSeasonsThatComeBackOrMoveIntoTheListDoNotNotify() throws {
+        let shown = Attention.review(try facts(finished: [newer]), remembered: AttentionMemory())
+        let gone = Attention.review(try facts(), remembered: shown.memory)
+        let back = Attention.review(try facts(finished: [newer, older]), remembered: gone.memory)
+        XCTAssertEqual(back.notices, [])
+    }
+
+    func testANewFinishIsAnnouncedEvenWhenAnotherSeasonLeftTheLibrary() throws {
+        let shown = Attention.review(try facts(finished: [older]), remembered: AttentionMemory())
+        let swapped = Attention.review(try facts(finished: [newer]), remembered: shown.memory)
+        XCTAssertEqual(swapped.notices.map(\.title), ["Futurama, Season 3 is finished"])
     }
 
     func testClearingAnItemClearsItsBadgeAndItCanNotifyAgainLater() throws {
