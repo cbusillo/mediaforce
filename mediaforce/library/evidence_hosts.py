@@ -12,7 +12,7 @@ from mediaforce.hosts.config import _host_priority, configured_remote_host_execu
 from mediaforce.hosts.types import FFMPEG_MISSING_ISSUE
 from mediaforce.remote import collect_host_statuses
 
-EVIDENCE_HOST_WAIT_REASON = "Waiting for an encode computer to measure this file."
+EVIDENCE_HOST_WAIT_REASON = "Waiting for a computer that can measure this file."
 _ENCODE_CAPABILITY = "encode_queue"
 
 

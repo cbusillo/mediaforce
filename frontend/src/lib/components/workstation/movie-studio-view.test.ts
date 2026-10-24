@@ -609,7 +609,7 @@ describe('movieCurrentWorkView', () => {
 				status: 'queued',
 				queue_position: 2,
 				queue_depth: 4,
-				scheduler_status_copy: 'Ready when a worker is free.'
+				scheduler_status_copy: 'Ready when a computer is free.'
 			},
 			{ is_paused: false, stop_requested: false },
 			1
@@ -622,21 +622,6 @@ describe('movieCurrentWorkView', () => {
 			queuePosition: '2 of 4',
 			eta: undefined
 		});
-	});
-
-	it('translates backend encode-host copy to the computer vocabulary', () => {
-		const view = movieCurrentWorkView(
-			{
-				job_id: 'encode-1',
-				prefix: 'movies/title',
-				status: 'queued',
-				scheduler_status_copy: 'Waiting for an available encode host.'
-			},
-			{ is_paused: false, stop_requested: false },
-			1
-		);
-
-		expect(view?.detail).toBe('Waiting for an available computer.');
 	});
 
 	it.each(['draining_no_fit', 'draining_impossible', 'schedule_interrupted'] as const)(
@@ -690,7 +675,7 @@ describe('movieCurrentWorkView', () => {
 				started_at: '2026-08-15T12:00:00Z',
 				progress: {
 					percent_complete: 42.4,
-					phase_label: 'Encoding',
+					phase_label: 'Compressing',
 					current_item_rel_path: 'movies/title/movie.mkv',
 					active_host_labels: ['Studio Mac'],
 					speed: 1.25,

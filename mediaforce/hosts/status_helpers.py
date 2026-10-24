@@ -257,6 +257,12 @@ def _status_from_paths(
     )
 
 
+SOURCE_ROOT_UNREADABLE_MESSAGE = "Can't read the media folder"
+STAGING_ROOT_UNWRITABLE_MESSAGE = "Can't write to its work folder"
+NEEDS_SETUP_MESSAGE = "Needs setup"
+FOLDERS_MISSING_MESSAGE = "Can't find its folders"
+
+
 def _host_message(
         *,
         available: bool,
@@ -282,12 +288,12 @@ def _host_message(
     if any(issue == SVT_AV1_REQUIRED_ISSUE for issue in issues):
         return "Install AV1 encoder support"
     if any(issue.startswith(SOURCE_ROOT_READ_MISSING_ISSUE) for issue in issues):
-        return "Source root not readable"
+        return SOURCE_ROOT_UNREADABLE_MESSAGE
     if any(issue.startswith(STAGING_ROOT_WRITE_MISSING_ISSUE) for issue in issues):
-        return "Staging root not writable"
+        return STAGING_ROOT_UNWRITABLE_MESSAGE
     if issues:
-        return "Needs remote setup"
-    return "Missing required paths"
+        return NEEDS_SETUP_MESSAGE
+    return FOLDERS_MISSING_MESSAGE
 
 
 def _should_retry_remote_status_exception(exc: Exception) -> bool:
@@ -623,6 +629,10 @@ def _ssh_access_must_be_fixed_first(status: HostStatus) -> bool:
 
 
 __all__ = [
+    "FOLDERS_MISSING_MESSAGE",
+    "NEEDS_SETUP_MESSAGE",
+    "SOURCE_ROOT_UNREADABLE_MESSAGE",
+    "STAGING_ROOT_UNWRITABLE_MESSAGE",
     "_classify_ssh_failure",
     "computer_check_failure_copy",
     "_command_output",

@@ -17,7 +17,7 @@ _HOST_STATUS_CACHE_VALUE: list[HostStatus] = []
 _HOST_STATUS_CACHE_REFRESH_FUTURE: Future[tuple[tuple[str, int, str, int, int], list[HostStatus]]] | None = None
 _HOST_STATUS_CACHE_TTL_SECONDS = 15.0
 _HOST_STATUS_CACHE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="host-status")
-_HOST_STATUS_PENDING_MESSAGE = "Checking host status..."
+_HOST_STATUS_PENDING_MESSAGE = "Checking this computer..."
 _LOCAL_HOST_STORAGE_SIGNATURE: object = None
 
 

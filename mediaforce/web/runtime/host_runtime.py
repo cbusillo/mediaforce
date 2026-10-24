@@ -34,7 +34,7 @@ def unavailable_host_error_message(status: HostStatus | None) -> str:
         return detail
     if status is not None and status.message:
         return status.message
-    return "Encode host is not available."
+    return "This computer isn't available."
 
 
 def lifecycle_command_error_detail(result: subprocess.CompletedProcess[str], default_message: str) -> str:
@@ -108,7 +108,7 @@ def host_runtime_rows(
         host_running_jobs = [job for job in running_jobs if str(job.get("host_key") or "") == status.key]
         active_probe_degraded = bool(active_encode_count > 0 and not probe_available and host_running_jobs)
         if active_probe_degraded:
-            active_reason = "status check deferred while encode is running"
+            active_reason = "checking again after the current compression"
         elif not status.available:
             active_reason = (
                 "shared storage is reconnecting in the background"
@@ -116,13 +116,13 @@ def host_runtime_rows(
                 else status.message
             )
         elif not encode_capable:
-            active_reason = "encode queue capability disabled"
+            active_reason = "not set up to compress"
         elif str(policy.get("mode") or "anytime") == "never":
-            active_reason = "encode queue disabled by schedule"
+            active_reason = "work schedule is off"
         elif not schedule_open:
             active_reason = ""
         elif active_encode_count >= max_parallel_encodes:
-            active_reason = "parallel encode slots are full"
+            active_reason = "already compressing as much as it can"
         else:
             active_reason = ""
         schedule_detail = str(policy["summary"])
@@ -137,7 +137,7 @@ def host_runtime_rows(
                 "probe_message": status.message,
                 "probe_issues": list(status.issues),
                 "available": True,
-                "message": "Encoding in progress; latest host check was deferred",
+                "message": "Compressing now; Mediaforce checks this computer again afterwards",
                 "issues": [],
             }
         else:
@@ -368,7 +368,7 @@ def _running_job_telemetry_summary(progress: dict[str, Any]) -> str:
     if progress_state == "quality_search":
         return phase_label or "Searching quality"
     if progress_state == "starting":
-        return phase_label or "Starting encode"
+        return phase_label or "Starting to compress"
     return phase_label
 
 

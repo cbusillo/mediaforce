@@ -1,6 +1,6 @@
 import type { HostRuntime, HostsPayload } from '$lib/api/types';
 
-export const HOST_STATUS_PENDING_MESSAGE = 'Checking host status...';
+export const HOST_STATUS_PENDING_MESSAGE = 'Checking this computer...';
 
 export type HostRuntimeBadgeState = {
 	tone: 'idle' | 'ready' | 'wait' | 'fail';

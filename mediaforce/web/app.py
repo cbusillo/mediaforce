@@ -3533,13 +3533,13 @@ def _calibration_job_badge(*, status: str, lane: str, error: Any) -> dict[str, s
         return {
             "label": "Proof running" if mode == "full" else "Sample running",
             "tone": "attention",
-            "detail": "Representative-file proof encode is active." if mode == "full" else "Sample calibration is active.",
+            "detail": "Compressing a whole file to check the result." if mode == "full" else "Making a sample now.",
         }
     if status == "queued":
         return {
             "label": "Proof queued" if mode == "full" else "Sample queued",
             "tone": "attention",
-            "detail": "Waiting for proof encode capacity." if mode == "full" else "Waiting for sample host capacity.",
+            "detail": "Waiting for a free computer.",
         }
     if status == "pending_review":
         return {"label": "Review pending", "tone": "attention", "detail": None}
