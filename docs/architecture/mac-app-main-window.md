@@ -63,3 +63,24 @@ status, and downloads the image once from TMDB's public image host, without
 the token, into `state.poster_dir`
 (`~/Library/Caches/mediaforce/posters` by default). The GET only reads that
 cache. A failed download is retried on the next sync.
+
+## Notifications and the Dock badge
+
+The app reads these facts every 30 seconds while it runs, even with its window
+closed, and asks the Director only by Mac notification and Dock badge:
+
+- a season finishing after the newest finish the app has already seen, so a
+  season that leaves the library and comes back stays quiet; more than three
+  at once arrive as one notification with the count;
+- something waiting on the Director: a sample ready to watch or needing to be
+  made again, a sample that needs a size decision, or a computer that needs its
+  password, Remote Login, or a trust check;
+- original backups becoming ready to delete (when their number rises).
+
+The Dock badge counts what waits on the Director: samples waiting, computers
+that need the Director, and one for original backups ready to delete. It clears
+as each item clears. Problems the Director cannot act on, such as shared
+storage being gone or a computer being off schedule, never notify. The first
+check after the app starts with no memory only records what it sees, so a new
+install does not announce the whole library. Opened from /Applications, the
+app registers itself to open at login.

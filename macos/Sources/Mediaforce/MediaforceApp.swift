@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct MediaforceApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var monitor = ServerMonitor(connection: ServerConnection(baseURL: ServerConnection.localServer))
 
     var body: some Scene {
