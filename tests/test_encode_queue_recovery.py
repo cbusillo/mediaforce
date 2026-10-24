@@ -7485,6 +7485,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                         rel_path=rel_path,
                         parent_dir=rel_path.rsplit("/", 1)[0],
                         status=status,
+                        # Older seasons rank first; both arrive together so only the opportunity differs.
+                        discovered_at="2026-01-01T00:00:00+00:00",
                     )
                 )
 
