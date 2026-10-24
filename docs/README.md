@@ -55,6 +55,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   acquisition guards, Plex/TMDB metadata, age ranking, and manifest provenance
 - `docs/architecture/typed-library-settings.md`: ordered typed roots,
   availability states, type-change compatibility, and credential boundaries
+- `docs/architecture/mac-app-main-window.md`: the Mac app's main-window facts
+  endpoint, its sections and state codes
 
 ## Design briefs
 

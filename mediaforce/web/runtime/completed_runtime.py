@@ -129,7 +129,7 @@ def list_completed_folders(
     ).mappings().fetchall()
 
     grouped: dict[str, CompletedFolder] = {}
-    confirmed_item_ids = _confirmed_originals_removed_item_ids(connection)
+    confirmed_item_ids = confirmed_originals_removed_item_ids(connection)
     resolved_archive_root = archive_root.resolve() if archive_root is not None else None
     counted_backup_paths: set[Path] = set()
     item_folder_prefixes: dict[int, str] = {}
@@ -264,7 +264,7 @@ def confirm_originals_removed_action(
         }
 
     resolved_archive_root = archive_root.resolve()
-    confirmed_item_ids = _confirmed_originals_removed_item_ids(connection)
+    confirmed_item_ids = confirmed_originals_removed_item_ids(connection)
     rows = connection.execute(
         select(
             library_items.c.id,
@@ -343,7 +343,7 @@ def record_deleted_original_backups(
     removed = {str(path) for path in removed_paths}
     if not removed:
         return 0
-    confirmed_item_ids = _confirmed_originals_removed_item_ids(connection)
+    confirmed_item_ids = confirmed_originals_removed_item_ids(connection)
     rows = connection.execute(
         select(
             library_items.c.id,
@@ -643,7 +643,7 @@ def _folder_cleanup_state(folder: CompletedFolder, *, archive_root_configured: b
     return "cleaned", "No original backups are waiting in the Cleanup folder."
 
 
-def _confirmed_originals_removed_item_ids(connection: DBClient) -> set[int]:
+def confirmed_originals_removed_item_ids(connection: DBClient) -> set[int]:
     return {
         int(item_id)
         for item_id in connection.execute(
