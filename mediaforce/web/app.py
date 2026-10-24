@@ -107,6 +107,7 @@ from mediaforce.hosts.types import HostSetupResult
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.encoding.audio_quality import check_sample_audio
 from mediaforce.encoding.free_space import encode_reserve_preflight
+from mediaforce.encoding.plain_failure import plain_failure_summary
 from mediaforce.encoding.quality import quality_toolchain_identity, run_sample_encode, select_quality_metric
 from mediaforce.remote import (
     HostReadinessError,
@@ -3437,19 +3438,6 @@ def _encode_queue_scheduler_from_form(form_data: dict[str, str]) -> dict[str, An
     return _normalize_encode_queue_scheduler({"mode": "anytime", "timezone": "host_local"})
 
 
-def _folder_badge_failure_detail(raw_error: Any, raw_waiting_reason: Any = None) -> str | None:
-    error_text = str(raw_error or raw_waiting_reason or "").strip()
-    if not error_text:
-        return None
-    if "Error:" in error_text:
-        error_text = error_text[error_text.rfind("Error:"):]
-    else:
-        lines = [line.strip() for line in error_text.splitlines() if line.strip()]
-        error_text = lines[-1] if lines else error_text
-    compact = " ".join(error_text.split())
-    return f"{compact[:157]}..." if len(compact) > 160 else compact
-
-
 def _folder_badge_prefix(raw_prefix: Any) -> str:
     return raw_prefix.strip().strip("/") if isinstance(raw_prefix, str) else ""
 
@@ -3482,7 +3470,7 @@ def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, 
             "tone": "warning",
             "detail": (
                 unfinished_breakdown_summary(groups)
-                or _folder_badge_failure_detail(row["error"], row["waiting_reason"])
+                or plain_failure_summary(row["error"], waiting_reason=row["waiting_reason"])
             ),
         }
     return badges
@@ -3559,13 +3547,13 @@ def _calibration_job_badge(*, status: str, lane: str, error: Any) -> dict[str, s
         return {
             "label": "Proof failed" if mode == "full" else "Sample failed",
             "tone": "warning",
-            "detail": _folder_badge_failure_detail(error),
+            "detail": plain_failure_summary(error),
         }
     if status == "stopped":
         return {
             "label": "Proof stopped" if mode == "full" else "Sample stopped",
             "tone": "warning",
-            "detail": _folder_badge_failure_detail(error),
+            "detail": plain_failure_summary(error),
         }
     return None
 
@@ -3587,9 +3575,9 @@ def _folder_review_badge(
             return {
                 "label": "Needs attention",
                 "tone": "warning",
-                "detail": _folder_badge_failure_detail(
+                "detail": plain_failure_summary(
                     encode_job.get("error"),
-                    encode_job.get("waiting_reason"),
+                    waiting_reason=encode_job.get("waiting_reason"),
                 ),
             }
 

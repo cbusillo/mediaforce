@@ -2,6 +2,7 @@
 	import SampleHistory from './SampleHistory.svelte';
 	import { resolveMetricLabel } from '$lib/folders/studio';
 	import { libraryCopy } from '$lib/library-copy';
+	import { operatorErrorView } from '$lib/operator-copy';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { onMount, tick } from 'svelte';
@@ -184,6 +185,9 @@
 	let audioChoice = $state<'original' | 'new'>('new');
 	let actionPhase = $state<ActionPhase>('idle');
 	let actionError = $state('');
+	// Raw text behind the action error's Details, kept with the sentence it explains so a later
+	// error never shows an earlier one's detail.
+	let actionErrorDetail = $state<{ summary: string; text: string } | null>(null);
 	let actionMessage = $state('');
 	let actionMessageTone = $state<'success' | 'neutral' | 'warning'>('success');
 	let actionMessageStateKey = $state('');
@@ -1433,13 +1437,15 @@
 		const message = error instanceof Error ? error.message.trim() : '';
 		if (!message) return fallback;
 		const lower = message.toLowerCase();
+		let summary = operatorErrorView(message, fallback).summary;
 		if (lower.includes('timeout') || lower.includes('timed out')) {
-			return 'That took longer than expected. Nothing was queued; please try again.';
+			summary = 'That took longer than expected. Nothing was queued; please try again.';
+		} else if (lower.includes('permission') || lower.includes('denied')) {
+			summary =
+				'The selected computer could not reach the files. Choose another computer in Details or try again.';
 		}
-		if (lower.includes('permission') || lower.includes('denied')) {
-			return 'The selected computer could not reach the files. Choose another computer in Details or try again.';
-		}
-		return message;
+		actionErrorDetail = summary === message ? null : { summary, text: message };
+		return summary;
 	}
 
 	function phaseCopy(phase: ActionPhase): { title: string; detail: string } {
@@ -1739,6 +1745,12 @@
 				<div>
 					<strong>Something needs your attention</strong>
 					<p>{actionError || loadError}</p>
+					{#if actionError && actionErrorDetail?.summary === actionError}
+						<details class="action-notice__details">
+							<summary>Details</summary>
+							<code>{actionErrorDetail.text}</code>
+						</details>
+					{/if}
 					{#if blockerAction}
 						<a class="action-notice__link" href={resolve(blockerAction.route)}
 							>{blockerAction.label}</a
@@ -5440,6 +5452,18 @@
 
 	.action-notice p {
 		color: inherit;
+	}
+
+	.action-notice__details {
+		font-size: var(--mf-text-2xs);
+		margin-top: 8px;
+	}
+
+	.action-notice__details code {
+		display: block;
+		font-family: var(--mf-font-mono);
+		white-space: pre-wrap;
+		word-break: break-all;
 	}
 
 	.action-notice__link {

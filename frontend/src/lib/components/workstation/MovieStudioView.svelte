@@ -14,7 +14,7 @@
 		MovieMember
 	} from '$lib/api/types';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
-	import { operatorErrorView } from '$lib/operator-copy';
+	import { operatorErrorView, safeOperatorErrorCopy } from '$lib/operator-copy';
 	import {
 		approvalStartDetail,
 		approvalStartLabel,
@@ -356,10 +356,10 @@
 			}
 		} catch (error) {
 			if (requestId !== checkedPreviewRequestId || requestPrefix !== folder.prefix) return;
-			checkedPreviewError =
-				error instanceof Error
-					? error.message
-					: 'The checked output is not available to preview right now.';
+			checkedPreviewError = safeOperatorErrorCopy(
+				error instanceof Error ? error.message : '',
+				'The checked output is not available to preview right now.'
+			);
 		} finally {
 			if (requestId === checkedPreviewRequestId && requestPrefix === folder.prefix) {
 				checkedPreviewPending = false;
@@ -382,10 +382,10 @@
 				: response.detail || 'The checked output is no longer available to preview.';
 		} catch (error) {
 			if (requestId !== checkedPreviewRequestId || requestPrefix !== folder.prefix) return;
-			checkedPreviewError =
-				error instanceof Error
-					? error.message
-					: 'The checked output is no longer available to preview.';
+			checkedPreviewError = safeOperatorErrorCopy(
+				error instanceof Error ? error.message : '',
+				'The checked output is no longer available to preview.'
+			);
 		}
 	}
 

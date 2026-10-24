@@ -51,7 +51,8 @@ function isOperatorReadyCopy(value: string): boolean {
 		/\b(?:[A-Za-z.]+)?(?:Error|Exception)\b|\b(?:Traceback|errno)\b/.test(value) ||
 		/\b[a-z]+_[a-z_]+\b/.test(value) ||
 		/[{}[\]]/.test(value) ||
-		/(?:^|\s)\/[A-Za-z0-9._/-]+/.test(value)
+		/(?:^|\s)\/[A-Za-z0-9._/-]+/.test(value) ||
+		/\bstatus \d{3}\b|\binternal server error\b/i.test(value)
 	);
 }
 

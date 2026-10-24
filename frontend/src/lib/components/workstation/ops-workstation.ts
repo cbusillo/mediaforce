@@ -335,37 +335,13 @@ function encodeHostCopy(job: EncodeQueueJob): string {
 	return ['queued', 'retry_backoff'].includes(status) ? 'Selecting computer' : 'No computer yet';
 }
 
-function operatorErrorCopy(value: unknown): string {
-	const detail = compactText(value);
-	if (!detail) return '';
-	const permissionPath = detail.match(/permission denied:\s*['"]([^'"]+)['"]/i)?.[1];
-	if (permissionPath) {
-		return `Mediaforce cannot access ${permissionPath} on this computer. Mount the storage, then retry.`;
-	}
-	const missingPath = detail.match(/no such file or directory:\s*['"]([^'"]+)['"]/i)?.[1];
-	if (missingPath) {
-		return `Mediaforce cannot find ${missingPath} on this computer. Mount the storage, then retry.`;
-	}
-	if (/final output size missed the approved target band/i.test(detail)) {
-		return 'The finished file was outside the approved size range. Your original media is safe; review the item before retrying.';
-	}
-	if (
-		/target_band_violates_quality_floor|target size conflicts with the configured quality floor/i.test(
-			detail
-		)
-	) {
-		return 'The saved size goal is too small to preserve the required quality. Choose a new size goal before retrying.';
-	}
-	return safeOperatorErrorCopy(detail, 'Mediaforce could not finish this work.');
-}
-
-function operatorErrorSummary(value: unknown): string {
-	const detail = compactText(value);
-	const permissionPath = detail.match(/permission denied:\s*['"]([^'"]+)['"]/i)?.[1];
-	if (permissionPath) return 'Storage unavailable';
-	const missingPath = detail.match(/no such file or directory:\s*['"]([^'"]+)['"]/i)?.[1];
-	if (missingPath) return 'Storage not found';
-	return operatorErrorCopy(detail);
+// The server words each failure in one sentence; the raw error stays for the row's Details.
+function encodeJobErrorSummary(job: EncodeQueueJob): string {
+	if (activeJobStatus(job.status) || !job.error) return '';
+	return (
+		compactText(job.error_summary) ||
+		safeOperatorErrorCopy(job.error, 'Mediaforce could not finish this work.')
+	);
 }
 
 // Speed and frame rate stay out of the row; the row's hover detail keeps them.
@@ -701,7 +677,7 @@ export function encodeUnfinishedBreakdownCopy(job: EncodeQueueJob): string {
 
 function encodeJobRawDetail(job: EncodeQueueJob): string {
 	return (
-		(activeJobStatus(job.status) ? '' : job.error) ||
+		encodeJobErrorSummary(job) ||
 		job.telemetry_summary ||
 		job.progress?.current_item_rel_path ||
 		job.attempt_summary ||
@@ -711,8 +687,7 @@ function encodeJobRawDetail(job: EncodeQueueJob): string {
 }
 
 export function encodeJobDetail(job: EncodeQueueJob): string {
-	const detail = compactTelemetryCopy(encodeJobRawDetail(job));
-	return activeJobStatus(job.status) ? detail : operatorErrorSummary(detail);
+	return compactTelemetryCopy(encodeJobRawDetail(job));
 }
 
 function encodeJobTimestamp(job: EncodeQueueJob): number {
@@ -790,7 +765,8 @@ export function buildEncodeRows(
 						.filter(Boolean)
 						.join(' · ')
 				: encodeJobDetail(job),
-			technicalDetail: compactText(job.telemetry_summary) || undefined,
+			technicalDetail:
+				compactText(encodeJobErrorSummary(job) ? job.error : job.telemetry_summary) || undefined,
 			action: canRetryPrefix ? 'retry-encode-prefix' : undefined,
 			actionScope: canRetryPrefix ? 'row' : undefined
 		};
@@ -995,7 +971,12 @@ export function buildOpsBlockers(
 					key: `needs-attention:${job.job_id}`,
 					tone: 'wait',
 					title: `${encodeJobLabel(job)} is waiting for you to take a look`,
-					detail: encodeUnfinishedBreakdownCopy(job) || operatorErrorCopy(encodeJobRawDetail(job)),
+					detail:
+						encodeUnfinishedBreakdownCopy(job) ||
+						safeOperatorErrorCopy(
+							encodeJobRawDetail(job),
+							'Mediaforce could not finish this work.'
+						),
 					href: job.prefix ? folderRoutePath(job.prefix) : undefined,
 					linkLabel: job.prefix ? 'Review item' : undefined
 				});
