@@ -1,7 +1,8 @@
 import SwiftUI
 
 struct ServerStatusView: View {
-    let monitor: ServerMonitor
+    let state: ServerState
+    let retry: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -22,10 +23,8 @@ struct ServerStatusView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: 460, alignment: .leading)
-                    if monitor.state != .reachable && monitor.state != .checking {
-                        Button("Check now") {
-                            Task { await monitor.refresh() }
-                        }
+                    if state != .reachable && state != .checking {
+                        Button("Check now", action: retry)
                         .padding(.top, 10)
                     }
                 }
@@ -38,11 +37,10 @@ struct ServerStatusView: View {
         .padding(.bottom, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .textBackgroundColor))
-        .task { await monitor.watch() }
     }
 
     private var symbol: String {
-        switch monitor.state {
+        switch state {
         case .checking: "ellipsis.circle"
         case .reachable: "checkmark.circle"
         case .unreachable: "bolt.horizontal.circle"
@@ -51,7 +49,7 @@ struct ServerStatusView: View {
     }
 
     private var headline: String {
-        switch monitor.state {
+        switch state {
         case .checking: "Looking for Mediaforce on this Mac…"
         case .reachable: "Mediaforce is running on this Mac."
         case .unreachable: "Can't reach Mediaforce on this Mac."
@@ -60,7 +58,7 @@ struct ServerStatusView: View {
     }
 
     private var explanation: String {
-        switch monitor.state {
+        switch state {
         case .checking:
             "This only takes a moment."
         case .reachable:
