@@ -180,7 +180,8 @@ struct SizeBar: View {
 
 struct BiggestTable: View {
     static let rowLimit = 9
-    static let rowHeight: CGFloat = 28
+    static let headerHeight: CGFloat = 28
+    static let rowHeight: CGFloat = 24
     static let noteHeight: CGFloat = 16
 
     let shows: [MainWindowFacts.NotStartedShow]
@@ -228,7 +229,7 @@ struct BiggestTable: View {
             }
             .tableStyle(.inset(alternatesRowBackgrounds: true))
             .scrollDisabled(true)
-            .frame(height: Self.rowHeight * CGFloat(shows.count + 1) + Self.noteHeight * CGFloat(shows.filter { waitingNote($0) != nil }.count))
+            .frame(height: Self.headerHeight + Self.rowHeight * CGFloat(shows.count) + Self.noteHeight * CGFloat(shows.filter { waitingNote($0) != nil }.count))
         }
     }
 
