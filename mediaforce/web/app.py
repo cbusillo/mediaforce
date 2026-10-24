@@ -144,10 +144,11 @@ from mediaforce.tuning.compression_intent import compression_intent_options
 from mediaforce.tuning.size_goals import guided_size_goal_options, operator_intent_from_policy
 from mediaforce.tuning.target_provenance import exact_item_target_provenance_blocker, target_size_provenance
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
-from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
-    register_frontend_routes, register_host_routes, register_operator_work_routes, register_queue_routes, \
-    register_settings_routes
+from mediaforce.web.routes import register_app_window_routes, register_completed_routes, register_dashboard_routes, \
+    register_folder_routes, register_frontend_routes, register_host_routes, register_operator_work_routes, \
+    register_queue_routes, register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
+from mediaforce.web.runtime.app_window import app_window_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
 from mediaforce.web.runtime.show_settings_runtime import prefixes_with_samples, use_show_settings
 from mediaforce.web.checked_output_preview import (
@@ -1152,6 +1153,19 @@ def create_app(
         return release_work_payload(config.paths.db_path)
 
     register_release_routes(app, work_snapshot=_release_work_snapshot)
+
+    def _main_window_payload() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            return app_window_payload(
+                connection,
+                library_types=config.library_type_map,
+                season_cards=[asdict(card) for card in _list_library_detail_cards(config, connection)],
+                host_statuses=_cached_host_statuses(config),
+                controller_storage=controller_storage_recovery_snapshot(config),
+                observed_at=datetime.now(UTC),
+            )
+
+    register_app_window_routes(app, main_window_payload=_main_window_payload)
     register_dashboard_routes(
         app,
         dashboard_payload=_dashboard_api_payload,

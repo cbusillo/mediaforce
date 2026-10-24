@@ -447,7 +447,7 @@ def _classify_ssh_failure(
         kind = "unreachable" if returncode is not None and ssh_host_unreachable(returncode, detail) else "check_failed"
         flags.update(setup_supported=True)
     message, issues = computer_check_failure_copy(kind, label)
-    return {"message": message, "issues": issues, **flags}
+    return {"kind": kind, "message": message, "issues": issues, **flags}
 
 
 def _remote_status_script(

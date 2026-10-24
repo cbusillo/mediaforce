@@ -247,6 +247,7 @@ def _remote_host_status(
             setup_supported=classification["setup_supported"],
             setup_requires_password=classification["setup_requires_password"],
             trust_reset_supported=classification.get("trust_reset_supported", False),
+            check_failure=classification["kind"],
         )
 
     try:
@@ -316,6 +317,7 @@ def _remote_host_status(
                 setup_supported=classification["setup_supported"],
                 setup_requires_password=classification["setup_requires_password"],
                 trust_reset_supported=classification.get("trust_reset_supported", False),
+                check_failure=classification["kind"],
             )
         try:
             payload = _parse_remote_status_output(result.stdout)
