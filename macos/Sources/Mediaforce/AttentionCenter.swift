@@ -14,7 +14,7 @@ final class AttentionCenter {
     }
 
     func requestPermission() {
-        Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
+        Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) }
     }
 
     func review(_ facts: MainWindowFacts) {
