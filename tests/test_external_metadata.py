@@ -593,6 +593,24 @@ class ExternalMetadataTests(unittest.TestCase):
         self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 1))
         self.assertEqual(status, "Returning Series")
 
+    @unittest.skipIf(os.geteuid() == 0, "root can search any folder")
+    def test_unreadable_poster_cache_reads_as_no_poster(self) -> None:
+        config = self._config(keep_posters=True)
+        poster_dir = config.paths.poster_dir
+        assert poster_dir is not None
+        with open_db(config.paths.db_path) as connection:
+            self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch([]))
+            connection.execute(series_metadata.update().values(tmdb_poster_path=None))
+            poster_dir.chmod(0)
+            try:
+                stats = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch([]))
+                poster = cached_show_poster(connection, poster_dir, "tv/Show")
+            finally:
+                poster_dir.chmod(0o755)
+
+        self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 1))
+        self.assertIsNone(poster)
+
     def test_series_saved_before_posters_refresh_without_waiting_for_the_interval(self) -> None:
         config = self._config(keep_posters=True)
         with open_db(config.paths.db_path) as connection:

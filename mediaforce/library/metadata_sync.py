@@ -391,7 +391,10 @@ def cached_show_poster(connection: DBClient, poster_dir: Path | None, show_prefi
         select(series_metadata.c.tmdb_poster_path).where(series_metadata.c.series_prefix == show_prefix.strip("/"))
     ).scalar_one_or_none()
     target = poster_file(poster_dir, poster_path)
-    return target if target is not None and target.is_file() else None
+    try:
+        return target if target is not None and target.is_file() else None
+    except OSError:
+        return None
 
 
 def poster_file(poster_dir: Path | None, poster_path: str | None) -> Path | None:
@@ -417,7 +420,13 @@ def _cache_posters(
         target = poster_file(poster_dir, poster_path)
         if target is None:
             continue
-        if target.is_file():
+        try:
+            already_cached = target.is_file()
+        except OSError:
+            stats.failed += 1
+            stats.message = "The poster cache could not be read; posters are retried on the next sync."
+            continue
+        if already_cached:
             stats.cached += 1
             continue
         try:
