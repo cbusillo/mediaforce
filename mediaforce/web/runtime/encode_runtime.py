@@ -64,6 +64,8 @@ from mediaforce.encoding.staging import EncodeConnectionLostError, FinishedOutpu
 from mediaforce.encoding.remote_cleanup import RemoteHostUnreachableError, end_remote_output_writers
 from mediaforce.encoding.dispatch_coordination import STANDALONE_CLI_ENCODE_ORIGINS, locked_encode_dispatch as _locked_encode_dispatch
 from mediaforce.encoding.helpers import resolve_item_staging_path
+from mediaforce.encoding.plain_failure import FINAL_SIZE_MISS_RE, QUALITY_FLOOR_CONFLICT_RE, \
+    QUALITY_SAFE_BRACKET_MISS_RE, final_size_miss_sentence
 from mediaforce.encoding.streams import StreamPlanIdentityError
 from mediaforce.tuning.av1_cold_start import AV1ColdStartContractError
 from mediaforce.tuning.content_intent_observations import ContentIntentObservationConflictError
@@ -289,23 +291,7 @@ CERTAIN_ENCODE_FAILURES: tuple[type[Exception], ...] = (
     StreamPlanIdentityError,
     TargetSizeSearchError,
 )
-FINAL_SIZE_MISS_RE = re.compile(
-    r"Final output size missed the approved target band: "
-    r"status=(?P<status>[a-z_]+), "
-    r"actual=(?P<actual>\d+|None), target=(?P<target>\d+|None), "
-    r"lower=(?P<lower>\d+|None), upper=(?P<upper>\d+|None)\."
-)
-QUALITY_FLOOR_CONFLICT_RE = re.compile(
-    r"The approved target size conflicts with the configured quality floor "
-    r"\((?P<reason>target_band_violates_quality_floor|target_requires_crossing_quality_floor)\); "
-    r"target=(?P<target>\d+) bytes, best_reachable=(?P<best>\d+) bytes\."
-)
-QUALITY_SAFE_BRACKET_MISS_RE = re.compile(
-    r"No setting lands inside the approved target size between two adjacent quality-safe settings "
-    rf"\((?P<reason>{re.escape(QUALITY_SAFE_BRACKET_MISS_REASON)})\); "
-    r"target=(?P<target>\d+) bytes, larger_quality_safe=(?P<larger>\d+) bytes, "
-    r"smaller_quality_safe=(?P<smaller>\d+) bytes\."
-)
+NEW_SIZE_GOAL_NEXT_STEP = "Choose a new size goal and make a new sample before trying again."
 SIZE_QUESTION_QUALITY_NEEDS_MORE = "quality_needs_more"
 SIZE_QUESTION_NO_SETTING_FITS = "no_setting_fits"
 # A measured quality-floor conflict may raise one item's size goal this far without an operator.
@@ -2201,10 +2187,7 @@ def _encode_failure_analysis(
             return {
                 **final_size_analysis,
                 "manifest_indexes": valid_indexes,
-                "summary": (
-                    "At least one selected item missed the approved final size contract. "
-                    "Choose a fresh size or compression goal and make another representative test before retrying."
-                ),
+                "summary": f"At least one file didn't come out at the size you approved. {NEW_SIZE_GOAL_NEXT_STEP}",
             }
         index = valid_indexes[0]
         item = manifest_items[index]
@@ -2269,15 +2252,7 @@ def _final_size_failure_analysis(error_message: str) -> dict[str, Any] | None:
     target = _optional_int(match.group("target"))
     lower = _optional_int(match.group("lower"))
     upper = _optional_int(match.group("upper"))
-    summary = (
-        "Mediaforce could not verify the final output against the approved target band. "
-        "Choose a fresh size or compression goal and make another representative test before retrying."
-        if status == "missing_target"
-        else (
-            f"The final output landed {'below' if status == 'under_target' else 'above'} the approved target band. "
-            "Choose a fresh size or compression goal and make another representative test before retrying."
-        )
-    )
+    summary = f"{final_size_miss_sentence(status)} {NEW_SIZE_GOAL_NEXT_STEP}"
     return {
         "kind": "final_size_target_miss",
         "retry_strategy": "fresh_goal_required",
@@ -2383,14 +2358,10 @@ def _aggregate_quality_failure_analysis(
             summary = str(analysis.get("summary") or "").strip()
         elif all_selected_analyzed and all_analyses_are_final_size:
             summary = (
-                f"{len(final_size_analyses)} selected items missed the approved final size contract. "
-                "Choose a fresh size or compression goal and make another representative test before retrying."
+                f"{len(final_size_analyses)} files didn't come out at the size you approved. {NEW_SIZE_GOAL_NEXT_STEP}"
             )
         else:
-            summary = (
-                "At least one selected item missed the approved final size contract. "
-                "Choose a fresh size or compression goal and make another representative test before retrying."
-            )
+            summary = f"At least one file didn't come out at the size you approved. {NEW_SIZE_GOAL_NEXT_STEP}"
         analysis.update(
             {
                 "manifest_indexes": indexes,
@@ -2408,10 +2379,7 @@ def _aggregate_quality_failure_analysis(
         if not all_selected_analyzed:
             analysis["auto_retry_allowed"] = False
             analysis["retry_strategy"] = "needs_operator_approval"
-            analysis["summary"] = (
-                f"Measured policy analysis covers {len(item_analyses)} of {len(selected_indexes)} selected items; "
-                "operator approval is required."
-            )
+            analysis["summary"] = _partly_measured_summary(len(item_analyses), len(selected_indexes))
         return analysis
     all_auto_retry = all(
         bool(item.get("auto_retry_allowed"))
@@ -2433,17 +2401,21 @@ def _aggregate_quality_failure_analysis(
             "retry_strategy": "auto_adjust_cap" if all_auto_retry else "needs_operator_approval",
             "proposed_max_encoded_percent": max(proposed_caps) if proposed_caps else None,
             "summary": (
-                f"Measured policy analysis covers {len(item_analyses)} selected items; "
-                "all are safe for bounded cap adjustment."
+                f"Mediaforce measured all {len(item_analyses)} files and will try them again with a slightly "
+                "bigger size limit."
                 if all_auto_retry
-                else (
-                    f"Measured policy analysis covers {len(item_analyses)} of {len(selected_indexes)} selected items; "
-                    "operator approval is required."
-                )
+                else _partly_measured_summary(len(item_analyses), len(selected_indexes))
             ),
         }
     )
     return first
+
+
+def _partly_measured_summary(measured_count: int, selected_count: int) -> str:
+    return (
+        f"Mediaforce measured {measured_count} of {selected_count} files, "
+        "so they need your OK before they try again."
+    )
 
 
 def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, Any] | None) -> bool:
@@ -2637,13 +2609,13 @@ def apply_quality_floor_size_exception(
             analysis["compression_authorization_reason"] = decision.reason_code
             analysis["summary"] = (
                 (
-                    "Every size inside the goal broke the quality floor, but the saved compression goal does not "
-                    "authorize a larger result automatically. Review this item before retrying."
+                    "Keeping the picture quality needs a bigger file than the size goal allows, and your size "
+                    "goal doesn't let Mediaforce go bigger on its own. Take a look before it tries again."
                 )
                 if floor_violated
                 else (
-                    "No setting fits the size goal while keeping the picture quality, and the saved compression "
-                    "goal does not allow a larger result. Review this item before retrying."
+                    "No setting fits the size goal while keeping the picture quality, and your size goal doesn't "
+                    "let Mediaforce go bigger on its own. Take a look before it tries again."
                 )
             )
             return False
@@ -2749,8 +2721,8 @@ def _mark_quality_policy_retry_unauthorized(
     aggregate_analysis["retry_strategy"] = "needs_operator_approval"
     aggregate_analysis["compression_authorization_reason"] = reason_code
     aggregate_analysis["summary"] = (
-        "Measured quality evidence found a possible item-specific cap change, but the saved compression goal "
-        "does not authorize it automatically. Review this item before retrying."
+        "A slightly bigger size limit for this file should work, but your size goal doesn't let Mediaforce "
+        "change it on its own. Take a look before it tries again."
     )
 
 

@@ -1,3 +1,5 @@
+import { safeOperatorErrorCopy } from '$lib/operator-copy';
+
 /** What the approval request reports about the encoding job it was asked to start. */
 export type ApprovalStartResponse = {
 	ok?: boolean;
@@ -37,7 +39,7 @@ export function approvalStartOutcome(
 	if (!start || start.ok !== true) {
 		return {
 			message:
-				`Your approval is saved, but compression did not start. ${start?.message ?? ''}`.trim(),
+				`Your approval is saved, but compression did not start. ${safeOperatorErrorCopy(start?.message, '')}`.trim(),
 			attention: true,
 			attentionTitle: 'Compression did not start'
 		};

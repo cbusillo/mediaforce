@@ -12,6 +12,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, encode_run_manifest_rel_paths, \
     unfinished_breakdown_groups, unfinished_breakdown_summary
+from mediaforce.encoding.plain_failure import plain_failure_summary
 from mediaforce.library.item_presence import library_item_is_missing
 from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, normalize_scope_prefix, \
     path_matches_scope, resolve_media_scope, resolve_media_scopes, scope_rel_path_filter, scopes_overlap
@@ -57,6 +58,11 @@ WorkflowPayload = dict[str, Any]
 ENCODE_CANDIDATE_STATUSES = frozenset({"discovered", "planned", "validated"})
 PROCESSING_JOB_STATUSES = frozenset({"queued", "running", "retry_backoff"})
 ATTENTION_JOB_STATUSES = frozenset({"failed", "stopped", "needs_attention"})
+_PROCESSING_JOB_DETAILS = {
+    "queued": "Waiting its turn to compress.",
+    "running": "Compressing now.",
+    "retry_backoff": "Trying again soon.",
+}
 JOB_STATUSES_FOR_WORKFLOW = PROCESSING_JOB_STATUSES | ATTENTION_JOB_STATUSES | {"completed"}
 UNFINISHED_JOB_STATUSES = PROCESSING_JOB_STATUSES | ATTENTION_JOB_STATUSES
 PREFIX_QUERY_BATCH_SIZE = 200
@@ -814,7 +820,7 @@ def _encode_job_workflow_state(
     latest = display_rows[0] if display_rows else None
     groups = unfinished_breakdown_groups(latest["progress_json"]) if latest is not None else []
     if active is not None:
-        detail = f"Encode job is {active['status']} for {active['prefix']}."
+        detail = _PROCESSING_JOB_DETAILS[active["status"]]
         owner_groups = [group for group in groups if group.get("needs_owner")]
         if owner_groups:
             detail = f"{detail} Needs you: {unfinished_breakdown_summary(owner_groups)}."
@@ -824,6 +830,11 @@ def _encode_job_workflow_state(
         if run is None:
             return None
         groups = unfinished_breakdown_groups(run["progress_json"])
-        error = unfinished_breakdown_summary(groups) or str(run["error"] or "Encode job needs operator attention.")
-        return ScopeJobLane("attention", f"Encode job is {run['status']} for {run['prefix']}: {error}", str(run["job_id"]))
+        breakdown = unfinished_breakdown_summary(groups)
+        detail = (
+            f"Needs you: {breakdown}."
+            if breakdown
+            else plain_failure_summary(run["error"]) or "This needs you to take a look."
+        )
+        return ScopeJobLane("attention", detail, str(run["job_id"]))
     return None

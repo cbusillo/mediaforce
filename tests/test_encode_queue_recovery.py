@@ -71,6 +71,7 @@ from mediaforce.encoding import quality as encoding_quality
 from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding.helpers import resolve_item_staging_path
+from mediaforce.encoding.plain_failure import final_size_miss_sentence, plain_failure_summary
 from mediaforce.encoding import video_filters
 from mediaforce.encoding.runner import run_tracked_process
 from mediaforce.encoding.free_space import ReservePreflight, VolumeCapacity, encode_reserve_preflight
@@ -2891,8 +2892,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(verification["upper_bound_bytes"], 161_238_933)
         self.assertEqual(
             analysis["summary"],
-            "The final output landed below the approved target band. "
-            "Choose a fresh size or compression goal and make another representative test before retrying.",
+            f"{final_size_miss_sentence('under_target')} {encode_runtime.NEW_SIZE_GOAL_NEXT_STEP}",
         )
 
     def test_missing_final_size_target_still_requires_a_fresh_goal(self) -> None:
@@ -2914,8 +2914,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNone(verification["upper_bound_bytes"])
         self.assertEqual(
             analysis["summary"],
-            "Mediaforce could not verify the final output against the approved target band. "
-            "Choose a fresh size or compression goal and make another representative test before retrying.",
+            f"{final_size_miss_sentence('missing_target')} {encode_runtime.NEW_SIZE_GOAL_NEXT_STEP}",
         )
 
     def test_multiple_final_size_misses_keep_fresh_goal_recovery(self) -> None:
@@ -2947,7 +2946,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(analysis["retry_strategy"], "fresh_goal_required")
         self.assertFalse(analysis["auto_retry_allowed"])
         self.assertEqual(analysis["manifest_indexes"], [0, 1])
-        self.assertIn("At least one selected item", analysis["summary"])
+        self.assertIn("At least one file", analysis["summary"])
 
     def test_parent_final_size_failures_keep_plain_fresh_goal_recovery(self) -> None:
         child_analyses = [
@@ -2973,8 +2972,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(len(object_list(analysis["item_analyses"])), 2)
         self.assertEqual(
             analysis["summary"],
-            "2 selected items missed the approved final size contract. "
-            "Choose a fresh size or compression goal and make another representative test before retrying.",
+            f"2 files didn't come out at the size you approved. {encode_runtime.NEW_SIZE_GOAL_NEXT_STEP}",
         )
 
     def test_broad_retry_delegates_final_size_miss_to_central_queue_guard(self) -> None:
@@ -3501,7 +3499,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         failure_analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
         self.assertFalse(failure_analysis["auto_retry_allowed"])
         self.assertEqual(failure_analysis["retry_strategy"], "needs_operator_approval")
-        self.assertIn("1 of 2 selected items", str(failure_analysis["summary"]))
+        self.assertIn("1 of 2 files", str(failure_analysis["summary"]))
         self.assertEqual(
             manifest["items"][0]["resolved_policy"]["video"]["max_encoded_percent"],
             15,
@@ -7137,7 +7135,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         series_card = next(card for card in series_cards if card.prefix == "tv/show")
         self.assertEqual(series_card.review_badge_label, "Needs attention")
         self.assertEqual(series_card.review_badge_tone, "warning")
-        self.assertEqual(series_card.review_badge_detail, "Error: child season failed")
+        self.assertEqual(series_card.review_badge_detail, plain_failure_summary("Error: child season failed"))
 
     def test_series_folder_cards_aggregate_descendant_calibration_badges(self) -> None:
         source = self._create_source_file("episode-series-calibration.mkv")
@@ -11734,7 +11732,7 @@ raise SystemExit(0)
                 {
                     "label": "Sample failed",
                     "tone": "warning",
-                    "detail": "Error: source disappeared after reset",
+                    "detail": plain_failure_summary("Error: source disappeared after reset"),
                 },
             )
 
@@ -11784,7 +11782,7 @@ raise SystemExit(0)
                 {
                     "label": "Needs attention",
                     "tone": "warning",
-                    "detail": "Error: Failed to find a suitable crf",
+                    "detail": plain_failure_summary("Error: Failed to find a suitable crf"),
                 },
             )
 
@@ -11845,7 +11843,7 @@ raise SystemExit(0)
         self.assertNotIn("tv/stale", badges)
         self.assertEqual(
             badges["tv/latest"],
-            {"label": "Needs attention", "tone": "warning", "detail": "Error: bad source"},
+            {"label": "Needs attention", "tone": "warning", "detail": plain_failure_summary("Error: bad source")},
         )
 
     def test_resolve_sample_host_maps_legacy_local_key_to_self_host(self) -> None:
@@ -24115,7 +24113,7 @@ raise SystemExit(0)
             working_state,
             (
                 "processing",
-                f"Encode job is running for tv/show. Needs you: 1 {labels['final_size_target_miss']} · "
+                f"Compressing now. Needs you: 1 {labels['final_size_target_miss']} · "
                 f"1 longer than every work window · 1 {labels['storage_io']}.",
             ),
         )
@@ -24125,7 +24123,7 @@ raise SystemExit(0)
             queued_left_state,
             (
                 "processing",
-                f"Encode job is queued for tv/show. Needs you: 1 {labels['final_size_target_miss']} · "
+                f"Waiting its turn to compress. Needs you: 1 {labels['final_size_target_miss']} · "
                 f"1 longer than every work window · 1 {labels['storage_io']}.",
             ),
         )
@@ -24134,8 +24132,7 @@ raise SystemExit(0)
             ended_state,
             (
                 "attention",
-                f"Encode job is needs_attention for tv/show: 1 {labels['final_size_target_miss']} · "
-                f"1 {labels['storage_io']}",
+                f"Needs you: 1 {labels['final_size_target_miss']} · 1 {labels['storage_io']}.",
             ),
         )
 
@@ -24539,7 +24536,7 @@ raise SystemExit(0)
         failure_analysis = object_dict(object_dict(aggregated["progress"]).get("failure_analysis"))
         self.assertEqual(failure_analysis["manifest_indexes"], [0, 1])
         self.assertEqual(len(object_list(failure_analysis["item_analyses"])), 2)
-        self.assertIn("2 of 2 selected items", str(failure_analysis["summary"]))
+        self.assertIn("2 of 2 files", str(failure_analysis["summary"]))
 
     def test_approve_measured_encode_recovery_updates_policy_and_queues_failed_items(self) -> None:
         manifest_path = self._write_manifest(

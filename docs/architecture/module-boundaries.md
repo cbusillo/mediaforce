@@ -281,6 +281,10 @@ test patch targets.
 
 - `encode_queue.py`
   - encode queue state, job persistence, and summaries
+- `plain_failure.py`
+  - one plain sentence for a stored error, waiting reason or failure kind,
+    with the raw text kept for Details; screens use it instead of wording
+    errors themselves
 - `duration_estimate.py`
   - conservative host-specific search-plus-encode admission estimates from
     recent successful runs

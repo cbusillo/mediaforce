@@ -1072,26 +1072,27 @@ describe('Ops workstation mapping', () => {
 		);
 	});
 
-	it('hides target-band internals from the attention summary', () => {
+	it("shows the server's sentence for a failure and never the raw error", () => {
 		const dashboard = dashboardFixture();
+		const raw =
+			'Final output size missed the approved target band: status=over_target, actual=60204063, target=48673111, lower=46239455, upper=51106767.';
 		dashboard.encode_queue.recent = [
 			{
 				job_id: 'encode-size-miss',
 				prefix: 'tv/show/season 3',
 				status: 'needs_attention',
-				error:
-					'Final output size missed the approved target band: status=over_target, actual=60204063, target=48673111, lower=46239455, upper=51106767.'
+				error: raw,
+				error_summary: 'The finished file came out bigger than the size you approved.'
 			}
 		];
 
 		expect(buildOpsBlockers(dashboard, hostsFixture(), null)[0].detail).toBe(
-			'The finished file was outside the approved size range. Your original media is safe; review the item before retrying.'
+			'The finished file came out bigger than the size you approved.'
 		);
 
-		dashboard.encode_queue.recent[0].error =
-			'The approved target size conflicts with the configured quality floor (target_band_violates_quality_floor); target=225000000 bytes, best_reachable=523458023 bytes.';
+		delete dashboard.encode_queue.recent[0].error_summary;
 		expect(buildOpsBlockers(dashboard, hostsFixture(), null)[0].detail).toBe(
-			'The saved size goal is too small to preserve the required quality. Choose a new size goal before retrying.'
+			'Mediaforce could not finish this work.'
 		);
 	});
 
@@ -1281,30 +1282,6 @@ describe('Ops workstation mapping', () => {
 		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null).title).toBe(
 			'2 media items need attention'
 		);
-	});
-
-	it('explains controller storage failures instead of exposing raw errno copy', () => {
-		const dashboard = dashboardFixture();
-		dashboard.encode_queue.recent = [
-			{
-				job_id: 'encode-storage-failure',
-				prefix: 'tv/Constellation/Season 1',
-				status: 'needs_attention',
-				error: "[Errno 13] Permission denied: '/Volumes/media'"
-			}
-		];
-
-		const row = buildOpsQueueRows(dashboard).find(
-			(candidate) => candidate.key === 'encode:encode-storage-failure'
-		);
-		const blockers = buildOpsBlockers(dashboard, hostsFixture(), null);
-
-		expect(row).toBeUndefined();
-		expect(blockers[0]).toMatchObject({
-			title: 'Constellation · Season 1 is waiting for you to take a look',
-			detail:
-				'Mediaforce cannot access /Volumes/media on this computer. Mount the storage, then retry.'
-		});
 	});
 
 	it('turns storage prefixes into human work labels', () => {

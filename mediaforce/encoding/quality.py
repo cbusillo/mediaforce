@@ -480,7 +480,6 @@ def analyze_quality_policy_failure(
         proposed_max_encoded_percent=proposed_cap,
         summary=_quality_failure_summary(
             kind=kind,
-            metric=metric.upper(),
             best_candidate=best_candidate,
             max_encoded_percent=max_encoded_percent,
             proposed_cap=proposed_cap,
@@ -517,7 +516,6 @@ def _proposed_size_cap(max_encoded_percent: float, measured_percent: float) -> i
 def _quality_failure_summary(
         *,
         kind: str,
-        metric: str,
         best_candidate: QualitySearchMeasurement,
         max_encoded_percent: float,
         proposed_cap: int | None,
@@ -525,17 +523,18 @@ def _quality_failure_summary(
 ) -> str:
     if kind == "size_cap_too_strict":
         retry_copy = (
-            f"; retrying with max_encoded_percent {proposed_cap}"
+            f" It will try again with a {proposed_cap}% limit."
             if auto_retry_allowed and proposed_cap is not None
             else ""
         )
         return (
-            f"Best measured candidate was CRF {best_candidate.crf:g} at {metric} {best_candidate.score:.2f} "
-            f"and {best_candidate.predicted_encode_percent:.1f}% against the {max_encoded_percent:g}% cap{retry_copy}."
+            f"The best setting Mediaforce measured kept the picture quality but came out at "
+            f"{best_candidate.predicted_encode_percent:.1f}% of the original, over the "
+            f"{max_encoded_percent:g}% limit.{retry_copy}"
         )
     return (
-        f"Best measured candidate was CRF {best_candidate.crf:g} at {metric} {best_candidate.score:.2f} "
-        f"and {best_candidate.predicted_encode_percent:.1f}%, below the requested quality floor."
+        f"The best setting Mediaforce measured came out at {best_candidate.predicted_encode_percent:.1f}% "
+        "of the original but didn't keep the picture quality you asked for."
     )
 
 

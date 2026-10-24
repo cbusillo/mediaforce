@@ -635,6 +635,8 @@ export interface EncodeQueueJob {
 	recoverable_item_count?: number;
 	host?: Record<string, unknown>;
 	error?: string | null;
+	// The error in one plain sentence; `error` keeps the raw text for Details.
+	error_summary?: string | null;
 	last_failure_kind?: string | null;
 	last_failure_at?: string | null;
 	created_at?: string | null;

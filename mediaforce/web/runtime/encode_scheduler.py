@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.timezones import system_timezone, valid_timezone_name
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.encoding.plain_failure import plain_failure_summary
 
 SCHEDULE_DAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 SCHEDULE_CLOSE_WAITING_REASON = "Waiting for the next work window."
@@ -615,6 +616,10 @@ def decorate_encode_job_for_scheduler(
         decorated["scheduler_status_copy"] = f"waiting for {policy['summary']}"
     else:
         decorated["scheduler_status_copy"] = "ready when a computer is free"
+    # The raw error stays for Details; screens show this sentence instead.
+    decorated["error_summary"] = plain_failure_summary(
+        decorated.get("error"), failure_kind=decorated.get("last_failure_kind")
+    )
     if include_telemetry:
         return decorate_encode_job_telemetry(decorated, encode_job_manifest_totals=deps.encode_job_manifest_totals)
     return decorated

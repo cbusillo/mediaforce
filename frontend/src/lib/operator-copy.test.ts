@@ -40,4 +40,9 @@ describe('operator copy boundary', () => {
 			'Fallback'
 		);
 	});
+
+	it('treats a bare HTTP failure as raw text', () => {
+		expect(safeOperatorErrorCopy('Request failed with status 500', 'Fallback')).toBe('Fallback');
+		expect(safeOperatorErrorCopy('Internal Server Error', 'Fallback')).toBe('Fallback');
+	});
 });
