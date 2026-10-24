@@ -7,7 +7,6 @@ import tomllib
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -20,8 +19,8 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata
 from mediaforce.library.external_metadata import PlexClient, PlexPathMapping, ProviderHttpError, TmdbClient, \
-    JSONPayload, map_plex_part_path, tmdb_id_from_guids, tmdb_image_path
-from mediaforce.library.metadata_sync import cached_show_poster, sync_external_metadata
+    FetchImage, FetchJson, JSONPayload, map_plex_part_path, tmdb_id_from_guids, tmdb_image_path
+from mediaforce.library.metadata_sync import MetadataSyncStats, cached_show_poster, sync_external_metadata
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.web.settings_runtime import normalize_metadata_settings
 
@@ -530,23 +529,10 @@ class ExternalMetadataTests(unittest.TestCase):
 
     def test_sync_caches_each_show_poster_once_and_serves_it(self) -> None:
         config = self._config()
-        rel_path = "tv/Show/Season 1/Episode 01.mkv"
         image_urls: list[str] = []
         with open_db(config.paths.db_path) as connection:
-            self._insert_item(connection, self.root / "source" / rel_path, rel_path)
-            with patch.dict(
-                    os.environ,
-                    {"MEDIAFORCE_PLEX_TOKEN": "plex-secret", "MEDIAFORCE_TMDB_TOKEN": "tmdb-secret"},
-                    clear=False,
-            ):
-                first = sync_external_metadata(
-                    connection, config, now=OBSERVED_AT, fetch_json_fn=self._successful_fetch,
-                    fetch_image_fn=self._poster_fetch(image_urls),
-                )
-                second = sync_external_metadata(
-                    connection, config, now=OBSERVED_AT + timedelta(minutes=30), fetch_json_fn=self._successful_fetch,
-                    fetch_image_fn=self._poster_fetch(image_urls),
-                )
+            first = self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch(image_urls))
+            second = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch(image_urls))
             poster = cached_show_poster(connection, config.paths.poster_dir, "tv/Show")
             missing = cached_show_poster(connection, config.paths.poster_dir, "tv/Unknown Show")
 
@@ -559,7 +545,6 @@ class ExternalMetadataTests(unittest.TestCase):
 
     def test_show_without_tmdb_poster_reads_none(self) -> None:
         config = self._config()
-        rel_path = "tv/Show/Season 1/Episode 01.mkv"
         image_urls: list[str] = []
 
         def no_poster_fetch(url: str, headers: Mapping[str, str], timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
@@ -567,18 +552,9 @@ class ExternalMetadataTests(unittest.TestCase):
             return {key: value for key, value in payload.items() if key != "poster_path"}, response_headers
 
         with open_db(config.paths.db_path) as connection:
-            self._insert_item(connection, self.root / "source" / rel_path, rel_path)
-            with patch.dict(
-                    os.environ,
-                    {"MEDIAFORCE_PLEX_TOKEN": "plex-secret", "MEDIAFORCE_TMDB_TOKEN": "tmdb-secret"},
-                    clear=False,
-            ):
-                sync_external_metadata(
-                    connection, config, now=OBSERVED_AT, fetch_json_fn=no_poster_fetch,
-                    fetch_image_fn=self._poster_fetch(image_urls),
-                )
-                cached = sync_external_metadata(
-                    connection, config, now=OBSERVED_AT + timedelta(minutes=30), fetch_json_fn=no_poster_fetch,
+            for minutes in (0, 30):
+                cached = self._sync_show(
+                    connection, config, minutes=minutes, fetch_json_fn=no_poster_fetch,
                     fetch_image_fn=self._poster_fetch(image_urls),
                 )
             poster = cached_show_poster(connection, config.paths.poster_dir, "tv/Show")
@@ -589,28 +565,15 @@ class ExternalMetadataTests(unittest.TestCase):
 
     def test_failed_poster_download_keeps_metadata_and_retries_next_sync(self) -> None:
         config = self._config()
-        rel_path = "tv/Show/Season 1/Episode 01.mkv"
         image_urls: list[str] = []
 
         def failing_fetch(_url: str, _timeout: float) -> bytes:
             raise ProviderHttpError("Provider request failed with HTTP 503", status_code=503)
 
         with open_db(config.paths.db_path) as connection:
-            self._insert_item(connection, self.root / "source" / rel_path, rel_path)
-            with patch.dict(
-                    os.environ,
-                    {"MEDIAFORCE_PLEX_TOKEN": "plex-secret", "MEDIAFORCE_TMDB_TOKEN": "tmdb-secret"},
-                    clear=False,
-            ):
-                failed = sync_external_metadata(
-                    connection, config, now=OBSERVED_AT, fetch_json_fn=self._successful_fetch,
-                    fetch_image_fn=failing_fetch,
-                )
-                status = connection.execute(select(series_metadata.c.tmdb_status)).scalar_one()
-                retried = sync_external_metadata(
-                    connection, config, now=OBSERVED_AT + timedelta(minutes=30), fetch_json_fn=self._successful_fetch,
-                    fetch_image_fn=self._poster_fetch(image_urls),
-                )
+            failed = self._sync_show(connection, config, minutes=0, fetch_image_fn=failing_fetch)
+            status = connection.execute(select(series_metadata.c.tmdb_status)).scalar_one()
+            retried = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch(image_urls))
 
         self.assertEqual((failed.posters.status, failed.posters.failed), ("completed_with_warnings", 1))
         self.assertEqual(status, "Returning Series")
@@ -619,27 +582,39 @@ class ExternalMetadataTests(unittest.TestCase):
 
     def test_series_saved_before_posters_refresh_without_waiting_for_the_interval(self) -> None:
         config = self._config()
-        rel_path = "tv/Show/Season 1/Episode 01.mkv"
         with open_db(config.paths.db_path) as connection:
-            self._insert_item(connection, self.root / "source" / rel_path, rel_path)
-            with patch.dict(
-                    os.environ,
-                    {"MEDIAFORCE_PLEX_TOKEN": "plex-secret", "MEDIAFORCE_TMDB_TOKEN": "tmdb-secret"},
-                    clear=False,
-            ):
-                sync_external_metadata(
-                    connection, config, now=OBSERVED_AT, fetch_json_fn=self._successful_fetch,
-                    fetch_image_fn=self._poster_fetch([]),
-                )
-                connection.execute(series_metadata.update().values(tmdb_poster_path=None))
-                refreshed = sync_external_metadata(
-                    connection, config, now=OBSERVED_AT + timedelta(minutes=30), fetch_json_fn=self._successful_fetch,
-                    fetch_image_fn=self._poster_fetch([]),
-                )
-                poster_path = connection.execute(select(series_metadata.c.tmdb_poster_path)).scalar_one()
+            self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch([]))
+            connection.execute(series_metadata.update().values(tmdb_poster_path=None))
+            refreshed = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch([]))
+            poster_path = connection.execute(select(series_metadata.c.tmdb_poster_path)).scalar_one()
 
         self.assertEqual(refreshed.tmdb.refreshed, 1)
         self.assertEqual(poster_path, "/poster42.jpg")
+
+    def _sync_show(
+            self,
+            connection: Connection,
+            config: MediaforceConfig,
+            *,
+            minutes: int,
+            fetch_image_fn: FetchImage,
+            fetch_json_fn: FetchJson | None = None,
+    ) -> MetadataSyncStats:
+        rel_path = "tv/Show/Season 1/Episode 01.mkv"
+        if minutes == 0:
+            self._insert_item(connection, self.root / "source" / rel_path, rel_path)
+        with patch.dict(
+                os.environ,
+                {"MEDIAFORCE_PLEX_TOKEN": "plex-secret", "MEDIAFORCE_TMDB_TOKEN": "tmdb-secret"},
+                clear=False,
+        ):
+            return sync_external_metadata(
+                connection,
+                config,
+                now=OBSERVED_AT + timedelta(minutes=minutes),
+                fetch_json_fn=fetch_json_fn or self._successful_fetch,
+                fetch_image_fn=fetch_image_fn,
+            )
 
     def test_poster_route_serves_the_file_or_says_none(self) -> None:
         poster = self.root / "poster.jpg"
@@ -751,7 +726,7 @@ class ExternalMetadataTests(unittest.TestCase):
         raise AssertionError(url)
 
     @staticmethod
-    def _poster_fetch(requested: list[str]) -> Any:
+    def _poster_fetch(requested: list[str]) -> FetchImage:
         def fetch(url: str, _timeout: float) -> bytes:
             requested.append(url)
             return b"poster-bytes"
