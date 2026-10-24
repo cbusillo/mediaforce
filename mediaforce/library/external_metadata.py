@@ -1,5 +1,6 @@
 import json
 import posixpath
+import re
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,7 +11,11 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 JSONPayload = dict[str, Any]
 FetchJson = Callable[[str, Mapping[str, str], float], tuple[JSONPayload, Mapping[str, str]]]
+FetchImage = Callable[[str, float], bytes]
 MAX_JSON_RESPONSE_BYTES = 32 * 1024 * 1024
+MAX_IMAGE_RESPONSE_BYTES = 5 * 1024 * 1024
+TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w342"
+TMDB_IMAGE_PATH = re.compile(r"^/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png)$")
 MAX_PLEX_METADATA_ITEMS = 1_000_000
 
 
@@ -49,6 +54,7 @@ class TmdbSeries:
     status: str | None
     in_production: bool | None
     genres: tuple[str, ...] = ()
+    poster_path: str | None = None
 
 
 class _SameOriginRedirectHandler(HTTPRedirectHandler):
@@ -90,6 +96,24 @@ def fetch_json(url: str, headers: Mapping[str, str], timeout_seconds: float) -> 
         ) from exc
     except (OSError, URLError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProviderHttpError(f"Provider request failed: {type(exc).__name__}") from exc
+
+
+def fetch_image(url: str, timeout_seconds: float) -> bytes:
+    opener = build_opener(_SameOriginRedirectHandler())
+    try:
+        with opener.open(Request(url, method="GET"), timeout=timeout_seconds) as response:
+            if not str(response.headers.get("Content-Type") or "").startswith("image/"):
+                raise ProviderHttpError("Provider image response was not an image")
+            body = response.read(MAX_IMAGE_RESPONSE_BYTES + 1)
+    except ProviderHttpError:
+        raise
+    except HTTPError as exc:
+        raise ProviderHttpError(f"Provider request failed with HTTP {exc.code}", status_code=exc.code) from exc
+    except (OSError, URLError) as exc:
+        raise ProviderHttpError(f"Provider request failed: {type(exc).__name__}") from exc
+    if len(body) > MAX_IMAGE_RESPONSE_BYTES:
+        raise ProviderHttpError("Provider image exceeded the size limit")
+    return body
 
 
 class PlexClient:
@@ -242,7 +266,12 @@ class TmdbClient:
             status=str(payload.get("status") or "").strip() or None,
             in_production=in_production if isinstance(in_production, bool) else None,
             genres=_tmdb_genre_names(payload.get("genres")),
+            poster_path=tmdb_image_path(payload.get("poster_path")),
         )
+
+
+def tmdb_image_path(value: object) -> str | None:
+    return value if isinstance(value, str) and TMDB_IMAGE_PATH.match(value) else None
 
 
 def _tmdb_genre_names(value: Any) -> tuple[str, ...]:

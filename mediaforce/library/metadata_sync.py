@@ -14,8 +14,9 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, metadata_sync_state, plex_item_metadata, series_metadata
-from mediaforce.library.external_metadata import FetchJson, PlexClient, PlexPathMapping, ProviderHttpError, \
-    TmdbClient, fetch_json, map_plex_part_path, tmdb_id_from_guids
+from mediaforce.library.external_metadata import TMDB_IMAGE_BASE_URL, FetchImage, FetchJson, PlexClient, \
+    PlexPathMapping, ProviderHttpError, TmdbClient, fetch_image, fetch_json, map_plex_part_path, tmdb_id_from_guids, \
+    tmdb_image_path
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 
 
@@ -36,6 +37,7 @@ class MetadataSyncStats:
     status: str = "not_configured"
     plex: ProviderSyncStats = field(default_factory=ProviderSyncStats)
     tmdb: ProviderSyncStats = field(default_factory=ProviderSyncStats)
+    posters: ProviderSyncStats = field(default_factory=ProviderSyncStats)
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -43,6 +45,7 @@ class MetadataSyncStats:
             "providers": {
                 "plex": asdict(self.plex),
                 "tmdb": asdict(self.tmdb),
+                "posters": asdict(self.posters),
             },
         }
 
@@ -53,6 +56,7 @@ def sync_external_metadata(
         *,
         now: datetime | None = None,
         fetch_json_fn: FetchJson = fetch_json,
+        fetch_image_fn: FetchImage = fetch_image,
 ) -> MetadataSyncStats:
     observed_at = (now or datetime.now(tz=UTC)).astimezone(UTC)
     settings = config.metadata
@@ -120,9 +124,17 @@ def sync_external_metadata(
         refresh_interval=timedelta(hours=_positive_float(tmdb_settings.get("refresh_interval_hours"), 24.0)),
         stats=stats.tmdb,
     )
+    connection.commit()
+    _cache_posters(
+        connection,
+        config.paths.poster_dir,
+        image_base_url=str(tmdb_settings.get("image_base_url") or TMDB_IMAGE_BASE_URL),
+        fetch_image_fn=fetch_image_fn,
+        stats=stats.posters,
+    )
     stats.status = (
         "completed"
-        if stats.plex.status == "completed" and stats.tmdb.status == "completed"
+        if stats.plex.status == "completed" and stats.tmdb.status == "completed" and not stats.posters.failed
         else "completed_with_warnings"
     )
     return stats
@@ -265,6 +277,7 @@ def _sync_plex(
             tmdb_status=None,
             tmdb_in_production=None,
             tmdb_genres_json=None,
+            tmdb_poster_path=None,
             tmdb_observed_at=None,
             updated_at=observed_at_text,
         )
@@ -284,6 +297,7 @@ def _sync_plex(
                 "tmdb_status": None,
                 "tmdb_in_production": None,
                 "tmdb_genres_json": None,
+                "tmdb_poster_path": None,
                 "tmdb_observed_at": None,
             })
         connection.execute(
@@ -324,6 +338,7 @@ def _sync_tmdb(
             series_metadata.c.series_prefix,
             series_metadata.c.tmdb_series_id,
             series_metadata.c.tmdb_genres_json,
+            series_metadata.c.tmdb_poster_path,
             series_metadata.c.tmdb_observed_at,
         ).where(series_metadata.c.series_prefix.in_(series_prefixes))
     ).mappings().fetchall()
@@ -334,8 +349,13 @@ def _sync_tmdb(
         if series_id is None:
             continue
         previous = _parse_timestamp(row["tmdb_observed_at"])
-        # Rows saved before genres were kept refresh once, so suggestions need not wait a full interval.
-        if previous is not None and observed_at - previous < refresh_interval and row["tmdb_genres_json"] is not None:
+        # Rows saved before genres or posters were kept refresh once, so neither waits a full interval.
+        if (
+                previous is not None
+                and observed_at - previous < refresh_interval
+                and row["tmdb_genres_json"] is not None
+                and row["tmdb_poster_path"] is not None
+        ):
             stats.cached += 1
             continue
         try:
@@ -357,12 +377,82 @@ def _sync_tmdb(
                 tmdb_status=series.status,
                 tmdb_in_production=(1 if series.in_production else 0) if series.in_production is not None else None,
                 tmdb_genres_json=json.dumps(list(series.genres), separators=(",", ":")),
+                tmdb_poster_path=series.poster_path or "",
                 tmdb_observed_at=observed_at_text,
                 updated_at=observed_at_text,
             )
         )
     if stats.status == "not_configured":
         stats.status = "completed"
+
+
+def cached_show_poster(connection: DBClient, poster_dir: Path | None, show_prefix: str) -> Path | None:
+    poster_path = connection.execute(
+        select(series_metadata.c.tmdb_poster_path).where(series_metadata.c.series_prefix == show_prefix.strip("/"))
+    ).scalar_one_or_none()
+    target = poster_file(poster_dir, poster_path)
+    try:
+        return target if target is not None and target.is_file() else None
+    except OSError:
+        return None
+
+
+def poster_file(poster_dir: Path | None, poster_path: str | None) -> Path | None:
+    image_path = tmdb_image_path(poster_path)
+    return poster_dir / image_path.lstrip("/") if poster_dir is not None and image_path is not None else None
+
+
+def _cache_posters(
+        connection: DBClient,
+        poster_dir: Path | None,
+        *,
+        image_base_url: str,
+        fetch_image_fn: FetchImage,
+        stats: ProviderSyncStats,
+) -> None:
+    if poster_dir is None:
+        stats.message = "Set state.poster_dir to keep show posters."
+        return
+    poster_paths = connection.execute(
+        select(series_metadata.c.tmdb_poster_path).where(series_metadata.c.tmdb_poster_path != "").distinct()
+    ).scalars()
+    for poster_path in poster_paths:
+        target = poster_file(poster_dir, poster_path)
+        if target is None:
+            continue
+        try:
+            already_cached = target.is_file()
+        except OSError:
+            stats.failed += 1
+            stats.message = "The poster cache could not be read; posters are retried on the next sync."
+            continue
+        if already_cached:
+            stats.cached += 1
+            continue
+        try:
+            image = fetch_image_fn(image_base_url.rstrip("/") + poster_path, 20.0)
+        except ProviderHttpError as exc:
+            stats.failed += 1
+            stats.message = _provider_error_message("TMDB images", exc)
+            continue
+        try:
+            _write_atomically(target, image)
+        except OSError:
+            stats.failed += 1
+            stats.message = "The poster cache could not be written; posters are retried on the next sync."
+            continue
+        stats.refreshed += 1
+    stats.status = "completed" if not stats.failed else "completed_with_warnings"
+
+
+def _write_atomically(target: Path, content: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(f".{target.name}.{uuid.uuid4().hex}.partial")
+    try:
+        partial.write_bytes(content)
+        partial.replace(target)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def _plex_path_mappings(config: MediaforceConfig) -> tuple[PlexPathMapping, ...]:
