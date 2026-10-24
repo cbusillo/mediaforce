@@ -296,3 +296,30 @@ jobs:
           set -euo pipefail
           test_command="$(jq -er '.qualityGate.test.fileIntegrityMacos | select(type == "string" and length > 0)' .github/github.json)"
           bash -euo pipefail -c "$test_command"
+
+  mac-app:
+    name: mac-app
+    needs: changes
+    # Fail closed: run unless the change was positively classified docs-only.
+    # A merge-train pull request skips when its push run covers the commit.
+    if: >-
+      ${{ !cancelled() && needs.changes.outputs.product != 'false' &&
+      needs.changes.outputs.covered_by_push != 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v6
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+
+      - name: Build and test the Mac app
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          test_command="$(jq -er '.qualityGate.test.macApp | select(type == "string" and length > 0)' .github/github.json)"
+          bash -euo pipefail -c "$test_command"

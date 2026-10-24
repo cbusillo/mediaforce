@@ -34,12 +34,17 @@ def test_prepare_release_installs_outside_source_worktree(tmp_path: Path) -> Non
         if command[0] == "uv":
             assert cwd is not None
             installed.append(cwd)
+        if command[0] == "bash":
+            assert cwd is not None
+            controller_deploy.built_mac_app(cwd).mkdir(parents=True)
+            installed.append(cwd)
         return ""
 
     with patch.object(controller_deploy, "_run", side_effect=run):
         candidate = controller_deploy.prepare_release(source, "main", home)
     assert not candidate.is_relative_to(source.parent)
     assert installed and all(path == candidate for path in installed)
+    assert controller_deploy.built_mac_app(candidate).is_dir()
     runtime_install.require_release_directory(candidate, home)
     payload = plistlib.loads(login_item.render_login_item_plist(login_item.LoginItemPaths(candidate, home)))
     assert Path(payload["WorkingDirectory"]) == candidate
@@ -120,7 +125,9 @@ def test_deploy_refuses_unpaused_or_running_work(paused: bool, encodes: int, sam
         controller_deploy.require_paused_idle_dashboard(dashboard)
 
 
-@pytest.mark.parametrize("outcome", ["healthy", "unhealthy", "slow", "resume-lost", "backup-failed", "prepare-failed"])
+@pytest.mark.parametrize(
+    "outcome", ["healthy", "unhealthy", "slow", "resume-lost", "backup-failed", "prepare-failed", "app-install-failed"],
+)
 def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, outcome: str) -> None:
     from http.client import RemoteDisconnected
     from urllib.error import URLError
@@ -181,6 +188,12 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, out
         assert cwd == old
         return {"status": "", "rev-parse": "previous-sha"}[command[1]]
 
+    installed_apps: list[Path] = []
+    def install_app(release: Path) -> None:
+        installed_apps.append(release)
+        if outcome == "app-install-failed":
+            raise OSError("Applications folder not writable")
+
     actual_backup = controller_deploy.backup_database
     def backup(source: Path, destination: Path) -> None:
         if outcome == "backup-failed":
@@ -194,7 +207,9 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, out
         controller_deploy, "disable_login_item", side_effect=stop_service
     ), patch.object(controller_deploy, "enable_login_item", side_effect=switch), patch.object(
         controller_deploy, "backup_database", side_effect=backup
-    ), patch.object(controller_deploy, "_bootstrap", side_effect=restore_service), patch.object(
+    ), patch.object(controller_deploy, "install_mac_app", side_effect=install_app), patch.object(
+        controller_deploy, "_bootstrap", side_effect=restore_service
+    ), patch.object(
         controller_deploy, "_run_command", return_value=subprocess.CompletedProcess([], 0, "", "")
     ), patch.object(controller_deploy, "_launch_domain", return_value="gui/fixture"), patch.object(
         controller_deploy, "_launch_target", return_value="gui/fixture/service"
@@ -207,8 +222,9 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, out
             with pytest.raises((RuntimeError, OSError)):
                 controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture", database=database, startup_timeout=90)
     assert service_running is (outcome != "unhealthy")
-    healthy_candidate = outcome in {"healthy", "slow", "resume-lost"}
+    healthy_candidate = outcome in {"healthy", "slow", "resume-lost", "app-install-failed"}
     assert resume_requests == ([True] if healthy_candidate else [])
+    assert installed_apps == ([candidate] if healthy_candidate else [])
     assert (old / "retained-output").read_text() == "keep"
     if outcome == "prepare-failed":
         assert not stage.exists()
@@ -222,6 +238,25 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, out
     roots = runtime_install.protected_runtime_roots(database.parent)
     assert old in roots and candidate in roots
     assert runtime_install.retained_deploy_stage(database.parent) == (stage if healthy_candidate else None)
+
+
+@pytest.mark.parametrize("previous_app", [False, True])
+def test_mac_app_install_replaces_previous_copy(tmp_path: Path, previous_app: bool) -> None:
+    release, applications = tmp_path / "release", tmp_path / "Applications"
+    built = controller_deploy.built_mac_app(release) / "Contents"
+    built.mkdir(parents=True)
+    (built / "Info.plist").write_text("new")
+    installed = applications / controller_deploy.MAC_APP_NAME
+    if previous_app:
+        (installed / "Contents").mkdir(parents=True)
+        (installed / "Contents/Info.plist").write_text("old")
+        (installed / "Contents/stale-resource").write_text("old")
+    applications.mkdir(exist_ok=True)
+    controller_deploy.install_mac_app(release, applications)
+    assert (installed / "Contents/Info.plist").read_text() == "new"
+    assert not (installed / "Contents/stale-resource").exists()
+    assert sorted(path.name for path in applications.iterdir()) == [controller_deploy.MAC_APP_NAME]
+    assert (built / "Info.plist").read_text() == "new"
 
 
 @pytest.mark.parametrize("shared_metadata", ["commondir", "objects/info/alternates"])

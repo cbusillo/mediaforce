@@ -90,6 +90,8 @@ the review clips and saved calibration summary remain.
 - `bin/mediaforce.py`: Python entry point
 - `config/defaults.toml`: checked-in encode defaults and policy defaults
 - `mediaforce/`: internal Python package
+- `macos/`: the Mac app (SwiftUI). `scripts/build-mac-app.sh test` builds and
+  tests it; it needs Xcode and `xcodegen`.
 - runtime state: stored under `~/Library/Application Support/mediaforce/`
   and `~/Library/Caches/mediaforce/review/`
 

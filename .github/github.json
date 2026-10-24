@@ -29,7 +29,8 @@
       "local": "uv run --with pytest pytest {test_paths}",
       "ci": "uv run --with pytest pytest -q --durations=20 && npm --prefix frontend test",
       "fileIntegrityMacos": "uv run --with pytest pytest -q tests/test_file_integrity.py tests/test_db_connection_custody.py tests/test_db_connection_checkpoint.py tests/test_db_runtime.py",
-      "frontendLocal": "npm --prefix frontend test -- {test_paths}"
+      "frontendLocal": "npm --prefix frontend test -- {test_paths}",
+      "macApp": "bash scripts/build-mac-app.sh test"
     },
     "lint": {
       "frontend": "npm --prefix frontend run lint"

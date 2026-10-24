@@ -115,6 +115,18 @@ a later successful release replaces that pointer. Removing old releases or
 releasing legacy protection requires a separate, verified retirement after no
 service, job or rollback depends on them.
 
+### Mac app
+
+Preparing the candidate also builds the Mac app from that release, so the
+deploy host needs Xcode and `xcodegen`. A failed build is a preparation
+failure and leaves the existing service alone. The app is signed to run on
+this Mac only, with no developer account or App Store step. After the
+candidate passes its health check, the deploy replaces
+`/Applications/Mediaforce.app` with the release's copy and then resumes the
+encode queue. If installing the app fails, the queue still resumes and the
+deploy reports the failure; the release's own copy stays in its
+`.build/release-app/` folder.
+
 ## Work evidence
 
 `GET /api/release/work` reports fresh, uncached database work evidence:
