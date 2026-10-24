@@ -7,9 +7,10 @@ struct CleanupFolder: Decodable, Sendable {
 }
 
 struct CleanupResult: Decodable, Sendable {
+    let ok: Bool
     let removedCount: Int
     let removedSizeBytes: Int64
-    var preservedCount: Int?
+    let preservedCount: Int?
 }
 
 struct MediaforceClient: Sendable {
@@ -50,14 +51,13 @@ struct MediaforceClient: Sendable {
     }
 
     func cleanupFolder() async throws -> CleanupFolder {
-        struct Completed: Decodable { let archiveCleanup: CleanupFolder }
-        var request = URLRequest(url: baseURL.appending(path: "api/completed"))
+        var request = URLRequest(url: baseURL.appending(path: "api/archive-cleanup"))
         request.timeoutInterval = Self.factsTimeout
-        return try await decode(Completed.self, from: request).archiveCleanup
+        return try await decode(CleanupFolder.self, from: request)
     }
 
-    func deleteAllOriginalBackups() async throws -> CleanupResult {
-        let data = try await post("api/completed/backups/clear", body: Data("{}".utf8))
+    func deleteCleanupFolder() async throws -> CleanupResult {
+        let data = try await post("api/archive-cleanup/clear", body: Data("{}".utf8))
         return try JSONDecoder.mediaforce.decode(CleanupResult.self, from: data)
     }
 

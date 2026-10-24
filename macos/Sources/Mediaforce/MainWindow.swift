@@ -52,9 +52,10 @@ final class MainWindowModel {
         await refresh()
     }
 
-    func deleteAllOriginalBackups() async {
+    func deleteCleanupFolder() async {
         do {
-            notice = .deleted(try await client.deleteAllOriginalBackups())
+            let result = try await client.deleteCleanupFolder()
+            notice = result.ok ? .deleted(result) : .publishing
         } catch {
             notice = .unanswered
         }
@@ -70,6 +71,16 @@ struct ActionNotice: Identifiable, Equatable {
     static let unanswered = ActionNotice(
         title: "Mediaforce didn't confirm that",
         message: "It didn't answer properly, so the change may not have happened. The window shows what Mediaforce reports next."
+    )
+
+    static let publishing = ActionNotice(
+        title: "Nothing was deleted",
+        message: "Files are being published right now. Try again when they finish."
+    )
+
+    static let emptyCleanupFolder = ActionNotice(
+        title: "Nothing to delete",
+        message: "The Cleanup folder is empty."
     )
 
     static func deleted(_ result: CleanupResult) -> ActionNotice {
@@ -258,16 +269,20 @@ struct BackupBin: View {
             Button("Delete original backups…") {
                 Task {
                     do {
-                        folder = try await model.client.cleanupFolder()
-                        confirming = true
+                        let found = try await model.client.cleanupFolder()
+                        if found.fileCount > 0 {
+                            folder = found
+                            confirming = true
+                        } else {
+                            model.notice = .emptyCleanupFolder
+                        }
                     } catch {
                         model.notice = .unanswered
                     }
                 }
             }
             .controlSize(.small)
-            .disabled(backups.count == 0)
-            .help(backups.count == 0 ? "Nothing to delete yet. Backups land here after a season is replaced." : "Delete everything in the Cleanup folder.")
+            .help("Delete everything in the Cleanup folder. Mediaforce shows what is there and asks first.")
             .padding(.leading, 50)
             .confirmationDialog(
                 "Delete everything in the Cleanup folder?",
@@ -275,7 +290,7 @@ struct BackupBin: View {
                 presenting: folder
             ) { _ in
                 Button("Delete all original backups", role: .destructive) {
-                    Task { await model.deleteAllOriginalBackups() }
+                    Task { await model.deleteCleanupFolder() }
                 }
             } message: { folder in
                 Text("\(Words.count(folder.fileCount, "file")), \(Words.size(folder.totalSizeBytes)). Mediaforce keeps any original a file still being finished needs. The replaced files stay in your library. This cannot be undone.")

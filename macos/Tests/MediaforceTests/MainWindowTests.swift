@@ -118,7 +118,7 @@ final class MediaforceClientActionTests: XCTestCase {
         try await client.pause()
         try await client.resume()
         StubServer.body = Data(#"{"ok": true, "removed_count": 3, "removed_size_bytes": 3000000000, "preserved_count": 1}"#.utf8)
-        let deleted = try await client.deleteAllOriginalBackups()
+        let deleted = try await client.deleteCleanupFolder()
         StubServer.body = Data("{}".utf8)
 
         XCTAssertEqual(Self.requests.map(\.httpMethod), ["POST", "POST", "POST"])
@@ -126,6 +126,20 @@ final class MediaforceClientActionTests: XCTestCase {
         XCTAssertEqual(Self.requests[2].value(forHTTPHeaderField: "Content-Type"), "application/json")
         XCTAssertEqual(deleted.removedCount, 3)
         XCTAssertEqual(ActionNotice.deleted(deleted).title, "Deleted 3 original backups")
+    }
+
+    @MainActor
+    func testADeleteRefusedWhilePublishingSaysNothingWasDeleted() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubServer.self]
+        StubServer.respond = { request in
+            HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        }
+        StubServer.body = Data(#"{"ok": false, "removed_count": 0, "removed_size_bytes": 0}"#.utf8)
+        let model = MainWindowModel(client: MediaforceClient(baseURL: ServerConnection.localServer, session: URLSession(configuration: configuration)))
+        await model.deleteCleanupFolder()
+        StubServer.body = Data("{}".utf8)
+        XCTAssertEqual(model.notice?.title, ActionNotice.publishing.title)
     }
 
     func testAFailedAnswerThrows() async {
