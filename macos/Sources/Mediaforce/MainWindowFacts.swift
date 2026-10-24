@@ -126,6 +126,36 @@ struct MainWindowFacts: Decodable, Sendable {
 
     struct KeptOriginal: Decodable, Sendable {
         let keptItemCount: Int
+        var kept: [KeptSeason] = []
+        var held: [HeldSeason] = []
+
+        enum CodingKeys: CodingKey {
+            case keptItemCount, kept, held
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            keptItemCount = try container.decode(Int.self, forKey: .keptItemCount)
+            kept = try container.decodeIfPresent([KeptSeason].self, forKey: .kept) ?? []
+            held = try container.decodeIfPresent([HeldSeason].self, forKey: .held) ?? []
+        }
+    }
+
+    struct KeptSeason: Decodable, Sendable, Identifiable {
+        let prefix: String
+        let show: String
+        let season: Int?
+        let reason: String
+        let itemCount: Int
+        var id: String { "\(prefix):\(reason)" }
+    }
+
+    struct HeldSeason: Decodable, Sendable, Identifiable {
+        let prefix: String
+        let show: String
+        let season: Int?
+        let reasons: [String]
+        var id: String { prefix }
     }
 }
 
