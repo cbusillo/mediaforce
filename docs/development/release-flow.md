@@ -119,8 +119,10 @@ service, job or rollback depends on them.
 
 Preparing the candidate also builds the Mac app from that release, so the
 deploy host needs Xcode and `xcodegen`. A failed build is a preparation
-failure and leaves the existing service alone. The app is signed to run on
-this Mac only, with no developer account or App Store step. After the
+failure and leaves the existing service alone. The app is signed with the
+team's Developer ID certificate, which must be in this Mac's keychain; macOS
+gives an ad-hoc signed app no notification permission. There is no App Store
+or notarization step. After the
 candidate passes its health check, the deploy replaces
 `/Applications/Mediaforce.app` with the release's copy and then resumes the
 encode queue. If installing the app fails, the queue still resumes and the
