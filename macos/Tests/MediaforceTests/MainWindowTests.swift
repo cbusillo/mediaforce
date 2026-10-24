@@ -71,6 +71,19 @@ final class MainWindowTests: XCTestCase {
         XCTAssertEqual(Words.size(661_000_000), "661 MB")
     }
 
+    func testEveryReasonWorkIsStoppedIsSaid() throws {
+        let json = MainWindowTests.facts.replacingOccurrences(of: #""paused_by_owner": false"#, with: #""paused_by_owner": true"#)
+        let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(json.utf8))
+        let explanation = try XCTUnwrap(Words.workExplanation(facts))
+        XCTAssertTrue(explanation.contains("resume"))
+        XCTAssertTrue(explanation.contains("storage"))
+    }
+
+    func testSizeFailuresExplainThemselves() {
+        XCTAssertNotNil(Words.sampleFailure("bound_exhausted"))
+        XCTAssertNil(Words.sampleFailure("a code the app does not know"))
+    }
+
     func testEpisodeEventsNameTheEpisodeOnce() throws {
         let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(Self.facts.utf8))
         XCTAssertEqual(Words.eventSentence(facts.events[0]), "Futurama S03E08 replaced. Saved 661 MB.")
@@ -100,13 +113,23 @@ final class MediaforceClientActionTests: XCTestCase {
         super.tearDown()
     }
 
-    func testActionsPostAndReportAFailedAnswer() async throws {
+    func testEachActionIsItsOwnRequestAndDeletingSendsItsJSON() async throws {
         let client = client()
         try await client.pause()
         try await client.resume()
-        try await client.deleteAllOriginalBackups()
-        XCTAssertEqual(Self.requests.map(\.httpMethod), ["POST", "POST", "POST"])
+        StubServer.body = Data(#"{"ok": true, "removed_count": 3, "removed_size_bytes": 3000000000, "preserved_count": 1}"#.utf8)
+        let deleted = try await client.deleteAllOriginalBackups()
+        StubServer.body = Data("{}".utf8)
 
+        XCTAssertEqual(Self.requests.map(\.httpMethod), ["POST", "POST", "POST"])
+        XCTAssertEqual(Set(Self.requests.compactMap(\.url)).count, 3)
+        XCTAssertEqual(Self.requests[2].value(forHTTPHeaderField: "Content-Type"), "application/json")
+        XCTAssertEqual(deleted.removedCount, 3)
+        XCTAssertEqual(ActionNotice.deleted(deleted).title, "Deleted 3 original backups")
+    }
+
+    func testAFailedAnswerThrows() async {
+        let client = client()
         StubServer.respond = { request in
             HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
         }
@@ -164,6 +187,12 @@ final class MainWindowModelTests: XCTestCase {
         let garbled = model { _ in (200, Data("not facts".utf8)) }
         await garbled.refresh()
         XCTAssertEqual(garbled.connection, .failing)
+    }
+
+    func testAFailedActionTellsTheOwner() async {
+        let model = model { _ in (500, Data()) }
+        await model.perform { try await $0.pause() }
+        XCTAssertEqual(model.notice?.title, ActionNotice.unanswered.title)
     }
 
     func testARefusedConnectionIsUnreachable() async {

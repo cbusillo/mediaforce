@@ -122,6 +122,8 @@ struct SampleShelf: View {
     let facts: MainWindowFacts
     private var samples: MainWindowFacts.Samples { facts.samples }
     let posters: PosterStore
+    let client: MediaforceClient
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -136,13 +138,15 @@ struct SampleShelf: View {
                             headline: sample.season.map { "Season \($0)" } ?? sample.show,
                             detail: Words.sampleState(sample)
                         )
+                        .help([Words.season(sample.show, sample.season), Words.sampleFailure(sample.failure)].compactMap { $0 }.joined(separator: ": "))
                         if let action = Words.sampleAction(sample.action) {
+                            let open = { openURL(client.seasonPage(sample.prefix)) }
                             if index == 0 {
-                                Button(action) {}
+                                Button(action, action: open)
                                     .buttonStyle(.borderedProminent)
                                     .controlSize(.small)
                             } else {
-                                Button(action) {}
+                                Button(action, action: open)
                                     .controlSize(.small)
                             }
                         } else if let reason = Words.waitingReason(sample, facts) {
@@ -175,6 +179,10 @@ struct SizeBar: View {
 }
 
 struct BiggestTable: View {
+    static let rowLimit = 9
+    static let rowHeight: CGFloat = 28
+    static let noteHeight: CGFloat = 16
+
     let shows: [MainWindowFacts.NotStartedShow]
     let samples: [MainWindowFacts.Sample]
 
@@ -220,15 +228,15 @@ struct BiggestTable: View {
             }
             .tableStyle(.inset(alternatesRowBackgrounds: true))
             .scrollDisabled(true)
-            .frame(height: CGFloat(min(shows.count, 9)) * 28 + 28)
+            .frame(height: Self.rowHeight * CGFloat(shows.count + 1) + Self.noteHeight * CGFloat(shows.filter { waitingNote($0) != nil }.count))
         }
     }
 
     private func waitingNote(_ show: MainWindowFacts.NotStartedShow) -> String? {
         guard let prefix = show.waitingSamplePrefix,
               let sample = samples.first(where: { $0.prefix == prefix }) else { return nil }
-        let season = sample.season.map { "Season \($0) sample" } ?? "Sample"
-        return sample.state == "ready_to_compare" ? "\(season) is ready" : "\(season) needs making again"
+        let season = sample.season.map { "Season \($0)" } ?? "A season"
+        return "\(season): \(Words.sampleState(sample).lowercased())"
     }
 }
 

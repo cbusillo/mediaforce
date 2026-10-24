@@ -80,30 +80,52 @@ extension Words {
 
     static func workExplanation(_ facts: MainWindowFacts) -> String? {
         let work = facts.work
+        var sentences: [String] = []
         if work.pausedByOwner {
-            return "Nothing new starts until you resume. Work already running finishes first."
+            sentences.append("Nothing new starts until you resume. Work already running finishes first.")
         }
         if work.stopReasons.contains("storage_unavailable") {
-            return "Shared storage isn't connected, so nothing is being compressed. Mediaforce keeps checking by itself and carries on when it's back."
+            sentences.append(work.pausedByOwner
+                ? "Shared storage isn't connected either; Mediaforce keeps checking by itself."
+                : "Shared storage isn't connected, so nothing is being compressed. Mediaforce keeps checking by itself and carries on when it's back.")
         }
         if work.stopReasons.contains("no_computer_ready") {
-            return "Work is waiting and no computer can take it right now. See Computers for why."
+            sentences.append("Work is waiting and no computer can take it right now. See Computers for why.")
         }
-        if work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
-            return "Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first."
+        if sentences.isEmpty, work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
+            sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
         }
-        return nil
+        return sentences.isEmpty ? nil : sentences.joined(separator: " ")
+    }
+
+    static func staleNotice(_ connection: ServerState, lastHeard: Date?) -> String {
+        let since = lastHeard.map { " Showing what it reported at \($0.formatted(date: .omitted, time: .shortened))." } ?? ""
+        return connection == .failing
+            ? "Mediaforce isn't answering properly.\(since)"
+            : "Can't reach Mediaforce on this Mac.\(since)"
+    }
+
+    static func sampleFailure(_ code: String?) -> String? {
+        switch code {
+        case "arithmetic_infeasible", "bound_exhausted", "quality_conflict":
+            "It can't reach the size goal at good quality."
+        case "goal_too_small": "The size goal is too small for this season."
+        case "size_under_target", "size_over_target", "size_unverified": "The sample came out the wrong size."
+        case "no_access": "Mediaforce couldn't open the source files."
+        case "missing_clips": "Its comparison clips are gone."
+        case "restarted": "It was interrupted by a restart."
+        case "stopped": "It was stopped."
+        default: nil
+        }
     }
 
     static func waitingReason(_ sample: MainWindowFacts.Sample, _ facts: MainWindowFacts) -> String? {
-        if let held = facts.keptOriginal.held.first(where: { $0.prefix == sample.prefix }), let reason = held.reasons.first {
-            return "Waits: \(holdReason(reason))"
-        }
+        var reasons = facts.keptOriginal.held.first(where: { $0.prefix == sample.prefix })?.reasons.map(holdReason) ?? []
         let work = facts.work
-        if work.pausedByOwner { return "Starts when you resume" }
-        if work.stopReasons.contains("storage_unavailable") { return "Starts when storage is back" }
-        if work.stopReasons.contains("no_computer_ready") { return "Starts when a computer is free" }
-        return nil
+        if work.pausedByOwner { reasons.append("until you resume") }
+        if work.stopReasons.contains("storage_unavailable") { reasons.append("until storage is back") }
+        if work.stopReasons.contains("no_computer_ready") { reasons.append("for a free computer") }
+        return reasons.isEmpty ? nil : "Waits: " + reasons.joined(separator: ", ")
     }
 
     static func event(_ event: MainWindowFacts.Event) -> String {

@@ -7,7 +7,8 @@ final class MainWindowModel {
 
     private(set) var facts: MainWindowFacts?
     private(set) var connection: ServerState = .checking
-    private(set) var actionFailed = false
+    private(set) var lastHeard: Date?
+    var notice: ActionNotice?
     var onFacts: ((MainWindowFacts) -> Void)?
     let client: MediaforceClient
     let posters: PosterStore
@@ -22,6 +23,7 @@ final class MainWindowModel {
             let facts = try await client.facts()
             self.facts = facts
             connection = .reachable
+            lastHeard = .now
             onFacts?(facts)
         } catch is DecodingError {
             connection = .failing
@@ -44,12 +46,43 @@ final class MainWindowModel {
     func perform(_ action: @Sendable (MediaforceClient) async throws -> Void) async {
         do {
             try await action(client)
-            actionFailed = false
         } catch {
-            actionFailed = true
+            notice = .unanswered
         }
         await refresh()
     }
+
+    func deleteAllOriginalBackups() async {
+        do {
+            notice = .deleted(try await client.deleteAllOriginalBackups())
+        } catch {
+            notice = .unanswered
+        }
+        await refresh()
+    }
+}
+
+struct ActionNotice: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+    let message: String
+
+    static let unanswered = ActionNotice(
+        title: "Mediaforce didn't confirm that",
+        message: "It didn't answer properly, so the change may not have happened. The window shows what Mediaforce reports next."
+    )
+
+    static func deleted(_ result: CleanupResult) -> ActionNotice {
+        let kept = (result.preservedCount ?? 0) > 0
+            ? " Kept \(Words.count(result.preservedCount ?? 0, "original")) that files still being finished need."
+            : ""
+        return ActionNotice(
+            title: "Deleted \(Words.count(result.removedCount, "original backup"))",
+            message: "\(Words.size(result.removedSizeBytes)) freed.\(kept)"
+        )
+    }
+
+    static func == (lhs: ActionNotice, rhs: ActionNotice) -> Bool { lhs.id == rhs.id }
 }
 
 enum Place: Hashable {
@@ -77,16 +110,23 @@ struct MainWindow: View {
                     Sidebar(place: $place, facts: facts, model: model)
                         .navigationSplitViewColumnWidth(214)
                 } detail: {
-                    switch place {
-                    case .spaceSaved: SpaceSavedPage(facts: facts)
-                    case .keptOriginal: KeptOriginalPage(kept: facts.keptOriginal)
-                    case .computers: ComputersPage(computers: facts.computers)
-                    default: LibraryPage(facts: facts, posters: model.posters)
+                    Group {
+                        switch place {
+                        case .spaceSaved: SpaceSavedPage(facts: facts)
+                        case .keptOriginal: KeptOriginalPage(kept: facts.keptOriginal)
+                        case .computers: ComputersPage(computers: facts.computers)
+                        default: LibraryPage(facts: facts, posters: model.posters, client: model.client)
+                        }
+                    }
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        if model.connection != .reachable {
+                            StaleNotice(connection: model.connection, lastHeard: model.lastHeard)
+                        }
                     }
                 }
                 .onChange(of: place) { previous, chosen in
                     guard let path = chosen.flatMap(Place.webPath) else { return }
-                    NSWorkspace.shared.open(model.client.baseURL.appending(path: path))
+                    NSWorkspace.shared.open(model.client.webPage(path))
                     place = previous
                 }
                 .toolbar {
@@ -102,6 +142,26 @@ struct MainWindow: View {
             }
         }
         .frame(minWidth: 1100, minHeight: 700)
+        .alert(item: Bindable(model).notice) { notice in
+            Alert(title: Text(notice.title), message: Text(notice.message))
+        }
+    }
+}
+
+struct StaleNotice: View {
+    let connection: ServerState
+    let lastHeard: Date?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+            Text(Words.staleNotice(connection, lastHeard: lastHeard))
+            Spacer(minLength: 0)
+        }
+        .font(.callout)
+        .padding(.horizontal, 34)
+        .padding(.vertical, 8)
+        .background(.yellow.opacity(0.18))
     }
 }
 
@@ -174,6 +234,7 @@ struct SidebarRow: View {
 struct BackupBin: View {
     let backups: MainWindowFacts.OriginalBackups
     let model: MainWindowModel
+    @State private var folder: CleanupFolder?
     @State private var confirming = false
 
     var body: some View {
@@ -194,21 +255,31 @@ struct BackupBin: View {
             }
             .help("When a season is replaced, its originals wait here until you delete them.")
             .padding(.horizontal, 16)
-            Button("Delete original backups…") { confirming = true }
-                .controlSize(.small)
-                .disabled(backups.count == 0)
-                .help(backups.count == 0 ? "Nothing to delete yet. Backups land here after a season is replaced." : "Delete every original backup in the Cleanup folder.")
-                .padding(.leading, 50)
-                .confirmationDialog(
-                    "Delete all \(backups.count) original backups?",
-                    isPresented: $confirming
-                ) {
-                    Button("Delete all original backups", role: .destructive) {
-                        Task { await model.perform { try await $0.deleteAllOriginalBackups() } }
+            Button("Delete original backups…") {
+                Task {
+                    do {
+                        folder = try await model.client.cleanupFolder()
+                        confirming = true
+                    } catch {
+                        model.notice = .unanswered
                     }
-                } message: {
-                    Text("This frees \(Words.size(backups.bytes)). The replaced files stay in your library. This cannot be undone.")
                 }
+            }
+            .controlSize(.small)
+            .disabled(backups.count == 0)
+            .help(backups.count == 0 ? "Nothing to delete yet. Backups land here after a season is replaced." : "Delete everything in the Cleanup folder.")
+            .padding(.leading, 50)
+            .confirmationDialog(
+                "Delete everything in the Cleanup folder?",
+                isPresented: $confirming,
+                presenting: folder
+            ) { _ in
+                Button("Delete all original backups", role: .destructive) {
+                    Task { await model.deleteAllOriginalBackups() }
+                }
+            } message: { folder in
+                Text("\(Words.count(folder.fileCount, "file")), \(Words.size(folder.totalSizeBytes)). Mediaforce keeps any original a file still being finished needs. The replaced files stay in your library. This cannot be undone.")
+            }
         }
         .padding(.bottom, 14)
     }
