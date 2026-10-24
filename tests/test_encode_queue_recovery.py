@@ -22880,7 +22880,7 @@ raise SystemExit(0)
             blocked = load_encode_job(connection, "job-browse-only")
             self.assertIsNotNone(blocked)
             assert blocked is not None
-            self.assertEqual(blocked["waiting_reason"], "Library is Browse only or Disabled in Settings.")
+            self.assertEqual(blocked["waiting_reason"], encode_runtime.LIBRARY_NOT_COMPRESSING_WAITING_REASON)
 
     def test_load_next_runnable_encode_job_batches_parent_sync_and_manifest_read(self) -> None:
         manifest_path = self._write_manifest(

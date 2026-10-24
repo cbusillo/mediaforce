@@ -2732,7 +2732,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Other Studio profile-blocked fixture",
                 "route": "/folders/other/Needs%20Probe",
                 "marker": "Needs Probe",
-                "stageMarker": "Profile blocked",
+                "stageMarker": "Files not ready",
             },
             {
                 "label": "Other Studio oversized-scope fixture",
