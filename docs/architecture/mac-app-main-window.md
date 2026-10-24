@@ -50,3 +50,22 @@ still answers when that storage is gone, and it starts no work.
   `motion_unclear`). `held` lists seasons waiting for a reason that lifts on
   its own (`current_season`, `recent_acquisition`, and so on) or for a motion
   decision (`motion_pattern`).
+
+## Notifications and the Dock badge
+
+The app reads these facts every 30 seconds while it runs, even with its window
+closed, and asks the Director only by Mac notification and Dock badge:
+
+- a season finishing (once per season, ever);
+- something waiting on the Director: a sample ready to watch or needing to be
+  made again, or a computer that needs its password, Remote Login, or a trust
+  check;
+- original backups becoming ready to delete (when their number rises).
+
+The Dock badge counts what waits on the Director: samples waiting, computers
+that need the Director, and one for original backups ready to delete. It clears
+as each item clears. Problems the Director cannot act on, such as shared
+storage being gone or a computer being off schedule, never notify. The first
+check after the app starts with no memory only records what it sees, so a new
+install does not announce the whole library. Opened from /Applications, the
+app registers itself to open at login.
