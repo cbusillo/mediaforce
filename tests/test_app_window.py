@@ -91,7 +91,7 @@ def _encode_job(connection: DBClient, prefix: str, *, status: str = "completed",
 def _computer(key: str, **fields: Any) -> dict[str, Any]:
     return {
         "key": key, "label": key, "message": "", "available": True, "capabilities": ["encode_queue"],
-        "active_encode_count": 0, "active_flag": "active", "schedule_open": True, **fields,
+        "active_encode_count": 0, "active_flag": "active", "schedule_open": True, "queue_active": True, **fields,
     }
 
 
@@ -228,6 +228,8 @@ def test_computer_states_are_codes(connection: DBClient) -> None:
         _computer("mini", available=False, check_failure="password_needed"),
         _computer("server", available=False, missing_mounts=["/Volumes/media"]),
         _computer("odd", available=False),
+        _computer("staging", controller_storage_issue="Controller storage needs a fresh check.", queue_active=False),
+        _computer("refused", queue_active=False),
         _computer("new", available=False, message=host_status._HOST_STATUS_PENDING_MESSAGE),
     ]
 
@@ -236,7 +238,7 @@ def test_computer_states_are_codes(connection: DBClient) -> None:
     assert states == [
         ("studio", "busy"), ("mbp", "ready"), ("night", "outside_schedule"), ("cooling", "cooling_down"),
         ("sampler", "not_encoding"), ("mini", "password_needed"), ("server", "storage_unreachable"),
-        ("odd", "not_ready"), ("new", "checking"),
+        ("odd", "not_ready"), ("staging", "storage_unreachable"), ("refused", "not_ready"), ("new", "checking"),
     ]
 
 
@@ -249,6 +251,8 @@ def test_computer_states_are_codes(connection: DBClient) -> None:
         (True, False, False, {}, "paused", ["storage_unavailable"]),
         (False, True, True, {"schedule_open": False}, "stopped", ["no_computer_ready"]),
         (False, True, False, {"schedule_open": False}, "idle", []),
+        (False, True, True, {"controller_storage_issue": "Storage needs a check.", "queue_active": False}, "stopped",
+         ["no_computer_ready"]),
     ],
 )
 def test_work_says_whether_it_is_paused_and_why_it_stopped(

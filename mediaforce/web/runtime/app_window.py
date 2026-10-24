@@ -352,11 +352,13 @@ def _computer_state(row: Mapping[str, Any]) -> str:
         return "busy"
     if "encode_queue" not in {str(capability).lower() for capability in row.get("capabilities") or []}:
         return "not_encoding"
+    if row.get("controller_storage_issue"):
+        return "storage_unreachable"
     if row.get("active_flag") == "cooldown":
         return "cooling_down"
     if not row.get("schedule_open"):
         return "outside_schedule"
-    return "ready"
+    return "ready" if row.get("queue_active") else "not_ready"
 
 
 def _unavailable_computer_state(row: Mapping[str, Any]) -> str:
