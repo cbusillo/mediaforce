@@ -56,10 +56,12 @@ still answers when that storage is gone, and it starts no work.
 The app reads these facts every 30 seconds while it runs, even with its window
 closed, and asks the Director only by Mac notification and Dock badge:
 
-- a season finishing (once per season, ever);
+- a season finishing, counted from the server's total of finished seasons so
+  none is missed while the app was closed; more than three at once arrive as
+  one notification with the count;
 - something waiting on the Director: a sample ready to watch or needing to be
-  made again, or a computer that needs its password, Remote Login, or a trust
-  check;
+  made again, a sample that needs a size decision, or a computer that needs its
+  password, Remote Login, or a trust check;
 - original backups becoming ready to delete (when their number rises).
 
 The Dock badge counts what waits on the Director: samples waiting, computers

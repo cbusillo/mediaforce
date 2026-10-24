@@ -7,30 +7,32 @@ struct AttentionNotice: Equatable, Sendable {
 }
 
 struct AttentionMemory: Codable, Equatable, Sendable {
-    var finished: Set<String> = []
+    var lastFinishedAt = ""
+    var finishedCount = 0
     var waiting: Set<String> = []
     var backupCount = 0
 }
 
 struct Attention: Equatable, Sendable {
     static let computerStatesNeedingYou: Set<String> = ["password_needed", "identity_changed", "new_name", "remote_login_off"]
+    static let mostSeasonsNamedSeparately = 3
 
     let notices: [AttentionNotice]
     let badgeCount: Int
     let memory: AttentionMemory
 
     static func review(_ facts: MainWindowFacts, remembered: AttentionMemory?) -> Attention {
-        let finished = finishedNotices(facts)
         let waiting = waitingNotices(facts)
         let memory = AttentionMemory(
-            finished: (remembered?.finished ?? []).union(finished.map(\.id)),
+            lastFinishedAt: ([remembered?.lastFinishedAt ?? ""] + facts.recentlyFinishedSeasons.compactMap(\.finishedAt)).max() ?? "",
+            finishedCount: facts.spaceSaved.seasonCount,
             waiting: Set(waiting.map(\.id)),
             backupCount: facts.originalBackups.count
         )
         guard let remembered else {
             return Attention(notices: [], badgeCount: waitingOnYou(facts), memory: memory)
         }
-        var notices = finished.filter { !remembered.finished.contains($0.id) }
+        var notices = finishedNotices(facts, since: remembered)
         notices += waiting.filter { !remembered.waiting.contains($0.id) }
         if facts.originalBackups.count > remembered.backupCount {
             notices.append(backupsNotice(facts.originalBackups))
@@ -44,8 +46,18 @@ struct Attention: Equatable, Sendable {
             + (facts.originalBackups.count > 0 ? 1 : 0)
     }
 
-    private static func finishedNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {
-        facts.recentlyFinishedSeasons.map { season in
+    private static func finishedNotices(_ facts: MainWindowFacts, since remembered: AttentionMemory) -> [AttentionNotice] {
+        let newlyFinished = facts.spaceSaved.seasonCount - remembered.finishedCount
+        guard newlyFinished > 0 else { return [] }
+        let named = facts.recentlyFinishedSeasons.filter { ($0.finishedAt ?? "") > remembered.lastFinishedAt }
+        guard newlyFinished <= mostSeasonsNamedSeparately, named.count >= newlyFinished else {
+            return [AttentionNotice(
+                id: "finished:\(newlyFinished)",
+                title: "\(Words.count(newlyFinished, "season")) finished",
+                body: "See Finished lately in Mediaforce for what was saved."
+            )]
+        }
+        return named.prefix(newlyFinished).map { season in
             AttentionNotice(
                 id: "finished:\(season.prefix)",
                 title: "\(Words.season(season.show, season.season)) is finished",
@@ -55,20 +67,7 @@ struct Attention: Equatable, Sendable {
     }
 
     private static func waitingNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {
-        let samples = facts.samples.waitingOnYou.map { sample in
-            let name = Words.season(sample.show, sample.season)
-            return sample.state == "ready_to_compare"
-                ? AttentionNotice(
-                    id: "sample:\(sample.prefix):ready",
-                    title: "\(name) sample is ready",
-                    body: "Watch the sample and approve it, and Mediaforce will compress the rest of the season."
-                )
-                : AttentionNotice(
-                    id: "sample:\(sample.prefix):again",
-                    title: "\(name) sample needs making again",
-                    body: "Make the sample again in Mediaforce, then watch it."
-                )
-        }
+        let samples = facts.samples.waitingOnYou.map(sampleNotice)
         let computers = facts.computers.filter { computerStatesNeedingYou.contains($0.state) }.map { computer in
             AttentionNotice(
                 id: "computer:\(computer.key):\(computer.state)",
@@ -77,6 +76,29 @@ struct Attention: Equatable, Sendable {
             )
         }
         return samples + computers
+    }
+
+    private static func sampleNotice(_ sample: MainWindowFacts.Sample) -> AttentionNotice {
+        let name = Words.season(sample.show, sample.season)
+        if sample.state == "ready_to_compare" {
+            return AttentionNotice(
+                id: "sample:\(sample.prefix):ready",
+                title: "\(name) sample is ready",
+                body: "Watch the sample and approve it, and Mediaforce will compress the rest of the season."
+            )
+        }
+        if sample.action == "choose_size" {
+            return AttentionNotice(
+                id: "sample:\(sample.prefix):size",
+                title: "\(name) needs a size decision",
+                body: "Its sample can't reach the size goal at good quality. Choose a size in Mediaforce."
+            )
+        }
+        return AttentionNotice(
+            id: "sample:\(sample.prefix):again",
+            title: "\(name) sample needs making again",
+            body: "Make the sample again in Mediaforce, then watch it."
+        )
     }
 
     private static func backupsNotice(_ backups: MainWindowFacts.OriginalBackups) -> AttentionNotice {

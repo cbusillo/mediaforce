@@ -3,17 +3,23 @@ import XCTest
 @testable import Mediaforce
 
 final class AttentionTests: XCTestCase {
+    private struct Finished {
+        let prefix: String
+        let at: String
+    }
+
     private func facts(
-        finished: [String] = [],
-        waitingSamples: [(prefix: String, state: String)] = [],
+        finished: [Finished] = [],
+        seasonCount: Int? = nil,
+        waitingSamples: [(prefix: String, state: String, action: String)] = [],
         computers: [(key: String, state: String)] = [],
         backups: Int = 0
     ) throws -> MainWindowFacts {
-        let finishedJSON = finished.map { prefix in
-            #"{"prefix": "\#(prefix)", "show_prefix": "tv/Futurama", "show": "Futurama", "season": 3, "episode_count": 15, "bytes_saved": 4000000000, "finished_at": "2026-10-22T04:14:18+00:00"}"#
+        let finishedJSON = finished.map { season in
+            #"{"prefix": "\#(season.prefix)", "show_prefix": "tv/Futurama", "show": "Futurama", "season": 3, "episode_count": 15, "bytes_saved": 4000000000, "finished_at": "\#(season.at)"}"#
         }
         let samplesJSON = waitingSamples.map { sample in
-            #"{"prefix": "\#(sample.prefix)", "show_prefix": "tv/Expanse", "show": "The Expanse", "season": 3, "state": "\#(sample.state)", "action": null, "failure": null}"#
+            #"{"prefix": "\#(sample.prefix)", "show_prefix": "tv/Expanse", "show": "The Expanse", "season": 3, "state": "\#(sample.state)", "action": "\#(sample.action)", "failure": null}"#
         }
         let computersJSON = computers.map { computer in
             #"{"key": "\#(computer.key)", "name": "\#(computer.key)", "platform": "macos", "state": "\#(computer.state)", "running_count": 0, "schedule_opens_at": null}"#
@@ -24,7 +30,7 @@ final class AttentionTests: XCTestCase {
          "library": {"tv": {"show_count": 0, "season_count": 0, "episode_count": 0, "total_bytes": 0, "original_bytes": 0},
                      "movies": {"title_count": 0, "total_bytes": 0, "original_bytes": 0},
                      "other": {"item_count": 0, "total_bytes": 0, "original_bytes": 0}},
-         "space_saved": {"bytes": 0, "item_count": 0, "episode_count": 0, "season_count": 0},
+         "space_saved": {"bytes": 0, "item_count": 0, "episode_count": 0, "season_count": \(seasonCount ?? finished.count)},
          "recently_finished_seasons": [\(finishedJSON.joined(separator: ","))],
          "biggest_not_started": [],
          "samples": {"waiting_on_you": [\(samplesJSON.joined(separator: ","))], "approved_not_started": []},
@@ -36,17 +42,21 @@ final class AttentionTests: XCTestCase {
         return try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(json.utf8))
     }
 
+    private let older = Finished(prefix: "tv/F/Season 2", at: "2026-10-20T00:00:00+00:00")
+    private let newer = Finished(prefix: "tv/F/Season 3", at: "2026-10-22T00:00:00+00:00")
+
     func testFirstLookNotifiesNothingButCountsTheBadge() throws {
-        let attention = Attention.review(try facts(finished: ["tv/F/Season 3"], waitingSamples: [("tv/E/Season 3", "ready_to_compare")], backups: 4), remembered: nil)
+        let now = try facts(finished: [older], waitingSamples: [("tv/E/Season 3", "ready_to_compare", "review_sample")], backups: 4)
+        let attention = Attention.review(now, remembered: nil)
         XCTAssertEqual(attention.notices, [])
         XCTAssertEqual(attention.badgeCount, 2)
     }
 
     func testEachNewThingNotifiesOnce() throws {
-        let before = Attention.review(try facts(), remembered: nil).memory
+        let before = Attention.review(try facts(finished: [older]), remembered: nil).memory
         let now = try facts(
-            finished: ["tv/F/Season 3"],
-            waitingSamples: [("tv/E/Season 3", "ready_to_compare")],
+            finished: [newer, older],
+            waitingSamples: [("tv/E/Season 3", "ready_to_compare", "review_sample")],
             computers: [("mbp", "password_needed"), ("mini", "storage_unreachable")],
             backups: 15
         )
@@ -63,8 +73,23 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(first.badgeCount, 3)
     }
 
+    func testManySeasonsFinishedWhileClosedNotifyOnceWithTheirTrueCount() throws {
+        let before = Attention.review(try facts(finished: [older]), remembered: nil).memory
+        let visible = (1...12).map { Finished(prefix: "tv/F/Season \($0 + 10)", at: "2026-10-23T00:00:\(String(format: "%02d", $0))+00:00") }
+
+        let attention = Attention.review(try facts(finished: visible, seasonCount: 14), remembered: before)
+
+        XCTAssertEqual(attention.notices.map(\.title), ["13 seasons finished"])
+    }
+
+    func testAnOlderSeasonMovingIntoTheListDoesNotNotify() throws {
+        let shown = Attention.review(try facts(finished: [newer], seasonCount: 2), remembered: AttentionMemory())
+        let afterRemoval = Attention.review(try facts(finished: [newer, older], seasonCount: 2), remembered: shown.memory)
+        XCTAssertEqual(afterRemoval.notices, [])
+    }
+
     func testClearingAnItemClearsItsBadgeAndItCanNotifyAgainLater() throws {
-        let waiting = try facts(waitingSamples: [("tv/E/Season 3", "ready_to_compare")], backups: 2)
+        let waiting = try facts(waitingSamples: [("tv/E/Season 3", "ready_to_compare", "review_sample")], backups: 2)
         let shown = Attention.review(waiting, remembered: AttentionMemory())
         let cleared = Attention.review(try facts(), remembered: shown.memory)
         let back = Attention.review(waiting, remembered: cleared.memory)
@@ -74,6 +99,14 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(back.notices.map(\.title), ["The Expanse, Season 3 sample is ready", "Original backups are ready to delete"])
     }
 
+    func testASampleThatCannotReachItsSizeAsksForASizeDecision() throws {
+        let attention = Attention.review(
+            try facts(waitingSamples: [("tv/E/Season 3", "needs_help", "choose_size")]),
+            remembered: AttentionMemory()
+        )
+        XCTAssertEqual(attention.notices.map(\.title), ["The Expanse, Season 3 needs a size decision"])
+    }
+
     func testFewerBackupsDoNotNotify() throws {
         let many = Attention.review(try facts(backups: 10), remembered: AttentionMemory())
         let fewer = Attention.review(try facts(backups: 4), remembered: many.memory)
@@ -81,21 +114,14 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(fewer.badgeCount, 1)
     }
 
-    func testAFinishedSeasonNeverNotifiesTwice() throws {
-        let shown = Attention.review(try facts(finished: ["tv/F/Season 3"]), remembered: AttentionMemory())
-        let droppedOff = Attention.review(try facts(), remembered: shown.memory)
-        let returned = Attention.review(try facts(finished: ["tv/F/Season 3"]), remembered: droppedOff.memory)
-        XCTAssertEqual(returned.notices, [])
+    func testProblemsTheOwnerCannotFixDoNotNotify() throws {
+        let attention = Attention.review(try facts(computers: [("mini", "storage_unreachable"), ("x", "outside_schedule")]), remembered: AttentionMemory())
+        XCTAssertEqual(attention.notices, [])
+        XCTAssertEqual(attention.badgeCount, 0)
     }
 
     func testCountsReadNaturally() {
         XCTAssertEqual(Words.count(1, "episode"), "1 episode")
         XCTAssertEqual(Words.count(15, "episode"), "15 episodes")
-    }
-
-    func testProblemsTheOwnerCannotFixDoNotNotify() throws {
-        let attention = Attention.review(try facts(computers: [("mini", "storage_unreachable"), ("x", "outside_schedule")]), remembered: AttentionMemory())
-        XCTAssertEqual(attention.notices, [])
-        XCTAssertEqual(attention.badgeCount, 0)
     }
 }
