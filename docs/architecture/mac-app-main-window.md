@@ -5,24 +5,28 @@ shows, as facts and stable codes. It sends no screen words: the app turns every
 code into words. Folder names (`show`, `season_folder`) are data, not wording.
 The web pages keep their own endpoints until the web app is retired.
 
-The read is pure: database rows, the computers' cached check results and the
-controller storage record. It touches no media storage, so it still answers
-when shared storage is gone, and it starts no work.
+The read is pure: database rows, the computers' cached check results, the
+controller storage record and the saved sample state the library cards already
+read from the local review cache. It reads no shared media storage, so it
+still answers when that storage is gone, and it starts no work.
 
 ## Sections
 
 - `work`: `state` is `running`, `idle`, `paused` (the owner paused the queue)
-  or `stopped` (`stop_reasons` say why: `storage_unreachable`,
-  `storage_unknown`). `running_count` and `waiting_count` count encode jobs.
-  `storage` lists each required mount with its recovery `status` and last
-  `failure` code.
+  or `stopped`. `stop_reasons` say why work cannot start, even while paused:
+  `storage_unavailable` (the same rule that admits encode work) and
+  `no_computer_ready` (work is waiting and no computer can take it).
+  `running_count` and `waiting_count` count encode jobs. `storage` lists each
+  required mount with its recovery `status` and last `failure` code.
 - `library`: per kind (`tv`, `movies`, `other`), counts of present files and
   `total_bytes`, plus `original_bytes`, the size still in original form.
 - `space_saved`: bytes saved by replaced files, the replaced file and episode
   counts, and `season_count`, the number of finished seasons.
 - `recently_finished_seasons`: finished seasons, newest first. A season is
-  finished when every present file is replaced or kept original; its
-  `finished_at` is its last replacement.
+  finished when at least one file was replaced and every present file is
+  replaced or kept original; its `finished_at` is its last replacement. A
+  season kept entirely original saved nothing and appears only under
+  `kept_original`.
 - `biggest_not_started`: the largest shows with no encode job, no replaced
   file and no approved sample. `waiting_sample_prefix` names a season whose
   sample waits on the owner.
@@ -30,7 +34,9 @@ when shared storage is gone, and it starts no work.
   for a sample) and `approved_not_started` (`ready_to_make`). `state`,
   `action` and `failure` are the folder page's own codes, from
   `mediaforce/web/runtime/page_state.py`.
-- `computers`: each computer's `state`: `ready`, `busy`, `checking`,
+- `computers`: each computer's `state`, from the same rows as the computers
+  page: `ready`, `busy`, `outside_schedule` (with `schedule_opens_at`),
+  `cooling_down` (with `cooldown_until`), `not_encoding`, `checking`,
   `storage_unreachable`, `not_ready`, or the kind of failed check
   (`password_needed`, `unreachable`, `remote_login_off`, `identity_changed`,
   `new_name`, `not_found`, `no_address`, `python_missing`,
@@ -39,8 +45,8 @@ when shared storage is gone, and it starts no work.
   first, using their event types as codes.
 - `original_backups`: originals moved aside on replacement and not yet
   removed, by count and original size.
-- `kept_original`: `kept` lists seasons with files the owner kept original,
-  by motion reason (`motion_mixed`, `motion_partly_interlaced`,
+- `kept_original`: `kept` lists seasons with present files the owner kept
+  original for their current source, by motion reason (`motion_mixed`, `motion_partly_interlaced`,
   `motion_unclear`). `held` lists seasons waiting for a reason that lifts on
   its own (`current_season`, `recent_acquisition`, and so on) or for a motion
   decision (`motion_pattern`).

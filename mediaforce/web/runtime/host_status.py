@@ -135,8 +135,8 @@ def checked_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
     ]
 
 
-def is_awaiting_first_check(status: HostStatus) -> bool:
-    return status.message == _HOST_STATUS_PENDING_MESSAGE
+def is_awaiting_first_check(message: str) -> bool:
+    return message == _HOST_STATUS_PENDING_MESSAGE
 
 
 def cached_host_statuses(config: MediaforceConfig) -> list[HostStatus]:

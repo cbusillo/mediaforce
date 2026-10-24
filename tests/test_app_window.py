@@ -9,7 +9,6 @@ import pytest
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
-from mediaforce.hosts.types import HostStatus
 from mediaforce.web.runtime import host_status
 from mediaforce.web.runtime.app_window import app_window_payload
 
@@ -89,26 +88,37 @@ def _encode_job(connection: DBClient, prefix: str, *, status: str = "completed",
     connection.commit()
 
 
-def _host(key: str, *, available: bool = False, **fields: Any) -> HostStatus:
-    return HostStatus(
-        key=key, label=key, mode="ssh", priority=1, capabilities=["encode_queue"], available=available,
-        message="", missing_paths=[], **fields,
+def _computer(key: str, **fields: Any) -> dict[str, Any]:
+    return {
+        "key": key, "label": key, "message": "", "available": True, "capabilities": ["encode_queue"],
+        "active_encode_count": 0, "active_flag": "active", "schedule_open": True, **fields,
+    }
+
+
+def _keep_original(connection: DBClient, item_id: int, rel_path: str, *, source_fingerprint: str | None = None) -> None:
+    connection.execute(
+        motion_keep_decisions.insert().values(
+            library_item_id=item_id, source_fingerprint=source_fingerprint or f"fp-{rel_path}", reason_code="mixed",
+            prefix=str(Path(rel_path).parent), kept_at=NOW,
+        )
     )
+    connection.commit()
 
 
 def _payload(
         connection: DBClient,
         *,
         cards: list[dict[str, Any]] | None = None,
-        hosts: list[HostStatus] | None = None,
-        storage: dict[str, Any] | None = None,
+        computers: list[dict[str, Any]] | None = None,
+        storage_admits_work: bool = True,
 ) -> dict[str, Any]:
     return app_window_payload(
         connection,
         library_types=LIBRARY_TYPES,
         season_cards=cards or [],
-        host_statuses=hosts or [],
-        controller_storage=storage or READY_STORAGE,
+        computers=computers or [],
+        controller_storage=READY_STORAGE,
+        storage_admits_work=storage_admits_work,
         observed_at=datetime(2026, 10, 24, 12, tzinfo=UTC),
     )
 
@@ -133,14 +143,12 @@ def test_library_totals_count_present_files_and_bytes_still_original(connection:
 def test_season_is_finished_only_when_every_file_is_replaced_or_kept(connection: DBClient) -> None:
     _replaced(connection, "tv/Futurama/Season 3/e1.mkv", saved=100, at="2026-10-22T01:00:00+00:00")
     _replaced(connection, "tv/Futurama/Season 3/e2.mkv", saved=200, at="2026-10-22T02:00:00+00:00")
-    kept_id = _item(connection, "tv/Futurama/Season 3/e3.mkv")
-    connection.execute(
-        motion_keep_decisions.insert().values(
-            library_item_id=kept_id, source_fingerprint="fp", reason_code="mixed",
-            prefix="tv/Futurama/Season 3", kept_at=NOW,
-        )
-    )
-    connection.commit()
+    _keep_original(connection, _item(connection, "tv/Futurama/Season 3/e3.mkv"), "tv/Futurama/Season 3/e3.mkv")
+    _replaced(connection, "tv/Futurama/Season 5/e1.mkv", saved=50, at=NOW)
+    lapsed_path = "tv/Futurama/Season 5/e2.mkv"
+    _keep_original(connection, _item(connection, lapsed_path), lapsed_path, source_fingerprint="an older source")
+    missing_path = "tv/Futurama/Season 6/e1.mkv"
+    _keep_original(connection, _item(connection, missing_path, missing=True), missing_path)
     _replaced(connection, "tv/Futurama/Season 4/e1.mkv", saved=999, at="2026-10-23T00:00:00+00:00")
     _item(connection, "tv/Futurama/Season 4/e2.mkv")
 
@@ -151,7 +159,8 @@ def test_season_is_finished_only_when_every_file_is_replaced_or_kept(connection:
     assert finished["bytes_saved"] == 300
     assert finished["kept_original_count"] == 1
     assert finished["finished_at"] == "2026-10-22T02:00:00+00:00"
-    assert payload["space_saved"] == {"bytes": 1299, "item_count": 3, "episode_count": 3, "season_count": 1}
+    assert payload["space_saved"] == {"bytes": 1349, "item_count": 4, "episode_count": 4, "season_count": 1}
+    assert payload["kept_original"]["kept_item_count"] == 1
     assert payload["kept_original"]["kept"] == [
         {**_identity("tv/Futurama/Season 3"), "reason": "motion_mixed", "item_count": 1},
     ]
@@ -210,45 +219,50 @@ def test_samples_split_into_waiting_on_owner_and_approved_not_started(connection
 
 
 def test_computer_states_are_codes(connection: DBClient) -> None:
-    _encode_job(connection, "tv/A/Season 1", status="running", host_key="studio")
-    pending = _host("new")
-    pending.message = host_status._HOST_STATUS_PENDING_MESSAGE
-    hosts = [
-        _host("studio", available=True),
-        _host("mbp", available=True),
-        _host("mini", check_failure="password_needed", setup_requires_password=True),
-        _host("server", missing_mounts=["/Volumes/media"]),
-        pending,
+    computers = [
+        _computer("studio", active_encode_count=1, active_flag="busy"),
+        _computer("mbp"),
+        _computer("night", schedule_open=False, active_flag="idle"),
+        _computer("cooling", active_flag="cooldown"),
+        _computer("sampler", capabilities=["sample_calibration"]),
+        _computer("mini", available=False, check_failure="password_needed"),
+        _computer("server", available=False, missing_mounts=["/Volumes/media"]),
+        _computer("odd", available=False),
+        _computer("new", available=False, message=host_status._HOST_STATUS_PENDING_MESSAGE),
     ]
 
-    computers = _payload(connection, hosts=hosts)["computers"]
+    states = [(computer["key"], computer["state"]) for computer in _payload(connection, computers=computers)["computers"]]
 
-    assert [(computer["key"], computer["state"], computer["running_count"]) for computer in computers] == [
-        ("studio", "busy", 1),
-        ("mbp", "ready", 0),
-        ("mini", "password_needed", 0),
-        ("server", "storage_unreachable", 0),
-        ("new", "checking", 0),
+    assert states == [
+        ("studio", "busy"), ("mbp", "ready"), ("night", "outside_schedule"), ("cooling", "cooling_down"),
+        ("sampler", "not_encoding"), ("mini", "password_needed"), ("server", "storage_unreachable"),
+        ("odd", "not_ready"), ("new", "checking"),
     ]
 
 
 @pytest.mark.parametrize(
-    "paused,storage_status,expected_state,expected_reasons",
+    "paused,storage_admits_work,queued,computer_fields,expected_state,expected_reasons",
     [
-        (False, "ready", "idle", []),
-        (True, "ready", "paused", []),
-        (False, "retrying", "stopped", ["storage_unreachable"]),
-        (True, "action_required", "paused", ["storage_unreachable"]),
+        (False, True, False, {}, "idle", []),
+        (True, True, False, {}, "paused", []),
+        (False, False, False, {}, "stopped", ["storage_unavailable"]),
+        (True, False, False, {}, "paused", ["storage_unavailable"]),
+        (False, True, True, {"schedule_open": False}, "stopped", ["no_computer_ready"]),
+        (False, True, False, {"schedule_open": False}, "idle", []),
     ],
 )
 def test_work_says_whether_it_is_paused_and_why_it_stopped(
-        connection: DBClient, paused: bool, storage_status: str, expected_state: str, expected_reasons: list[str],
+        connection: DBClient, paused: bool, storage_admits_work: bool, queued: bool, computer_fields: dict[str, Any],
+        expected_state: str, expected_reasons: list[str],
 ) -> None:
     save_queue_state(connection, {"queue_name": DEFAULT_QUEUE_NAME, "is_paused": paused, "updated_at": NOW})
     connection.commit()
-    storage = {"mounts": [{"mount_point": "/Volumes/media", "status": storage_status, "last_failure_kind": "mount_absent"}]}
+    if queued:
+        _encode_job(connection, "tv/A/Season 1", status="queued")
 
-    work = _payload(connection, storage=storage)["work"]
+    work = _payload(
+        connection, computers=[_computer("mbp", **computer_fields)], storage_admits_work=storage_admits_work,
+    )["work"]
 
     assert (work["state"], work["paused_by_owner"], work["stop_reasons"]) == (expected_state, paused, expected_reasons)
 

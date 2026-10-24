@@ -36,6 +36,7 @@ class ReadPathPurityTests(unittest.TestCase):
         self.config = MediaforceConfig(
             raw={
                 "media": {
+                    "staging_root": str(project_root / "staging"),
                     "libraries": [
                         {
                             "key": "tv",

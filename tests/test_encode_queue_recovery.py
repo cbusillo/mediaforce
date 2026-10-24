@@ -12898,6 +12898,25 @@ raise SystemExit(0)
         self.assertIn(remote.AB_AV1_MISSING_ISSUE, status.issues)
         self.assertEqual(status.message, "Install ab-av1 first")
 
+    def test_failed_remote_check_keeps_its_kind(self) -> None:
+        host: dict[str, object] = {"host": "cbusillo@encode-host", "label": "Encode Host", "capabilities": ["encode_queue"]}
+        outcomes = {
+            "password_needed": subprocess.CompletedProcess(args=["ssh"], returncode=255, stdout="", stderr="Permission denied"),
+            "unreachable": subprocess.TimeoutExpired(cmd=["ssh"], timeout=8),
+            "check_failed": OSError("ssh could not start"),
+            "unreadable_reply": subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="not a status reply", stderr=""),
+        }
+        for kind, outcome in outcomes.items():
+            with self.subTest(kind=kind), patch(
+                    "mediaforce.remote._run_remote_status_probe",
+                    side_effect=outcome if isinstance(outcome, Exception) else None,
+                    return_value=outcome,
+            ), patch("mediaforce.remote._learn_remote_wake_mac"):
+                status = remote._remote_host_status(self.config, host)
+            self.assertFalse(status.available)
+            self.assertEqual(status.check_failure, kind)
+        self.assertEqual(remote._remote_host_status(self.config, {"label": "No Address"}).check_failure, "no_address")
+
     def test_remote_host_status_uses_host_path_overrides(self) -> None:
         host: dict[str, object] = {
             "host": "cbusillo@encode-host",

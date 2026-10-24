@@ -4,7 +4,6 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-import json
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -13,10 +12,11 @@ from sqlalchemy import select
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.encoding.encode_queue import count_pending_encode_work, load_queue_state
-from mediaforce.hosts.types import HostStatus
 from mediaforce.library.candidate_selection import SEASON_PATTERN
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
+from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
+from mediaforce.web.runtime.host_runtime import running_encode_counts_by_host
 from mediaforce.web.runtime.host_status import is_awaiting_first_check
 
 SCHEMA_VERSION = 1
@@ -31,8 +31,7 @@ EVENT_KINDS = (
     "validation_completed",
     "promotion_completed",
 )
-WAITING_SAMPLE_STATES = frozenset({"ready_to_compare", "needs_help"})
-STORAGE_READY = "ready"
+WORKING_COMPUTER_STATES = frozenset({"ready", "busy"})
 
 
 @dataclass(slots=True)
@@ -75,8 +74,9 @@ def app_window_payload(
         *,
         library_types: Mapping[str, str],
         season_cards: Iterable[Mapping[str, Any]],
-        host_statuses: Iterable[HostStatus],
+        computers: Iterable[Mapping[str, Any]],
         controller_storage: Mapping[str, Any],
+        storage_admits_work: bool,
         observed_at: datetime,
 ) -> dict[str, Any]:
     items = _present_items(connection, library_types)
@@ -87,16 +87,17 @@ def app_window_payload(
     samples = _samples(cards)
     finished = _finished_seasons(items, promotions, seasons, kept)
     events = _events(connection)
+    computer_states = [_computer(row) for row in computers]
     return {
         "schema_version": SCHEMA_VERSION,
         "observed_at": observed_at.isoformat(timespec="seconds"),
-        "work": _work(connection, controller_storage),
+        "work": _work(connection, controller_storage, storage_admits_work, computer_states),
         "library": _library_totals(items),
         "space_saved": _space_saved(items, promotions, finished),
         "recently_finished_seasons": finished[:RECENT_SEASON_LIMIT],
         "biggest_not_started": _biggest_not_started(connection, items, promotions, samples),
         "samples": samples,
-        "computers": _computers(connection, host_statuses),
+        "computers": computer_states,
         "events": events,
         "last_change": events[0] if events else None,
         "original_backups": _original_backups(connection, promotions),
@@ -150,6 +151,8 @@ def _promotions(connection: DBClient) -> dict[int, _Promotion]:
 def _kept_original_rows(connection: DBClient) -> dict[int, Mapping[str, Any]]:
     rows = connection.execute(
         select(motion_keep_decisions.c.library_item_id, motion_keep_decisions.c.prefix, motion_keep_decisions.c.reason_code)
+        .select_from(motion_keep_decisions.join(library_items, motion_keep_decisions.c.library_item_id == library_items.c.id))
+        .where(LIBRARY_ITEM_PRESENT, motion_keep_decisions.c.source_fingerprint == library_item_source_sql())
     ).mappings()
     return {int(row["library_item_id"]): row for row in rows}
 
@@ -293,23 +296,25 @@ def _samples(cards: list[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     return {"waiting_on_you": waiting, "approved_not_started": approved}
 
 
-def _work(connection: DBClient, controller_storage: Mapping[str, Any]) -> dict[str, Any]:
+def _work(
+        connection: DBClient,
+        controller_storage: Mapping[str, Any],
+        storage_admits_work: bool,
+        computers: list[dict[str, Any]],
+) -> dict[str, Any]:
     paused = bool(load_queue_state(connection).get("is_paused"))
-    storage = [
-        {"mount_point": mount.get("mount_point"), "status": mount.get("status"), "failure": mount.get("last_failure_kind")}
-        for mount in controller_storage.get("mounts") or []
-    ]
+    waiting_count = count_pending_encode_work(connection)
+    running_count = sum(running_encode_counts_by_host(connection).values())
     stop_reasons = []
-    if controller_storage.get("state_error"):
-        stop_reasons.append("storage_unknown")
-    if any(mount["status"] != STORAGE_READY for mount in storage):
-        stop_reasons.append("storage_unreachable")
-    running = _running_encode_hosts(connection)
+    if not storage_admits_work:
+        stop_reasons.append("storage_unavailable")
+    if waiting_count and not any(computer["state"] in WORKING_COMPUTER_STATES for computer in computers):
+        stop_reasons.append("no_computer_ready")
     if paused:
         state = "paused"
     elif stop_reasons:
         state = "stopped"
-    elif running:
+    elif running_count:
         state = "running"
     else:
         state = "idle"
@@ -317,42 +322,47 @@ def _work(connection: DBClient, controller_storage: Mapping[str, Any]) -> dict[s
         "state": state,
         "paused_by_owner": paused,
         "stop_reasons": stop_reasons,
-        "running_count": sum(running.values()),
-        "waiting_count": count_pending_encode_work(connection),
-        "storage": storage,
+        "running_count": running_count,
+        "waiting_count": waiting_count,
+        "storage": [
+            {"mount_point": mount.get("mount_point"), "status": mount.get("status"), "failure": mount.get("last_failure_kind")}
+            for mount in controller_storage.get("mounts") or []
+        ],
     }
 
 
-def _running_encode_hosts(connection: DBClient) -> dict[str, int]:
-    counts: dict[str, int] = defaultdict(int)
-    rows = connection.execute(select(encode_jobs.c.host_json).where(encode_jobs.c.status == "running")).scalars()
-    for host_json in rows:
-        counts[str(_json_object(host_json).get("key") or "")] += 1
-    return dict(counts)
+def _computer(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "key": row.get("key"),
+        "name": row.get("label"),
+        "platform": row.get("platform"),
+        "state": _computer_state(row),
+        "running_count": int(row.get("active_encode_count") or 0),
+        "schedule_opens_at": row.get("schedule_next_opens_at"),
+        "cooldown_until": row.get("cooldown_until"),
+    }
 
 
-def _computers(connection: DBClient, statuses: Iterable[HostStatus]) -> list[dict[str, Any]]:
-    running = _running_encode_hosts(connection)
-    return [
-        {
-            "key": status.key,
-            "name": status.label,
-            "platform": status.platform,
-            "state": _computer_state(status, running.get(status.key, 0)),
-            "running_count": running.get(status.key, 0),
-        }
-        for status in statuses
-    ]
-
-
-def _computer_state(status: HostStatus, running_count: int) -> str:
-    if is_awaiting_first_check(status):
+def _computer_state(row: Mapping[str, Any]) -> str:
+    if is_awaiting_first_check(str(row.get("message") or "")):
         return "checking"
-    if status.available:
-        return "busy" if running_count else "ready"
-    if status.check_failure:
-        return status.check_failure
-    if status.missing_mounts:
+    if not row.get("available"):
+        return _unavailable_computer_state(row)
+    if int(row.get("active_encode_count") or 0):
+        return "busy"
+    if "encode_queue" not in {str(capability).lower() for capability in row.get("capabilities") or []}:
+        return "not_encoding"
+    if row.get("active_flag") == "cooldown":
+        return "cooling_down"
+    if not row.get("schedule_open"):
+        return "outside_schedule"
+    return "ready"
+
+
+def _unavailable_computer_state(row: Mapping[str, Any]) -> str:
+    if row.get("check_failure"):
+        return str(row["check_failure"])
+    if row.get("missing_mounts") or row.get("controller_storage_issue"):
         return "storage_unreachable"
     return "not_ready"
 
@@ -427,13 +437,3 @@ def _hold_reason_codes(lifecycle: Mapping[str, Any] | None) -> list[str]:
             if code and code not in codes:
                 codes.append(code)
     return codes
-
-
-def _json_object(raw: object) -> dict[str, Any]:
-    if not isinstance(raw, str) or not raw.strip():
-        return {}
-    try:
-        value = json.loads(raw)
-    except ValueError:
-        return {}
-    return value if isinstance(value, dict) else {}

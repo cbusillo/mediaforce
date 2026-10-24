@@ -223,6 +223,7 @@ from mediaforce.web.runtime.host_recovery import process_host_recovery_once, ret
 from mediaforce.web.runtime.host_status import refresh_current_machine_host_statuses
 from mediaforce.web.runtime.recovery_alerts import recovery_alerts, record_recovery_alerts
 from mediaforce.web.runtime.controller_storage_recovery import (
+    controller_storage_admission_issue,
     controller_storage_recovery_snapshot,
     process_controller_storage_recovery_once,
 )
@@ -1160,8 +1161,9 @@ def create_app(
                 connection,
                 library_types=config.library_type_map,
                 season_cards=[asdict(card) for card in _list_library_detail_cards(config, connection)],
-                host_statuses=_cached_host_statuses(config),
+                computers=_host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses),
                 controller_storage=controller_storage_recovery_snapshot(config),
+                storage_admits_work=controller_storage_admission_issue(config, None) is None,
                 observed_at=datetime.now(UTC),
             )
 
