@@ -1,3 +1,4 @@
+import os
 import plistlib
 import sqlite3
 import subprocess
@@ -278,12 +279,12 @@ def test_failed_mac_app_install_keeps_previous_app(tmp_path: Path, previous: str
     applications.mkdir()
     _app_at(installed if previous == "installed" else applications / f".{controller_deploy.MAC_APP_NAME}.replaced", "old")
     incoming = applications / f".{controller_deploy.MAC_APP_NAME}.incoming"
-    actual_rename = Path.rename
 
     def rename(path: Path, target: Path) -> Path:
         if path == incoming:
             raise OSError("Applications folder refused the move")
-        return actual_rename(path, target)
+        os.rename(path, target)
+        return target
 
     failure = (
         patch.object(controller_deploy.shutil, "copytree", side_effect=OSError("disk full"))
