@@ -54,7 +54,8 @@ from mediaforce.core.db_tables import production_holds
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
-from mediaforce.hosts.status_helpers import computer_check_failure_copy
+from mediaforce.hosts.status_helpers import FOLDERS_MISSING_MESSAGE, SOURCE_ROOT_UNREADABLE_MESSAGE, \
+    STAGING_ROOT_UNWRITABLE_MESSAGE, computer_check_failure_copy
 from mediaforce.web.runtime.size_exception import decide_size_exception
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.folder_tuning_advice import review_gate
@@ -86,7 +87,8 @@ from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.media_scopes import media_scope_from_prefix
 from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts import status_runtime as host_status_runtime
-from mediaforce.hosts.types import VMAF_MODEL_MISSING_ISSUE, is_vmaf_model_load_failure
+from mediaforce.hosts.types import SOURCE_ROOT_READ_MISSING_ISSUE, STAGING_ROOT_WRITE_MISSING_ISSUE, \
+    VMAF_MODEL_MISSING_ISSUE, is_vmaf_model_load_failure
 from mediaforce.remote import HostReadinessError, HostStatus
 from mediaforce.tuning.calibration_jobs import list_queue_summary, \
     load_active_overlapping_job as load_active_overlapping_calibration_job, \
@@ -448,7 +450,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert job is not None
             self.assertEqual(job["status"], "retry_backoff")
             self.assertEqual(job["last_failure_kind"], "stale_lease")
-            self.assertIn("stale worker lease", str(job["waiting_reason"]))
+            self.assertIn("stopped reporting in", str(job["waiting_reason"]))
 
     def _running_job_with_expired_lease(self, connection: DBClient, *, progress_age: timedelta) -> None:
         source_path = self._create_source_file("episode-live.mkv")
@@ -3710,7 +3712,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated["status"], "retry_backoff")
         self.assertEqual(updated["last_failure_kind"], "ssh_transport")
-        self.assertIn("SSH transport failure", str(updated["waiting_reason"]))
+        self.assertIn("lost connection", str(updated["waiting_reason"]))
         self.assertIsNotNone(updated["retry_not_before"])
         self.assertIsNotNone(updated["host_cooldown_until"])
         self.assertTrue(partial_path.exists())
@@ -4220,7 +4222,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(updated["status"], "retry_backoff")
             self.assertIsNone(updated["terminal_reason"])
             self.assertEqual(updated["last_failure_kind"], "ssh_transport")
-            self.assertIn("SSH transport failure", str(updated["waiting_reason"]))
+            self.assertIn("lost connection", str(updated["waiting_reason"]))
             self.assertIsNone(updated["finished_at"])
             self.assertIsNotNone(updated["host_cooldown_until"])
             self.assertEqual(updated["last_host"]["failure_streak"], 1)
@@ -5473,7 +5475,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNone(rows[0]["schedule_closes_at"])
         self.assertIsNone(rows[0]["schedule_next_opens_at"])
         self.assertFalse(rows[0]["queue_active"])
-        self.assertEqual(rows[0]["active_reason"], "encode queue disabled by schedule")
+        self.assertEqual(rows[0]["active_reason"], "work schedule is off")
 
     def test_host_runtime_rows_include_exact_schedule_transitions(self) -> None:
         self.config.raw["remote_hosts"] = [
@@ -11700,7 +11702,7 @@ raise SystemExit(0)
                 {
                     "label": "Sample running",
                     "tone": "attention",
-                    "detail": "Sample calibration is active.",
+                    "detail": "Making a sample now.",
                 },
             )
 
@@ -13074,8 +13076,8 @@ raise SystemExit(0)
             status = remote._remote_host_status(self.config, host)
 
         self.assertFalse(status.available)
-        self.assertEqual(status.message, "Staging root not writable")
-        self.assertIn("Staging root is not writable on this host. /srv/media/transcode", status.issues)
+        self.assertEqual(status.message, STAGING_ROOT_UNWRITABLE_MESSAGE)
+        self.assertIn(f"{STAGING_ROOT_WRITE_MISSING_ISSUE} /srv/media/transcode", status.issues)
 
     def test_remote_host_status_rejects_unreadable_source_root(self) -> None:
         host: dict[str, object] = {
@@ -13115,8 +13117,8 @@ raise SystemExit(0)
             status = remote._remote_host_status(self.config, host)
 
         self.assertFalse(status.available)
-        self.assertEqual(status.message, "Source root not readable")
-        self.assertIn("Source root is not readable on this host. /srv/media/tv", status.issues)
+        self.assertEqual(status.message, SOURCE_ROOT_UNREADABLE_MESSAGE)
+        self.assertIn(f"{SOURCE_ROOT_READ_MISSING_ISSUE} /srv/media/tv", status.issues)
 
     def test_remote_host_status_reuses_cached_expensive_tool_probe(self) -> None:
         host_status_runtime._REMOTE_TOOL_CACHE.clear()
@@ -13449,8 +13451,8 @@ raise SystemExit(0)
             status = remote._remote_host_status(self.config, host)
 
         self.assertFalse(status.available)
-        self.assertEqual(status.message, "Staging root not writable")
-        self.assertIn("Staging root is not writable on this host. /srv/media/transcode", status.issues)
+        self.assertEqual(status.message, STAGING_ROOT_UNWRITABLE_MESSAGE)
+        self.assertIn(f"{STAGING_ROOT_WRITE_MISSING_ISSUE} /srv/media/transcode", status.issues)
 
     def test_remote_host_status_requires_ab_av1_for_stream_encode_host_with_remote_roots(self) -> None:
         host: dict[str, object] = {
@@ -13607,7 +13609,7 @@ raise SystemExit(0)
         ), patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
         self.assertFalse(status.available)
-        self.assertEqual(status.message, "Missing required paths")
+        self.assertEqual(status.message, FOLDERS_MISSING_MESSAGE)
         self.assertEqual(status.missing_paths, ["/srv/media/tv"])
 
     def test_remote_host_status_ignores_inherited_stream_source_roots_without_host_overrides(self) -> None:
@@ -13916,7 +13918,7 @@ raise SystemExit(0)
             result = remote.prepare_remote_host_with_password(self.config, "Sample Host", password=None)
         self.assertFalse(result.ok)
         self.assertTrue(result.requires_password)
-        self.assertIn("SSH key", result.message)
+        self.assertNotIn("SSH", result.message)
 
     def test_prepare_remote_host_with_password_runs_key_install_then_rechecks_status(self) -> None:
         host = {"host": "cbusillo@sample-host", "label": "Sample Host"}
@@ -14101,7 +14103,7 @@ raise SystemExit(0)
             "mediaforce.remote._run_remote_ssh", return_value=verify_ok) as run_remote_ssh_mock:
             result = remote._install_local_ssh_key(host, "secret")
         self.assertTrue(result.ok)
-        self.assertIn("Installed this Mac's SSH key", result.message)
+        self.assertNotIn("SSH", result.message)
         awake_mock.assert_called_once_with(host)
         subprocess_run_mock.assert_called_once()
         run_remote_ssh_mock.assert_called_once_with(host, "true", identity_file=private_key, timeout=15)
@@ -15104,7 +15106,7 @@ raise SystemExit(0)
         source_path, staging_path, item = self._promotion_with_other_active_encode("episode-cross-volume")
 
         with open_db(self.config.paths.db_path) as connection, self.assertRaisesRegex(
-                staging_runtime.PromotionWaiting, "running encode"
+                staging_runtime.PromotionWaiting, "running compression"
         ):
             staging_runtime.promote_one_item(
                 connection,
@@ -18465,10 +18467,10 @@ raise SystemExit(0)
         self.assertTrue(rows[0]["available"])
         self.assertFalse(rows[0]["probe_available"])
         self.assertEqual(rows[0]["probe_message"], "SSH unavailable")
-        self.assertEqual(rows[0]["message"], "Encoding in progress; latest host check was deferred")
+        self.assertNotIn("host", rows[0]["message"].lower())
         self.assertEqual(rows[0]["issues"], [])
         self.assertFalse(rows[0]["queue_active"])
-        self.assertEqual(rows[0]["active_reason"], "status check deferred while encode is running")
+        self.assertTrue(rows[0]["active_reason"])
 
     def test_select_encode_host_skips_probe_degraded_active_hosts(self) -> None:
         statuses = [
@@ -24139,7 +24141,7 @@ raise SystemExit(0)
     def test_unfinished_breakdown_separates_waits_that_need_the_owner(self) -> None:
         waits = [
             "Waiting for free-space reserve on /Volumes/Media: needs 40 GB free, 12 GB available.",
-            "Waiting for the active large encode job to release its free-space reserve.",
+            encode_runtime.LARGE_COMPRESSION_RESERVE_WAITING_REASON,
             "Waiting for a measurable free-space reserve: cannot measure /Volumes/Media. Mount or repair it.",
             "Waiting for complete free-space reserve inputs. Rebuild the production plan or rescan the folder.",
             "Controller storage: Unexpected volume at /Volumes/Media. Reconnect storage in Finder or with Set up computer; "

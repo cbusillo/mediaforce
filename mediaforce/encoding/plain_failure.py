@@ -35,7 +35,7 @@ _MISSING_PATH_RE = re.compile(r"no such file or directory:\s*['\"]", re.IGNORECA
 _UNREADABLE_PATH_RE = re.compile(r"permission denied:\s*['\"]", re.IGNORECASE)
 # SSH names the login methods it tried; a file's "Permission denied" names a path instead.
 _SSH_LOGIN_REFUSED_RE = re.compile(r"permission denied \([a-z,-]+\)|host key verification failed", re.IGNORECASE)
-_RETRY_WAITING_RE =re.compile(r"^retrying after .+ at \S+$", re.IGNORECASE)
+_RETRY_WAITING_RE = re.compile(r"^retrying after .+ at \S+$", re.IGNORECASE)
 
 FALLBACK_SUMMARY = "Mediaforce couldn't finish this."
 

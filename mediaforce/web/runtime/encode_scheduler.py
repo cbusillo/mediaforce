@@ -102,15 +102,6 @@ def schedule_profile_policy_for_host(
     return dict(selected_profile)
 
 
-def encode_queue_scheduler_summary(policy: dict[str, Any]) -> str:
-    mode = str(policy.get("mode") or "anytime")
-    if mode == "night":
-        return f"window {int(policy['start_hour']):02d}:00-{int(policy['end_hour']):02d}:00 in host local time"
-    if mode == "never":
-        return "disabled"
-    return "runs anytime"
-
-
 def host_schedule_now(current: datetime, host_payload: dict[str, Any] | None) -> datetime:
     return _current_utc(current).astimezone(_host_schedule_timezone(host_payload))
 
@@ -461,7 +452,7 @@ def decorate_encode_job_telemetry(
     elif progress_state == "quality_search":
         decorated["telemetry_summary"] = phase_label or "Searching quality"
     elif progress_state == "starting":
-        decorated["telemetry_summary"] = phase_label or "Starting encode"
+        decorated["telemetry_summary"] = phase_label or "Starting to compress"
     else:
         decorated["telemetry_summary"] = phase_label
     return decorated
