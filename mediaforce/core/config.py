@@ -128,6 +128,7 @@ class ConfigPaths:
     review_dir: Path
     runtime_settings_path: Path
     runtime_reservation_dir: Path | None = None
+    poster_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -478,6 +479,7 @@ def load_config(config_path: Path | None = None) -> MediaforceConfig:
         review_dir=_resolve_path(project_root, state.get("review_dir", "state/review")),
         runtime_settings_path=runtime_settings_path,
         runtime_reservation_dir=runtime_reservation_dir,
+        poster_dir=_resolve_path(project_root, state["poster_dir"]) if state.get("poster_dir") else None,
     )
     return MediaforceConfig(raw=raw, paths=paths)
 
