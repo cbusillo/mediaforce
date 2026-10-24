@@ -5,44 +5,34 @@ import UserNotifications
 
 @MainActor
 final class AttentionCenter {
-    static let checkInterval: Duration = .seconds(30)
     static let memoryKey = "attentionMemory"
 
-    private let client: MediaforceClient
     private let defaults: UserDefaults
 
-    init(client: MediaforceClient, defaults: UserDefaults = .standard) {
-        self.client = client
+    init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
     }
 
-    func start() {
-        Task {
-            _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
-            while !Task.isCancelled {
-                await check()
-                try? await Task.sleep(for: Self.checkInterval)
-            }
-        }
+    func requestPermission() {
+        Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
     }
 
-    func check() async {
-        guard let facts = try? await client.facts() else { return }
+    func review(_ facts: MainWindowFacts) {
         let attention = Attention.review(facts, remembered: rememberedMemory())
         NSApp.dockTile.badgeLabel = attention.badgeCount > 0 ? "\(attention.badgeCount)" : nil
-        for notice in attention.notices {
-            await post(notice)
-        }
         remember(attention.memory)
+        for notice in attention.notices {
+            post(notice)
+        }
     }
 
-    private func post(_ notice: AttentionNotice) async {
+    private func post(_ notice: AttentionNotice) {
         let content = UNMutableNotificationContent()
         content.title = notice.title
         content.body = notice.body
         content.sound = .default
         let request = UNNotificationRequest(identifier: "\(notice.id):\(UUID().uuidString)", content: content, trigger: nil)
-        try? await UNUserNotificationCenter.current().add(request)
+        UNUserNotificationCenter.current().add(request)
     }
 
     private func rememberedMemory() -> AttentionMemory? {
@@ -54,7 +44,9 @@ final class AttentionCenter {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    let model = MainWindowModel(client: MediaforceClient(baseURL: ServerConnection.localServer))
     private var attention: AttentionCenter?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -62,8 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if Bundle.main.bundleURL.path.hasPrefix("/Applications/") {
             try? SMAppService.mainApp.register()
         }
-        let attention = AttentionCenter(client: MediaforceClient(baseURL: ServerConnection.localServer))
-        attention.start()
+        let attention = AttentionCenter()
+        attention.requestPermission()
+        model.onFacts = { attention.review($0) }
+        model.startWatching()
         self.attention = attention
     }
 
