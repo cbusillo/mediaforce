@@ -38,5 +38,6 @@ The verifier requires:
 Package verification complements the normal acceptance gate; it does not
 replace backend, frontend, CLI, or PyCharm checks.
 
-The CI `acceptance` job runs the package build and verifier, so package privacy
+The CI `tests` job runs the package build and verifier, and the required
+`acceptance` check passes only when it does, so package privacy
 is a required pull-request signal rather than a manual release convention.

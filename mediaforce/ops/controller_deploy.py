@@ -86,13 +86,27 @@ def install_mac_app(release: Path, applications: Path = APPLICATIONS) -> None:
     installed = applications / MAC_APP_NAME
     incoming = applications / f".{MAC_APP_NAME}.incoming"
     replaced = applications / f".{MAC_APP_NAME}.replaced"
-    for leftover in (incoming, replaced):
-        shutil.rmtree(leftover, ignore_errors=True)
+    _restore_interrupted_replacement(installed, replaced)
+    shutil.rmtree(incoming, ignore_errors=True)
     shutil.copytree(built_mac_app(release), incoming, symlinks=True)
-    if installed.exists() or installed.is_symlink():
+    if _is_present(installed):
+        shutil.rmtree(replaced, ignore_errors=True)
         installed.rename(replaced)
-    incoming.rename(installed)
+    try:
+        incoming.rename(installed)
+    except OSError:
+        _restore_interrupted_replacement(installed, replaced)
+        raise
     shutil.rmtree(replaced, ignore_errors=True)
+
+
+def _restore_interrupted_replacement(installed: Path, replaced: Path) -> None:
+    if not _is_present(installed) and _is_present(replaced):
+        replaced.rename(installed)
+
+
+def _is_present(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
 
 
 def backup_database(database: Path, destination: Path) -> None:

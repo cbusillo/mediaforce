@@ -240,23 +240,58 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, out
     assert runtime_install.retained_deploy_stage(database.parent) == (stage if healthy_candidate else None)
 
 
-@pytest.mark.parametrize("previous_app", [False, True])
-def test_mac_app_install_replaces_previous_copy(tmp_path: Path, previous_app: bool) -> None:
+def _built_app(release: Path, marker: str) -> None:
+    contents = controller_deploy.built_mac_app(release) / "Contents"
+    contents.mkdir(parents=True)
+    (contents / "Info.plist").write_text(marker)
+
+
+def _app_at(path: Path, marker: str) -> None:
+    (path / "Contents").mkdir(parents=True)
+    (path / "Contents/Info.plist").write_text(marker)
+    (path / "Contents/stale-resource").write_text(marker)
+
+
+@pytest.mark.parametrize("previous", ["none", "installed", "left-aside-by-interrupted-run"])
+def test_mac_app_install_replaces_previous_copy(tmp_path: Path, previous: str) -> None:
     release, applications = tmp_path / "release", tmp_path / "Applications"
-    built = controller_deploy.built_mac_app(release) / "Contents"
-    built.mkdir(parents=True)
-    (built / "Info.plist").write_text("new")
+    _built_app(release, "new")
     installed = applications / controller_deploy.MAC_APP_NAME
-    if previous_app:
-        (installed / "Contents").mkdir(parents=True)
-        (installed / "Contents/Info.plist").write_text("old")
-        (installed / "Contents/stale-resource").write_text("old")
-    applications.mkdir(exist_ok=True)
+    applications.mkdir()
+    if previous == "installed":
+        _app_at(installed, "old")
+    if previous == "left-aside-by-interrupted-run":
+        _app_at(applications / f".{controller_deploy.MAC_APP_NAME}.replaced", "old")
     controller_deploy.install_mac_app(release, applications)
     assert (installed / "Contents/Info.plist").read_text() == "new"
     assert not (installed / "Contents/stale-resource").exists()
     assert sorted(path.name for path in applications.iterdir()) == [controller_deploy.MAC_APP_NAME]
-    assert (built / "Info.plist").read_text() == "new"
+    assert (controller_deploy.built_mac_app(release) / "Contents/Info.plist").read_text() == "new"
+
+
+@pytest.mark.parametrize("previous", ["installed", "left-aside-by-interrupted-run"])
+@pytest.mark.parametrize("failing_step", ["copy", "move-in"])
+def test_failed_mac_app_install_keeps_previous_app(tmp_path: Path, previous: str, failing_step: str) -> None:
+    release, applications = tmp_path / "release", tmp_path / "Applications"
+    _built_app(release, "new")
+    installed = applications / controller_deploy.MAC_APP_NAME
+    applications.mkdir()
+    _app_at(installed if previous == "installed" else applications / f".{controller_deploy.MAC_APP_NAME}.replaced", "old")
+    incoming = applications / f".{controller_deploy.MAC_APP_NAME}.incoming"
+    actual_rename = Path.rename
+
+    def rename(path: Path, target: Path) -> Path:
+        if path == incoming:
+            raise OSError("Applications folder refused the move")
+        return actual_rename(path, target)
+
+    failure = (
+        patch.object(controller_deploy.shutil, "copytree", side_effect=OSError("disk full"))
+        if failing_step == "copy" else patch.object(Path, "rename", rename)
+    )
+    with failure, pytest.raises(OSError):
+        controller_deploy.install_mac_app(release, applications)
+    assert (installed / "Contents/Info.plist").read_text() == "old"
 
 
 @pytest.mark.parametrize("shared_metadata", ["commondir", "objects/info/alternates"])

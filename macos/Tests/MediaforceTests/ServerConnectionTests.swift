@@ -58,6 +58,12 @@ final class ServerConnectionTests: XCTestCase {
         XCTAssertEqual(state, .unreachable)
     }
 
+    func testTimeoutIsUnreachable() async {
+        StubServer.respond = { _ in throw URLError(.timedOut) }
+        let state = await connection().check()
+        XCTAssertEqual(state, .unreachable)
+    }
+
     @MainActor
     func testMonitorReportsLatestCheck() async {
         let monitor = ServerMonitor(connection: connection())

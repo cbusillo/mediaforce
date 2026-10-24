@@ -54,8 +54,8 @@ struct ServerStatusView: View {
         switch monitor.state {
         case .checking: "Looking for Mediaforce on this Mac…"
         case .reachable: "Mediaforce is running on this Mac."
-        case .unreachable: "Mediaforce isn't running on this Mac."
-        case .failing: "Mediaforce is running but isn't answering properly."
+        case .unreachable: "Can't reach Mediaforce on this Mac."
+        case .failing: "Mediaforce answered with an error."
         }
     }
 
@@ -66,9 +66,9 @@ struct ServerStatusView: View {
         case .reachable:
             "Your library will appear here in a later version. For now this window shows that the app can reach Mediaforce."
         case .unreachable:
-            "Nothing is being compressed until it starts again. This window checks every few seconds and updates by itself."
+            "It isn't answering, so this window can't tell what it's doing. It checks again every few seconds and updates by itself."
         case .failing:
-            "It answered with an error. This window checks every few seconds and updates by itself."
+            "This window can't tell what it's doing until it answers properly. It checks again every few seconds and updates by itself."
         }
     }
 }
