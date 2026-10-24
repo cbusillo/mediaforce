@@ -138,11 +138,13 @@ def _run_remote_status_probe(
     raise RuntimeError("Remote status probe did not produce a result.")
 
 
-def _probe_exception_copy(exc: Exception, label: str) -> tuple[str, list[str]]:
+def _probe_exception_kind(exc: Exception) -> str:
     """A check that never finished: a timeout reads as a computer that is off or asleep."""
-    return computer_check_failure_copy(
-        "unreachable" if isinstance(exc, subprocess.TimeoutExpired) else "check_failed", label,
-    )
+    return "unreachable" if isinstance(exc, subprocess.TimeoutExpired) else "check_failed"
+
+
+def _probe_exception_copy(exc: Exception, label: str) -> tuple[str, list[str]]:
+    return computer_check_failure_copy(_probe_exception_kind(exc), label)
 
 
 def _remote_host_status(
@@ -169,6 +171,7 @@ def _remote_host_status(
             probe_available=False,
             repo_path=repo_path,
             issues=computer_check_failure_copy("no_address", label)[1],
+            check_failure="no_address",
         )
 
     if host_targets_current_machine({"host": ssh_host}):
@@ -226,6 +229,7 @@ def _remote_host_status(
             repo_path=repo_path,
             issues=_probe_exception_copy(exc, label)[1],
             detail=str(exc),
+            check_failure=_probe_exception_kind(exc),
         )
 
     if result.returncode != 0:
@@ -247,6 +251,7 @@ def _remote_host_status(
             setup_supported=classification["setup_supported"],
             setup_requires_password=classification["setup_requires_password"],
             trust_reset_supported=classification.get("trust_reset_supported", False),
+            check_failure=classification["kind"],
         )
 
     try:
@@ -264,6 +269,7 @@ def _remote_host_status(
             probe_available=False,
             repo_path=repo_path,
             issues=computer_check_failure_copy("unreadable_reply", label)[1],
+            check_failure="unreadable_reply",
             detail=result.stdout.strip() or None,
             setup_supported=True,
         )
@@ -296,6 +302,7 @@ def _remote_host_status(
                 repo_path=repo_path,
                 issues=_probe_exception_copy(exc, label)[1],
                 detail=str(exc),
+                check_failure=_probe_exception_kind(exc),
             )
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "SSH host unavailable"
@@ -316,6 +323,7 @@ def _remote_host_status(
                 setup_supported=classification["setup_supported"],
                 setup_requires_password=classification["setup_requires_password"],
                 trust_reset_supported=classification.get("trust_reset_supported", False),
+                check_failure=classification["kind"],
             )
         try:
             payload = _parse_remote_status_output(result.stdout)
@@ -332,6 +340,7 @@ def _remote_host_status(
                 probe_available=False,
                 repo_path=repo_path,
                 issues=computer_check_failure_copy("unreadable_reply", label)[1],
+                check_failure="unreadable_reply",
                 detail=result.stdout.strip() or None,
                 setup_supported=True,
             )

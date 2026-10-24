@@ -36,6 +36,7 @@ class ReadPathPurityTests(unittest.TestCase):
         self.config = MediaforceConfig(
             raw={
                 "media": {
+                    "staging_root": str(project_root / "staging"),
                     "libraries": [
                         {
                             "key": "tv",
@@ -162,6 +163,7 @@ class ReadPathPurityTests(unittest.TestCase):
             "api_folder_status",
         )
         hosts_endpoint = self._endpoint(app, "/api/hosts", "api_hosts")
+        main_window_endpoint = self._endpoint(app, "/api/app/main-window", "api_app_main_window")
 
         unexpected_process = AssertionError("GET request attempted to launch a child process")
         with patch("subprocess.run", side_effect=unexpected_process) as run_mock, patch(
@@ -177,12 +179,14 @@ class ReadPathPurityTests(unittest.TestCase):
             folder_response = folder_endpoint("tv/missing")
             folder_status_response = folder_status_endpoint("tv/missing")
             hosts_response = hosts_endpoint(0)
+            main_window_response = main_window_endpoint()
 
         self.assertEqual(dashboard_response.status_code, 200)
         self.assertEqual(dashboard_scan_job_response.status_code, 200)
         self.assertEqual(folder_response.status_code, 404)
         self.assertEqual(folder_status_response.status_code, 200)
         self.assertEqual(hosts_response.status_code, 200)
+        self.assertEqual(main_window_response.status_code, 200)
         run_mock.assert_not_called()
         popen_mock.assert_not_called()
         scan_thread_mock.assert_not_called()
