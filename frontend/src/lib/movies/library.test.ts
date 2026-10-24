@@ -582,7 +582,7 @@ describe('movie action discoverability', () => {
 				...readyTitle.workflow_state!,
 				state: 'browse_only',
 				primary_lane: 'none',
-				label: 'Browse only'
+				label: 'View only'
 			}
 		};
 		const conflictTitle: MovieTitle = {

@@ -205,33 +205,33 @@ def library_readiness(
             }
         return {
             "state": "blocked",
-            "label": "Safety blocked",
-            "detail": "Browse-only until 3D / VR playback qualification is implemented.",
+            "label": "View only for now",
+            "detail": "Mediaforce shows 3D and VR files but cannot compress them safely yet.",
         }
     if availability == "browse_only":
         return {
             "state": "browse_only",
-            "label": "Browse only",
-            "detail": "Mediaforce scans and shows this library but never processes it.",
+            "label": "View only",
+            "detail": "Mediaforce scans and shows this library but never changes its files.",
         }
     if not library_production_supported(library_type):
         return {
             "state": "blocked",
-            "label": "Workflow blocked",
-            "detail": f"{library_type_label(library_type)} production is not available yet.",
+            "label": "Not supported yet",
+            "detail": "Mediaforce cannot compress this kind of library yet.",
         }
     if library_type == "other":
         valid_profiles = {option["key"] for option in LIBRARY_PROFILE_OPTIONS["other"]}
         if default_profile not in valid_profiles:
             return {
                 "state": "incomplete",
-                "label": "Profile needed",
-                "detail": "Choose an explicit Other processing profile before enabling Production.",
+                "label": "Choose a compression setting",
+                "detail": "Choose a compression setting before letting Mediaforce compress files here.",
             }
         return {
             "state": "ready",
             "label": "Ready",
-            "detail": "Generic file and folder scopes use the selected profile and require probe readiness.",
+            "detail": "Files and folders here use the selected compression setting once Mediaforce can read them.",
         }
     return {"state": "ready", "label": "Ready", "detail": "Scanning and production processing are enabled."}
 
@@ -786,7 +786,7 @@ def build_runtime_settings_payload(
         library_type = normalize_library_type(explicit_type or None, key=normalized_key)
         availability_text = _text(row.get("availability", ""))
         if availability_text and availability_text not in {"production", "browse_only", "disabled"}:
-            raise SettingsValidationError("Choose Production, Browse only, or Disabled for each library.")
+            raise SettingsValidationError("Choose Compress files, View only, or Off for each library.")
         availability = normalize_library_availability(availability_text or None, library_type=library_type)
         previous_type = current_types.get(normalized_key)
         expected_confirmation = f"{normalized_key}:{previous_type}->{library_type}" if previous_type else ""
@@ -796,7 +796,7 @@ def build_runtime_settings_payload(
             availability = "browse_only"
         if availability == "production" and not library_production_supported(library_type):
             raise SettingsValidationError(
-                f"{library_type_label(library_type)} production is not available yet; use Browse only."
+                f"Mediaforce cannot compress {library_type_label(library_type)} libraries yet; choose View only."
             )
         profile = _text(row.get("default_profile", DEFAULT_LIBRARY_PROFILES[library_type]))
         valid_profiles = {option["key"] for option in LIBRARY_PROFILE_OPTIONS[library_type]}

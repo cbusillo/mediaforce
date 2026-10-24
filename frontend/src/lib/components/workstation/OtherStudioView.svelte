@@ -26,7 +26,6 @@
 	import TargetDefaultEvidence from '$lib/components/TargetDefaultEvidence.svelte';
 	import {
 		otherActionFileCount,
-		otherReadinessBlockerCopy,
 		otherSampleSetupResult,
 		otherScopeSummary,
 		otherWorkflowDetail,
@@ -618,7 +617,7 @@
 			{#if readiness.blockers.length}
 				<ul>
 					{#each readiness.blockers as blocker (blocker)}<li>
-							{otherReadinessBlockerCopy(blocker)}
+							{blocker}
 						</li>{/each}
 				</ul>
 			{/if}

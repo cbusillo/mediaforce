@@ -6,7 +6,6 @@ import {
 	mergeOtherLibraryPayloads,
 	otherActionFileCount,
 	otherLibraryStateGroup,
-	otherReadinessBlockerCopy,
 	otherSampleSetupResult,
 	otherScopeSummary,
 	otherWorkflowDetail,
@@ -43,7 +42,7 @@ const workUnit: OtherWorkUnit = {
 	video_codecs: { h264: 2 },
 	profile_readiness: {
 		state: 'ready',
-		label: 'Profile ready',
+		label: 'Ready',
 		detail: 'All files are ready.',
 		profile: 'other_conservative',
 		profile_label: 'Conservative',
@@ -241,28 +240,6 @@ describe('Other scope presentation', () => {
 		expect(otherActionFileCount(workflow('encode', { encode: 4 }), 3, 5)).toBe(3);
 		expect(otherActionFileCount(workflow('validate', { validate: 2 }), 0, 5)).toBe(2);
 		expect(otherActionFileCount(workflow('promote', { promote: 1 }), 0, 5)).toBe(1);
-	});
-
-	it('translates backend readiness recovery into primary operator language', () => {
-		expect(
-			otherReadinessBlockerCopy(
-				'The complete membership cannot be reviewed as one bounded work unit before sampling or queueing this scope.'
-			)
-		).toBe(
-			'The complete membership cannot be reviewed as one folder selection before creating a sample or starting work on this scope.'
-		);
-		expect(otherReadinessBlockerCopy('Choose exact-file grouping before processing.')).toBe(
-			'Choose one-file-at-a-time before compression.'
-		);
-		expect(otherReadinessBlockerCopy('Processing cannot start for this work unit.')).toBe(
-			'Compression cannot start for this folder or file.'
-		);
-		expect(otherReadinessBlockerCopy('Bounded work units need processing.')).toBe(
-			'Folder selections need compression.'
-		);
-		expect(otherReadinessBlockerCopy('Use work units before processing.')).toBe(
-			'Use folders or files before compression.'
-		);
 	});
 });
 

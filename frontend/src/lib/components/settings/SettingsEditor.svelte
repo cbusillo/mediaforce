@@ -836,14 +836,14 @@
 									>
 								</label>
 								<label class="stacked-field">
-									<span>Decision model</span>
+									<span>What Mediaforce aims for</span>
 									<select
 										class="field"
 										bind:value={draft.video_defaults.decision_model}
 										onchange={(event) => updateVideoDefault('decision_model', selectValue(event))}
 									>
-										<option value="size_first_review">Size-first review</option>
-										<option value="quality_first_sample">Quality-first sample</option>
+										<option value="size_first_review">The size goal</option>
+										<option value="quality_first_sample">The picture quality</option>
 									</select>
 								</label>
 								<label class="stacked-field">
