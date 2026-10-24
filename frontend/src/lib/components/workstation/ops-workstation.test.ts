@@ -1654,7 +1654,7 @@ describe('Ops workstation mapping', () => {
 			active_encode_count: 1,
 			max_parallel_encodes: 1,
 			queue_active: false,
-			active_reason: 'parallel encode slots are full'
+			active_reason: 'already compressing as much as it can'
 		};
 		hosts.hosts[1] = {
 			...hosts.hosts[1],

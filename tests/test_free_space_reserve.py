@@ -260,7 +260,7 @@ def test_large_job_serializes_against_existing_running_job(tmp_path: Path, monke
         ),
     )
 
-    assert waiting_reason == "Waiting for the active large encode job to release its free-space reserve."
+    assert waiting_reason == encode_runtime.LARGE_COMPRESSION_RESERVE_WAITING_REASON
 
 
 def test_manifest_source_size_supports_unresolved_target_fallback(tmp_path: Path) -> None:

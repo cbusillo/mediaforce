@@ -307,9 +307,7 @@ export function movieCurrentWorkView(
 			label: 'Compressing now',
 			tone: 'active',
 			headline: currentItem ? `Compressing ${fileName(currentItem)}` : 'Compressing this movie now',
-			detail:
-				normalizeMovieQueueCopy(textValue(progress?.phase_label)) ||
-				'Mediaforce is compressing the current movie.',
+			detail: textValue(progress?.phase_label) || 'Mediaforce is compressing the current movie.',
 			blockers: [],
 			percentComplete,
 			queuePosition,
@@ -358,9 +356,7 @@ export function movieCurrentWorkView(
 		: job.queue_position && job.queue_depth
 			? `Queued ${job.queue_position} of ${job.queue_depth}`
 			: 'Waiting to compress';
-	const detail =
-		normalizeMovieQueueCopy(waitingCopy) ||
-		'Mediaforce will start this movie when a computer accepts it.';
+	const detail = waitingCopy || 'Mediaforce will start this movie when a computer accepts it.';
 
 	return {
 		label: queueState?.stop_requested
@@ -403,30 +399,6 @@ const WORK_WINDOW_WAITS: Record<string, { blocker: string; startCondition: strin
 		startCondition: 'the next work window opens'
 	}
 };
-
-function normalizeMovieQueueCopy(value: string): string {
-	return value
-		.replace(/\bencode queue\b/gi, (match) => matchCase(match, 'compression queue'))
-		.replace(/\bencode jobs?\b/gi, (match) =>
-			matchCase(match, match.toLowerCase().endsWith('s') ? 'compression jobs' : 'compression job')
-		)
-		.replace(/\bencode hosts?\b/gi, (match) =>
-			matchCase(match, match.toLowerCase().endsWith('s') ? 'computers' : 'computer')
-		)
-		.replace(/\bprocessing queue\b/gi, (match) => matchCase(match, 'compression queue'))
-		.replace(/\bencoding\b/gi, (match) => matchCase(match, 'compressing'))
-		.replace(/\bprocessing\b/gi, (match) => matchCase(match, 'compressing'))
-		.replace(/\bencode\b/gi, (match) => matchCase(match, 'compress'))
-		.replace(/\bworkers?\b/gi, (match) =>
-			match.toLowerCase().endsWith('s') ? 'computers' : 'computer'
-		);
-}
-
-function matchCase(source: string, replacement: string): string {
-	return /^[A-Z]/.test(source)
-		? replacement.charAt(0).toUpperCase() + replacement.slice(1)
-		: replacement;
-}
 
 export function movieGoalFactsView(
 	durationSeconds: number | null | undefined,

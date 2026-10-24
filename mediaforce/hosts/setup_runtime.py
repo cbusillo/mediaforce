@@ -219,7 +219,7 @@ def prepare_remote_host_with_password(
             if not password:
                 return HostSetupResult(
                     ok=False,
-                    message="The remote account password is required the first time so Mediaforce can install this Mac's SSH key.",
+                    message="Enter this computer's account password once so Mediaforce can set up signing in on its own.",
                     requires_password=True,
                     performed_steps=prep_steps,
                 )
@@ -428,7 +428,7 @@ def _install_local_ssh_key(
     if result.returncode != 0:
         return HostSetupResult(
             ok=False,
-            message="Installing this Mac's SSH key failed.",
+            message="Mediaforce couldn't set up signing in to this computer.",
             detail=result.stderr.strip() or result.stdout.strip() or None,
             requires_password=True,
         )
@@ -437,7 +437,7 @@ def _install_local_ssh_key(
     if verify_result.returncode != 0:
         return HostSetupResult(
             ok=False,
-            message="The SSH key install did not produce working passwordless access.",
+            message="Mediaforce set up signing in, but this computer still asks for a password.",
             detail=(
                     verify_result.stderr.strip()
                     or verify_result.stdout.strip()
@@ -448,7 +448,7 @@ def _install_local_ssh_key(
 
     return HostSetupResult(
         ok=True,
-        message="Installed this Mac's SSH key on the remote host.",
+        message="Mediaforce can now sign in to this computer on its own.",
         performed_steps=[f"Installed {public_key.name} for passwordless SSH access."],
     )
 

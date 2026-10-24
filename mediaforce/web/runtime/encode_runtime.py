@@ -291,6 +291,7 @@ CERTAIN_ENCODE_FAILURES: tuple[type[Exception], ...] = (
     StreamPlanIdentityError,
     TargetSizeSearchError,
 )
+LARGE_COMPRESSION_RESERVE_WAITING_REASON = "Waiting for a large compression to finish and release its free-space reserve."
 LIBRARY_NOT_COMPRESSING_WAITING_REASON = "This library is set to View only or Off in Settings."
 NEW_SIZE_GOAL_NEXT_STEP = "Choose a new size goal and make a new sample before trying again."
 SIZE_QUESTION_QUALITY_NEEDS_MORE = "quality_needs_more"
@@ -454,7 +455,7 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
                     connection.rollback()
                     continue
         except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError, subprocess.SubprocessError) as exc:
-            message = f"Waiting to end its earlier remote encode before making this file again. {exc}"
+            message = f"Waiting to stop the earlier attempt on its computer before making this file again. {exc}"
             if restart_stop:
                 # Ask once and wait: an encode that may still be writing is never started again blindly.
                 episode, host_label = _restart_stop_names(job, selected_items)
@@ -1933,7 +1934,7 @@ def _transition_encode_job_schedule_close(
             "retry_not_before": (datetime.now(tz=UTC) + timedelta(
                 seconds=deps.encode_job_retry_base_delay_seconds,
             )).isoformat(timespec="seconds"),
-            "waiting_reason": "Waiting to end the earlier encode and remove its unfinished file before retrying.",
+            "waiting_reason": "Waiting to stop the earlier attempt and remove its unfinished file before retrying.",
         })
     save_encode_job(connection, job)
     sync_encode_job_parent(connection, job, deps)
@@ -3603,7 +3604,7 @@ def _large_job_serialization_waiting_reason(
             f"the library, then retry. ({exc})"
         )
     if candidate_is_large or running_state.has_large_or_unmeasurable_work:
-        return "Waiting for the active large encode job to release its free-space reserve."
+        return LARGE_COMPRESSION_RESERVE_WAITING_REASON
     return None
 
 
@@ -4172,7 +4173,7 @@ def load_next_runnable_encode_job(
     ) -> str | None:
         if running_reserve_state.reserve_unmeasurable:
             return (
-                "Waiting for the active encode work's free-space reserve to become measurable. "
+                "Waiting for the current compression's free-space reserve to become measurable. "
                 "Mount or repair its storage, then retry."
             )
         reserve = deps.encode_reserve_preflight(
@@ -4929,20 +4930,20 @@ def _encode_failure_retries_after_attempt_cap(
 
 def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) -> str:
     reason = {
-        "worker_restart": "worker restart",
-        "stale_lease": "stale worker lease",
-        "host_unavailable": "host availability issue",
-        "controller_storage_unavailable": "controller storage issue",
-        "ssh_transport": "SSH transport failure",
+        "worker_restart": "Mediaforce restarted",
+        "stale_lease": "a computer stopped reporting in",
+        "host_unavailable": "a computer was unavailable",
+        "controller_storage_unavailable": "a storage problem on this Mac",
+        "ssh_transport": "a lost connection to a computer",
         "host_configuration": "a setup problem on that computer",
-        "unreadable_output": "unreadable encoder output",
-        "host_scratch": "scratch folder problem on the computer",
+        "unreadable_output": "a compressed file that could not be read",
+        "host_scratch": "a work folder problem on the computer",
         REMOTE_QUALITY_TIMEOUT_FAILURE_KIND: "a quality check that ran too long on a computer",
-        "storage_io": "media storage read or write error",
-        "controller_database_busy": "controller database contention",
+        "storage_io": "a problem reading or writing media",
+        "controller_database_busy": "a busy moment in Mediaforce",
         OUTPUT_NOT_VISIBLE_FAILURE_KIND: "a finished file this machine could not see",
         "unknown": "an error Mediaforce does not recognise",
-    }.get(failure_kind, "retryable failure")
+    }.get(failure_kind, "a temporary problem")
     return f"retrying after {reason} at {retry_not_before}"
 
 
@@ -4983,7 +4984,7 @@ def prepare_terminal_encode_job_for_requeue(
     if cleanup.outcome is not _EncodeRetryArtifactCleanupOutcome.CLEANED:
         raise HTTPException(
             status_code=409,
-            detail="Waiting to end the earlier encode and remove its unfinished file before making it again."
+            detail="Waiting to stop the earlier attempt and remove its unfinished file before making it again."
             + (f" {cleanup.detail}" if cleanup.detail else ""),
         )
 

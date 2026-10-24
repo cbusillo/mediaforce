@@ -891,5 +891,5 @@ def _active_encode_promotion_waiting_reason(
     if active_job_id is None:
         return None
     return (
-        "Waiting for a running encode to finish, because copying this file could use space that encode needs."
+        "Waiting for a running compression to finish, because copying this file could use space it needs."
     )

@@ -46,8 +46,8 @@ VMAF_MODEL_MISSING_ISSUE = (
 )
 SAMPLE_AV1_ENCODER_MISSING_ISSUE = "ffmpeg is missing libsvtav1 support required for sampled calibration."
 LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE = "Sampled calibration is not supported on Linux hosts."
-SOURCE_ROOT_READ_MISSING_ISSUE = "Source root is not readable on this host."
-STAGING_ROOT_WRITE_MISSING_ISSUE = "Staging root is not writable on this host."
+SOURCE_ROOT_READ_MISSING_ISSUE = "Mediaforce can't read the media folder on this computer:"
+STAGING_ROOT_WRITE_MISSING_ISSUE = "Mediaforce can't write to its work folder on this computer:"
 
 
 @dataclass(slots=True)
@@ -107,4 +107,6 @@ __all__ = [
     "SAMPLE_METRIC_MISSING_ISSUE",
     "SOURCE_ROOT_READ_MISSING_ISSUE",
     "STAGING_ROOT_WRITE_MISSING_ISSUE",
+    "VMAF_MODEL_MISSING_ISSUE",
+    "is_vmaf_model_load_failure",
 ]
