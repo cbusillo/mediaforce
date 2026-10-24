@@ -134,7 +134,7 @@ def sync_external_metadata(
     )
     stats.status = (
         "completed"
-        if stats.plex.status == "completed" and stats.tmdb.status == "completed"
+        if stats.plex.status == "completed" and stats.tmdb.status == "completed" and not stats.posters.failed
         else "completed_with_warnings"
     )
     return stats
@@ -426,7 +426,12 @@ def _cache_posters(
             stats.failed += 1
             stats.message = _provider_error_message("TMDB images", exc)
             continue
-        _write_atomically(target, image)
+        try:
+            _write_atomically(target, image)
+        except OSError:
+            stats.failed += 1
+            stats.message = "The poster cache could not be written; posters are retried on the next sync."
+            continue
         stats.refreshed += 1
     stats.status = "completed" if not stats.failed else "completed_with_warnings"
 
@@ -434,8 +439,11 @@ def _cache_posters(
 def _write_atomically(target: Path, content: bytes) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_name(f".{target.name}.{uuid.uuid4().hex}.partial")
-    partial.write_bytes(content)
-    partial.replace(target)
+    try:
+        partial.write_bytes(content)
+        partial.replace(target)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def _plex_path_mappings(config: MediaforceConfig) -> tuple[PlexPathMapping, ...]:

@@ -528,7 +528,7 @@ class ExternalMetadataTests(unittest.TestCase):
             self.assertIsNone(tmdb_image_path(value), value)
 
     def test_sync_caches_each_show_poster_once_and_serves_it(self) -> None:
-        config = self._config()
+        config = self._config(keep_posters=True)
         image_urls: list[str] = []
         with open_db(config.paths.db_path) as connection:
             first = self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch(image_urls))
@@ -544,7 +544,7 @@ class ExternalMetadataTests(unittest.TestCase):
         self.assertIsNone(missing)
 
     def test_show_without_tmdb_poster_reads_none(self) -> None:
-        config = self._config()
+        config = self._config(keep_posters=True)
         image_urls: list[str] = []
 
         def no_poster_fetch(url: str, headers: Mapping[str, str], timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
@@ -564,7 +564,7 @@ class ExternalMetadataTests(unittest.TestCase):
         self.assertEqual(cached.tmdb.cached, 1)
 
     def test_failed_poster_download_keeps_metadata_and_retries_next_sync(self) -> None:
-        config = self._config()
+        config = self._config(keep_posters=True)
         image_urls: list[str] = []
 
         def failing_fetch(_url: str, _timeout: float) -> bytes:
@@ -576,12 +576,25 @@ class ExternalMetadataTests(unittest.TestCase):
             retried = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch(image_urls))
 
         self.assertEqual((failed.posters.status, failed.posters.failed), ("completed_with_warnings", 1))
+        self.assertEqual((failed.status, retried.status), ("completed_with_warnings", "completed"))
         self.assertEqual(status, "Returning Series")
         self.assertEqual(retried.posters.refreshed, 1)
         self.assertEqual(len(image_urls), 1)
 
+    def test_unwritable_poster_cache_is_a_warning_not_a_failed_sync(self) -> None:
+        config = self._config(keep_posters=True)
+        assert config.paths.poster_dir is not None
+        config.paths.poster_dir.parent.mkdir(parents=True, exist_ok=True)
+        config.paths.poster_dir.write_text("a file where the cache folder should be")
+        with open_db(config.paths.db_path) as connection:
+            stats = self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch([]))
+            status = connection.execute(select(series_metadata.c.tmdb_status)).scalar_one()
+
+        self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 1))
+        self.assertEqual(status, "Returning Series")
+
     def test_series_saved_before_posters_refresh_without_waiting_for_the_interval(self) -> None:
-        config = self._config()
+        config = self._config(keep_posters=True)
         with open_db(config.paths.db_path) as connection:
             self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch([]))
             connection.execute(series_metadata.update().values(tmdb_poster_path=None))
@@ -632,7 +645,7 @@ class ExternalMetadataTests(unittest.TestCase):
         self.assertEqual(Path(served.path), poster)
         self.assertEqual((none.status_code, json.loads(none.body)), (404, {"poster": "none"}))
 
-    def _config(self) -> MediaforceConfig:
+    def _config(self, *, keep_posters: bool = False) -> MediaforceConfig:
         with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
             raw = copy.deepcopy(tomllib.load(handle))
         raw["media"]["source_roots"] = {"tv": str(self.root / "source" / "tv")}
@@ -648,7 +661,7 @@ class ExternalMetadataTests(unittest.TestCase):
             web_state_dir=self.root / "web",
             review_dir=self.root / "review",
             runtime_settings_path=self.root / "runtime.json",
-            poster_dir=self.root / "posters",
+            poster_dir=self.root / "posters" if keep_posters else None,
         )
         return MediaforceConfig(raw=raw, paths=paths)
 
