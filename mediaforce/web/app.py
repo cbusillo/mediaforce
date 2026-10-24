@@ -148,6 +148,8 @@ from mediaforce.web.routes import register_app_window_routes, register_completed
     register_folder_routes, register_frontend_routes, register_host_routes, register_operator_work_routes, \
     register_queue_routes, register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
+from mediaforce.web.routes.posters import register_poster_routes
+from mediaforce.library.metadata_sync import cached_show_poster
 from mediaforce.web.runtime.app_window import app_window_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
 from mediaforce.web.runtime.show_settings_runtime import prefixes_with_samples, use_show_settings
@@ -1197,6 +1199,12 @@ def create_app(
         clear_completed_backups_action=lambda prefixes=None: _clear_completed_backups_action(prefixes),
         confirm_originals_removed_action=lambda prefixes: _confirm_originals_removed_action(prefixes),
     )
+
+    def _show_poster(show_prefix: str) -> Path | None:
+        with open_db(config.paths.db_path) as connection:
+            return cached_show_poster(connection, config.paths.poster_dir, show_prefix)
+
+    register_poster_routes(app, show_poster=_show_poster)
     register_host_routes(
         app,
         hosts_payload=_hosts_payload,

@@ -1,4 +1,5 @@
 import copy
+import json
 from collections.abc import Mapping
 import os
 import tempfile
@@ -9,6 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
+from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
@@ -16,8 +19,9 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata
 from mediaforce.library.external_metadata import PlexClient, PlexPathMapping, ProviderHttpError, TmdbClient, \
-    JSONPayload, map_plex_part_path, tmdb_id_from_guids
-from mediaforce.library.metadata_sync import sync_external_metadata
+    FetchImage, FetchJson, JSONPayload, map_plex_part_path, tmdb_id_from_guids, tmdb_image_path
+from mediaforce.library.metadata_sync import MetadataSyncStats, cached_show_poster, sync_external_metadata
+from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.web.settings_runtime import normalize_metadata_settings
 
 
@@ -518,7 +522,148 @@ class ExternalMetadataTests(unittest.TestCase):
         self.assertEqual(payload["tmdb"]["token_env"], "MEDIAFORCE_TMDB_HOME_TOKEN")
         self.assertEqual(payload["tmdb"]["refresh_interval_hours"], 48.0)
 
-    def _config(self) -> MediaforceConfig:
+    def test_tmdb_poster_path_accepts_only_a_plain_image_name(self) -> None:
+        self.assertEqual(tmdb_image_path("/abc_D-9.jpg"), "/abc_D-9.jpg")
+        for value in (None, "", "abc.jpg", "/../secret.jpg", "/a/b.jpg", "https://x.test/a.jpg", "/a.gif", 7):
+            self.assertIsNone(tmdb_image_path(value), value)
+
+    def test_sync_caches_each_show_poster_once_and_serves_it(self) -> None:
+        config = self._config(keep_posters=True)
+        image_urls: list[str] = []
+        with open_db(config.paths.db_path) as connection:
+            first = self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch(image_urls))
+            second = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch(image_urls))
+            poster = cached_show_poster(connection, config.paths.poster_dir, "tv/Show")
+            missing = cached_show_poster(connection, config.paths.poster_dir, "tv/Unknown Show")
+
+        self.assertEqual(image_urls, ["https://image.tmdb.org/t/p/w342/poster42.jpg"])
+        self.assertEqual((first.posters.refreshed, second.posters.cached), (1, 1))
+        assert poster is not None
+        self.assertEqual(poster.read_bytes(), b"poster-bytes")
+        self.assertTrue(poster.is_relative_to(config.paths.poster_dir))
+        self.assertIsNone(missing)
+
+    def test_show_without_tmdb_poster_reads_none(self) -> None:
+        config = self._config(keep_posters=True)
+        image_urls: list[str] = []
+
+        def no_poster_fetch(url: str, headers: Mapping[str, str], timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
+            payload, response_headers = self._successful_fetch(url, headers, timeout)
+            return {key: value for key, value in payload.items() if key != "poster_path"}, response_headers
+
+        with open_db(config.paths.db_path) as connection:
+            for minutes in (0, 30):
+                cached = self._sync_show(
+                    connection, config, minutes=minutes, fetch_json_fn=no_poster_fetch,
+                    fetch_image_fn=self._poster_fetch(image_urls),
+                )
+            poster = cached_show_poster(connection, config.paths.poster_dir, "tv/Show")
+
+        self.assertIsNone(poster)
+        self.assertEqual(image_urls, [])
+        self.assertEqual(cached.tmdb.cached, 1)
+
+    def test_failed_poster_download_keeps_metadata_and_retries_next_sync(self) -> None:
+        config = self._config(keep_posters=True)
+        image_urls: list[str] = []
+
+        def failing_fetch(_url: str, _timeout: float) -> bytes:
+            raise ProviderHttpError("Provider request failed with HTTP 503", status_code=503)
+
+        with open_db(config.paths.db_path) as connection:
+            failed = self._sync_show(connection, config, minutes=0, fetch_image_fn=failing_fetch)
+            status = connection.execute(select(series_metadata.c.tmdb_status)).scalar_one()
+            retried = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch(image_urls))
+
+        self.assertEqual((failed.posters.status, failed.posters.failed), ("completed_with_warnings", 1))
+        self.assertEqual((failed.status, retried.status), ("completed_with_warnings", "completed"))
+        self.assertEqual(status, "Returning Series")
+        self.assertEqual(retried.posters.refreshed, 1)
+        self.assertEqual(len(image_urls), 1)
+
+    def test_unwritable_poster_cache_is_a_warning_not_a_failed_sync(self) -> None:
+        config = self._config(keep_posters=True)
+        assert config.paths.poster_dir is not None
+        config.paths.poster_dir.parent.mkdir(parents=True, exist_ok=True)
+        config.paths.poster_dir.write_text("a file where the cache folder should be")
+        with open_db(config.paths.db_path) as connection:
+            stats = self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch([]))
+            status = connection.execute(select(series_metadata.c.tmdb_status)).scalar_one()
+
+        self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 1))
+        self.assertEqual(status, "Returning Series")
+
+    @unittest.skipIf(os.geteuid() == 0, "root can search any folder")
+    def test_unreadable_poster_cache_reads_as_no_poster(self) -> None:
+        config = self._config(keep_posters=True)
+        poster_dir = config.paths.poster_dir
+        assert poster_dir is not None
+        with open_db(config.paths.db_path) as connection:
+            self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch([]))
+            connection.execute(series_metadata.update().values(tmdb_poster_path=None))
+            poster_dir.chmod(0)
+            try:
+                stats = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch([]))
+                poster = cached_show_poster(connection, poster_dir, "tv/Show")
+            finally:
+                poster_dir.chmod(0o755)
+
+        self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 1))
+        self.assertIsNone(poster)
+
+    def test_series_saved_before_posters_refresh_without_waiting_for_the_interval(self) -> None:
+        config = self._config(keep_posters=True)
+        with open_db(config.paths.db_path) as connection:
+            self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch([]))
+            connection.execute(series_metadata.update().values(tmdb_poster_path=None))
+            refreshed = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch([]))
+            poster_path = connection.execute(select(series_metadata.c.tmdb_poster_path)).scalar_one()
+
+        self.assertEqual(refreshed.tmdb.refreshed, 1)
+        self.assertEqual(poster_path, "/poster42.jpg")
+
+    def _sync_show(
+            self,
+            connection: Connection,
+            config: MediaforceConfig,
+            *,
+            minutes: int,
+            fetch_image_fn: FetchImage,
+            fetch_json_fn: FetchJson | None = None,
+    ) -> MetadataSyncStats:
+        rel_path = "tv/Show/Season 1/Episode 01.mkv"
+        if minutes == 0:
+            self._insert_item(connection, self.root / "source" / rel_path, rel_path)
+        with patch.dict(
+                os.environ,
+                {"MEDIAFORCE_PLEX_TOKEN": "plex-secret", "MEDIAFORCE_TMDB_TOKEN": "tmdb-secret"},
+                clear=False,
+        ):
+            return sync_external_metadata(
+                connection,
+                config,
+                now=OBSERVED_AT + timedelta(minutes=minutes),
+                fetch_json_fn=fetch_json_fn or self._successful_fetch,
+                fetch_image_fn=fetch_image_fn,
+            )
+
+    def test_poster_route_serves_the_file_or_says_none(self) -> None:
+        poster = self.root / "poster.jpg"
+        poster.write_bytes(b"poster-bytes")
+        app = FastAPI()
+        register_poster_routes(app, show_poster=lambda show_prefix: poster if show_prefix == "tv/Show" else None)
+        endpoint = next(
+            route.endpoint for route in app.router.routes
+            if isinstance(route, APIRoute) and route.path == "/api/app/posters/{show_prefix:path}"
+        )
+
+        served = endpoint("tv/Show")
+        none = endpoint("tv/Other")
+
+        self.assertEqual(Path(served.path), poster)
+        self.assertEqual((none.status_code, json.loads(none.body)), (404, {"poster": "none"}))
+
+    def _config(self, *, keep_posters: bool = False) -> MediaforceConfig:
         with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
             raw = copy.deepcopy(tomllib.load(handle))
         raw["media"]["source_roots"] = {"tv": str(self.root / "source" / "tv")}
@@ -534,6 +679,7 @@ class ExternalMetadataTests(unittest.TestCase):
             web_state_dir=self.root / "web",
             review_dir=self.root / "review",
             runtime_settings_path=self.root / "runtime.json",
+            poster_dir=self.root / "posters" if keep_posters else None,
         )
         return MediaforceConfig(raw=raw, paths=paths)
 
@@ -604,8 +750,19 @@ class ExternalMetadataTests(unittest.TestCase):
             self_authorization = dict(headers).get("Authorization")
             if self_authorization != "Bearer tmdb-secret":
                 raise AssertionError("TMDB bearer token was not sent")
-            return {"id": 42, "status": "Returning Series", "in_production": True, "genres": [{"id": 10764, "name": "Reality"}]}, {}
+            return {
+                "id": 42, "status": "Returning Series", "in_production": True,
+                "genres": [{"id": 10764, "name": "Reality"}], "poster_path": "/poster42.jpg",
+            }, {}
         raise AssertionError(url)
+
+    @staticmethod
+    def _poster_fetch(requested: list[str]) -> FetchImage:
+        def fetch(url: str, _timeout: float) -> bytes:
+            requested.append(url)
+            return b"poster-bytes"
+
+        return fetch
 
 
 if __name__ == "__main__":

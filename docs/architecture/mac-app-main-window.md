@@ -50,3 +50,16 @@ still answers when that storage is gone, and it starts no work.
   `motion_unclear`). `held` lists seasons waiting for a reason that lifts on
   its own (`current_season`, `recent_acquisition`, and so on) or for a motion
   decision (`motion_pattern`).
+
+## Show posters
+
+`GET /api/app/posters/{show_prefix}`, for example `/api/app/posters/tv/Futurama`,
+returns the show's poster image, or `404` with `{"poster": "none"}` when
+Mediaforce has no poster for it. The app then shows the show's name instead.
+
+Posters come from Mediaforce's own TMDB metadata. The metadata sync keeps each
+series' TMDB poster path, using the series id and token it already uses for
+status, and downloads the image once from TMDB's public image host, without
+the token, into `state.poster_dir`
+(`~/Library/Caches/mediaforce/posters` by default). The GET only reads that
+cache. A failed download is retried on the next sync.
