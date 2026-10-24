@@ -1,0 +1,55 @@
+---
+name: Mediaforce
+options:
+  bundleIdPrefix: com.shinycomputers
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+targets:
+  Mediaforce:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/Mediaforce
+    info:
+      path: Generated/Mediaforce-Info.plist
+      properties:
+        CFBundleDisplayName: Mediaforce
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.utilities
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.shinycomputers.mediaforce
+        PRODUCT_NAME: Mediaforce
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+
+  MediaforceTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/MediaforceTests
+    dependencies:
+      - target: Mediaforce
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.shinycomputers.mediaforce.tests
+        GENERATE_INFOPLIST_FILE: true
+
+schemes:
+  Mediaforce:
+    build:
+      targets:
+        Mediaforce: all
+    test:
+      targets:
+        - MediaforceTests

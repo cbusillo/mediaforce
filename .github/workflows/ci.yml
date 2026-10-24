@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 env:
-  # Pull-request time budget for the acceptance lane. Exceeding it is reported
+  # Pull-request time budget for the tests lane. Exceeding it is reported
   # as a warning on the run, not a failure.
   ACCEPTANCE_BUDGET_MINUTES: "10"
 
@@ -54,7 +54,7 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          # Below the job timeout, and above the 45-minute acceptance limit.
+          # Below the job timeout, and above the 45-minute tests limit.
           PUSH_RUN_WAIT_MINUTES: "50"
         run: |
           # A merge-train candidate is pushed to launchplane/train/ (a full
@@ -129,7 +129,8 @@ jobs:
           done <<< "$files"
           echo "product=${product}" >> "$GITHUB_OUTPUT"
 
-  acceptance:
+  tests:
+    name: tests
     needs: changes
     # Fail closed: run unless the change was positively classified docs-only.
     # A merge-train pull request skips when its push run covers the commit.
@@ -257,9 +258,9 @@ jobs:
         run: |
           elapsed=$(( $(date +%s) - LANE_STARTED_AT ))
           budget=$(( ACCEPTANCE_BUDGET_MINUTES * 60 ))
-          echo "Acceptance lane took ${elapsed}s (budget ${budget}s)."
+          echo "Tests lane took ${elapsed}s (budget ${budget}s)."
           if [ "$elapsed" -gt "$budget" ]; then
-            echo "::warning title=CI time budget exceeded::Acceptance took ${elapsed}s; budget is ${budget}s."
+            echo "::warning title=CI time budget exceeded::Tests took ${elapsed}s; budget is ${budget}s."
           fi
 
   file-integrity-macos:
@@ -296,3 +297,44 @@ jobs:
           set -euo pipefail
           test_command="$(jq -er '.qualityGate.test.fileIntegrityMacos | select(type == "string" and length > 0)' .github/github.json)"
           bash -euo pipefail -c "$test_command"
+
+  mac-app:
+    name: mac-app
+    needs: changes
+    # Fail closed: run unless the change was positively classified docs-only.
+    # A merge-train pull request skips when its push run covers the commit.
+    if: >-
+      ${{ !cancelled() && needs.changes.outputs.product != 'false' &&
+      needs.changes.outputs.covered_by_push != 'true' }}
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v6
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+
+      - name: Build and test the Mac app
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          test_command="$(jq -er '.qualityGate.test.macApp | select(type == "string" and length > 0)' .github/github.json)"
+          bash -euo pipefail -c "$test_command"
+
+  # The one required check: every lane passed, or skipped on purpose.
+  acceptance:
+    needs: [changes, tests, file-integrity-macos, mac-app]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every lane to pass or skip
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s' "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          printf '%s' "$RESULTS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' > /dev/null

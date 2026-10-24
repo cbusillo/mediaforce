@@ -5,6 +5,7 @@ import argparse
 import json
 from http.client import HTTPException
 import os
+import shutil
 import sqlite3
 import subprocess
 import time
@@ -22,6 +23,8 @@ from mediaforce.ops.runtime_install import (
 
 
 DEFAULT_STARTUP_TIMEOUT = 180
+MAC_APP_NAME = "Mediaforce.app"
+APPLICATIONS = Path("/Applications")
 
 
 def _run(command: list[str], *, cwd: Path | None = None) -> str:
@@ -67,9 +70,43 @@ def prepare_release(source: Path, target: str, home: Path) -> Path:
     _run(["git", "fetch", "--no-tags", str(source), sha], cwd=root)
     _run(["git", "checkout", "--detach", sha], cwd=root)
     _run(["uv", "sync", "--project", str(root), "--locked", "--no-dev"], cwd=root)
+    _run(["bash", str(root / "scripts/build-mac-app.sh"), "build", str(built_mac_app(root).parent)], cwd=root)
     if not (root / ".venv/bin/mediaforce-web").is_file() or not (root / "frontend/build/index.html").is_file():
         raise RuntimeError("prepared runtime lacks its entrypoint or frontend build")
+    if not built_mac_app(root).is_dir():
+        raise RuntimeError("prepared runtime lacks its Mac app")
     return root
+
+
+def built_mac_app(release: Path) -> Path:
+    return release / ".build/release-app" / MAC_APP_NAME
+
+
+def install_mac_app(release: Path, applications: Path = APPLICATIONS) -> None:
+    installed = applications / MAC_APP_NAME
+    incoming = applications / f".{MAC_APP_NAME}.incoming"
+    replaced = applications / f".{MAC_APP_NAME}.replaced"
+    _restore_interrupted_replacement(installed, replaced)
+    shutil.rmtree(incoming, ignore_errors=True)
+    shutil.copytree(built_mac_app(release), incoming, symlinks=True)
+    if _is_present(installed):
+        shutil.rmtree(replaced, ignore_errors=True)
+        installed.rename(replaced)
+    try:
+        incoming.rename(installed)
+    except OSError:
+        _restore_interrupted_replacement(installed, replaced)
+        raise
+    shutil.rmtree(replaced, ignore_errors=True)
+
+
+def _restore_interrupted_replacement(installed: Path, replaced: Path) -> None:
+    if not _is_present(installed) and _is_present(replaced):
+        replaced.rename(installed)
+
+
+def _is_present(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
 
 
 def backup_database(database: Path, destination: Path) -> None:
@@ -155,8 +192,11 @@ def _deploy(
             disable_login_item(paths)
         raise
     retain_deploy_stage(database.parent, stage)
-    # A lost resume response is uncertain; leave the healthy candidate running.
-    _api(base_url, "/api/encode-queue/resume", post=True)
+    try:
+        install_mac_app(candidate)
+    finally:
+        # A lost resume response is uncertain; leave the healthy candidate running.
+        _api(base_url, "/api/encode-queue/resume", post=True)
 
 
 def main() -> None:
