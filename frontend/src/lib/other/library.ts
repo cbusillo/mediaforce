@@ -83,21 +83,6 @@ export function otherActionFileCount(
 	}
 }
 
-export function otherReadinessBlockerCopy(value: string): string {
-	return value
-		.trim()
-		.replace(/\bexact-file grouping\b/gi, (match) => matchCase(match, 'one-file-at-a-time'))
-		.replace(/\bbounded work unit(s?)\b/gi, (match, plural: string) =>
-			matchCase(match, plural ? 'folder selections' : 'folder selection')
-		)
-		.replace(/\bwork unit(s?)\b/gi, (match, plural: string) =>
-			matchCase(match, plural ? 'folders or files' : 'folder or file')
-		)
-		.replace(/\bprocessing\b/gi, (match) => matchCase(match, 'compression'))
-		.replace(/\bsampling\b/gi, (match) => matchCase(match, 'creating a sample'))
-		.replace(/\bqueueing\b/gi, (match) => matchCase(match, 'starting work on'));
-}
-
 export function otherWorkflowLabel(
 	workflow: FolderWorkflowState | null | undefined,
 	detailsLoading = false
@@ -227,12 +212,6 @@ export function mergeOtherLibraryPayloads(
 
 function mergeOtherWorkUnit(structure: OtherWorkUnit, details?: OtherWorkUnit): OtherWorkUnit {
 	return details ? { ...structure, ...details } : structure;
-}
-
-function matchCase(source: string, replacement: string): string {
-	return /^[A-Z]/.test(source)
-		? replacement.charAt(0).toUpperCase() + replacement.slice(1)
-		: replacement;
 }
 
 function laneCount(workflow: FolderWorkflowState, lane: string, fallback: number): number {

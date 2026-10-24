@@ -636,9 +636,9 @@ def adapt_movie_workflow_payload(
             **payload,
             "state": "browse_only",
             "primary_lane": "none",
-            "label": "Browse only",
+            "label": "View only",
             "tone": "idle",
-            "detail": "This movie library is visible but production actions are disabled.",
+            "detail": "Mediaforce shows this movie library but won't change its files. Let it compress files here in Settings.",
             "next_action": {
                 "kind": "none",
                 "label": "Browse title",

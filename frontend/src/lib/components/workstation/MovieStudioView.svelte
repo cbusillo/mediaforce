@@ -848,7 +848,7 @@
 		<div class="goal-contract__heading">
 			<div>
 				<span>{label}</span>
-				<strong>Resolved movie goals</strong>
+				<strong>Goals for this movie</strong>
 			</div>
 			{#if showChangeAction && canChangeGoals && !parentTitleWork && movieGoalContract.status === 'ready'}
 				<button class="secondary" type="button" onclick={editRequest}>Change goals</button>
@@ -856,8 +856,8 @@
 		</div>
 		{#if movieGoalContract.status === 'resolving'}
 			<div class="goal-contract__resolving" role="status">
-				<strong>Resolving movie goals</strong>
-				<span>Mediaforce is assembling the size, quality, stream, and review contract.</span>
+				<strong>Working out this movie’s goals</strong>
+				<span>Mediaforce is working out the size, picture quality, sound, and subtitles.</span>
 			</div>
 		{:else}
 			<dl class="goal-contract__rows">
@@ -888,9 +888,9 @@
 						<p>No movie-specific findings are active. Use the standard visual review.</p>
 					{/if}
 					<p>
-						<strong>Provenance:</strong> You set this comes from the current request; Library setting
-						comes from this library or folder; Mediaforce default comes from the configured baseline;
-						Carried over comes from an earlier compatible plan.
+						<strong>Where each goal came from:</strong> You set this means you chose it for this request;
+						Library setting comes from this library or folder; Mediaforce default is the standard starting
+						point; Carried over comes from an earlier plan that still fits.
 					</p>
 				</div>
 			</details>
@@ -1419,7 +1419,7 @@
 				<div class="sample-bench">
 					<div class="sample-facts">
 						<div>
-							<span>Representative file</span><strong
+							<span>Sample file</span><strong
 								>{asText(sampleItem.rel_path) || activeMember?.label || 'Pending'}</strong
 							>
 						</div>

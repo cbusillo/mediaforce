@@ -496,7 +496,7 @@ export function movieGoalFactsView(
 				? 'Planning range, not a guarantee'
 				: targetSizeBytes
 					? 'Target estimate, not a guarantee'
-					: 'Target not resolved',
+					: 'Not worked out yet',
 		estimateBasis: sampledOutputBytes ? 'sampled' : targetSizeBytes ? 'target' : 'unavailable'
 	};
 }
@@ -655,9 +655,9 @@ function qualityContractCopy(
 	if (!metric || !floor) {
 		return {
 			label: 'Minimum picture quality',
-			value: 'Still resolving',
+			value: 'Still working it out',
 			detail: 'Mediaforce is still working out the minimum picture quality for this movie.',
-			provenance: 'Still resolving',
+			provenance: 'Still working it out',
 			tone: 'normal'
 		};
 	}
@@ -698,7 +698,7 @@ function streamContractCopy(
 		return {
 			label,
 			value: label === 'Audio' ? 'No audio detected' : 'No subtitles detected',
-			detail: `No ${label.toLowerCase()} streams are present in the resolved stream plan.`,
+			detail: `This movie's plan has no ${label.toLowerCase()} tracks.`,
 			provenance: provenanceLabel(source, false),
 			tone: 'normal'
 		};
@@ -721,7 +721,7 @@ function streamContractCopy(
 	return {
 		label,
 		value: kept ? `Keep ${kept} ${noun}${kept === 1 ? '' : 's'}` : `Drop all ${noun}s`,
-		detail: `${parts.join(', ')}. ${label === 'Audio' ? 'Copied tracks stay unchanged; converted tracks use the planned output codec.' : 'Only the listed subtitle streams are kept.'}`,
+		detail: `${parts.join(', ')}. ${label === 'Audio' ? 'Copied tracks stay unchanged; converted tracks use the new sound format.' : 'Only the listed subtitle streams are kept.'}`,
 		provenance: provenanceLabel(source, false),
 		tone: dropped === streams.length ? 'attention' : 'normal'
 	};
@@ -863,7 +863,7 @@ function qualityFindingLabel(value: unknown): string {
 function provenanceLabel(source: unknown, requiresChoice: boolean): string {
 	if (requiresChoice) return 'Needs your choice';
 	const normalized = textValue(source).toLowerCase();
-	if (!normalized) return 'Still resolving';
+	if (!normalized) return 'Still working it out';
 	if (/operator|request|note|user/.test(normalized)) return 'You set this';
 	if (/folder|profile|library|policy/.test(normalized)) return 'Library setting';
 	if (/legacy|snapshot|persisted/.test(normalized)) return 'Carried over';

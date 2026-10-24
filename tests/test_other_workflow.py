@@ -75,12 +75,14 @@ class OtherWorkflowTests(unittest.TestCase):
             )
 
         by_id = {decision.item_id: decision for decision in decisions}
+        # Both files miss the same measurement, and the folder names that one reason.
+        reason = by_id[blocked_id].profile_blocker
+        self.assertTrue(reason)
         self.assertFalse(by_id[ready_id].eligible)
-        self.assertIn("frame dimensions", by_id[ready_id].profile_blocker)
+        self.assertEqual(by_id[ready_id].profile_blocker, reason)
         self.assertFalse(by_id[blocked_id].eligible)
-        self.assertIn("frame dimensions", by_id[blocked_id].profile_blocker)
         self.assertEqual(workflow.primary_lane, "blocked")
-        self.assertIn("frame dimensions", workflow.blockers[0])
+        self.assertEqual(workflow.blockers[0], reason)
 
     def test_library_and_scope_payloads_keep_membership_and_confirmation_explicit(self) -> None:
         config = self._config(grouping="folder")
@@ -209,7 +211,8 @@ class OtherWorkflowTests(unittest.TestCase):
 
         self.assertEqual(context["item_count"], 251)
         self.assertFalse(context["membership_complete"])
-        self.assertEqual(context["profile_readiness"]["label"], "Scope too large")
+        self.assertEqual(context["profile_readiness"]["state"], "blocked")
+        self.assertNotIn("bounded work unit", " ".join(context["profile_readiness"]["blockers"]))
         self.assertEqual(blocker["code"], "other_profile_not_ready")
 
     def test_other_library_catalog_is_bounded_and_reports_truncation(self) -> None:

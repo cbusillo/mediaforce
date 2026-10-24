@@ -291,6 +291,7 @@ CERTAIN_ENCODE_FAILURES: tuple[type[Exception], ...] = (
     StreamPlanIdentityError,
     TargetSizeSearchError,
 )
+LIBRARY_NOT_COMPRESSING_WAITING_REASON = "This library is set to View only or Off in Settings."
 NEW_SIZE_GOAL_NEXT_STEP = "Choose a new size goal and make a new sample before trying again."
 SIZE_QUESTION_QUALITY_NEEDS_MORE = "quality_needs_more"
 SIZE_QUESTION_NO_SETTING_FITS = "no_setting_fits"
@@ -4195,7 +4196,7 @@ def load_next_runnable_encode_job(
             continue
         library_key = _encode_job_library_key(job)
         if library_key and library_key not in config.source_root_map:
-            waiting_reason = "Library is Browse only or Disabled in Settings."
+            waiting_reason = LIBRARY_NOT_COMPRESSING_WAITING_REASON
             if str(job.get("waiting_reason") or "") != waiting_reason:
                 job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
                 save_encode_job(connection, job)
@@ -4456,7 +4457,7 @@ def run_encode_job(
                     "owner_pid": None,
                     "process_pid": None,
                     "schedule_close_deadline_at": None,
-                    "waiting_reason": "Library is Browse only or Disabled in Settings.",
+                    "waiting_reason": LIBRARY_NOT_COMPRESSING_WAITING_REASON,
                     "updated_at": deps.now_iso(),
                 }
             )

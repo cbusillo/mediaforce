@@ -28,7 +28,8 @@ roots from checked-in defaults.
 
 Legacy configurations with only `media.source_roots` remain readable. Settings
 projects `tv` as TV, `movies` as Movies, and unknown root IDs as Other. TV
-defaults to Production; other inferred types default to Browse only on the
+defaults to Compress files (`production`); other inferred types default to View
+only (`browse_only`) on the
 first typed save.
 
 ## Availability
@@ -69,7 +70,7 @@ not apply to the selected type are structurally absent from Settings.
 
 Changing an existing root type requires a server-produced compatibility
 preview. The acknowledgement is bound to the root ID and exact old/new type.
-Confirmation returns the root to Browse only, schedules a catalog refresh, and
+Confirmation returns the root to View only, schedules a catalog refresh, and
 preserves historical folder overrides with their former library type. Those
 overrides remain recoverable but are ignored while their type is incompatible.
 Media files are never moved or deleted by a type change.

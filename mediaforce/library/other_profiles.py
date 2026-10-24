@@ -74,14 +74,14 @@ def other_item_profile_blocker(
     profile = str(library.get("default_profile") or "").strip()
     valid_profiles = {option["key"] for option in LIBRARY_PROFILE_OPTIONS["other"]}
     if profile not in valid_profiles:
-        return "Choose a supported Other processing profile in Settings."
+        return "Choose a compression setting for this library in Settings."
     video_codec = str(row.get("video_codec") or "").strip().lower()
     if not video_codec or video_codec == "unknown":
-        return f"{other_profile_label(profile)} requires a detected video stream."
+        return f"{other_profile_label(profile)} needs a video track Mediaforce can read."
     if _positive_float(row.get("duration_seconds")) <= 0:
-        return f"{other_profile_label(profile)} requires a measured media duration."
+        return f"{other_profile_label(profile)} needs to know how long the video is."
     if _positive_int(row.get("width")) <= 0 or _positive_int(row.get("height")) <= 0:
-        return f"{other_profile_label(profile)} requires measured frame dimensions."
+        return f"{other_profile_label(profile)} needs to know the picture size."
     return None
 
 
@@ -98,8 +98,8 @@ def other_profile_readiness(
     if availability != "production":
         return {
             "state": "browse_only",
-            "label": "Browse only",
-            "detail": "Enable Production in Settings before sampling or queueing this scope.",
+            "label": "View only",
+            "detail": "Let Mediaforce compress files in this library in Settings before making a sample or starting work.",
             "profile": profile,
             "profile_label": profile_label,
             "blockers": [],
@@ -107,23 +107,23 @@ def other_profile_readiness(
     if not membership_complete:
         return {
             "state": "blocked",
-            "label": "Scope too large",
+            "label": "Too many files",
             "detail": (
-                f"This folder contains more than {OTHER_FOLDER_SCOPE_MAX_ITEMS} files. "
-                "Choose exact-file grouping or split the source folder before processing."
+                f"This folder has more than {OTHER_FOLDER_SCOPE_MAX_ITEMS} files, too many to check together. "
+                "In Settings, set Work on to One file, or split the folder."
             ),
             "profile": profile,
             "profile_label": profile_label,
-            "blockers": ["The complete membership cannot be reviewed as one bounded work unit."],
+            "blockers": ["This folder has too many files to check together."],
         }
     unique_blockers = list(dict.fromkeys(blockers))
     if unique_blockers:
         blocked_count = len(blockers)
         return {
             "state": "blocked",
-            "label": "Profile blocked",
+            "label": "Files not ready",
             "detail": (
-                f"{blocked_count} of {item_count} files do not meet the {profile_label} requirements. "
+                f"{blocked_count} of {item_count} files don't have what {profile_label} needs. "
                 f"{unique_blockers[0]}"
             ),
             "profile": profile,
@@ -132,11 +132,11 @@ def other_profile_readiness(
         }
     return {
         "state": "ready",
-        "label": "Profile ready",
+        "label": "Ready",
         "detail": (
-            f"All {item_count} indexed files meet the {profile_label} probe requirements."
+            f"All {item_count} files have what {profile_label} needs."
             if item_count
-            else f"{profile_label} is selected; this root is currently empty."
+            else f"{profile_label} is selected; this folder is empty."
         ),
         "profile": profile,
         "profile_label": profile_label,
