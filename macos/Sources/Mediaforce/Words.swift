@@ -264,6 +264,52 @@ extension Words {
     static let openItem = "Open"
     static let openInBrowser = "Open in browser"
     static let cancel = "Cancel"
+    static let none = "None"
+    static let next = "Next"
+    static let looksGood = "Looks Good"
+    static let tryAgain = "Try Again"
+    static let spotCheckNoEpisode = "None of this show's episodes still has its original backup to compare."
+    static let spotCheckUnanswered = "Mediaforce didn't answer, so this show can't play yet."
+    static let spaceSaved = "Space saved"
+    static let originalBackups = "Original backups"
+    static let originalBackupsHelp = "When a season is replaced, its originals wait here until you delete them on Space saved."
+    static let spotCheckFirst = "Spot-check before deleting"
+    static let spotCheckPrompt = "Does it look right? Each show you check gets a tick below."
+    static let noBackupsToCheck = "No original backups are waiting, so there is nothing to spot-check."
+    static let showChecked = "Checked. Choose it to look again."
+    static let checkThisShow = "Play an episode of this show above."
+    static let deleteBackups = "Delete Original Backups…"
+    static let deleteAllBackups = "Delete all original backups"
+    static let deleteBackupsQuestion = "Delete everything in the Cleanup folder?"
+    static let deleteBackupsHelp = "Delete everything in the Cleanup folder. Mediaforce shows what is there and asks first."
+
+    static func savedSoFar(_ bytes: Int64) -> String { "\(size(bytes)) saved so far." }
+
+    static func spotCheckFile(_ seasonPrefix: String, _ file: ItemFacts.File) -> String {
+        let folders = seasonPrefix.split(separator: "/").dropFirst().joined(separator: ", ")
+        return file.episode == nil ? folders : "\(folders), \(fileName(file))"
+    }
+
+    static func showBackups(_ seasons: Int, _ bytes: Int64) -> String {
+        "\(count(seasons, "season")), \(size(bytes)) of backups"
+    }
+
+    static func storageCompressed(_ bytes: Int64) -> String { "Compressed, \(size(bytes))" }
+    static func storageStillOriginal(_ bytes: Int64) -> String { "Still original, \(size(bytes))" }
+    static func storageSaved(_ bytes: Int64) -> String { "Space saved, \(size(bytes))" }
+    static func storageBackups(_ bytes: Int64) -> String { "Backups, \(size(bytes))" }
+
+    static func libraryWasAndIs(_ was: Int64, _ now: Int64) -> String {
+        "The library was \(size(was)) and is \(size(now)) now."
+    }
+
+    static func deleteBackupsLine(_ count: Int, _ bytes: Int64) -> String {
+        "Delete \(Words.count(count, "original backup")) to get back \(size(bytes))."
+    }
+
+    static func deleteBackupsDetail(_ folder: CleanupFolder) -> String {
+        "\(count(folder.fileCount, "file")), \(size(folder.totalSizeBytes)). Mediaforce keeps any original a file still being finished needs. The replaced files stay in your library. This cannot be undone."
+    }
     static let original = "Original"
     static let sample = "Sample"
     static let play = "Play"

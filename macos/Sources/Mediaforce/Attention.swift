@@ -63,7 +63,7 @@ struct Attention: Equatable, Sendable {
             id: "finished:\(newlyFinished.count)",
             title: mayHaveMore ? "At least \(newlyFinished.count) seasons finished" : "\(newlyFinished.count) seasons finished",
             body: "See Finished lately in Mediaforce for what was saved.",
-            opens: .spaceSaved
+            opens: .library
         )]
     }
 

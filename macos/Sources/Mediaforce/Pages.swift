@@ -76,38 +76,6 @@ struct LibraryStatePicker: View {
     }
 }
 
-struct SpaceSavedPage: View {
-    let facts: MainWindowFacts
-
-    var body: some View {
-        PageFrame(title: "Space saved") {
-            Text("\(Words.size(facts.spaceSaved.bytes)) saved from \(Words.count(facts.spaceSaved.episodeCount, "episode")) in \(Words.count(facts.spaceSaved.seasonCount, "finished season")).")
-                .foregroundStyle(.secondary)
-            Text("Finished lately")
-                .font(.headline)
-            Table(facts.recentlyFinishedSeasons) {
-                TableColumn("Season") { (season: MainWindowFacts.FinishedSeason) in
-                    Text(Words.season(season.show, season.season))
-                }
-                TableColumn("Episodes") { (season: MainWindowFacts.FinishedSeason) in
-                    Text("\(season.episodeCount + season.keptOriginalCount)").monospacedDigit()
-                }
-                .width(70)
-                TableColumn("Saved") { (season: MainWindowFacts.FinishedSeason) in
-                    Text(season.keptEntirelyOriginal ? Words.keptOriginal : Words.size(season.bytesSaved)).monospacedDigit()
-                }
-                .width(80)
-                TableColumn("Finished") { (season: MainWindowFacts.FinishedSeason) in
-                    Text(Words.day(season.finishedAt)).foregroundStyle(.secondary)
-                }
-                .width(80)
-            }
-            .tableStyle(.inset(alternatesRowBackgrounds: true))
-            .frame(minHeight: 360)
-        }
-    }
-}
-
 struct ComputersPage: View {
     let computers: [MainWindowFacts.Computer]
 
