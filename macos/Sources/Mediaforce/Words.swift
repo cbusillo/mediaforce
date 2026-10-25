@@ -267,6 +267,28 @@ extension Words {
     static let none = "None"
     static let next = "Next"
     static let looksGood = "Looks Good"
+    static let appName = "Mediaforce"
+    static let lookForNewFilesNow = "Look for New Files"
+    static let openMediaforce = "Open Mediaforce"
+    static let settingsEllipsis = "Settings…"
+    static let resumeHelp = "Resume work on every computer."
+    static let menuNotConnected = "Mediaforce isn't answering. Open it to see why."
+
+    /// The line under the menu bar switch: what Mediaforce is doing, or why it isn't.
+    static func menuStatus(_ facts: MainWindowFacts) -> String {
+        let work = facts.work
+        if work.pausedByOwner { return "Paused" }
+        if work.stopReasons.contains("storage_unavailable") { return "This Mac can't see the media library" }
+        if work.stopReasons.contains("no_computer_ready") { return "Waiting for a computer" }
+        if work.runningCount > 0 {
+            guard let first = work.runningSeasons.first else { return "Compressing" }
+            let name = season(first.show, first.season)
+            let more = work.runningSeasons.count - 1
+            return more > 0 ? "Compressing \(name) and \(more) more" : "Compressing \(name)"
+        }
+        if work.waitingCount > 0 { return "Waiting to start" }
+        return Attention.waitingOnYou(facts) > 0 ? waitingForYou : "Up to date"
+    }
     static let tryAgain = "Try Again"
     static let spotCheckNoEpisode = "None of this show's episodes still has its original backup to compare."
     static let spotCheckUnanswered = "Mediaforce didn't answer, so this show can't play yet."
