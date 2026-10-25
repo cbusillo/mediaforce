@@ -1,4 +1,5 @@
 import os
+import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -169,3 +170,28 @@ def test_an_interrupted_preparation_is_cleaned_up_later(config: MediaforceConfig
 
     assert not stale.exists()
     assert running.exists()
+
+
+def test_a_file_larger_than_the_cache_is_not_prepared(config: MediaforceConfig, tmp_path: Path) -> None:
+    with open_db(config.paths.db_path) as connection:
+        item_id = _episode(connection, tmp_path, 1, size=100)
+        connection.commit()
+
+    with patch.object(app_item, "PLAYER_CACHE_BYTES", 99), patch.object(app_item, "_remux", side_effect=_remux_by_copy) as remux:
+        with pytest.raises(app_item.PlayerUnavailable) as unavailable:
+            player_file(config, item_id, "original")
+
+    assert unavailable.value.code == "too_large"
+    remux.assert_not_called()
+
+
+def test_a_stalled_probe_is_refused_with_a_code(config: MediaforceConfig, tmp_path: Path) -> None:
+    with open_db(config.paths.db_path) as connection:
+        item_id = _episode(connection, tmp_path, 1, size=100)
+        connection.commit()
+
+    with patch.object(app_item.subprocess, "run", side_effect=subprocess.TimeoutExpired("ffprobe", 60)):
+        with pytest.raises(app_item.PlayerUnavailable) as unavailable:
+            player_file(config, item_id, "original")
+
+    assert unavailable.value.code == "too_slow"

@@ -39,8 +39,8 @@ PLAYER_CACHE_BYTES = 40 * 1000 ** 3
 PLAYER_FREE_MARGIN_BYTES = 20 * 1000 ** 3
 PLAYER_REMUX_TIMEOUT_SECONDS = 30 * 60
 PARTIAL_SUFFIX = ".partial"
-_PLAYER_LOCKS: dict[Path, threading.Lock] = {}
-_PLAYER_LOCKS_GUARD = threading.Lock()
+# One preparation at a time across every file, so the space check, eviction and remux never overlap.
+_PLAYER_PREPARATION = threading.Lock()
 _EPISODE_NUMBER = re.compile(r"[sS]\d+[eE](\d+)")
 
 
@@ -186,20 +186,17 @@ def player_file(config: MediaforceConfig, library_item_id: int, side: str) -> Pa
     stat = source.stat()
     cache = config.paths.web_state_dir / "player"
     target = cache / f"{library_item_id}-{side}-{stat.st_size}-{stat.st_mtime_ns}.mp4"
-    # One preparation per file at a time: a second request for it waits and then reads the cache.
-    with _player_lock(target):
+    # A second request for the same file waits here and then reads the cache.
+    with _PLAYER_PREPARATION:
         if not target.is_file():
+            if stat.st_size > PLAYER_CACHE_BYTES:
+                raise PlayerUnavailable("too_large", f"{source.name} is too large to prepare for playing.")
             cache.mkdir(parents=True, exist_ok=True)
             _trim_cache(cache, keep=target, incoming_bytes=stat.st_size)
             if shutil.disk_usage(cache).free < stat.st_size + PLAYER_FREE_MARGIN_BYTES:
                 raise PlayerUnavailable("no_room", f"Not enough free space to prepare {source.name} for playing.")
             _remux(source, target)
     return target
-
-
-def _player_lock(target: Path) -> threading.Lock:
-    with _PLAYER_LOCKS_GUARD:
-        return _PLAYER_LOCKS.setdefault(target, threading.Lock())
 
 
 def _remux(source: Path, target: Path) -> None:
@@ -224,11 +221,14 @@ def _remux(source: Path, target: Path) -> None:
 
 
 def _video_codec(source: Path) -> str:
-    result = subprocess.run(
-        [ffprobe_binary(), "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name",
-         "-of", "default=noprint_wrappers=1:nokey=1", str(source)],
-        capture_output=True, text=True, timeout=60,
-    )
+    try:
+        result = subprocess.run(
+            [ffprobe_binary(), "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(source)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise PlayerUnavailable("too_slow", f"Reading {source.name} took too long.") from error
     return result.stdout.strip()
 
 

@@ -10,6 +10,7 @@ struct ItemPage: View {
     @State private var refreshFailed = false
     @State private var selected: ItemFacts.File.ID?
     @State private var notice: ActionNotice?
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         Group {
@@ -17,7 +18,11 @@ struct ItemPage: View {
                 HStack(alignment: .top, spacing: 0) {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 18) {
-                            ItemHeader(facts: facts, poster: facts.showPrefix.flatMap(model.posters.image(for:)))
+                            HStack(alignment: .top) {
+                                ItemHeader(facts: facts, poster: facts.showPrefix.flatMap(model.posters.image(for:)))
+                                // Starting work and some decisions have no control in the app yet (#1079).
+                                Button(Words.openInBrowser) { openURL(model.client.seasonPage(prefix)) }
+                            }
                             if !facts.waiting.isEmpty {
                                 WaitingBox(files: facts.waiting, prefix: prefix, client: model.client) { file, action in
                                     Task { await act(action, file) }
@@ -343,6 +348,7 @@ final class ItemPlayers {
     private var observer: Any?
     private var readiness: [NSKeyValueObservation] = []
     private var ready: Set<ObjectIdentifier> = []
+    private var requests = 0
 
     init() {
         original.isMuted = true
@@ -376,23 +382,54 @@ final class ItemPlayers {
             return
         }
         guard !preparing else { return }
+        let request = nextRequest()
+        let time = main.currentTime()
         playing = true
-        Task { await playTogether() }
+        Task { await play(from: time, request) }
     }
 
-    private func playTogether() async {
-        if comparing {
-            await original.seek(to: main.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero)
-            guard playing else { return }
-            // Start both at the same host time so neither runs ahead of the other.
-            let start = CMClockGetTime(CMClockGetHostTimeClock()) + CMTime(seconds: 0.2, preferredTimescale: 600)
-            main.automaticallyWaitsToMinimizeStalling = false
-            original.automaticallyWaitsToMinimizeStalling = false
-            main.setRate(1, time: main.currentTime(), atHostTime: start)
-            original.setRate(1, time: main.currentTime(), atHostTime: start)
-        } else {
-            main.play()
+    func pause() {
+        _ = nextRequest()
+        main.pause()
+        original.pause()
+        playing = false
+    }
+
+    func seek(to seconds: Double) {
+        let wasPlaying = playing
+        pause()
+        let request = nextRequest()
+        let time = CMTime(seconds: seconds, preferredTimescale: 600)
+        position = seconds
+        playing = wasPlaying
+        Task {
+            // Each seek or play supersedes the ones before it, so a late one never moves the picture back.
+            async let mainSeek = main.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+            async let originalSeek = comparing ? original.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) : true
+            _ = await (mainSeek, originalSeek)
+            guard request == requests, wasPlaying else { return }
+            await play(from: time, request)
         }
+    }
+
+    private func play(from time: CMTime, _ request: Int) async {
+        guard comparing else {
+            if request == requests { main.play() }
+            return
+        }
+        await original.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+        guard request == requests else { return }
+        // Start both at the same host time so neither runs ahead of the other.
+        let start = CMClockGetTime(CMClockGetHostTimeClock()) + CMTime(seconds: 0.2, preferredTimescale: 600)
+        main.automaticallyWaitsToMinimizeStalling = false
+        original.automaticallyWaitsToMinimizeStalling = false
+        main.setRate(1, time: time, atHostTime: start)
+        original.setRate(1, time: time, atHostTime: start)
+    }
+
+    private func nextRequest() -> Int {
+        requests += 1
+        return requests
     }
 
     private func itemChanged(_ side: ObjectIdentifier, status: AVPlayerItem.Status, duration: Double) {
@@ -408,25 +445,6 @@ final class ItemPlayers {
         preparing = false
         // Open on a moment a quarter of the way in, so there is a picture to compare before playing.
         seek(to: self.duration / 4)
-    }
-
-    func pause() {
-        main.pause()
-        original.pause()
-        playing = false
-    }
-
-    func seek(to seconds: Double) {
-        let wasPlaying = playing
-        pause()
-        let time = CMTime(seconds: seconds, preferredTimescale: 600)
-        main.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
-        if comparing { original.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) }
-        position = seconds
-        if wasPlaying {
-            playing = true
-            Task { await playTogether() }
-        }
     }
 
     private func tick(_ time: CMTime) {
