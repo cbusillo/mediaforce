@@ -145,9 +145,9 @@ from mediaforce.tuning.size_goals import guided_size_goal_options, operator_inte
 from mediaforce.tuning.target_provenance import exact_item_target_provenance_blocker, target_size_provenance
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_app_window_routes, register_completed_routes, \
-    register_computer_settings_routes, register_dashboard_routes, register_folder_routes, register_frontend_routes, \
-    register_host_routes, register_library_settings_routes, register_metadata_settings_routes, \
-    register_operator_work_routes, register_queue_routes, register_settings_routes
+    register_compression_settings_routes, register_computer_settings_routes, register_dashboard_routes, \
+    register_folder_routes, register_frontend_routes, register_host_routes, register_library_settings_routes, \
+    register_metadata_settings_routes, register_operator_work_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_show_poster, metadata_configuration_status
@@ -306,6 +306,8 @@ from mediaforce.web.settings_runtime import (
     DEFAULT_HOST_SCHEDULE_PROFILE,
     SettingsValidationError,
     build_runtime_media_settings as _build_runtime_media_settings,
+    build_runtime_video_settings as _build_runtime_video_settings,
+    compression_settings_facts as _compression_settings_facts_runtime,
     build_runtime_settings_payload as _build_runtime_settings_payload,
     canonical_schedule_profile_key as _canonical_schedule_profile_key,
     computer_section_settings as _computer_section_settings,
@@ -326,6 +328,7 @@ from mediaforce.web.settings_runtime import (
     settings_remote_rows_for_config as _settings_remote_rows_for_config_runtime,
     settings_schedule_profile_rows_for_config as _settings_schedule_profile_rows_for_config,
     settings_section_revision as _settings_section_revision,
+    settings_video_defaults_for_config as _settings_video_defaults_for_config,
     settings_transcode_root_value as _settings_transcode_root_value_runtime,
     runtime_source_roots as _runtime_source_roots,
     runtime_library_signature as _runtime_library_signature,
@@ -1216,6 +1219,30 @@ def create_app(
             settings = None
         return {"ok": True, "settings": settings}
 
+    def _compression_settings_facts() -> dict[str, Any]:
+        """The Compression tab's defaults and revision, both from one stored state."""
+        snapshot, revision = _settings_snapshot("compression")
+        return _compression_settings_facts_runtime(
+            video_defaults=_settings_video_defaults_for_config(snapshot), revision=revision,
+        )
+
+    def _save_compression_settings_action(*, edits: dict[str, Any], revision: str) -> dict[str, Any]:
+        """Save the Compression tab alone; libraries, computers, schedules and metadata stay as saved.
+
+        Like the other tabs, the payload is built from freshly loaded settings and written only if the stored
+        compression defaults are still the revision the tab loaded, checked under the runtime settings lock.
+        """
+        nonlocal config
+        config = load_config(config.paths.config_path)
+        app.state.config = config
+        payload = _build_runtime_video_settings(edits=edits, saved=_settings_video_defaults_for_config(config))
+        _apply_settings_payload(payload, section="compression", revision=revision)
+        try:
+            settings: dict[str, Any] | None = _compression_settings_facts()
+        except SettingsValidationError:
+            settings = None
+        return {"ok": True, "settings": settings}
+
     def _library_type_preview_action(key: str, library_type: str) -> dict[str, Any]:
         definition = config.library_definition_map.get(key)
         if definition is None:
@@ -1374,6 +1401,11 @@ def create_app(
         app,
         metadata_settings_facts=_metadata_settings_facts,
         save_metadata_settings_action=_save_metadata_settings_action,
+    )
+    register_compression_settings_routes(
+        app,
+        compression_settings_facts=_compression_settings_facts,
+        save_compression_settings_action=_save_compression_settings_action,
     )
     register_completed_routes(
         app,

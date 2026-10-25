@@ -235,4 +235,106 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(Set(words).count, codes.count)
         XCTAssertFalse(words.contains(Words.metadataSaveRefused("invalid_settings")))
     }
+
+    private let compressionFacts = """
+    {"aim": "size_first_review", "size_goal_mb": 300.0, "size_goal_minutes": 45.0, "size_limit_percent": 10.0,
+     "largest_percent": 80.0, "tallest_picture": 1080, "grain": 8, "measurement": "vmaf",
+     "appearance_target": 85.0, "appearance_minimum": 80.0, "detail_target": 41.0, "detail_minimum": 35.0,
+     "sample_method": "ab_av1_fast_sample", "size_goal_mode": "normalized",
+     "aims": ["size_first_review", "quality_first_sample"], "measurements": ["auto", "vmaf", "xpsnr"],
+     "sample_methods": ["ab_av1_fast_sample"], "revision": "v1"}
+    """
+
+    private func compression() throws -> CompressionSettingsFacts {
+        try JSONDecoder.mediaforce.decode(CompressionSettingsFacts.self, from: Data(compressionFacts.utf8))
+    }
+
+    private let compressionRefusalCodes = [
+        "size_goal_invalid", "size_goal_minutes_invalid", "size_limit_invalid", "sample_size_limit_invalid",
+        "largest_size_invalid", "tallest_picture_invalid", "grain_invalid", "appearance_target_invalid",
+        "appearance_minimum_invalid", "detail_target_invalid", "detail_minimum_invalid",
+        "appearance_minimum_above_target", "detail_minimum_above_target", "unknown_aim", "unknown_measurement",
+        "unknown_sample_method",
+    ]
+
+    func testCompressionSettingsDecodeFromServerShape() throws {
+        let decoded = try compression()
+        XCTAssertEqual(decoded.aim, "size_first_review")
+        XCTAssertEqual(decoded.sizeGoalMb, 300)
+        XCTAssertEqual(decoded.sizeGoalMinutes, 45)
+        XCTAssertEqual(decoded.sizeLimitPercent, 10)
+        XCTAssertEqual(decoded.largestPercent, 80)
+        XCTAssertEqual(decoded.tallestPicture, 1080)
+        XCTAssertEqual(decoded.grain, 8)
+        XCTAssertEqual(decoded.measurement, "vmaf")
+        XCTAssertEqual([decoded.appearanceTarget, decoded.appearanceMinimum], [85, 80])
+        XCTAssertEqual([decoded.detailTarget, decoded.detailMinimum], [41, 35])
+        XCTAssertEqual(decoded.sampleMethod, "ab_av1_fast_sample")
+        XCTAssertEqual(decoded.sizeGoalMode, "normalized")
+        XCTAssertEqual(decoded.measurements, ["auto", "vmaf", "xpsnr"])
+        XCTAssertEqual(decoded.revision, "v1")
+    }
+
+    func testCompressionSaveBodyIsTheSectionTheServerReads() throws {
+        var draft = CompressionSettingsDraft(try compression())
+        draft.saveBody.aim = "quality_first_sample"
+        draft.saveBody.sizeGoalMb = 450
+        draft.saveBody.tallestPicture = 720
+        draft.saveBody.measurement = "auto"
+
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder.mediaforce.encode(draft.saveBody)) as? NSDictionary
+        )
+        XCTAssertEqual(body, [
+            "aim": "quality_first_sample", "size_goal_mb": 450, "size_goal_minutes": 45, "size_limit_percent": 10,
+            "largest_percent": 80, "tallest_picture": 720, "grain": 8, "measurement": "auto",
+            "appearance_target": 85, "appearance_minimum": 80, "detail_target": 41, "detail_minimum": 35,
+            "sample_method": "ab_av1_fast_sample", "revision": "v1",
+        ] as NSDictionary)
+    }
+
+    func testEveryCompressionChoiceHasItsOwnWords() throws {
+        let facts = try compression()
+        let groups: [([String], (String) -> String)] = [
+            (facts.aims, Words.compressionAim),
+            (facts.measurements, Words.qualityMeasurement),
+            (facts.sampleMethods, Words.sampleMethod),
+            ([facts.sizeGoalMode], Words.sizeGoalScaling),
+        ]
+        for (codes, words) in groups {
+            let shown = codes.map(words)
+            XCTAssertEqual(Set(shown).count, codes.count)
+            XCTAssertFalse(shown.contains(words("not-a-choice")))
+        }
+    }
+
+    func testEveryCompressionRefusalCodeHasItsOwnWords() {
+        let words = compressionRefusalCodes.map { Words.compressionSaveRefused($0) }
+        XCTAssertEqual(Set(words).count, compressionRefusalCodes.count)
+        XCTAssertFalse(words.contains(Words.compressionSaveRefused("invalid_settings")))
+    }
+
+    func testCompressionWordsNeverUseInternalTerms() throws {
+        let facts = try compression()
+        var shown: [String] = [
+            Words.compressionTab, Words.aimSection, Words.aimPicker, Words.sizeSection, Words.sizeGoal,
+            Words.megabytes, Words.forAnEpisodeOf, Words.minutes, Words.sizeLimit, Words.sizeLimitHelp,
+            Words.largestSize, Words.percentOfOriginal, Words.largestSizeHelp, Words.percent, Words.pictureSection,
+            Words.tallestPicture, Words.pixelsTall, Words.tallestPictureHelp, Words.grain, Words.grainHelp,
+            Words.advancedCompression, Words.measurementPicker, Words.appearanceTarget, Words.appearanceMinimum,
+            Words.detailTarget, Words.detailMinimum, Words.scoresHelp, Words.samplePicker,
+            Words.tallestPictureSummary(0), Words.tallestPictureSummary(1080),
+            Words.sizeGoalScaling(facts.sizeGoalMode), Words.compressionSaveRefused("invalid_settings"),
+        ]
+        shown += facts.aims.map(Words.compressionAim)
+        shown += facts.measurements.map(Words.qualityMeasurement)
+        shown += facts.sampleMethods.map(Words.sampleMethod)
+        shown += compressionRefusalCodes.map { Words.compressionSaveRefused($0) }
+        let internalTerms = ["VMAF", "XPSNR", "CRF", "PSNR", "AV1", "SVT", "LEDGER", "CADENCE", "SHARD", "MANIFEST"]
+        for text in shown {
+            for term in internalTerms {
+                XCTAssertFalse(text.uppercased().contains(term), "\(text) says \(term)")
+            }
+        }
+    }
 }
