@@ -3,6 +3,7 @@ import SwiftUI
 struct LibraryPage: View {
     let facts: MainWindowFacts
     let posters: PosterStore
+    let openComputer: (String) -> Void
     let openSample: (String) -> Void
 
     var body: some View {
@@ -26,7 +27,7 @@ struct LibraryPage: View {
                     .frame(width: 556, alignment: .leading)
                     VStack(alignment: .leading, spacing: 26) {
                         BiggestTable(shows: Array(facts.biggestNotStarted.prefix(BiggestTable.rowLimit)), samples: facts.samples.waitingOnYou, openSample: openSample)
-                        Computers(computers: facts.computers)
+                        Computers(computers: facts.computers, open: openComputer)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }

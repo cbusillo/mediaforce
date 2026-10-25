@@ -42,7 +42,7 @@ final class MenuBarTests: XCTestCase {
 
     func testTheStatusLineOpensWhatItNames() throws {
         XCTAssertEqual(try facts(work: work(running: 1, seasons: ["tv/Futurama/Season 3"])).statusOpens, .item("tv/Futurama/Season 3"))
-        XCTAssertEqual(try facts(work: work(reasons: ["no_computer_ready"], waiting: 2)).statusOpens, .computers)
+        XCTAssertEqual(try facts(work: work(reasons: ["no_computer_ready"], waiting: 2)).statusOpens, .computer(nil))
         XCTAssertNil(try facts(work: work(paused: true, running: 1, seasons: ["tv/ER/Season 1"])).statusOpens)
         XCTAssertNil(try facts(work: work()).statusOpens)
     }
@@ -63,6 +63,6 @@ final class MenuBarTests: XCTestCase {
 
     func testTheMenuListsWhatWaitsAndOpensItsPage() throws {
         let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(MainWindowTests.facts.utf8))
-        XCTAssertEqual(Attention.menuLines(facts).map(\.opens), [.sample("tv/Lucifer/Season 2"), .computers, .spaceSaved])
+        XCTAssertEqual(Attention.menuLines(facts).map(\.opens), [.sample("tv/Lucifer/Season 2"), .computer("mini"), .spaceSaved])
     }
 }

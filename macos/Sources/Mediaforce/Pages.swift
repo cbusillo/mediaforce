@@ -76,12 +76,3 @@ struct LibraryStatePicker: View {
     }
 }
 
-struct ComputersPage: View {
-    let computers: [MainWindowFacts.Computer]
-
-    var body: some View {
-        PageFrame(title: "Computers") {
-            Computers(computers: computers)
-        }
-    }
-}

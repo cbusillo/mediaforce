@@ -244,6 +244,8 @@ struct BiggestTable: View {
 
 struct Computers: View {
     let computers: [MainWindowFacts.Computer]
+    // Opens that computer in Settings › Computers.
+    let open: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -255,12 +257,16 @@ struct Computers: View {
                         Image(systemName: Words.computerSymbol(computer))
                             .foregroundStyle(.secondary)
                             .frame(width: 22)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(computer.name ?? computer.key)
-                            Text(Words.computerState(computer.state))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        Button { open(computer.key) } label: {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(computer.name ?? computer.key)
+                                    .foregroundStyle(.primary)
+                                Text(Words.computerState(computer.state))
+                                    .font(.caption)
+                            }
                         }
+                        .buttonStyle(QuietLinkStyle())
+                        .help(Words.openInSettings)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }

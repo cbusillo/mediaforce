@@ -15,6 +15,7 @@ struct CleanupResult: Decodable, Sendable {
 
 struct MediaforceClient: Sendable {
     static let factsTimeout: TimeInterval = 30
+    static let computerActionTimeout: TimeInterval = 600
 
     let baseURL: URL
     var session: URLSession = .shared
@@ -76,6 +77,26 @@ struct MediaforceClient: Sendable {
 
     func reviewMedia(_ path: String) -> URL {
         baseURL.appending(path: path)
+    }
+
+    func hosts() async throws -> HostsFacts {
+        var request = URLRequest(url: baseURL.appending(path: "api/hosts").appending(queryItems: [URLQueryItem(name: "compact", value: "1")]))
+        request.timeoutInterval = Self.factsTimeout
+        return try await decode(HostsFacts.self, from: request)
+    }
+
+    /// Runs one of a computer's fixes. Setting a computer up or starting it can take minutes, so these wait longer.
+    func computerAction(_ action: ComputerAction, _ hostKey: String, password: String? = nil) async throws -> HostActionResult {
+        let path = switch action {
+        case .checkAgain: "api/hosts/retry-connection"
+        case .start: "api/hosts/start"
+        case .setUp: "api/hosts/prepare"
+        case .trustAgain: "api/hosts/reset-trust"
+        }
+        var body = ["host_key": hostKey]
+        if let password { body["remote_password"] = password }
+        let data = try await post(path, body: JSONEncoder().encode(body), timeout: Self.computerActionTimeout)
+        return try JSONDecoder.mediaforce.decode(HostActionResult.self, from: data)
     }
 
     func lookForNewFiles() async throws {
@@ -184,9 +205,10 @@ struct MediaforceClient: Sendable {
         return try JSONDecoder.mediaforce.decode(SampleActionResult.self, from: data)
     }
 
-    private func post(_ path: String, body: Data? = nil) async throws -> Data {
+    private func post(_ path: String, body: Data? = nil, timeout: TimeInterval? = nil) async throws -> Data {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "POST"
+        if let timeout { request.timeoutInterval = timeout }
         if let body {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
