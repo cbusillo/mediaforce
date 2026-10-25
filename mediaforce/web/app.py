@@ -319,6 +319,8 @@ from mediaforce.web.settings_runtime import (
     library_section_rows as _library_section_rows,
     library_settings_facts as _library_settings_facts_runtime,
     merge_runtime_settings_payload as _merge_runtime_settings_payload,
+    without_plex_library_roots as _without_plex_library_roots,
+    cleared_plex_path_keys as _cleared_plex_path_keys,
     build_runtime_metadata_settings as _build_runtime_metadata_settings,
     metadata_settings_facts as _metadata_settings_facts_runtime,
     normalize_encode_queue_scheduler as _normalize_encode_queue_scheduler,
@@ -332,6 +334,7 @@ from mediaforce.web.settings_runtime import (
     settings_transcode_root_value as _settings_transcode_root_value_runtime,
     runtime_source_roots as _runtime_source_roots,
     runtime_library_signature as _runtime_library_signature,
+    runtime_plex_paths as _runtime_plex_paths,
     bind_runtime_library_overrides as _bind_runtime_library_overrides,
 )
 
@@ -1018,12 +1021,17 @@ def create_app(
         }
 
     def _apply_settings_payload(
-            payload: dict[str, Any], *, section: str | None = None, revision: str | None = None,
+            payload: dict[str, Any],
+            *,
+            section: str | None = None,
+            revision: str | None = None,
+            cleared_plex_roots: Collection[str] = (),
     ) -> None:
         """Merge only the given runtime settings keys, then reload and rescan when the library changed.
 
         With a `section` and its `revision`, the merge happens only if that stored section is still that revision
-        when the runtime settings lock is held; otherwise nothing is written.
+        when the runtime settings lock is held; otherwise nothing is written. `cleared_plex_roots` names libraries
+        whose kept Plex path is removed from `metadata.plex.library_roots` in the same write.
         """
         nonlocal config
         changed_type_roots = {
@@ -1043,11 +1051,13 @@ def create_app(
             if section is not None and _settings_section_revision(existing_runtime_settings, section) != revision:
                 raise SettingsValidationError("Settings changed since they were loaded.", "settings_changed")
             merged_runtime_settings = _merge_runtime_settings_payload(existing_runtime_settings, payload)
+            merged_runtime_settings = _without_plex_library_roots(merged_runtime_settings, cleared_plex_roots)
             merged_runtime_settings = _bind_runtime_library_overrides(merged_runtime_settings, changed_type_roots)
             catalog_refresh_needed = (
                 _runtime_source_roots(existing_runtime_settings) != _runtime_source_roots(merged_runtime_settings)
                 or _runtime_library_signature(existing_runtime_settings)
                 != _runtime_library_signature(merged_runtime_settings)
+                or _runtime_plex_paths(existing_runtime_settings) != _runtime_plex_paths(merged_runtime_settings)
                 or object_dict(existing_runtime_settings.get("metadata"))
                 != object_dict(merged_runtime_settings.get("metadata"))
             )
@@ -1121,6 +1131,9 @@ def create_app(
     ) -> dict[str, Any]:
         """Save the Libraries tab alone; computers, schedules, size defaults and metadata stay as saved.
 
+        The one exception is a cleared Plex path: that library's kept root in the Plex settings goes too, as on the
+        website, so the library really uses its own folder again. Every other kept root stays.
+
         The tab sends the revision it loaded. The payload is built from freshly loaded settings and written only if
         the stored library section is still that revision under the lock, so a save never overwrites a change made
         elsewhere, and type changes are confirmed and bound against the types actually saved.
@@ -1128,17 +1141,19 @@ def create_app(
         nonlocal config
         config = load_config(config.paths.config_path)
         app.state.config = config
+        saved_rows = _settings_library_rows_for_config_runtime(config, min_rows=0)
         media, _plex_library_roots = _build_runtime_media_settings(
-            libraries=_library_section_rows(
-                libraries,
-                _settings_library_rows_for_config_runtime(config, min_rows=0),
-                _library_key_references(config.raw),
-            ),
+            libraries=_library_section_rows(libraries, saved_rows, _library_key_references(config.raw)),
             transcode_root=working_folder,
             catalog_refresh_hours=catalog_refresh_hours,
             **_saved_library_context(),
         )
-        _apply_settings_payload({"media": media}, section="library", revision=revision)
+        _apply_settings_payload(
+            {"media": media},
+            section="library",
+            revision=revision,
+            cleared_plex_roots=_cleared_plex_path_keys(libraries, saved_rows),
+        )
         try:
             settings: dict[str, Any] | None = _library_settings_facts()
         except SettingsValidationError:

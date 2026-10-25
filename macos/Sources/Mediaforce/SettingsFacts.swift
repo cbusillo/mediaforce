@@ -12,6 +12,7 @@ struct LibrarySettingsFacts: Decodable, Sendable, Equatable {
         var name: String
         var folder: String
         var type: String
+        var plexPath: String
         var typeChangeConfirmation: String?
     }
 }
@@ -74,7 +75,7 @@ struct LibrarySettingsDraft: Equatable {
     }
 
     mutating func addLibrary(type: String) {
-        rows.append(Row(library: .init(key: "", name: "", folder: "", type: type)))
+        rows.append(Row(library: .init(key: "", name: "", folder: "", type: type, plexPath: "")))
     }
 
     mutating func remove(_ id: Row.ID) {

@@ -4,8 +4,9 @@ import XCTest
 
 final class SettingsTests: XCTestCase {
     private let serverFacts = """
-    {"libraries": [{"key": "movies", "name": "Movies", "folder": "/Volumes/media/movies", "type": "movie"},
-                   {"key": "tv", "name": "Tv", "folder": "/Volumes/media/tv", "type": "tv"}],
+    {"libraries": [{"key": "movies", "name": "Movies", "folder": "/Volumes/media/movies", "type": "movie",
+                    "plex_path": "/data/movies"},
+                   {"key": "tv", "name": "Tv", "folder": "/Volumes/media/tv", "type": "tv", "plex_path": ""}],
      "working_folder": "/Volumes/media/transcode", "catalog_refresh_hours": 6.0,
      "types": ["tv", "movie", "spatial", "other"], "revision": "r1"}
     """
@@ -23,6 +24,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(decoded.libraries.map(\.key), ["movies", "tv"])
         XCTAssertEqual(decoded.libraries.map(\.type), ["movie", "tv"])
         XCTAssertEqual(decoded.libraries[0].folder, "/Volumes/media/movies")
+        XCTAssertEqual(decoded.libraries.map(\.plexPath), ["/data/movies", ""])
         XCTAssertNil(decoded.libraries[0].typeChangeConfirmation)
         XCTAssertEqual(decoded.workingFolder, "/Volumes/media/transcode")
         XCTAssertEqual(decoded.catalogRefreshHours, 6)
@@ -33,6 +35,7 @@ final class SettingsTests: XCTestCase {
     func testSaveBodyIsTheLibrarySectionTheServerReads() throws {
         var draft = LibrarySettingsDraft(try facts())
         draft.rows[1].library.name = "TV"
+        draft.rows[1].library.plexPath = "/data/tv"
         draft.addLibrary(type: "other")
         draft.rows[2].library.name = "Home Videos"
         draft.rows[2].library.folder = "/Volumes/media/home"
@@ -41,9 +44,10 @@ final class SettingsTests: XCTestCase {
 
         XCTAssertEqual(try json(draft.saveBody), [
             "libraries": [
-                ["key": "movies", "name": "Movies", "folder": "/Volumes/media/movies", "type": "movie"],
-                ["key": "tv", "name": "TV", "folder": "/Volumes/media/tv", "type": "tv"],
-                ["key": "", "name": "Home Videos", "folder": "/Volumes/media/home", "type": "other"],
+                ["key": "movies", "name": "Movies", "folder": "/Volumes/media/movies", "type": "movie",
+                 "plex_path": "/data/movies"],
+                ["key": "tv", "name": "TV", "folder": "/Volumes/media/tv", "type": "tv", "plex_path": "/data/tv"],
+                ["key": "", "name": "Home Videos", "folder": "/Volumes/media/home", "type": "other", "plex_path": ""],
             ],
             "working_folder": "/Volumes/media/work",
             "catalog_refresh_hours": 12,
@@ -88,6 +92,7 @@ final class SettingsTests: XCTestCase {
             "working_folder_missing", "working_folder_not_absolute", "refresh_interval_invalid", "library_incomplete",
             "library_name_too_long", "library_folder_not_absolute", "library_folder_duplicate", "library_folders_overlap",
             "library_contains_working_folder", "library_type_unsupported", "library_type_unconfirmed", "no_libraries",
+            "plex_path_relative", "plex_path_duplicate",
         ]
         let words = codes.map { Words.librarySaveRefused($0) }
         XCTAssertEqual(Set(words).count, codes.count)
