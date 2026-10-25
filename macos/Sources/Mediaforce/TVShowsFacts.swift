@@ -74,7 +74,7 @@ struct TVShowsFacts: Decodable, Sendable {
 
 // The web library's four state groups, shared by the TV shows and Movies pages.
 enum LibraryStateGroup: Int, CaseIterable, Identifiable {
-    case needsYou, inProgress, readyForYou, noActiveWork
+    case needsYou, inProgress, readyToCompress, noActiveWork
 
     var id: Int { rawValue }
 }
@@ -91,7 +91,7 @@ extension LibraryStateGroup {
         } else if tones.contains("active") || states.contains("sample_waiting") {
             self = .inProgress
         } else if tones.contains("ready") || states.contains("needs_test") {
-            self = .readyForYou
+            self = .readyToCompress
         } else {
             self = .noActiveWork
         }

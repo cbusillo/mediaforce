@@ -24,7 +24,7 @@ from mediaforce.core.db_tables import library_items, motion_keep_decisions, stag
 from mediaforce.encoding.encode_queue import list_encode_runs_for_prefix
 from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
     workflow_eligibility
-from mediaforce.library.media_scopes import resolve_media_scope
+from mediaforce.library.media_scopes import MediaScope, resolve_media_scope
 from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.library.workflow_state import build_folder_workflow_state
@@ -41,7 +41,7 @@ PLAYER_REMUX_TIMEOUT_SECONDS = 30 * 60
 PARTIAL_SUFFIX = ".partial"
 # One preparation at a time across every file, so the space check, eviction and remux never overlap.
 _PLAYER_PREPARATION = threading.Lock()
-_EPISODE_NUMBER = re.compile(r"[sS]\d+[eE](\d+)")
+_EPISODE_NUMBER = re.compile(r"[sS](\d+)[eE](\d+)")
 
 
 def item_payload(
@@ -106,7 +106,8 @@ def item_payload(
             "library_item_id": item.item_id,
             "rel_path": item.rel_path,
             "name": name,
-            "episode": int(number.group(1)) if number else None,
+            "season": int(number.group(1)) if number else None,
+            "episode": int(number.group(2)) if number else None,
             "stage": episode.get("stage") or "not_started",
             "validation": episode.get("validation"),
             "kept_reason": kept.get(item.item_id),
@@ -117,18 +118,27 @@ def item_payload(
             "original_bytes": int(stage.get("source_size_bytes") or 0) if replaced else None,
             "original_backup": replaced and bool(stage.get("archived_source_path")) and item.item_id not in removed,
         })
-    files.sort(key=lambda row: (row["episode"] is None, row["episode"] or 0, row["name"]))
+    files.sort(key=lambda row: (row["episode"] is None, row["season"] or 0, row["episode"] or 0, row["name"]))
     return {
         "prefix": scope.prefix,
         "domain": scope.domain,
         "kind": scope.kind,
-        **(season_identity(scope.prefix) if scope.kind == "tv_season" else {"show": None, "season": None}),
+        **_identity(scope),
         "title": scope.title,
         "parent_prefix": scope.parent_prefix,
         "files": files,
         "sound": _sound(sound_facts),
         "still_airing": _still_airing(lifecycle) if scope.domain == "tv" else None,
     }
+
+
+def _identity(scope: MediaScope) -> dict[str, Any]:
+    """The show and season a page is about: a season names both, a whole show names only itself."""
+    if scope.kind == "tv_season":
+        return season_identity(scope.prefix)
+    if scope.kind == "tv_series":
+        return {"show": scope.title, "show_prefix": scope.prefix, "season": None}
+    return {"show": None, "season": None}
 
 
 def _sound(facts: Mapping[str, Any] | None) -> dict[str, Any] | None:

@@ -99,7 +99,7 @@ struct ActionNotice: Identifiable, Equatable {
 }
 
 enum Place: Hashable {
-    case library, spaceSaved, tv, movies, otherMedia, computers
+    case library, spaceSaved, media, computers
     case sample(String)
     case item(String)
 
@@ -150,9 +150,7 @@ struct MainWindow: View {
                         case .computers: ComputersPage(computers: facts.computers)
                         case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }
                         case .item(let prefix): ItemPage(prefix: prefix, model: model) { place = .sample($0) }
-                        case .tv: TVShowsPage(model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
-                        case .movies: MoviesPage(model: model) { place = .item($0) }
-                        case .otherMedia: OtherMediaPage(model: model) { place = .item($0) }
+                        case .media: MediaPage(model: model) { place = .item($0) }
                         default: LibraryPage(facts: facts, posters: model.posters) { place = .sample($0) }
                         }
                     }
@@ -235,14 +233,8 @@ struct Sidebar: View {
                     .tag(Place.library)
                 SidebarRow(title: "Space saved", symbol: "arrow.down.right.and.arrow.up.left", trailing: Words.size(facts.spaceSaved.bytes))
                     .tag(Place.spaceSaved)
-                Section("Media") {
-                    SidebarRow(title: "TV shows", symbol: "tv", trailing: "\(facts.library.tv.showCount)")
-                        .tag(Place.tv)
-                    SidebarRow(title: "Movies", symbol: "film", trailing: "\(facts.library.movies.titleCount)")
-                        .tag(Place.movies)
-                    SidebarRow(title: "Other media", symbol: "rectangle.stack", trailing: "\(facts.library.other.itemCount)")
-                        .tag(Place.otherMedia)
-                }
+                SidebarRow(title: Words.media, symbol: "film.stack", trailing: "\(facts.library.tv.showCount + facts.library.movies.titleCount + facts.library.other.itemCount)")
+                    .tag(Place.media)
                 Section {
                     Label("Computers", systemImage: "desktopcomputer")
                         .tag(Place.computers)

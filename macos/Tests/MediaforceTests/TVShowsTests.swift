@@ -55,8 +55,8 @@ final class TVShowsTests: XCTestCase {
             ([season(1, state: "finished", tone: "success"), season(2, state: "needs_help", tone: "attention", action: "retry_sample")], .needsYou),
             ([season(1, state: "making_season", tone: "active"), season(2, state: "ready_to_compare", tone: "ready")], .inProgress),
             ([season(1, state: "sample_waiting", tone: "quiet"), season(2, state: "needs_test", tone: "quiet")], .inProgress),
-            ([season(1, state: "ready_to_finish", tone: "ready"), season(2, state: "finished", tone: "success")], .readyForYou),
-            ([season(1, state: "needs_test", tone: "quiet")], .readyForYou),
+            ([season(1, state: "ready_to_finish", tone: "ready"), season(2, state: "finished", tone: "success")], .readyToCompress),
+            ([season(1, state: "needs_test", tone: "quiet")], .readyToCompress),
             ([season(1, state: "finished", tone: "success"), season(2, state: "motion_held", tone: "quiet")], .noActiveWork),
         ]
         for (seasons, group) in cases {
