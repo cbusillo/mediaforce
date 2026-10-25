@@ -545,7 +545,7 @@ class ExternalMetadataTests(unittest.TestCase):
         # The token goes in a header, never in the poster's URL.
         self.assertTrue(all(headers.get("X-Plex-Token") == "plex-secret" and "plex-secret" not in url for url, headers in requests))
         self.assertEqual((first.posters.refreshed, second.posters.cached), (2, 2))
-        assert show is not None and movie is not None
+        assert show is not None and movie is not None and config.paths.poster_dir is not None
         self.assertEqual(show.read_bytes(), b"poster-bytes")
         self.assertTrue(show.is_relative_to(config.paths.poster_dir))
         self.assertNotEqual(show, movie)

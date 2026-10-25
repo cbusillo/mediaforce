@@ -16,8 +16,8 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, metadata_sync_state, plex_item_metadata, series_metadata, \
     title_posters
-from mediaforce.library.external_metadata import FetchImage, FetchJson, PlexClient, PlexPathMapping, ProviderHttpError, \
-    TmdbClient, fetch_image, fetch_json, map_plex_part_path, plex_thumb_path, tmdb_id_from_guids
+from mediaforce.library.external_metadata import FetchImage, FetchJson, PlexClient, PlexPathMapping, PlexShow, \
+    ProviderHttpError, TmdbClient, fetch_image, fetch_json, map_plex_part_path, plex_thumb_path, tmdb_id_from_guids
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 
 
@@ -105,7 +105,7 @@ def sync_external_metadata(
             return stats
         _record_provider_success(connection, "plex", observed_at)
         connection.commit()
-    # Posters come from Plex alone, so they are kept whether or not TMDB is set up.
+    # Posters come from Plex alone, so they are kept even when TMDB isn't set up.
     _cache_posters(connection, config.paths.poster_dir, plex_client, stats=stats.posters)
 
     tmdb_token = _environment_secret(tmdb_settings, "MEDIAFORCE_TMDB_TOKEN")
@@ -323,7 +323,7 @@ def _sync_plex(
 def _record_posters(
         connection: DBClient,
         config: MediaforceConfig,
-        shows: Mapping[str, Any],
+        shows: Mapping[str, PlexShow],
         series_claims: Mapping[str, set[str]],
         claims: Any,
         *,
