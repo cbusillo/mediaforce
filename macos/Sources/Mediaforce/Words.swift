@@ -36,6 +36,47 @@ enum Words {
         }
     }
 
+    static let computerNotHeardFrom = "Not checked yet"
+    static let openInSettings = "Open in Settings › Computers"
+    static let accountPassword = "Account password"
+    static let workWindowsItem = "Work windows"
+
+    /// States where a computer is fine as it is; every other state has something to fix.
+    private static let computerStatesFine: Set<String> = ["ready", "busy", "outside_schedule", "not_encoding", "checking"]
+
+    static func computerNeedsYou(_ state: String?) -> Bool {
+        state.map { !computerStatesFine.contains($0) } ?? false
+    }
+
+    static func accountPasswordPrompt(_ name: String) -> String {
+        "Password for \(name.isEmpty ? "this computer" : name)"
+    }
+
+    static func computerAction(_ action: ComputerAction, needsPassword: Bool) -> String {
+        switch action {
+        case .checkAgain: "Check Again"
+        case .start: "Start It"
+        case .setUp: needsPassword ? "Set Up" : "Set Up Again"
+        case .trustAgain: "Trust It Again"
+        }
+    }
+
+    /// What to do about a computer's state, in plain words; nil when there is nothing to do.
+    static func computerFixHelp(_ state: String) -> String? {
+        switch state {
+        case "unreachable": "Make sure it is on and awake, then check again. Start It wakes it when Mediaforce knows how."
+        case "not_found", "new_name": "Mediaforce checks it again and says what it finds."
+        case "storage_unreachable": "Set it up again to reconnect it to the shared storage. Nothing on it is removed."
+        case "unreadable_reply", "python_missing": "Set it up again. Mediaforce puts back what it needs there."
+        case "password_needed": "Enter its account password once. Mediaforce uses it to set the computer up and doesn't keep it."
+        case "identity_changed": "Its identity changed, which happens after a reinstall. If this is the same computer, trust it again."
+        case "remote_login_off": "On that Mac, turn on Remote Login in System Settings › General › Sharing, then check again."
+        case "no_address": "Give it an address below and save."
+        case "cooling_down": "It failed several times in a row. Mediaforce tries it again by itself after a rest."
+        default: nil
+        }
+    }
+
     static func sampleState(_ sample: MainWindowFacts.Sample) -> String {
         seasonState(sample.state, sample.action)
     }
@@ -714,7 +755,7 @@ extension Words {
     }
 
     static func atOnce(_ count: Int) -> String {
-        "Works on \(count.formatted()) at once"
+        "Jobs at once: \(count.formatted())"
     }
 
     static func day(_ code: String) -> String {

@@ -17,7 +17,7 @@ struct MediaforceApp: App {
         }
         .menuBarExtraStyle(.window)
         Settings {
-            SettingsWindow(client: appDelegate.model.client)
+            SettingsWindow(model: appDelegate.model)
         }
     }
 }

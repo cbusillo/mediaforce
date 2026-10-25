@@ -105,10 +105,16 @@ def normalize_library_policy(library_type: LibraryType, value: Any) -> dict[str,
     return {key: value.get(key, default) for key, default in defaults.items()}
 
 
+def _default_library_label(key: str) -> str:
+    """A library without a name of its own is named for its type when its key is one ("TV", not "Tv")."""
+    type_label = next((option["label"] for option in LIBRARY_TYPE_OPTIONS if option["key"] == key), None)
+    return type_label or key.replace("_", " ").replace("-", " ").title()
+
+
 def normalize_library_definition(value: Any, *, key: str) -> dict[str, Any]:
     payload = dict(value) if isinstance(value, Mapping) else {}
     library_type = normalize_library_type(payload.get("type"), key=key)
-    label = str(payload.get("label") or key.replace("_", " ").replace("-", " ").title()).strip()
+    label = str(payload.get("label") or _default_library_label(key)).strip()
     profile_options = {option["key"] for option in LIBRARY_PROFILE_OPTIONS[library_type]}
     profile = str(payload.get("default_profile") or DEFAULT_LIBRARY_PROFILES[library_type]).strip()
     if profile not in profile_options:

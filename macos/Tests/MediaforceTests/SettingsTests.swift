@@ -343,3 +343,38 @@ final class SettingsTests: XCTestCase {
         }
     }
 }
+
+final class ComputerFixTests: XCTestCase {
+    private func host(_ json: String) throws -> HostsFacts.Host {
+        try JSONDecoder.mediaforce.decode(HostsFacts.self, from: Data("{\"hosts\": [\(json)]}".utf8)).hosts[0]
+    }
+
+    func testAComputerOffersTheFixesTheServerAllows() throws {
+        let unusable = try host("""
+        {"key": "mini", "available": false, "setup_supported": true, "setup_requires_password": false,
+         "trust_reset_supported": false, "issues": [], "recovery": {"status": "action_required", "reason": "x"}}
+        """)
+        XCTAssertEqual(ComputerFix.offered(unusable), [.checkAgain, .start, .setUp])
+
+        let ready = try host("""
+        {"key": "mbp", "available": true, "setup_supported": true, "setup_requires_password": false,
+         "trust_reset_supported": false, "issues": [], "recovery": {"status": "ready"}}
+        """)
+        XCTAssertEqual(ComputerFix.offered(ready), [])
+
+        let changed = try host("""
+        {"key": "studio", "available": true, "setup_supported": true, "setup_requires_password": true,
+         "trust_reset_supported": true, "issues": [{"code": "x"}], "recovery": null}
+        """)
+        XCTAssertEqual(ComputerFix.offered(changed), [.setUp, .trustAgain])
+    }
+
+    func testEachStateLeadsWithItsOwnFix() {
+        XCTAssertEqual(ComputerFix.primary(for: "password_needed"), .setUp)
+        XCTAssertEqual(ComputerFix.primary(for: "identity_changed"), .trustAgain)
+        XCTAssertEqual(ComputerFix.primary(for: "remote_login_off"), .checkAgain)
+        XCTAssertNil(ComputerFix.primary(for: "ready"))
+        XCTAssertEqual(Words.computerAction(.setUp, needsPassword: true), "Set Up")
+        XCTAssertEqual(Words.atOnce(2), "Jobs at once: 2")
+    }
+}
