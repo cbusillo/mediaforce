@@ -71,6 +71,7 @@ def test_the_route_serves_the_shows() -> None:
     app = FastAPI()
     register_app_window_routes(
         app, main_window_payload=dict, tv_shows_payload=lambda: tv_shows_payload([_card("tv/ER/Season 1")]), movies_payload=dict,
+        other_media_payload=dict,
         sample_payload=lambda _prefix: None, approve_sample_action=lambda *_args: {}, make_sample_action=lambda *_args: {},
         compress_season_action=lambda _prefix: {},
     )

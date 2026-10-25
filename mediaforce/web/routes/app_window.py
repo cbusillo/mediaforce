@@ -14,6 +14,7 @@ def register_app_window_routes(
         main_window_payload: Callable[[], dict[str, Any]],
         tv_shows_payload: Callable[[], dict[str, Any]],
         movies_payload: Callable[[], dict[str, Any]],
+        other_media_payload: Callable[[], dict[str, Any]],
         sample_payload: Callable[[str], dict[str, Any] | None],
         approve_sample_action: Callable[[str, Collection[str], str], dict[str, Any]],
         make_sample_action: Callable[[str, str | None], dict[str, Any]],
@@ -30,6 +31,10 @@ def register_app_window_routes(
     @app.get("/api/app/movies")
     def api_app_movies() -> JSONResponse:
         return JSONResponse(movies_payload())
+
+    @app.get("/api/app/other")
+    def api_app_other() -> JSONResponse:
+        return JSONResponse(other_media_payload())
 
     @app.get("/api/app/samples/{prefix:path}")
     def api_app_sample(prefix: str) -> JSONResponse:

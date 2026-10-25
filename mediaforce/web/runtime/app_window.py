@@ -276,6 +276,44 @@ def _movie_review_pending(title: Mapping[str, Any], lane: Any) -> bool:
     return lane not in {"processing", "validate", "promote", "blocked", "complete"}
 
 
+def other_media_payload(library: Mapping[str, Any]) -> dict[str, Any]:
+    listed = [
+        {
+            "prefix": unit["prefix"],
+            "title": unit.get("title") or unit["prefix"],
+            "library": unit.get("library_label"),
+            "file_count": int(unit.get("item_count") or 0),
+            "bytes": int(unit.get("total_size_bytes") or 0),
+            "estimated_saved_bytes": None if unit.get("details_loading") or unit.get("projected_reclaim_bytes") is None
+            else int(unit["projected_reclaim_bytes"]),
+            "state": other_media_state(unit),
+        }
+        for unit in library.get("work_units") or []
+        if unit.get("prefix")
+    ]
+    return {
+        "items": sorted(listed, key=lambda item: (-item["bytes"], item["title"])),
+        "truncated": bool(library.get("catalog_truncated")),
+    }
+
+
+# The web Other library's state group (frontend/src/lib/other/library.ts otherLibraryStateGroup), checked in its order.
+def other_media_state(unit: Mapping[str, Any]) -> str:
+    readiness = (unit.get("profile_readiness") or {}).get("state")
+    lane = (unit.get("workflow_state") or {}).get("primary_lane")
+    if readiness == "blocked":
+        return "cannot_start"
+    if readiness == "browse_only":
+        return "view_only"
+    if lane in {"attention", "blocked"}:
+        return "needs_attention"
+    if lane == "processing":
+        return "compressing"
+    if lane in {"encode", "validate", "promote", "mixed"}:
+        return "ready"
+    return "no_work"
+
+
 def _library_totals(items: list[_Item]) -> dict[str, Any]:
     by_kind: dict[str, list[_Item]] = defaultdict(list)
     for item in items:

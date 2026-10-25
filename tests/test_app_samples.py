@@ -152,7 +152,8 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
 
         app = FastAPI()
         register_app_window_routes(
-            app, main_window_payload=dict, tv_shows_payload=dict, movies_payload=dict, sample_payload=lambda _prefix: None,
+            app, main_window_payload=dict, tv_shows_payload=dict, movies_payload=dict, other_media_payload=dict,
+            sample_payload=lambda _prefix: None,
             make_sample_action=lambda *_args: {},
             approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
                 prefix, confirm, draft_hash, save_profile=save, queue_encode=queue,

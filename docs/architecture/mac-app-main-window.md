@@ -128,6 +128,20 @@ the web movie library's state group, checked in its order: `view_only`,
 codes the same way as TV shows (needs you, in progress, ready for you, no
 active work) and opens a movie's web page for anything it does.
 
+## Other media
+
+The Other media page lists the Other library's folders and single files, the
+same work units as the web Other library. `GET /api/app/other` gives its facts,
+built from the web Other library's details and read only while the page is
+open: `items`, biggest first, each with `prefix`, `title`, `library`,
+`file_count`, `bytes`, `estimated_saved_bytes` (null while details load or
+nothing measured it) and one `state` code, plus `truncated`, true when the web
+library's listing cap hid part of the library. `state` is the web Other
+library's state group, checked in its order: `cannot_start`, `view_only`,
+`needs_attention`, `compressing`, `ready` or `no_work`. The sidebar's Other
+media number counts files; the page counts folders and files and names the
+files they hold, which match that number unless `truncated`.
+
 ## Notifications and the Dock badge
 
 The app reads these facts every 30 seconds while it runs, even with its window

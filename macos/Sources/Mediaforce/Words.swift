@@ -411,3 +411,35 @@ extension Words {
         return "\(movieState(movie.state)). \(count(movie.fileCount, "file")), \(size(movie.bytes))\(place). \(saved)"
     }
 }
+
+extension Words {
+    static let otherMedia = "Other media"
+    static let nameColumn = "Name"
+    static let searchOtherMedia = "Search folders and files"
+    static let noMatchingOtherMedia = "No folders or files match."
+    static let chooseOtherMedia = "Choose a folder or file to see more about it."
+    static let otherMediaTruncated = "This list shows only part of this library. The rest is too big to list here."
+
+    // Counts what the list holds, folders and single files, and the files inside them, which is the sidebar's number.
+    static func otherMediaCount(_ shown: Int, of total: Int, files: Int) -> String {
+        let listed = shown == total ? total.formatted() : "\(shown.formatted()) of \(total.formatted())"
+        return "\(listed) folders and files, \(count(files, "file")) in all"
+    }
+
+    static func otherMediaState(_ code: String) -> String {
+        switch code {
+        case "cannot_start": "Can't start"
+        case "view_only": "View only"
+        case "needs_attention": "Needs attention"
+        case "compressing": "Compressing"
+        case "ready": "Ready for you"
+        default: "No work needed"
+        }
+    }
+
+    static func otherMediaDetail(_ item: OtherMediaFacts.Item) -> String {
+        let place = item.library.map { " in \($0)" } ?? ""
+        let saved = item.estimatedSavedBytes.map { "About \(size($0)) could be saved." } ?? "No estimate of space saved yet."
+        return "\(otherMediaState(item.state)). \(count(item.fileCount, "file")), \(size(item.bytes))\(place). \(saved)"
+    }
+}
