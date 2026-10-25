@@ -397,10 +397,11 @@ final class ComputerSettingsModel {
         do {
             let result = try await client.saveComputerSettings(draft.saveBody)
             if result.ok {
+                // Said before the rows are rebuilt, so the list keeps the chosen computer by its place.
+                justSaved = true
                 if let settings = result.settings { show(settings) } else { await load() }
                 // A new or readdressed computer has its own setup facts.
                 await loadHosts()
-                justSaved = true
             } else if result.code == "settings_changed" {
                 notice = .settingsChangedElsewhere
                 await load()
@@ -477,8 +478,10 @@ struct ComputerSettingsForm: View {
     let facts: ComputerSettingsFacts
     let main: MainWindowModel
     @State private var selection: Pane?
-    // The chosen computer's place in the list, so a load or save that rebuilds the rows keeps it chosen, even when
-    // its address was edited.
+    // The chosen computer's stored id and its place in the list, so rebuilding the rows keeps it chosen, even when
+    // its address was edited. A save stores the list in the draft's order and numbers it afresh, so after a save the
+    // place is what holds; after a revert or reload the stored ids are unchanged, so the id is.
+    @State private var chosenID: String?
     @State private var chosenIndex: Int?
 
     var body: some View {
@@ -529,6 +532,7 @@ struct ComputerSettingsForm: View {
         .onChange(of: selection) { _, chosen in
             if case .computer(let id) = chosen {
                 chosenIndex = computers.wrappedValue.firstIndex { $0.id == id }
+                chosenID = chosenIndex.map { computers.wrappedValue[$0].computer.id }
             }
         }
         // A notification or the menu bar asked for one computer.
@@ -641,7 +645,9 @@ struct ComputerSettingsForm: View {
         let rows = computers.wrappedValue
         if case .computer(let id) = selection, rows.contains(where: { $0.id == id }) { return }
         if selection == .workWindows { return }
-        let kept = chosenIndex.flatMap { rows.indices.contains($0) ? rows[$0] : nil } ?? rows.first
+        let byPlace = chosenIndex.flatMap { rows.indices.contains($0) ? rows[$0] : nil }
+        let byID = chosenID.flatMap { id in id.isEmpty ? nil : rows.first { $0.computer.id == id } }
+        let kept = (model.justSaved ? byPlace ?? byID : byID ?? byPlace) ?? rows.first
         selection = kept.map { .computer($0.id) } ?? .workWindows
     }
 
