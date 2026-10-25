@@ -103,6 +103,13 @@ class ApprovalNeedsConfirmation(HTTPException):
         self.confirm = confirm
 
 
+class ReviewedDraftChanged(HTTPException):
+    """The sample's draft is not the one the owner watched, so nothing was approved."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=409, detail="This sample changed after it was reviewed. Watch the new sample first.")
+
+
 class QueueNeedsChoice(HTTPException):
     """Queueing refused until the owner makes a choice the season page asks for."""
 
@@ -2999,6 +3006,7 @@ def save_profile_action(
         confirm_high_impact: bool = False,
         confirm_size_tradeoff: bool = False,
         reviewed_draft_hash: str = "",
+        require_reviewed_draft: bool = False,
 ) -> ActionPayload:
     production_blocker = production_action_blocker(config, normalized_prefix)
     if production_blocker is not None:
@@ -3008,6 +3016,8 @@ def save_profile_action(
         raise HTTPException(status_code=400, detail="No draft calibration found for this folder")
     calibration_payload = object_dict(calibration)
     current_draft_hash = str(calibration_payload.get("draft_hash") or calibration_draft_hash(calibration_payload)).strip()
+    if require_reviewed_draft and reviewed_draft_hash.strip() != current_draft_hash:
+        raise ReviewedDraftChanged()
     baseline_policy = object_dict(object_dict(calibration_payload.get("sample_item")).get("resolved_policy"))
     if not baseline_policy:
         with open_db(config.paths.db_path) as connection:

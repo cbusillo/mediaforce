@@ -7,7 +7,8 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_followup_request, sample_goal_request, \
     with_compression_intent
 from mediaforce.web.runtime.app_window import season_identity
-from mediaforce.web.runtime.folder_actions import APPROVED_SAMPLE_NOTES, ApprovalNeedsConfirmation, QueueNeedsChoice
+from mediaforce.web.runtime.folder_actions import APPROVED_SAMPLE_NOTES, ApprovalNeedsConfirmation, QueueNeedsChoice, \
+    ReviewedDraftChanged
 
 SaveProfileFn = Callable[[str, bool, bool, str, str], Mapping[str, Any]]
 QueueEncodeFn = Callable[[str, str, bool, bool, str], Mapping[str, Any]]
@@ -53,15 +54,14 @@ def approve_sample(
         confirm: Collection[str],
         reviewed_draft_hash: str,
         *,
-        current_draft_hash: Callable[[str], str],
         save_profile: SaveProfileFn,
         queue_encode: QueueEncodeFn,
 ) -> dict[str, Any]:
     """Approve the sample the owner watched and start compressing the season, like the season page's approval."""
-    if not reviewed_draft_hash or reviewed_draft_hash != current_draft_hash(prefix):
-        return {"ok": False, "code": "sample_changed"}
     try:
         saved = save_profile(prefix, "high_impact" in confirm, "size_tradeoff" in confirm, reviewed_draft_hash, "")
+    except ReviewedDraftChanged:
+        return {"ok": False, "code": "sample_changed"}
     except ApprovalNeedsConfirmation as needed:
         return {"ok": False, "code": f"confirm_{needed.confirm}"}
     except HTTPException:

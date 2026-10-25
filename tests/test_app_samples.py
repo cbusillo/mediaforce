@@ -105,7 +105,7 @@ def test_facts_offer_only_playable_moments_and_the_sizes_that_can_be_chosen() ->
     assert sample_facts(not_playable, _status())["moments"] == []
 
 
-def test_the_real_approval_check_asks_again_for_an_important_settings_change(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_real_approval_check_refuses_a_changed_draft_and_asks_again_for_an_important_change(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(folder_actions, "production_action_blocker", lambda *_args: None)
     calibration = {
         "draft_hash": "draft-1",
@@ -122,15 +122,15 @@ def test_the_real_approval_check_asks_again_for_an_important_settings_change(mon
             calibration_draft_hash=unused, save_calibration_state=unused, load_advice_state=unused,
             record_visual_approval_artifact=unused, merge_advice_state=unused, upsert_override=unused,
             confirm_high_impact=high_impact, confirm_size_tradeoff=size_tradeoff, reviewed_draft_hash=draft_hash,
+            require_reviewed_draft=True,
         )
 
     def approve(confirm: Collection[str], draft_hash: str) -> dict[str, Any]:
-        return approve_sample(
-            PREFIX, confirm, draft_hash, current_draft_hash=lambda _prefix: "draft-1",
-            save_profile=save_profile, queue_encode=lambda *_args: {},
-        )
+        return approve_sample(PREFIX, confirm, draft_hash, save_profile=save_profile, queue_encode=lambda *_args: {})
 
     assert approve(set(), "draft-1") == {"ok": False, "code": "confirm_high_impact"}
+    assert approve({"high_impact"}, "a draft replaced since") == {"ok": False, "code": "sample_changed"}
+    assert approve({"high_impact"}, "") == {"ok": False, "code": "sample_changed"}
 
 
 def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_did_not() -> None:
@@ -154,8 +154,7 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
         register_app_window_routes(
             app, main_window_payload=dict, sample_payload=lambda _prefix: None, make_sample_action=lambda *_args: {},
             approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
-                prefix, confirm, draft_hash, current_draft_hash=lambda _prefix: "draft-1",
-                save_profile=save, queue_encode=queue,
+                prefix, confirm, draft_hash, save_profile=save, queue_encode=queue,
             ),
             compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=queue),
         )
@@ -167,12 +166,9 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
         200, {"ok": True, "compressing": True, "reason": None},
     )
     assert saved[-1] == (PREFIX, False, True, "draft-1", "")
-    saved.clear()
-    assert _post(endpoint(ok, ok), {"reviewed_draft_hash": "a draft replaced since"}) == (
+    assert _post(endpoint(folder_actions.ReviewedDraftChanged(), ok), watched) == (
         409, {"ok": False, "code": "sample_changed"},
     )
-    assert _post(endpoint(ok, ok), {}) == (409, {"ok": False, "code": "sample_changed"})
-    assert saved == []
     assert _post(endpoint(ok, {"ok": False, "code": "encode_already_active"}), watched)[1]["compressing"] is True
     assert _post(endpoint(ok, HTTPException(409, "No computer.")), watched) == (
         200, {"ok": True, "compressing": False, "reason": None},

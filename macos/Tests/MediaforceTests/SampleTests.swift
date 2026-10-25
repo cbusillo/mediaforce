@@ -36,6 +36,13 @@ final class SampleTests: XCTestCase {
         XCTAssertTrue(try decode(Self.facts(state: "making_season", action: nil)).isInProgress)
         XCTAssertFalse(try decode(Self.facts(state: "finished", action: nil)).isInProgress)
         XCTAssertEqual(try decode(Self.facts(state: "ready_to_make", action: "queue_encode")).actions, [.startCompressing])
+        let laterStages = [("needs_help", "retry_encode"), ("needs_help", "review_files"), ("ready_to_check", "validate_outputs"),
+                           ("ready_to_finish", "promote_outputs"), ("motion_held", "decide_motion")]
+        for (state, action) in laterStages {
+            let facts = try decode(Self.facts(state: state, action: action))
+            XCTAssertEqual(facts.actions, [.openInBrowser], action)
+            XCTAssertNotEqual(Words.sampleHeadline(facts), Words.sampleHeadline(try decode(Self.facts(state: "needs_help", action: "make_sample"))), action)
+        }
     }
 
     func testAnApprovalHoldsOnlyForTheSampleTheOwnerWatched() throws {

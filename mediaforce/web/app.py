@@ -2178,6 +2178,8 @@ def create_app(
             confirm_size_tradeoff: bool,
             reviewed_draft_hash: str,
             scope_membership_token: str = "",
+            *,
+            require_reviewed_draft: bool = False,
     ) -> ActionPayload:
         blocker = _other_scope_action_blocker(normalized_prefix, scope_membership_token)
         if blocker is not None:
@@ -2199,6 +2201,7 @@ def create_app(
             confirm_high_impact=confirm_high_impact,
             confirm_size_tradeoff=confirm_size_tradeoff,
             reviewed_draft_hash=reviewed_draft_hash,
+            require_reviewed_draft=require_reviewed_draft,
         )
 
     def _other_scope_action_blocker(
@@ -2492,12 +2495,6 @@ def create_app(
             return None
         return folder, _folder_status_payload(normalized_prefix)
 
-    def _current_draft_hash(normalized_prefix: str) -> str:
-        calibration = object_dict(_load_calibration_state(config, normalized_prefix))
-        if not calibration:
-            return ""
-        return str(calibration.get("draft_hash") or _calibration_draft_hash(calibration)).strip()
-
     def _app_sample_payload(normalized_prefix: str) -> dict[str, Any] | None:
         payloads = _season_payloads(normalized_prefix)
         return sample_facts(*payloads) if payloads else None
@@ -2515,8 +2512,9 @@ def create_app(
         main_window_payload=_main_window_payload,
         sample_payload=_app_sample_payload,
         approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
-            prefix, confirm, draft_hash, current_draft_hash=_current_draft_hash,
-            save_profile=_save_profile_action, queue_encode=_queue_folder_encode_action,
+            prefix, confirm, draft_hash,
+            save_profile=lambda *args: _save_profile_action(*args, require_reviewed_draft=True),
+            queue_encode=_queue_folder_encode_action,
         ),
         make_sample_action=_make_app_sample_action,
         compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=_queue_folder_encode_action),

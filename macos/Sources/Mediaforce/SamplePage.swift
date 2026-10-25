@@ -33,7 +33,10 @@ struct SamplePage: View {
                     SampleComparison(moments: facts.moments, client: model.client)
                 }
                 SampleFactsGrid(facts: facts)
-                SampleActions(facts: facts, working: working, approve: startApproval, make: { make(size: $0) }, compress: compress)
+                SampleActions(
+                    facts: facts, working: working, approve: startApproval, make: { make(size: $0) }, compress: compress,
+                    openInBrowser: { openURL(model.client.seasonPage(prefix)) }
+                )
             } else if unreadable {
                 Text(Words.staleNotice(.failing, lastHeard: nil))
                     .foregroundStyle(.secondary)
@@ -188,6 +191,7 @@ struct SampleActions: View {
     let approve: () -> Void
     let make: (String?) -> Void
     let compress: () -> Void
+    let openInBrowser: () -> Void
 
     var body: some View {
         let actions = facts.actions
@@ -208,6 +212,10 @@ struct SampleActions: View {
                 }
                 if actions.contains(.startCompressing) {
                     Button(Words.startCompressing, action: compress)
+                        .buttonStyle(.borderedProminent)
+                }
+                if actions.contains(.openInBrowser) {
+                    Button(Words.openInBrowser, action: openInBrowser)
                         .buttonStyle(.borderedProminent)
                 }
                 if actions.contains(.makeSample) {

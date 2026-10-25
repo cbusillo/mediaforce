@@ -36,7 +36,7 @@ struct SampleFacts: Decodable, Sendable {
     }
 
     enum Action: Equatable {
-        case approve, makeAgain, makeSample, chooseSize, tryAnotherSize, startCompressing
+        case approve, makeAgain, makeSample, chooseSize, tryAnotherSize, startCompressing, openInBrowser
     }
 
     static let inProgressStates: Set<String> = ["making_test", "sample_waiting", "making_season"]
@@ -55,6 +55,7 @@ struct SampleFacts: Decodable, Sendable {
         case "make_sample", "retry_sample": return [.makeSample] + others
         case "choose_size": return sizeChoices.isEmpty ? [] : [.chooseSize]
         case "queue_encode": return [.startCompressing]
+        case "retry_encode", "review_files", "validate_outputs", "promote_outputs", "decide_motion": return [.openInBrowser]
         default: return []
         }
     }
