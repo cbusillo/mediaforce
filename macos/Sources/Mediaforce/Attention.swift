@@ -4,6 +4,8 @@ struct AttentionNotice: Equatable, Sendable {
     let id: String
     let title: String
     let body: String
+    // Where clicking the notification takes the Director.
+    var opens: Place?
 }
 
 struct AttentionMemory: Codable, Equatable, Sendable {
@@ -51,7 +53,8 @@ struct Attention: Equatable, Sendable {
                 AttentionNotice(
                     id: "finished:\(season.prefix)",
                     title: "\(Words.season(season.show, season.season)) is finished",
-                    body: Words.finishedNotice(season, keptReasons: keptReasons(facts, season.prefix))
+                    body: Words.finishedNotice(season, keptReasons: keptReasons(facts, season.prefix)),
+                    opens: .item(season.prefix)
                 )
             }
         }
@@ -59,7 +62,8 @@ struct Attention: Equatable, Sendable {
         return [AttentionNotice(
             id: "finished:\(newlyFinished.count)",
             title: mayHaveMore ? "At least \(newlyFinished.count) seasons finished" : "\(newlyFinished.count) seasons finished",
-            body: "See Finished lately in Mediaforce for what was saved."
+            body: "See Finished lately in Mediaforce for what was saved.",
+            opens: .spaceSaved
         )]
     }
 
@@ -73,7 +77,8 @@ struct Attention: Equatable, Sendable {
             AttentionNotice(
                 id: "computer:\(computer.key):\(computer.state)",
                 title: "\(computer.name ?? computer.key) needs you",
-                body: "\(Words.computerState(computer.state)). Open Mediaforce to fix it."
+                body: "\(Words.computerState(computer.state)). Open Mediaforce to fix it.",
+                opens: .computers
             )
         }
         return samples + computers
@@ -85,20 +90,23 @@ struct Attention: Equatable, Sendable {
             return AttentionNotice(
                 id: "sample:\(sample.prefix):ready",
                 title: "\(name) sample is ready",
-                body: "Watch the sample and approve it, and Mediaforce will compress the rest of the season."
+                body: "Watch the sample and approve it, and Mediaforce will compress the rest of the season.",
+                opens: .sample(sample.prefix)
             )
         }
         if sample.action == "choose_size" {
             return AttentionNotice(
                 id: "sample:\(sample.prefix):size",
                 title: "\(name) needs a size decision",
-                body: "Its sample can't reach the size goal at good quality. Choose a size in Mediaforce."
+                body: "Its sample can't reach the size goal at good quality. Choose a size in Mediaforce.",
+                opens: .sample(sample.prefix)
             )
         }
         return AttentionNotice(
             id: "sample:\(sample.prefix):again",
             title: "\(name) sample needs making again",
-            body: "Make the sample again in Mediaforce, then watch it."
+            body: "Make the sample again in Mediaforce, then watch it.",
+            opens: .sample(sample.prefix)
         )
     }
 
@@ -106,7 +114,8 @@ struct Attention: Equatable, Sendable {
         AttentionNotice(
             id: "backups",
             title: "Original backups are ready to delete",
-            body: "\(Words.count(backups.count, "original backup")), \(Words.size(backups.bytes)). Delete them in Mediaforce when you're ready."
+            body: "\(Words.count(backups.count, "original backup")), \(Words.size(backups.bytes)). Delete them in Mediaforce when you're ready.",
+            opens: .spaceSaved
         )
     }
 }

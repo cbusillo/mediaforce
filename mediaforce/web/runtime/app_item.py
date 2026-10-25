@@ -59,9 +59,12 @@ def item_payload(
             for episode in load_season_episode_progress(connection, items, list_encode_runs_for_prefix(connection, scope.prefix))
         }
         ids = [item.item_id for item in items]
-        sizes = dict(connection.execute(
-            select(library_items.c.id, library_items.c.size_bytes).where(library_items.c.id.in_(ids))
-        ).tuples().all())
+        sizes = {
+            int(item_id): int(size or 0)
+            for item_id, size in connection.execute(
+                select(library_items.c.id, library_items.c.size_bytes).where(library_items.c.id.in_(ids))
+            )
+        }
         stages = {
             int(row["library_item_id"]): row
             for row in connection.execute(select(
@@ -71,11 +74,14 @@ def item_payload(
                 staged_artifacts.c.archived_source_path,
             ).where(staged_artifacts.c.library_item_id.in_(ids))).mappings()
         }
-        kept = dict(connection.execute(
-            select(motion_keep_decisions.c.library_item_id, motion_keep_decisions.c.reason_code)
-            .join(library_items, motion_keep_decisions.c.library_item_id == library_items.c.id)
-            .where(library_items.c.id.in_(ids), motion_keep_decisions.c.source_fingerprint == library_item_source_sql())
-        ).tuples().all())
+        kept = {
+            int(item_id): str(reason)
+            for item_id, reason in connection.execute(
+                select(motion_keep_decisions.c.library_item_id, motion_keep_decisions.c.reason_code)
+                .join(library_items, motion_keep_decisions.c.library_item_id == library_items.c.id)
+                .where(library_items.c.id.in_(ids), motion_keep_decisions.c.source_fingerprint == library_item_source_sql())
+            )
+        }
         removed = confirmed_originals_removed_item_ids(connection)
         lifecycle = scope_lifecycle_payload_from_decisions(scope.prefix, decisions, motion_holds)
         sound_facts = sound(connection, scope.prefix) if scope.domain == "tv" else None
@@ -97,7 +103,7 @@ def item_payload(
             "held_reason": "motion_pattern" if item.motion_held else None,
             "percent_complete": episode.get("percent_complete"),
             "size_question": episode.get("size_question"),
-            "bytes": int(sizes.get(item.item_id) or 0),
+            "bytes": sizes.get(item.item_id, 0),
             "original_bytes": int(stage.get("source_size_bytes") or 0) if replaced else None,
             "original_backup": replaced and bool(stage.get("archived_source_path")) and item.item_id not in removed,
         })

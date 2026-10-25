@@ -31,6 +31,9 @@ final class AttentionCenter {
         content.title = notice.title
         content.body = notice.body
         content.sound = .default
+        if let opens = notice.opens {
+            content.userInfo = [Place.notificationKey: opens.notificationValue]
+        }
         let request = UNNotificationRequest(identifier: "\(notice.id):\(UUID().uuidString)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
@@ -45,7 +48,7 @@ final class AttentionCenter {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     let model = MainWindowModel(client: MediaforceClient(baseURL: ServerConnection.localServer))
     private var attention: AttentionCenter?
 
@@ -54,11 +57,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if Bundle.main.bundleURL.path.hasPrefix("/Applications/") {
             try? SMAppService.mainApp.register()
         }
+        UNUserNotificationCenter.current().delegate = self
         let attention = AttentionCenter()
         attention.requestPermission()
         model.onFacts = { attention.review($0) }
         model.startWatching()
         self.attention = attention
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        let value = response.notification.request.content.userInfo[Place.notificationKey] as? String
+        await MainActor.run {
+            NSApp.activate()
+            model.requestedPlace = value.flatMap(Place.init(notificationValue:))
+        }
     }
 
     private static var isRunningTests: Bool {
