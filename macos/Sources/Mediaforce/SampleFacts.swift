@@ -36,7 +36,7 @@ struct SampleFacts: Decodable, Sendable {
     }
 
     enum Action: Equatable {
-        case approve, makeAgain, makeSample, chooseSize, tryAnotherSize
+        case approve, makeAgain, makeSample, chooseSize, tryAnotherSize, startCompressing
     }
 
     var isBeingMade: Bool { state == "making_test" || state == "sample_waiting" }
@@ -52,8 +52,18 @@ struct SampleFacts: Decodable, Sendable {
         case "review_sample": return [.approve, .makeAgain] + others
         case "make_sample", "retry_sample": return [.makeSample] + others
         case "choose_size": return sizeChoices.isEmpty ? [] : [.chooseSize]
+        case "queue_encode": return [.startCompressing]
         default: return []
         }
+    }
+}
+
+struct SampleApproval: Equatable {
+    let reviewedDraftHash: String
+    var confirmed: [String] = []
+
+    func stillReviewed(_ facts: SampleFacts?) -> Bool {
+        (facts?.draftHash ?? "") == reviewedDraftHash
     }
 }
 

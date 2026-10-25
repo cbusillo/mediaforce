@@ -11,7 +11,7 @@ struct SamplePage: View {
     @State private var unreadable = false
     @State private var working = false
     @State private var refreshes = 0
-    @State private var confirmed: [String] = []
+    @State private var approval: SampleApproval?
     @State private var confirming: String?
     @State private var choosingBalance = false
     @Environment(\.openURL) private var openURL
@@ -33,7 +33,7 @@ struct SamplePage: View {
                     SampleComparison(moments: facts.moments, client: model.client)
                 }
                 SampleFactsGrid(facts: facts)
-                SampleActions(facts: facts, working: working, approve: startApproval, make: { make(size: $0) })
+                SampleActions(facts: facts, working: working, approve: startApproval, make: { make(size: $0) }, compress: compress)
             } else if unreadable {
                 Text(Words.staleNotice(.failing, lastHeard: nil))
                     .foregroundStyle(.secondary)
@@ -48,7 +48,7 @@ struct SamplePage: View {
             presenting: confirming
         ) { code in
             Button(Words.approveSample) {
-                confirmed.append(String(code.dropFirst("confirm_".count)))
+                approval?.confirmed.append(String(code.dropFirst("confirm_".count)))
                 approve()
             }
             Button(Words.cancel, role: .cancel) {}
@@ -75,6 +75,7 @@ struct SamplePage: View {
             do {
                 facts = try await model.client.sample(prefix)
                 unreadable = false
+                dropApprovalIfChanged()
             } catch {
                 unreadable = facts == nil
             }
@@ -84,19 +85,39 @@ struct SamplePage: View {
     }
 
     private func startApproval() {
-        confirmed = []
+        approval = SampleApproval(reviewedDraftHash: facts?.draftHash ?? "")
         approve()
     }
 
+    private func dropApprovalIfChanged() {
+        guard let approval, !approval.stillReviewed(facts) else { return }
+        self.approval = nil
+        if confirming != nil {
+            confirming = nil
+            model.notice = .sampleChanged
+        }
+    }
+
     private func approve() {
-        let confirm = confirmed
-        let draftHash = facts?.draftHash ?? ""
+        dropApprovalIfChanged()
+        guard let approval else {
+            model.notice = .sampleChanged
+            return
+        }
         act {
-            let result = try await $0.approveSample(prefix, confirm: confirm, draftHash: draftHash)
+            let result = try await $0.approveSample(prefix, confirm: approval.confirmed, draftHash: approval.reviewedDraftHash)
             if let code = result.code, Words.sampleConfirmation(code) != nil {
                 confirming = code
                 return nil
             }
+            if !result.ok { return .sampleRefused }
+            return result.compressing == true ? nil : .approvedNotCompressing
+        }
+    }
+
+    private func compress() {
+        act {
+            let result = try await $0.compressSeason(prefix)
             if !result.ok { return .sampleRefused }
             return result.compressing == true ? nil : .approvedNotCompressing
         }
@@ -153,6 +174,7 @@ struct SampleActions: View {
     let working: Bool
     let approve: () -> Void
     let make: (String?) -> Void
+    let compress: () -> Void
 
     var body: some View {
         let actions = facts.actions
@@ -169,6 +191,10 @@ struct SampleActions: View {
             HStack(spacing: 10) {
                 if actions.contains(.approve) {
                     Button(Words.approveSample, action: approve)
+                        .buttonStyle(.borderedProminent)
+                }
+                if actions.contains(.startCompressing) {
+                    Button(Words.startCompressing, action: compress)
                         .buttonStyle(.borderedProminent)
                 }
                 if actions.contains(.makeSample) {

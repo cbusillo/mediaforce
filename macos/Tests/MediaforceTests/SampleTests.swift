@@ -33,6 +33,16 @@ final class SampleTests: XCTestCase {
         XCTAssertEqual(try decode(Self.facts(state: "needs_help", action: "choose_size")).actions, [.chooseSize])
         XCTAssertEqual(try decode(Self.facts(state: "making_test", action: nil)).actions, [])
         XCTAssertTrue(try decode(Self.facts(state: "sample_waiting", action: nil)).isBeingMade)
+        XCTAssertEqual(try decode(Self.facts(state: "ready_to_make", action: "queue_encode")).actions, [.startCompressing])
+    }
+
+    func testAnApprovalHoldsOnlyForTheSampleTheOwnerWatched() throws {
+        let watched = try decode(Self.facts())
+        let approval = SampleApproval(reviewedDraftHash: try XCTUnwrap(watched.draftHash))
+        XCTAssertTrue(approval.stillReviewed(watched))
+        let replaced = try decode(Self.facts().replacingOccurrences(of: #""draft-1""#, with: #""draft-2""#))
+        XCTAssertFalse(approval.stillReviewed(replaced))
+        XCTAssertFalse(approval.stillReviewed(nil))
     }
 
     func testEveryStateHasItsOwnHeadlineAndOnlyKnownGuardsAsk() throws {

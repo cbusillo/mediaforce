@@ -56,6 +56,10 @@ struct MediaforceClient: Sendable {
         try await sampleAction(prefix, "make", body: ["size": size ?? NSNull()])
     }
 
+    func compressSeason(_ prefix: String) async throws -> SampleActionResult {
+        try await sampleAction(prefix, "compress", body: [:])
+    }
+
     func reviewMedia(_ path: String) -> URL {
         baseURL.appending(path: path)
     }

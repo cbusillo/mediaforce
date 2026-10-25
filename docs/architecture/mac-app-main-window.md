@@ -81,6 +81,10 @@ like the web page's approval. It answers `{"ok": true, "compressing": bool}`,
 or `409` with `code` `confirm_high_impact` or `confirm_size_tradeoff` when the
 approval check wants the Director to confirm again, or `refused`.
 
+`POST .../compress` starts compressing an approved season that is not
+compressing (action `queue_encode`), the same way approval does, and answers
+`{"ok": true, "compressing": bool}`.
+
 `POST .../make` with `size` (a choice key, or null) makes the sample again: it
 retries the saved request when the sample failed for a reason a retry fixes,
 remakes a reviewed sample at its measured goal, or asks for a new sample at

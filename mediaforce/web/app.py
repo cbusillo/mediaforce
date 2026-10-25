@@ -150,7 +150,7 @@ from mediaforce.web.routes import register_app_window_routes, register_completed
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_show_poster
-from mediaforce.web.runtime.app_samples import approve_sample, make_sample, sample_facts
+from mediaforce.web.runtime.app_samples import approve_sample, make_sample, sample_facts, start_compressing
 from mediaforce.web.runtime.app_window import app_window_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
 from mediaforce.web.runtime.show_settings_runtime import prefixes_with_samples, use_show_settings
@@ -2512,6 +2512,7 @@ def create_app(
             prefix, confirm, draft_hash, save_profile=_save_profile_action, queue_encode=_queue_folder_encode_action,
         ),
         make_sample_action=_make_app_sample_action,
+        compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=_queue_folder_encode_action),
     )
     register_child_recovery_routes(app, recover_children_action=_recover_children_action)
     register_size_decision_routes(app, decide_size_exception_action=_decide_size_exception_action)

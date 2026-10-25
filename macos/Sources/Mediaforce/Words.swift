@@ -214,6 +214,7 @@ extension Words {
     static let approveSample = "Approve and compress the season"
     static let makeSampleAgain = "Make sample again"
     static let makeSample = "Make sample"
+    static let startCompressing = "Start compressing"
     static let tryAnotherSize = "Try another size"
     static let chooseSizeHeadline = "Choose a size"
     static let openInBrowser = "Open in browser"
@@ -292,8 +293,13 @@ extension ActionNotice {
     )
 
     static let approvedNotCompressing = ActionNotice(
-        title: "Approved, but compressing didn't start",
-        message: "The season waits under Samples, with the reason it waits."
+        title: "Compressing didn't start",
+        message: "The sample is approved, but the season isn't compressing. Press Start compressing to try again."
+    )
+
+    static let sampleChanged = ActionNotice(
+        title: "The sample changed",
+        message: "A new sample replaced the one you watched, so nothing was approved. Watch the new sample first."
     )
 
     static let chooseBalance = ActionNotice(

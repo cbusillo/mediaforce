@@ -65,6 +65,11 @@ def approve_sample(
         return REFUSED
     if not saved.get("ok"):
         return REFUSED
+    return start_compressing(prefix, queue_encode=queue_encode)
+
+
+def start_compressing(prefix: str, *, queue_encode: QueueEncodeFn) -> dict[str, Any]:
+    """Queue the approved season, with the same holds as the season page's approval."""
     try:
         queued = queue_encode(prefix, APPROVED_SAMPLE_NOTES, False, False, "")
     except HTTPException:

@@ -15,6 +15,7 @@ def register_app_window_routes(
         sample_payload: Callable[[str], dict[str, Any] | None],
         approve_sample_action: Callable[[str, Collection[str], str], dict[str, Any]],
         make_sample_action: Callable[[str, str | None], dict[str, Any]],
+        compress_season_action: Callable[[str], dict[str, Any]],
 ) -> None:
     @app.get("/api/app/main-window")
     def api_app_main_window() -> JSONResponse:
@@ -35,6 +36,11 @@ def register_app_window_routes(
             {value for value in confirm if isinstance(value, str)} if isinstance(confirm, list) else set(),
             str(body.get("reviewed_draft_hash") or ""),
         )
+        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    @app.post("/api/app/samples/{prefix:path}/compress")
+    async def api_app_sample_compress(prefix: str) -> JSONResponse:
+        result = await run_in_threadpool(compress_season_action, prefix.strip("/"))
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/app/samples/{prefix:path}/make")

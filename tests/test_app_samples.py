@@ -11,7 +11,7 @@ from starlette.routing import Route
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime import folder_actions
-from mediaforce.web.runtime.app_samples import approve_sample, make_sample, sample_facts
+from mediaforce.web.runtime.app_samples import approve_sample, make_sample, sample_facts, start_compressing
 
 PREFIX = "tv/Lucifer/Season 2"
 
@@ -131,17 +131,19 @@ def test_the_real_approval_check_asks_again_for_an_important_settings_change(mon
     assert approve({"high_impact"}, "an older draft") == {"ok": False, "code": "confirm_high_impact"}
 
 
-def test_approving_starts_compressing_and_says_when_it_did_not() -> None:
+def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_did_not() -> None:
     saved: list[tuple[Any, ...]] = []
+    queued: list[tuple[Any, ...]] = []
 
-    def endpoint(save_result: Any, queue_result: Any) -> Any:
+    def endpoint(save_result: Any, queue_result: Any, action: str = "approve") -> Any:
         def save(*args: Any) -> dict[str, Any]:
             saved.append(args)
             if isinstance(save_result, Exception):
                 raise save_result
             return save_result
 
-        def queue(*_args: Any) -> dict[str, Any]:
+        def queue(*args: Any) -> dict[str, Any]:
+            queued.append(args)
             if isinstance(queue_result, Exception):
                 raise queue_result
             return queue_result
@@ -152,8 +154,9 @@ def test_approving_starts_compressing_and_says_when_it_did_not() -> None:
             approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
                 prefix, confirm, draft_hash, save_profile=save, queue_encode=queue,
             ),
+            compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=queue),
         )
-        return _route(app, "/api/app/samples/{prefix:path}/approve", "POST")
+        return _route(app, f"/api/app/samples/{{prefix:path}}/{action}", "POST")
 
     ok = {"ok": True}
     assert _post(endpoint(ok, ok), {"confirm": ["size_tradeoff", 7], "reviewed_draft_hash": "draft-1"}) == (
@@ -166,6 +169,13 @@ def test_approving_starts_compressing_and_says_when_it_did_not() -> None:
     assert _post(endpoint(size_guard, ok), {}) == (409, {"ok": False, "code": "confirm_size_tradeoff"})
     assert _post(endpoint(HTTPException(400, "No sample."), ok), {}) == (409, {"ok": False, "code": "refused"})
     assert _post(endpoint({"ok": False}, ok), {}) == (409, {"ok": False, "code": "refused"})
+
+    queued.clear()
+    compress = asyncio.run(endpoint(None, ok, "compress")(PREFIX))
+    assert (compress.status_code, json.loads(compress.body)) == (200, {"ok": True, "compressing": True})
+    assert queued == [(PREFIX, folder_actions.APPROVED_SAMPLE_NOTES, False, False, "")]
+    refused = asyncio.run(endpoint(None, HTTPException(409, "Held."), "compress")(PREFIX))
+    assert json.loads(refused.body) == {"ok": True, "compressing": False}
 
 
 def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() -> None:
