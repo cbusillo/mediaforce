@@ -39,7 +39,9 @@ struct SampleFacts: Decodable, Sendable {
         case approve, makeAgain, makeSample, chooseSize, tryAnotherSize, startCompressing
     }
 
-    var isBeingMade: Bool { state == "making_test" || state == "sample_waiting" }
+    static let inProgressStates: Set<String> = ["making_test", "sample_waiting", "making_season"]
+
+    var isInProgress: Bool { state.map(Self.inProgressStates.contains) ?? false }
 
     var estimatedSavedBytes: Int64? {
         guard estimatedEpisodeBytes > 0, seasonEpisodeCount > 0 else { return nil }
@@ -71,4 +73,9 @@ struct SampleActionResult: Decodable, Sendable {
     let ok: Bool
     let code: String?
     let compressing: Bool?
+    let reason: String?
+
+    static let browserReasons: Set<String> = ["confirm_legacy_size", "confirm_compression_goal", "approval_needs_fresh_sample"]
+
+    var needsBrowser: Bool { reason.map(Self.browserReasons.contains) ?? false }
 }

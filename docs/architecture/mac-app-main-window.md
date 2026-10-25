@@ -79,11 +79,16 @@ compressing would take), `goal_bytes`, `size_status`, `draft_hash`, and the
 `reviewed_draft_hash` approves the sample and starts compressing the season,
 like the web page's approval. It answers `{"ok": true, "compressing": bool}`,
 or `409` with `code` `confirm_high_impact` or `confirm_size_tradeoff` when the
-approval check wants the Director to confirm again, or `refused`.
+approval check wants the Director to confirm again, `sample_changed` when the
+sample is no longer the draft the Director watched (nothing is approved), or
+`refused`.
 
 `POST .../compress` starts compressing an approved season that is not
 compressing (action `queue_encode`), the same way approval does, and answers
-`{"ok": true, "compressing": bool}`.
+`{"ok": true, "compressing": bool}`. Approve and compress both add `reason`,
+the queue's code when compressing did not start, such as
+`confirm_compression_goal` or `confirm_legacy_size` (a choice made on the web
+page) or `free_space_reserve`.
 
 `POST .../make` with `size` (a choice key, or null) makes the sample again: it
 retries the saved request when the sample failed for a reason a retry fixes,

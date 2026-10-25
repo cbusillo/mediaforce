@@ -125,10 +125,12 @@ def test_the_real_approval_check_asks_again_for_an_important_settings_change(mon
         )
 
     def approve(confirm: Collection[str], draft_hash: str) -> dict[str, Any]:
-        return approve_sample(PREFIX, confirm, draft_hash, save_profile=save_profile, queue_encode=lambda *_args: {})
+        return approve_sample(
+            PREFIX, confirm, draft_hash, current_draft_hash=lambda _prefix: "draft-1",
+            save_profile=save_profile, queue_encode=lambda *_args: {},
+        )
 
     assert approve(set(), "draft-1") == {"ok": False, "code": "confirm_high_impact"}
-    assert approve({"high_impact"}, "an older draft") == {"ok": False, "code": "confirm_high_impact"}
 
 
 def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_did_not() -> None:
@@ -152,30 +154,44 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
         register_app_window_routes(
             app, main_window_payload=dict, sample_payload=lambda _prefix: None, make_sample_action=lambda *_args: {},
             approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
-                prefix, confirm, draft_hash, save_profile=save, queue_encode=queue,
+                prefix, confirm, draft_hash, current_draft_hash=lambda _prefix: "draft-1",
+                save_profile=save, queue_encode=queue,
             ),
             compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=queue),
         )
         return _route(app, f"/api/app/samples/{{prefix:path}}/{action}", "POST")
 
     ok = {"ok": True}
-    assert _post(endpoint(ok, ok), {"confirm": ["size_tradeoff", 7], "reviewed_draft_hash": "draft-1"}) == (
-        200, {"ok": True, "compressing": True},
+    watched = {"reviewed_draft_hash": "draft-1"}
+    assert _post(endpoint(ok, ok), {"confirm": ["size_tradeoff", 7], **watched}) == (
+        200, {"ok": True, "compressing": True, "reason": None},
     )
     assert saved[-1] == (PREFIX, False, True, "draft-1", "")
-    assert _post(endpoint(ok, {"ok": False, "code": "encode_already_active"}), {})[1]["compressing"] is True
-    assert _post(endpoint(ok, HTTPException(409, "No computer.")), {}) == (200, {"ok": True, "compressing": False})
+    saved.clear()
+    assert _post(endpoint(ok, ok), {"reviewed_draft_hash": "a draft replaced since"}) == (
+        409, {"ok": False, "code": "sample_changed"},
+    )
+    assert _post(endpoint(ok, ok), {}) == (409, {"ok": False, "code": "sample_changed"})
+    assert saved == []
+    assert _post(endpoint(ok, {"ok": False, "code": "encode_already_active"}), watched)[1]["compressing"] is True
+    assert _post(endpoint(ok, HTTPException(409, "No computer.")), watched) == (
+        200, {"ok": True, "compressing": False, "reason": None},
+    )
     size_guard = folder_actions.ApprovalNeedsConfirmation("size_tradeoff", "Missed the goal.")
-    assert _post(endpoint(size_guard, ok), {}) == (409, {"ok": False, "code": "confirm_size_tradeoff"})
-    assert _post(endpoint(HTTPException(400, "No sample."), ok), {}) == (409, {"ok": False, "code": "refused"})
-    assert _post(endpoint({"ok": False}, ok), {}) == (409, {"ok": False, "code": "refused"})
+    assert _post(endpoint(size_guard, ok), watched) == (409, {"ok": False, "code": "confirm_size_tradeoff"})
+    assert _post(endpoint(HTTPException(400, "No sample."), ok), watched) == (409, {"ok": False, "code": "refused"})
+    assert _post(endpoint({"ok": False}, ok), watched) == (409, {"ok": False, "code": "refused"})
 
     queued.clear()
     compress = asyncio.run(endpoint(None, ok, "compress")(PREFIX))
-    assert (compress.status_code, json.loads(compress.body)) == (200, {"ok": True, "compressing": True})
+    assert (compress.status_code, json.loads(compress.body)) == (200, {"ok": True, "compressing": True, "reason": None})
     assert queued == [(PREFIX, folder_actions.APPROVED_SAMPLE_NOTES, False, False, "")]
-    refused = asyncio.run(endpoint(None, HTTPException(409, "Held."), "compress")(PREFIX))
-    assert json.loads(refused.body) == {"ok": True, "compressing": False}
+    for refusal, reason in [
+        ({"ok": False, "code": "free_space_reserve"}, "free_space_reserve"),
+        (folder_actions.QueueNeedsChoice("confirm_compression_goal", "Choose a goal."), "confirm_compression_goal"),
+    ]:
+        refused = asyncio.run(endpoint(None, refusal, "compress")(PREFIX))
+        assert json.loads(refused.body) == {"ok": True, "compressing": False, "reason": reason}
 
 
 def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() -> None:

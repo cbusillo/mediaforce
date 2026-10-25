@@ -7,7 +7,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_followup_request, sample_goal_request, \
     with_compression_intent
 from mediaforce.web.runtime.app_window import season_identity
-from mediaforce.web.runtime.folder_actions import APPROVED_SAMPLE_NOTES, ApprovalNeedsConfirmation
+from mediaforce.web.runtime.folder_actions import APPROVED_SAMPLE_NOTES, ApprovalNeedsConfirmation, QueueNeedsChoice
 
 SaveProfileFn = Callable[[str, bool, bool, str, str], Mapping[str, Any]]
 QueueEncodeFn = Callable[[str, str, bool, bool, str], Mapping[str, Any]]
@@ -53,10 +53,13 @@ def approve_sample(
         confirm: Collection[str],
         reviewed_draft_hash: str,
         *,
+        current_draft_hash: Callable[[str], str],
         save_profile: SaveProfileFn,
         queue_encode: QueueEncodeFn,
 ) -> dict[str, Any]:
-    """Approve the sample and start compressing the season, the same as the season page's approval."""
+    """Approve the sample the owner watched and start compressing the season, like the season page's approval."""
+    if not reviewed_draft_hash or reviewed_draft_hash != current_draft_hash(prefix):
+        return {"ok": False, "code": "sample_changed"}
     try:
         saved = save_profile(prefix, "high_impact" in confirm, "size_tradeoff" in confirm, reviewed_draft_hash, "")
     except ApprovalNeedsConfirmation as needed:
@@ -72,9 +75,12 @@ def start_compressing(prefix: str, *, queue_encode: QueueEncodeFn) -> dict[str, 
     """Queue the approved season, with the same holds as the season page's approval."""
     try:
         queued = queue_encode(prefix, APPROVED_SAMPLE_NOTES, False, False, "")
+    except QueueNeedsChoice as refused:
+        queued = {"code": refused.code}
     except HTTPException:
         queued = {}
-    return {"ok": True, "compressing": bool(queued.get("ok")) or queued.get("code") == "encode_already_active"}
+    compressing = bool(queued.get("ok")) or queued.get("code") == "encode_already_active"
+    return {"ok": True, "compressing": compressing, "reason": None if compressing else queued.get("code")}
 
 
 def make_sample(

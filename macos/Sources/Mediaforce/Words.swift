@@ -302,6 +302,11 @@ extension ActionNotice {
         message: "A new sample replaced the one you watched, so nothing was approved. Watch the new sample first."
     )
 
+    static let finishInBrowser = ActionNotice(
+        title: "Compressing needs a choice first",
+        message: "The sample is approved, but this season needs a choice made on its page in the browser before it can compress."
+    )
+
     static let chooseBalance = ActionNotice(
         title: "Choose this season's balance first",
         message: "This season needs its balance of size and detail chosen before a new sample. Choose it in the browser."

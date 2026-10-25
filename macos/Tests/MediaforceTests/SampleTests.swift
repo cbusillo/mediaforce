@@ -24,7 +24,7 @@ final class SampleTests: XCTestCase {
         XCTAssertEqual(facts.moments.first?.sample.sizeBytes, 700_000)
         XCTAssertEqual(facts.sizeChoices.map(\.key), ["smaller"])
         XCTAssertEqual(facts.estimatedSavedBytes, 60_000_000_000 - 296_440_462 * 16)
-        XCTAssertFalse(facts.isBeingMade)
+        XCTAssertFalse(facts.isInProgress)
     }
 
     func testEachStateShowsOnlyItsActions() throws {
@@ -32,7 +32,9 @@ final class SampleTests: XCTestCase {
         XCTAssertEqual(try decode(Self.facts(state: "needs_help", action: "retry_sample", choices: "[]")).actions, [.makeSample])
         XCTAssertEqual(try decode(Self.facts(state: "needs_help", action: "choose_size")).actions, [.chooseSize])
         XCTAssertEqual(try decode(Self.facts(state: "making_test", action: nil)).actions, [])
-        XCTAssertTrue(try decode(Self.facts(state: "sample_waiting", action: nil)).isBeingMade)
+        XCTAssertTrue(try decode(Self.facts(state: "sample_waiting", action: nil)).isInProgress)
+        XCTAssertTrue(try decode(Self.facts(state: "making_season", action: nil)).isInProgress)
+        XCTAssertFalse(try decode(Self.facts(state: "finished", action: nil)).isInProgress)
         XCTAssertEqual(try decode(Self.facts(state: "ready_to_make", action: "queue_encode")).actions, [.startCompressing])
     }
 
@@ -95,6 +97,15 @@ final class SampleClientTests: XCTestCase {
         let sent = try XCTUnwrap(StubServerBody.json(request))
         XCTAssertEqual(sent["confirm"] as? [String], ["high_impact"])
         XCTAssertEqual(sent["reviewed_draft_hash"] as? String, "draft-1")
+    }
+
+    func testOnlyAChoiceTheBrowserAsksForSendsTheOwnerThere() async throws {
+        let needsChoice = try await client(status: 200, body: #"{"ok": true, "compressing": false, "reason": "confirm_compression_goal"}"#)
+            .compressSeason("tv/Lucifer/Season 2")
+        XCTAssertTrue(needsChoice.needsBrowser)
+        let waiting = try await client(status: 200, body: #"{"ok": true, "compressing": false, "reason": "free_space_reserve"}"#)
+            .compressSeason("tv/Lucifer/Season 2")
+        XCTAssertFalse(waiting.needsBrowser)
     }
 
     func testAServerErrorOnAnActionThrows() async {

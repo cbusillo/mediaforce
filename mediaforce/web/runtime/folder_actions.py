@@ -103,6 +103,14 @@ class ApprovalNeedsConfirmation(HTTPException):
         self.confirm = confirm
 
 
+class QueueNeedsChoice(HTTPException):
+    """Queueing refused until the owner makes a choice the season page asks for."""
+
+    def __init__(self, code: Literal["confirm_legacy_size", "confirm_compression_goal"], detail: str) -> None:
+        super().__init__(status_code=400, detail=detail)
+        self.code = code
+
+
 _FINAL_SIZE_RECOVERY_BLOCKER_CODE = "final_size_recovery_contract_unchanged"
 _FINAL_SIZE_RECOVERY_BLOCKER_MESSAGE = (
     "The latest production encode missed its approved final-size target under the same reviewed settings. "
@@ -838,12 +846,10 @@ def queue_folder_encode_action(
         )
         if {"target_size_mb", "target_size_bytes", "size_goal_mode"} & calibration_video.keys():
             if calibration_intent.size_goal.requires_confirmation:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Confirm whether the saved legacy size is runtime-normalized or an absolute per-episode "
-                        "target before queueing production."
-                    ),
+                raise QueueNeedsChoice(
+                    "confirm_legacy_size",
+                    "Confirm whether the saved legacy size is runtime-normalized or an absolute per-episode "
+                    "target before queueing production.",
                 )
         calibration_sample_item = object_dict(calibration_payload.get("sample_item"))
         frozen_compression_intent = (
@@ -852,9 +858,9 @@ def queue_folder_encode_action(
             else compression_intent_from_policy(calibration_video)
         )
         if frozen_compression_intent.requires_confirmation:
-            raise HTTPException(
-                status_code=400,
-                detail="Choose and confirm a compression goal before queueing production.",
+            raise QueueNeedsChoice(
+                "confirm_compression_goal",
+                "Choose and confirm a compression goal before queueing production.",
             )
         # The owner's current sound choice and lifecycle win over the sample's snapshot of them.
         production_policy = policy_with_owner_settings(calibration_policy, config, approval_prefix)

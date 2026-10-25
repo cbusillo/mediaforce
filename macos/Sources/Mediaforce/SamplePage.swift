@@ -13,7 +13,7 @@ struct SamplePage: View {
     @State private var refreshes = 0
     @State private var approval: SampleApproval?
     @State private var confirming: String?
-    @State private var choosingBalance = false
+    @State private var browserNotice: ActionNotice?
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -25,7 +25,7 @@ struct SamplePage: View {
                     Text(failure)
                         .foregroundStyle(.secondary)
                 }
-                if facts.isBeingMade {
+                if facts.isInProgress {
                     ProgressView()
                         .controlSize(.small)
                 }
@@ -55,11 +55,15 @@ struct SamplePage: View {
         } message: { code in
             Text(Words.sampleConfirmation(code)?.message ?? "")
         }
-        .alert(ActionNotice.chooseBalance.title, isPresented: $choosingBalance) {
+        .alert(
+            browserNotice?.title ?? "",
+            isPresented: Binding(get: { browserNotice != nil }, set: { if !$0 { browserNotice = nil } }),
+            presenting: browserNotice
+        ) { _ in
             Button(Words.openInBrowser) { openURL(model.client.seasonPage(prefix)) }
             Button(Words.cancel, role: .cancel) {}
-        } message: {
-            Text(ActionNotice.chooseBalance.message)
+        } message: { notice in
+            Text(notice.message)
         }
     }
 
@@ -79,7 +83,7 @@ struct SamplePage: View {
             } catch {
                 unreadable = facts == nil
             }
-            guard facts?.isBeingMade == true else { return }
+            guard facts?.isInProgress == true else { return }
             try? await Task.sleep(for: Self.pollInterval)
         } while !Task.isCancelled
     }
@@ -110,17 +114,26 @@ struct SamplePage: View {
                 confirming = code
                 return nil
             }
-            if !result.ok { return .sampleRefused }
-            return result.compressing == true ? nil : .approvedNotCompressing
+            if result.code == "sample_changed" {
+                self.approval = nil
+                return .sampleChanged
+            }
+            return result.ok ? compressingNotice(result) : .sampleRefused
         }
     }
 
     private func compress() {
         act {
             let result = try await $0.compressSeason(prefix)
-            if !result.ok { return .sampleRefused }
-            return result.compressing == true ? nil : .approvedNotCompressing
+            return result.ok ? compressingNotice(result) : .sampleRefused
         }
+    }
+
+    private func compressingNotice(_ result: SampleActionResult) -> ActionNotice? {
+        if result.compressing == true { return nil }
+        guard result.needsBrowser else { return .approvedNotCompressing }
+        browserNotice = .finishInBrowser
+        return nil
     }
 
     private func make(size: String?) {
@@ -129,7 +142,7 @@ struct SamplePage: View {
             if result.ok { return nil }
             switch result.code {
             case "choose_balance":
-                choosingBalance = true
+                browserNotice = .chooseBalance
                 return nil
             case "choose_size": return .chooseSize
             default: return .sampleRefused
