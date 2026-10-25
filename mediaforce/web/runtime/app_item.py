@@ -186,13 +186,17 @@ def player_file(config: MediaforceConfig, library_item_id: int, side: str) -> Pa
     stat = source.stat()
     cache = config.paths.web_state_dir / "player"
     target = cache / f"{library_item_id}-{side}-{stat.st_size}-{stat.st_mtime_ns}.mp4"
+    if target.is_file():
+        return target
     # A second request for the same file waits here and then reads the cache.
     with _PLAYER_PREPARATION:
         if not target.is_file():
-            if stat.st_size > PLAYER_CACHE_BYTES:
-                raise PlayerUnavailable("too_large", f"{source.name} is too large to prepare for playing.")
             cache.mkdir(parents=True, exist_ok=True)
-            _trim_cache(cache, keep=target, incoming_bytes=stat.st_size)
+            # The other side of the same file stays, so a comparison never evicts its own half.
+            pair = list(cache.glob(f"{library_item_id}-*.mp4"))
+            if stat.st_size + sum(path.stat().st_size for path in pair) > PLAYER_CACHE_BYTES:
+                raise PlayerUnavailable("too_large", f"{source.name} is too large to prepare for playing.")
+            _trim_cache(cache, keep={target, *pair}, incoming_bytes=stat.st_size)
             if shutil.disk_usage(cache).free < stat.st_size + PLAYER_FREE_MARGIN_BYTES:
                 raise PlayerUnavailable("no_room", f"Not enough free space to prepare {source.name} for playing.")
             _remux(source, target)
@@ -232,17 +236,17 @@ def _video_codec(source: Path) -> str:
     return result.stdout.strip()
 
 
-def _trim_cache(cache: Path, *, keep: Path, incoming_bytes: int) -> None:
+def _trim_cache(cache: Path, *, keep: set[Path], incoming_bytes: int) -> None:
     """Keep the newest few files within the byte budget, leaving room for the one about to be made."""
     now = time.time()
     for partial in cache.glob(f"*{PARTIAL_SUFFIX}"):
         # A preparation still running is younger than its timeout; anything older was interrupted.
         if now - partial.stat().st_mtime > PLAYER_REMUX_TIMEOUT_SECONDS:
             partial.unlink(missing_ok=True)
-    files = sorted((path for path in cache.glob("*.mp4") if path != keep),
+    files = sorted((path for path in cache.glob("*.mp4") if path not in keep),
                    key=lambda path: path.stat().st_mtime, reverse=True)
-    total = incoming_bytes
-    for index, path in enumerate(files):
+    total = incoming_bytes + sum(path.stat().st_size for path in keep if path.is_file())
+    for index, path in enumerate(files, start=len(keep)):
         total += path.stat().st_size
-        if index >= PLAYER_CACHE_KEEP - 1 or total > PLAYER_CACHE_BYTES:
+        if index >= PLAYER_CACHE_KEEP or total > PLAYER_CACHE_BYTES:
             path.unlink(missing_ok=True)

@@ -195,3 +195,32 @@ def test_a_stalled_probe_is_refused_with_a_code(config: MediaforceConfig, tmp_pa
             player_file(config, item_id, "original")
 
     assert unavailable.value.code == "too_slow"
+
+
+def test_a_comparison_keeps_both_halves_in_the_cache(config: MediaforceConfig, tmp_path: Path) -> None:
+    with open_db(config.paths.db_path) as connection:
+        replaced = _replaced(connection, tmp_path, 1, size=40, original_size=70)
+        others = [_episode(connection, tmp_path, number, size=10) for number in range(2, 4)]
+        connection.commit()
+
+    with patch.object(app_item, "PLAYER_CACHE_BYTES", 120), patch.object(app_item, "_remux", side_effect=_remux_by_copy):
+        for item_id in others:
+            player_file(config, item_id, "original")
+        compressed = player_file(config, replaced, "compressed")
+        original = player_file(config, replaced, "original")
+
+    assert compressed is not None and compressed.is_file()
+    assert original is not None and original.is_file()
+
+
+def test_a_comparison_too_large_for_the_cache_is_refused(config: MediaforceConfig, tmp_path: Path) -> None:
+    with open_db(config.paths.db_path) as connection:
+        replaced = _replaced(connection, tmp_path, 1, size=40, original_size=70)
+        connection.commit()
+
+    with patch.object(app_item, "PLAYER_CACHE_BYTES", 100), patch.object(app_item, "_remux", side_effect=_remux_by_copy):
+        assert player_file(config, replaced, "compressed") is not None
+        with pytest.raises(app_item.PlayerUnavailable) as unavailable:
+            player_file(config, replaced, "original")
+
+    assert unavailable.value.code == "too_large"

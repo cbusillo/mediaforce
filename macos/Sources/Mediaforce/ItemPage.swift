@@ -383,7 +383,8 @@ final class ItemPlayers {
         }
         guard !preparing else { return }
         let request = nextRequest()
-        let time = main.currentTime()
+        // The position the Director last chose, not wherever an unfinished seek has got to.
+        let time = CMTime(seconds: position, preferredTimescale: 600)
         playing = true
         Task { await play(from: time, request) }
     }
@@ -402,23 +403,27 @@ final class ItemPlayers {
         let time = CMTime(seconds: seconds, preferredTimescale: 600)
         position = seconds
         playing = wasPlaying
+        // Each seek or play supersedes the ones before it, so a late one never moves the picture back.
         Task {
-            // Each seek or play supersedes the ones before it, so a late one never moves the picture back.
-            async let mainSeek = main.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
-            async let originalSeek = comparing ? original.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) : true
-            _ = await (mainSeek, originalSeek)
-            guard request == requests, wasPlaying else { return }
-            await play(from: time, request)
+            if wasPlaying {
+                await play(from: time, request)
+            } else {
+                async let mainSeek = main.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+                async let originalSeek = comparing ? original.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) : true
+                _ = await (mainSeek, originalSeek)
+            }
         }
     }
 
     private func play(from time: CMTime, _ request: Int) async {
+        async let mainSeek = main.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+        async let originalSeek = comparing ? original.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) : true
+        _ = await (mainSeek, originalSeek)
+        guard request == requests else { return }
         guard comparing else {
-            if request == requests { main.play() }
+            main.play()
             return
         }
-        await original.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
-        guard request == requests else { return }
         // Start both at the same host time so neither runs ahead of the other.
         let start = CMClockGetTime(CMClockGetHostTimeClock()) + CMTime(seconds: 0.2, preferredTimescale: 600)
         main.automaticallyWaitsToMinimizeStalling = false
