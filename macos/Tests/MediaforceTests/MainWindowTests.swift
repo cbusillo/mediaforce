@@ -160,7 +160,7 @@ final class MediaforceClientActionTests: XCTestCase {
             HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!
         }
         let client = MediaforceClient(baseURL: ServerConnection.localServer, session: URLSession(configuration: configuration))
-        let image = await client.poster(showPrefix: "tv/Unknown")
+        let image = await client.poster(titlePrefix: "tv/Unknown")
         XCTAssertNil(image)
     }
 }
