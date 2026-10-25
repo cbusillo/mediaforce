@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import PurePosixPath
@@ -32,6 +32,10 @@ EVENT_KINDS = (
     "promotion_completed",
 )
 WORKING_COMPUTER_STATES = frozenset({"ready", "busy"})
+# Files directly in a show's folder: counted with the show, but not part of any season Mediaforce can work on.
+NOT_IN_SEASON_FOLDER = "not_in_season_folder"
+# A season with no file left to compress that is not finished either, such as one whose files all stay original.
+NO_WORK = "no_work"
 
 
 @dataclass(slots=True)
@@ -102,16 +106,19 @@ def app_window_payload(
     }
 
 
-def _present_items(connection: DBClient, library_types: Mapping[str, str]) -> list[_Item]:
-    rows = connection.execute(
-        select(
-            library_items.c.id,
-            library_items.c.rel_path,
-            library_items.c.media_root,
-            library_items.c.size_bytes,
-            library_items.c.status,
-        ).where(LIBRARY_ITEM_PRESENT)
-    ).mappings()
+def _present_items(
+        connection: DBClient, library_types: Mapping[str, str], *, media_roots: Collection[str] | None = None,
+) -> list[_Item]:
+    query = select(
+        library_items.c.id,
+        library_items.c.rel_path,
+        library_items.c.media_root,
+        library_items.c.size_bytes,
+        library_items.c.status,
+    ).where(LIBRARY_ITEM_PRESENT)
+    if media_roots is not None:
+        query = query.where(library_items.c.media_root.in_(media_roots))
+    rows = connection.execute(query).mappings()
     return [
         _Item(
             item_id=int(row["id"]),
@@ -180,26 +187,62 @@ def season_identity(prefix: str) -> dict[str, Any]:
     }
 
 
-def tv_shows_payload(season_cards: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    shows: dict[str, list[tuple[dict[str, Any], Mapping[str, Any]]]] = defaultdict(list)
-    for card in season_cards:
-        if card.get("prefix"):
-            identity = season_identity(str(card["prefix"]))
-            shows[identity["show_prefix"]].append((identity, card))
-    listed = [_tv_show(show_prefix, seasons) for show_prefix, seasons in shows.items()]
+def _tv_show_prefixes(items: Iterable[_Item]) -> set[str]:
+    """The shows the sidebar counts and the TV shows page lists, so the two always agree."""
+    return {item.show_prefix for item in items if item.show_prefix}
+
+
+def tv_shows_payload(
+        connection: DBClient,
+        *,
+        library_types: Mapping[str, str],
+        season_cards: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    tv_roots = [root for root, library_type in library_types.items() if library_type == "tv"]
+    items = _present_items(connection, library_types, media_roots=tv_roots)
+    cards = [card for card in season_cards if card.get("prefix")]
+    carded = {str(card["prefix"]) for card in cards}
+    loose: dict[str, list[_Item]] = defaultdict(list)
+    uncarded: dict[str, list[_Item]] = defaultdict(list)
+    for item in items:
+        if item.show_prefix and item.season_prefix is None:
+            loose[item.show_prefix].append(item)
+        elif item.season_prefix and item.season_prefix not in carded:
+            uncarded[item.season_prefix].append(item)
+    shows: dict[str, list[tuple[dict[str, Any], Mapping[str, Any]]]] = {prefix: [] for prefix in _tv_show_prefixes(items)}
+    for card in cards + [_season_without_work(prefix, season_items) for prefix, season_items in uncarded.items()]:
+        identity = season_identity(str(card["prefix"]))
+        shows.setdefault(identity["show_prefix"], []).append((identity, card))
+    listed = [_tv_show(show_prefix, seasons, loose.get(show_prefix, [])) for show_prefix, seasons in shows.items()]
     return {"shows": sorted(listed, key=lambda show: (-show["bytes"], show["show"]))}
 
 
-def _tv_show(show_prefix: str, seasons: list[tuple[dict[str, Any], Mapping[str, Any]]]) -> dict[str, Any]:
+# Season cards only cover seasons with files left to compress, so a season with none left is told from its files.
+def _season_without_work(prefix: str, items: list[_Item]) -> dict[str, Any]:
+    finished = all(item.promoted for item in items)
+    return {
+        "prefix": prefix,
+        "item_count": len(items),
+        "total_size_bytes": sum(item.size_bytes for item in items),
+        "projected_reclaim_bytes": 0,
+        "page_state": {"key": "finished", "tone": "success"} if finished else {"key": NO_WORK, "tone": "quiet"},
+    }
+
+
+def _tv_show(
+        show_prefix: str, seasons: list[tuple[dict[str, Any], Mapping[str, Any]]], loose: list[_Item],
+) -> dict[str, Any]:
     cards = [card for _, card in seasons]
+    loose_bytes = sum(item.size_bytes for item in loose)
     return {
         "show_prefix": show_prefix,
-        "show": seasons[0][0]["show"],
+        "show": PurePosixPath(show_prefix).parts[-1],
         "season_count": len(seasons),
-        "episode_count": sum(int(card.get("item_count") or 0) for card in cards),
-        "bytes": sum(int(card.get("total_size_bytes") or 0) for card in cards),
+        "episode_count": sum(int(card.get("item_count") or 0) for card in cards) + len(loose),
+        "bytes": sum(int(card.get("total_size_bytes") or 0) for card in cards) + loose_bytes,
         "estimated_saved_bytes": None if any(card.get("details_loading") for card in cards)
         else sum(int(card.get("projected_reclaim_bytes") or 0) for card in cards),
+        "loose_files": {"state": NOT_IN_SEASON_FOLDER, "episode_count": len(loose), "bytes": loose_bytes} if loose else None,
         "seasons": [
             _tv_season(identity, card)
             for identity, card in sorted(seasons, key=lambda season: (season[0]["season"] is None, season[0]["season"] or 0, season[0]["prefix"]))
@@ -325,7 +368,7 @@ def _library_totals(items: list[_Item]) -> dict[str, Any]:
     other = [item for kind, kind_items in by_kind.items() if kind not in {"tv", "movie"} for item in kind_items]
     return {
         "tv": {
-            "show_count": len({item.show_prefix for item in tv if item.show_prefix}),
+            "show_count": len(_tv_show_prefixes(tv)),
             "season_count": len({item.season_prefix for item in tv if item.season_prefix}),
             "episode_count": len(tv),
             **_size_totals(tv),

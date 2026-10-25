@@ -115,6 +115,11 @@ struct TVSeasonList: View {
                     }
                 }
             }
+            if let looseFiles = show.looseFiles {
+                Text(Words.looseFiles(looseFiles))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }

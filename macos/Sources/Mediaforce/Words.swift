@@ -58,6 +58,7 @@ enum Words {
         case ("finish_blocked", _): "Not ready to replace"
         case ("ready_to_finish", _): "Ready to replace"
         case ("finished", _): "Finished"
+        case ("no_work", _): "Nothing to compress"
         default: "Waiting"
         }
     }
@@ -402,6 +403,14 @@ extension Words {
     static func seasonButton(_ season: TVShowsFacts.Season) -> String {
         guard season.opensSample else { return openInBrowser }
         return season.action == "queue_encode" ? startCompressing : sampleAction(season.action) ?? sample
+    }
+
+    static func looseFiles(_ files: TVShowsFacts.LooseFiles) -> String {
+        let one = files.episodeCount == 1
+        let verb = one ? "isn't" : "aren't"
+        let them = one ? "it" : "them"
+        let episodes = "\(count(files.episodeCount, "episode")) (\(size(files.bytes)))"
+        return "\(episodes) \(verb) in a season folder. Mediaforce works season by season, so move \(them) into a Season folder to compress \(them)."
     }
 
     static func shown(_ shown: Int, of total: Int, _ noun: String) -> String {

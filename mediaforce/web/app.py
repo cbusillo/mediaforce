@@ -1377,7 +1377,11 @@ def create_app(
 
     def _tv_shows_payload() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
-            return tv_shows_payload([asdict(card) for card in _list_library_detail_cards(config, connection)])
+            return tv_shows_payload(
+                connection,
+                library_types=config.library_type_map,
+                season_cards=[asdict(card) for card in _list_library_detail_cards(config, connection)],
+            )
 
     register_dashboard_routes(
         app,

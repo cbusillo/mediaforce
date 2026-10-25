@@ -10,7 +10,7 @@ from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
 from mediaforce.web.runtime import host_status
-from mediaforce.web.runtime.app_window import app_window_payload
+from mediaforce.web.runtime.app_window import app_window_payload, tv_shows_payload
 
 LIBRARY_TYPES = {"tv": "tv", "movies": "movie", "other": "other"}
 READY_STORAGE = {"mounts": [{"mount_point": "/Volumes/media", "status": "ready", "last_failure_kind": None}]}
@@ -140,6 +140,33 @@ def test_library_totals_count_present_files_and_bytes_still_original(connection:
     }
     assert library["movies"] == {"title_count": 1, "total_bytes": 50, "original_bytes": 50}
     assert library["other"] == {"item_count": 1, "total_bytes": 7, "original_bytes": 7}
+
+
+def test_tv_shows_list_every_show_the_sidebar_counts(connection: DBClient) -> None:
+    _item(connection, "tv/ER/Season 1/e1.mkv", size=1000)
+    _replaced(connection, "tv/House/Season 1/e1.mkv", saved=4000, at=NOW)
+    _item(connection, "tv/Psych/Season 1/e1.mkv", size=70)
+    _item(connection, "tv/ER/pilot.mkv", size=300)
+    _item(connection, "tv/Cosmos/e1.mkv", size=200)
+    _item(connection, "tv/Cosmos/e2.mkv", size=250)
+    _item(connection, "tv/Cosmos/e3.mkv", size=50, missing=True)
+    _item(connection, "movies/Heat (1995)/Heat.mkv", size=50)
+    cards = [{"prefix": "tv/ER/Season 1", "item_count": 1, "total_size_bytes": 1000, "projected_reclaim_bytes": 600}]
+
+    shows = {show["show"]: show for show in tv_shows_payload(connection, library_types=LIBRARY_TYPES, season_cards=cards)["shows"]}
+
+    assert shows["ER"]["loose_files"] == {"state": "not_in_season_folder", "episode_count": 1, "bytes": 300}
+    assert (shows["ER"]["season_count"], shows["ER"]["episode_count"], shows["ER"]["bytes"]) == (1, 2, 1300)
+    assert shows["Cosmos"]["loose_files"] == {"state": "not_in_season_folder", "episode_count": 2, "bytes": 450}
+    assert (shows["Cosmos"]["season_count"], shows["Cosmos"]["seasons"], shows["Cosmos"]["show_prefix"]) == (0, [], "tv/Cosmos")
+    # Seasons with nothing left to compress have no season card, but their shows are still listed.
+    house, psych = shows["House"]["seasons"], shows["Psych"]["seasons"]
+    assert [(season["state"], season["episode_count"], season["bytes"]) for season in house] == [("finished", 1, 1000)]
+    assert [(season["state"], season["episode_count"], season["bytes"]) for season in psych] == [("no_work", 1, 70)]
+    assert shows["ER"]["seasons"][0]["state"] is None
+    sidebar = _payload(connection, cards=cards)["library"]["tv"]
+    assert len(shows) == sidebar["show_count"]
+    assert sum(show["episode_count"] for show in shows.values()) == sidebar["episode_count"]
 
 
 def test_season_is_finished_only_when_every_file_is_replaced_or_kept(connection: DBClient) -> None:
