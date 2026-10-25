@@ -95,13 +95,19 @@ def prepare_source_publish(connection: DBClient, item_id: int, *, source_path: P
     if source_identity is not None:
         moves.append((before, source_path, archive_path, source_identity))
     moves.append((after, staging_path, destination_path, output_identity))
+    record_prepared_moves(connection, operation, moves)
+    return operation
+
+
+def record_prepared_moves(connection: DBClient, operation: str,
+                          moves: list[tuple[str, Path, Path, dict[str, Any]]]) -> None:
+    """Record an operation's moves in order, before any file is touched."""
     for ordinal, (version_id, old, new, identity) in enumerate(moves):
         connection.execute(source_moves.insert().values(
             operation_id=operation, ordinal=ordinal, version_id=version_id, from_path=str(old), to_path=str(new),
             phase="prepared", checks_json=json_text(identity),
         ))
     connection.commit()
-    return operation
 
 
 def apply_source_moves(connection: DBClient, operation: str) -> None:
@@ -173,6 +179,14 @@ def pending_archive_paths(connection: DBClient) -> set[Path]:
         source_transitions.c.outcome.in_(("prepared", "unresolved")),
     )).mappings()
     return {Path(path).resolve() for row in rows for path in (row["from_path"], row["to_path"]) if path}
+
+
+def path_in_pending_move(connection: DBClient, path: str) -> bool:
+    """Whether unfinished publishing or a put-back is moving a file to or from this path."""
+    return connection.execute(select(source_moves.c.ordinal).join(source_transitions).where(
+        source_transitions.c.outcome.in_(("prepared", "unresolved")),
+        (source_moves.c.from_path == path) | (source_moves.c.to_path == path),
+    ).limit(1)).first() is not None
 
 
 def prepare_archive_removal(connection: DBClient, path: Path) -> list[str]:

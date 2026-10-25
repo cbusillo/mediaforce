@@ -211,6 +211,7 @@ extension Words {
         case "motion_mixed": "mixed film and video motion"
         case "motion_partly_interlaced": "partly interlaced"
         case "motion_unclear": "motion pattern unclear"
+        case "motion_put_back": "you put the original back"
         default: "kept by you"
         }
     }

@@ -11,12 +11,14 @@ from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_readonly_db
-from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.core.db_tables import library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.encode_queue import encode_run_rel_paths, list_child_encode_jobs_for_parents, \
     list_encode_runs_for_prefix
+from mediaforce.encoding.put_back import PUT_BACK_REASON
 from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
 from mediaforce.library.motion_holds import queue_motion_holds
+from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.library.media_scopes import resolve_media_scope
 from mediaforce.library.staged_validation import staged_validation_outcome
 from mediaforce.library.workflow_state import ItemWorkflowState, build_folder_workflow_state
@@ -35,6 +37,7 @@ EPISODE_STAGES = (
     "held",
     "not_started",
 )
+PUT_BACK_DETAIL = "Kept original: you put the original back."
 _RUNNING_PREPARATION_STATES = frozenset({"starting", "staging_source"})
 _OWNER_RUN_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
 _VALIDATION_DETAILS = {
@@ -62,7 +65,24 @@ def folder_episodes_payload(config: MediaforceConfig, prefix: str) -> dict[str, 
             workflow.items,
             list_encode_runs_for_prefix(connection, scope.prefix),
         )
+        put_back = put_back_rel_paths(connection, [episode["rel_path"] for episode in episodes])
+    for episode in episodes:
+        if episode["stage"] == "kept_original" and episode["rel_path"] in put_back:
+            episode["detail"] = PUT_BACK_DETAIL
     return {"prefix": scope.prefix, "available": True, "episodes": episodes}
+
+
+def put_back_rel_paths(connection: DBClient, rel_paths: list[str]) -> set[str]:
+    """The episodes kept original because the owner put their original back."""
+    if not rel_paths:
+        return set()
+    return set(connection.execute(select(library_items.c.rel_path).join(
+        motion_keep_decisions, motion_keep_decisions.c.library_item_id == library_items.c.id,
+    ).where(
+        library_items.c.rel_path.in_(rel_paths),
+        motion_keep_decisions.c.reason_code == PUT_BACK_REASON,
+        motion_keep_decisions.c.source_fingerprint == library_item_source_sql(),
+    )).scalars())
 
 
 def load_season_episode_progress(
