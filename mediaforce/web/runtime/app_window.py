@@ -41,18 +41,15 @@ class _Item:
     kind: str
     size_bytes: int
     promoted: bool
+    # Read for every item several times per window, so each path is split once.
+    parts: tuple[str, ...] = field(init=False)
+    show_prefix: str | None = field(init=False)
+    season_prefix: str | None = field(init=False)
 
-    @property
-    def parts(self) -> tuple[str, ...]:
-        return PurePosixPath(self.rel_path).parts
-
-    @property
-    def show_prefix(self) -> str | None:
-        return "/".join(self.parts[:2]) if self.kind == "tv" and len(self.parts) >= 3 else None
-
-    @property
-    def season_prefix(self) -> str | None:
-        return "/".join(self.parts[:3]) if self.kind == "tv" and len(self.parts) >= 4 else None
+    def __post_init__(self) -> None:
+        self.parts = PurePosixPath(self.rel_path).parts
+        self.show_prefix = "/".join(self.parts[:2]) if self.kind == "tv" and len(self.parts) >= 3 else None
+        self.season_prefix = "/".join(self.parts[:3]) if self.kind == "tv" and len(self.parts) >= 4 else None
 
 
 @dataclass(slots=True)

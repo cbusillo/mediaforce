@@ -1,7 +1,7 @@
 import json
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Literal, Mapping, NamedTuple
+from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, NamedTuple
 
 from sqlalchemy import Select, literal_column, or_, select
 
@@ -381,18 +381,30 @@ def _load_item_rows(connection: DBClient, scope: MediaScope) -> list[DBRow]:
 
 
 def _load_item_rows_for_scopes(connection: DBClient, scopes: list[MediaScope]) -> list[DBRow]:
-    rows_by_key: dict[tuple[int, str | None], DBRow] = {}
-    for scope_batch in _chunks(scopes, PREFIX_QUERY_BATCH_SIZE):
+    if len(scopes) <= PREFIX_QUERY_BATCH_SIZE:
         query = _item_rows_query().where(
-            or_(*(scope_rel_path_filter(library_items.c.rel_path, scope) for scope in scope_batch))
+            or_(*(scope_rel_path_filter(library_items.c.rel_path, scope) for scope in scopes))
         )
-        for row in connection.execute(query).mappings().fetchall():
-            rows_by_key[(int(row["item_id"]), row["staging_path"])] = row
-    return sorted(rows_by_key.values(), key=lambda item_row: str(item_row["rel_path"]))
+        return list(connection.execute(query).mappings().fetchall())
+    # SQLite tests every row against every range in a long OR, so many scopes read their library roots
+    # once and keep the rows a scope holds.
+    query = _item_rows_query().where(
+        or_(*(scope_rel_path_filter(library_items.c.rel_path, root) for root in sorted({scope.root for scope in scopes})))
+    )
+    in_scopes = _rel_path_in_scopes(scopes)
+    return [row for row in connection.execute(query).mappings() if in_scopes(str(row["rel_path"]))]
 
 
-def _chunks(values: list[Any], size: int) -> list[list[Any]]:
-    return [values[index:index + size] for index in range(0, len(values), size)]
+def _rel_path_in_scopes(scopes: list[MediaScope]) -> Callable[[str], bool]:
+    """Whether a stored path falls in any scope, as the scope's own SQL filter decides."""
+    if any(not scope.prefix for scope in scopes):
+        return lambda _rel_path: True
+    exact = {scope.prefix for scope in scopes if scope.match == "exact_item"}
+    descendants = {scope.prefix for scope in scopes if scope.match != "exact_item"}
+
+    return lambda rel_path: rel_path in exact or any(
+        ancestor in descendants for ancestor in _path_ancestors(rel_path)
+    )
 
 
 def _build_folder_state(
@@ -620,16 +632,46 @@ def _load_encode_job_states(
 ) -> dict[str, ScopeJobStates]:
     rows = _workflow_encode_job_rows(connection)
     part_files = _manifest_files_lookup()
-    scoped_rows = [(row, media_scope_from_prefix(str(row["prefix"] or ""), match="descendants")) for row in rows]
+    overlapping_rows = _overlapping_job_rows(rows)
     return {
-        scope.prefix: _scope_job_states(
-            scope,
-            [row for row, job_scope in scoped_rows if scopes_overlap(scope, job_scope)],
-            part_files,
-            settled_paths,
-        )
+        scope.prefix: _scope_job_states(scope, overlapping_rows(scope), part_files, settled_paths)
         for scope in scopes
     }
+
+
+def _overlapping_job_rows(rows: list[DBRow]) -> Callable[[MediaScope], list[DBRow]]:
+    """The jobs overlapping each scope, in job order, as `scopes_overlap` decides.
+
+    A job covers its prefix and everything under it, so it overlaps a scope at, above or (for a scope
+    that covers its descendants) below the scope's prefix. Looking jobs up by prefix keeps a library
+    of seasons from testing every job against every season.
+    """
+    at_prefix: dict[str, list[int]] = {}
+    under_prefix: dict[str, list[int]] = {}
+    for index, row in enumerate(rows):
+        job_prefix = media_scope_from_prefix(str(row["prefix"] or ""), match="descendants").prefix
+        at_prefix.setdefault(job_prefix, []).append(index)
+        for ancestor in _path_ancestors(job_prefix):
+            under_prefix.setdefault(ancestor, []).append(index)
+
+    def overlapping(scope: MediaScope) -> list[DBRow]:
+        if not scope.prefix:
+            return list(rows)
+        indexes = {*at_prefix.get("", ()), *at_prefix.get(scope.prefix, ())}
+        for ancestor in _path_ancestors(scope.prefix):
+            indexes.update(at_prefix.get(ancestor, ()))
+        if scope.match == "descendants":
+            indexes.update(under_prefix.get(scope.prefix, ()))
+        return [rows[index] for index in sorted(indexes)]
+
+    return overlapping
+
+
+def _path_ancestors(prefix: str) -> Iterator[str]:
+    separator = prefix.find("/")
+    while separator >= 0:
+        yield prefix[:separator]
+        separator = prefix.find("/", separator + 1)
 
 
 def _manifest_files_lookup() -> Callable[[DBRow], tuple[str, ...]]:
