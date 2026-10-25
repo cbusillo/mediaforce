@@ -224,3 +224,19 @@ def test_a_comparison_too_large_for_the_cache_is_refused(config: MediaforceConfi
             player_file(config, replaced, "original")
 
     assert unavailable.value.code == "too_large"
+
+
+def test_an_old_copy_of_the_same_file_is_not_kept_as_its_pair(config: MediaforceConfig, tmp_path: Path) -> None:
+    with open_db(config.paths.db_path) as connection:
+        replaced = _replaced(connection, tmp_path, 1, size=40, original_size=50)
+        connection.commit()
+    cache = config.paths.web_state_dir / "player"
+    cache.mkdir(parents=True)
+    stale = cache / f"{replaced}-original-999-1.mp4"
+    stale.write_bytes(b"S" * 60)
+
+    with patch.object(app_item, "PLAYER_CACHE_BYTES", 100), patch.object(app_item, "_remux", side_effect=_remux_by_copy):
+        assert player_file(config, replaced, "compressed") is not None
+        assert player_file(config, replaced, "original") is not None
+
+    assert not stale.exists()

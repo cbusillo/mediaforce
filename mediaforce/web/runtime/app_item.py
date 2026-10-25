@@ -174,18 +174,13 @@ def player_file(config: MediaforceConfig, library_item_id: int, side: str) -> Pa
     if item is None:
         return None
     promoted_at, backup = stage if stage is not None else (None, None)
-    replaced = promoted_at is not None
-    if side == "compressed":
-        source = Path(str(item)) if replaced else None
-    elif replaced:
-        source = Path(str(backup)) if backup else None
-    else:
-        source = Path(str(item))
-    if source is None or not source.is_file():
+    sources = _player_sources(Path(str(item)), Path(str(backup)) if backup else None, replaced=promoted_at is not None)
+    source = sources.get(side)
+    if source is None:
         return None
     stat = source.stat()
     cache = config.paths.web_state_dir / "player"
-    target = cache / f"{library_item_id}-{side}-{stat.st_size}-{stat.st_mtime_ns}.mp4"
+    target = _cached_name(cache, library_item_id, side, source)
     if target.is_file():
         return target
     # A second request for the same file waits here and then reads the cache.
@@ -193,7 +188,10 @@ def player_file(config: MediaforceConfig, library_item_id: int, side: str) -> Pa
         if not target.is_file():
             cache.mkdir(parents=True, exist_ok=True)
             # The other side of the same file stays, so a comparison never evicts its own half.
-            pair = list(cache.glob(f"{library_item_id}-*.mp4"))
+            pair = [
+                path for other, other_source in sources.items() if other != side
+                if (path := _cached_name(cache, library_item_id, other, other_source)).is_file()
+            ]
             if stat.st_size + sum(path.stat().st_size for path in pair) > PLAYER_CACHE_BYTES:
                 raise PlayerUnavailable("too_large", f"{source.name} is too large to prepare for playing.")
             _trim_cache(cache, keep={target, *pair}, incoming_bytes=stat.st_size)
@@ -201,6 +199,18 @@ def player_file(config: MediaforceConfig, library_item_id: int, side: str) -> Pa
                 raise PlayerUnavailable("no_room", f"Not enough free space to prepare {source.name} for playing.")
             _remux(source, target)
     return target
+
+
+def _player_sources(library_file: Path, backup: Path | None, *, replaced: bool) -> dict[str, Path]:
+    """Each side that can play now: a replaced file has its compressed copy and maybe its backup."""
+    sides = {"compressed": library_file, "original": backup} if replaced else {"original": library_file}
+    return {side: path for side, path in sides.items() if path is not None and path.is_file()}
+
+
+def _cached_name(cache: Path, library_item_id: int, side: str, source: Path) -> Path:
+    """Named for the source's size and change time, so a changed file never plays an old copy."""
+    stat = source.stat()
+    return cache / f"{library_item_id}-{side}-{stat.st_size}-{stat.st_mtime_ns}.mp4"
 
 
 def _remux(source: Path, target: Path) -> None:

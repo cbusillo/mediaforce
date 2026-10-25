@@ -349,6 +349,8 @@ final class ItemPlayers {
     private var readiness: [NSKeyValueObservation] = []
     private var ready: Set<ObjectIdentifier> = []
     private var requests = 0
+    // While a seek settles, the clock's reports would overwrite the position the Director chose.
+    private var settling: Int?
 
     init() {
         original.isMuted = true
@@ -403,6 +405,7 @@ final class ItemPlayers {
         let time = CMTime(seconds: seconds, preferredTimescale: 600)
         position = seconds
         playing = wasPlaying
+        settling = request
         // Each seek or play supersedes the ones before it, so a late one never moves the picture back.
         Task {
             if wasPlaying {
@@ -412,6 +415,7 @@ final class ItemPlayers {
                 async let originalSeek = comparing ? original.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) : true
                 _ = await (mainSeek, originalSeek)
             }
+            if settling == request { settling = nil }
         }
     }
 
@@ -453,6 +457,7 @@ final class ItemPlayers {
     }
 
     private func tick(_ time: CMTime) {
+        guard settling == nil else { return }
         position = time.seconds
     }
 }
