@@ -1,72 +1,111 @@
 import SwiftUI
 
+/// Where Mediaforce on this Mac stands when the app can't use it, told apart by what the app can see itself.
+enum ServerSituation: Equatable {
+    case checking
+    // This Mac has no Mediaforce login item: a first launch on a new Mac.
+    case notSetUp
+    // The login item is there, but Mediaforce doesn't answer.
+    case notRunning
+    // Mediaforce answers, but with an error or a reply the app can't read.
+    case inTrouble
+
+    init(_ state: ServerState, serviceInstalled: Bool) {
+        switch state {
+        case .checking, .reachable: self = .checking
+        case .unreachable: self = serviceInstalled ? .notRunning : .notSetUp
+        case .failing: self = .inTrouble
+        }
+    }
+}
+
+/// One calm card in the middle of the window: what is happening in one plain sentence, and the one thing to do.
+/// A small Details disclosure appears only when there is real trouble, saying what failed and when.
 struct ServerStatusView: View {
     let state: ServerState
+    var lastHeard: Date?
+    var problem: ServerProblem?
+    // Read each time the window draws this card, so setting Mediaforce up while it is open shows at the next check.
+    var serviceInstalled = BackgroundService.isInstalled
     let retry: () -> Void
+    @State private var working = false
+    @State private var serviceRefusal: String?
+    @State private var confirmingRestart = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Mediaforce")
-                .font(.system(size: 30, weight: .bold))
-                .padding(.bottom, 18)
-
-            HStack(alignment: .top, spacing: 14) {
-                Image(systemName: symbol)
-                    .font(.system(size: 24, weight: .regular))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 32, alignment: .center)
-                    .padding(.top, 1)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(headline)
-                        .font(.title3.weight(.semibold))
-                    Text(explanation)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: 460, alignment: .leading)
-                    if state != .reachable && state != .checking {
-                        Button("Check now", action: retry)
-                        .padding(.top, 10)
-                    }
-                }
-                Spacer(minLength: 0)
+        let situation = ServerSituation(state, serviceInstalled: serviceInstalled)
+        VStack(spacing: 14) {
+            Image(systemName: Words.serverSymbol(situation))
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(.secondary)
+                .frame(height: 56)
+            Text(Words.serverHeadline(situation))
+                .font(.system(size: 24, weight: .bold))
+                .multilineTextAlignment(.center)
+            Text(Words.serverSentence(situation))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 440)
+            // Not set up has no button: there is no way yet to set Mediaforce up from here.
+            if situation == .notRunning || situation == .inTrouble {
+                actions(situation)
+                    .controlSize(.large)
+                    .padding(.top, 6)
             }
-            Spacer(minLength: 0)
+            Text(Words.serverLastHeard(situation, lastHeard))
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 4)
+            if situation == .inTrouble || serviceRefusal != nil {
+                DisclosureGroup(Words.details) {
+                    Text(Words.serverDetails(problem: problem, refusal: serviceRefusal))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 4)
+                }
+                .frame(maxWidth: 440)
+            }
         }
-        .padding(.horizontal, 34)
-        .padding(.top, 24)
-        .padding(.bottom, 24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
-    }
-
-    private var symbol: String {
-        switch state {
-        case .checking: "ellipsis.circle"
-        case .reachable: "checkmark.circle"
-        case .unreachable: "bolt.horizontal.circle"
-        case .failing: "exclamationmark.circle"
+        .confirmationDialog(Words.restartQuestion, isPresented: $confirmingRestart) {
+            Button(Words.restartMediaforce) { Task { await run(BackgroundService.restart) } }
+            Button(Words.cancel, role: .cancel) {}
+        } message: {
+            Text(Words.restartMessage)
         }
     }
 
-    private var headline: String {
-        switch state {
-        case .checking: "Looking for Mediaforce on this Mac…"
-        case .reachable: "Mediaforce is running on this Mac."
-        case .unreachable: "Can't reach Mediaforce on this Mac."
-        case .failing: "Mediaforce answered with an error."
+    @ViewBuilder
+    private func actions(_ situation: ServerSituation) -> some View {
+        HStack(spacing: 10) {
+            switch situation {
+            case .notRunning:
+                Button(Words.startMediaforce) { Task { await run(BackgroundService.start) } }
+                    .buttonStyle(.borderedProminent)
+            case .inTrouble:
+                Button(Words.restartMediaforce) { confirmingRestart = true }
+                    .buttonStyle(.borderedProminent)
+            case .checking, .notSetUp:
+                EmptyView()
+            }
+            Button(Words.checkAgain, action: retry)
+            if working { ProgressView().controlSize(.small) }
         }
+        .disabled(working)
     }
 
-    private var explanation: String {
-        switch state {
-        case .checking:
-            "This only takes a moment."
-        case .reachable:
-            "Your library will appear here in a later version. For now this window shows that the app can reach Mediaforce."
-        case .unreachable:
-            "It isn't answering, so this window can't tell what it's doing. It checks again every few seconds and updates by itself."
-        case .failing:
-            "This window can't tell what it's doing until it answers properly. It checks again every few seconds and updates by itself."
+    /// Starts or restarts the service, then checks again once it has had a moment to come up.
+    private func run(_ action: @escaping @Sendable () async -> String?) async {
+        working = true
+        serviceRefusal = await action()
+        if serviceRefusal == nil {
+            try? await Task.sleep(for: .seconds(3))
+            retry()
         }
+        working = false
     }
 }

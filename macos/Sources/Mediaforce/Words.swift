@@ -37,6 +37,64 @@ enum Words {
     }
 
     static let computerNotHeardFrom = "Not checked yet"
+    static let details = "Details"
+    static let checkAgain = "Check Again"
+    static let startMediaforce = "Start Mediaforce"
+    static let restartMediaforce = "Restart Mediaforce"
+    static let restartQuestion = "Restart Mediaforce?"
+    static let restartMessage = "Anything being compressed or sampled right now is interrupted."
+    static let settingsDidNotLoad = "Mediaforce is running, but these settings didn't load."
+
+    static func serverSymbol(_ situation: ServerSituation) -> String {
+        switch situation {
+        case .checking: "ellipsis.circle"
+        case .notSetUp: "shippingbox"
+        case .notRunning: "moon.zzz"
+        case .inTrouble: "exclamationmark.triangle"
+        }
+    }
+
+    static func serverHeadline(_ situation: ServerSituation) -> String {
+        switch situation {
+        case .checking: "Looking for Mediaforce on this Mac…"
+        case .notSetUp: "Mediaforce isn't set up on this Mac"
+        case .notRunning: "Mediaforce isn't running"
+        case .inTrouble: "Mediaforce is having trouble"
+        }
+    }
+
+    static func serverSentence(_ situation: ServerSituation) -> String {
+        switch situation {
+        case .checking: "This only takes a moment."
+        case .notSetUp: "Mediaforce itself runs in the background on the Mac that holds your library. Open this app on that Mac."
+        case .notRunning: "It usually starts when you log in. Start it now, and this window fills in as soon as it answers."
+        case .inTrouble: "It answered, but not properly, so this window can't show your library. It often clears by itself; if not, restarting it usually helps."
+        }
+    }
+
+    static func serverLastHeard(_ situation: ServerSituation, _ lastHeard: Date?) -> String {
+        if situation == .notSetUp { return "This Mac has never been set up to run Mediaforce." }
+        guard let lastHeard else { return "Checking again every 30 seconds." }
+        let day = Calendar.current.isDateInToday(lastHeard) ? "today" : lastHeard.formatted(date: .abbreviated, time: .omitted)
+        return "Last heard from Mediaforce \(day) at \(lastHeard.formatted(date: .omitted, time: .shortened)). Checking again every 30 seconds."
+    }
+
+    /// What failed and when, for the Details disclosure.
+    static func serverDetails(problem: ServerProblem?, refusal: String?) -> String {
+        var lines: [String] = []
+        if let problem {
+            let what = switch problem.kind {
+            case .noAnswer: "Mediaforce didn't answer"
+            case .errorReply: "Mediaforce answered with an error"
+            case .unreadableReply: "Mediaforce's answer couldn't be read, which can happen when the app and Mediaforce are different versions"
+            }
+            lines.append("\(what) at \(problem.at.formatted(date: .omitted, time: .standard)).")
+        }
+        if let refusal {
+            lines.append("macOS refused to start it: \(refusal.isEmpty ? "no reason given" : refusal)")
+        }
+        return lines.isEmpty ? "Nothing more is known yet." : lines.joined(separator: "\n")
+    }
     static let openInSettings = "Open in Settings › Computers"
     static let accountPassword = "Account password"
     static let workWindowsItem = "Work windows"

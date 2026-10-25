@@ -198,9 +198,11 @@ final class MainWindowModelTests: XCTestCase {
         let erroring = model { _ in (500, Data()) }
         await erroring.refresh()
         XCTAssertEqual(erroring.connection, .failing)
+        XCTAssertEqual(erroring.problem?.kind, .errorReply)
         let garbled = model { _ in (200, Data("not facts".utf8)) }
         await garbled.refresh()
         XCTAssertEqual(garbled.connection, .failing)
+        XCTAssertEqual(garbled.problem?.kind, .unreadableReply)
     }
 
     func testAFailedActionTellsTheOwner() async {
@@ -213,6 +215,7 @@ final class MainWindowModelTests: XCTestCase {
         let model = model { _ in throw URLError(.cannotConnectToHost) }
         await model.refresh()
         XCTAssertEqual(model.connection, .unreachable)
+        XCTAssertEqual(model.problem?.kind, .noAnswer)
         XCTAssertNil(model.facts)
     }
 }
