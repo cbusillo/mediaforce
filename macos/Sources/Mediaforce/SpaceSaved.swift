@@ -79,6 +79,8 @@ struct SpotCheck: View {
     let model: MainWindowModel
     @State private var showPrefix: String?
     @State private var loaded = Loaded.loading
+    // Each load takes the next number; only the latest one may change what the player shows.
+    @State private var generation = 0
     @State private var notice: ActionNotice?
 
     /// What the player has for the chosen show: an episode with its backup, or why it has none.
@@ -153,6 +155,8 @@ struct SpotCheck: View {
 
     private func load() async {
         guard let show = current else { return }
+        generation += 1
+        let mine = generation
         if loaded.show != show.prefix { loaded = .loading }
         var result = Loaded.noBackupEpisode
         do {
@@ -165,8 +169,8 @@ struct SpotCheck: View {
         } catch {
             result = .failed
         }
-        // A slower answer for a show no longer chosen must not replace the one on screen.
-        guard current?.prefix == show.prefix else { return }
+        // A slower or cancelled answer must not replace a newer one on screen.
+        guard mine == generation, !Task.isCancelled else { return }
         loaded = result
     }
 
