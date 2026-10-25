@@ -2,7 +2,7 @@
 
 The page shows every file with where it has got, its size before and after, and whether its original
 backup is still there to compare against. The server sends states and codes; the app words them. The
-player reads one file at a time as MP4, remuxed once and cached, since the Mac's player cannot open MKV.
+player reads one file at a time as MP4, remuxed once and cached, since the app's player cannot open MKV.
 """
 
 import re
@@ -147,22 +147,22 @@ def player_file(config: MediaforceConfig, library_item_id: int, side: str) -> Pa
         return None
     with open_readonly_db(config.paths.db_path) as connection:
         item = connection.execute(
-            select(library_items.c.source_path, library_items.c.content_version_fingerprint, library_items.c.size_bytes)
-            .where(library_items.c.id == library_item_id)
-        ).mappings().one_or_none()
+            select(library_items.c.source_path).where(library_items.c.id == library_item_id)
+        ).scalar_one_or_none()
         stage = connection.execute(
             select(staged_artifacts.c.promoted_at, staged_artifacts.c.archived_source_path)
             .where(staged_artifacts.c.library_item_id == library_item_id)
-        ).mappings().one_or_none()
+        ).one_or_none()
     if item is None:
         return None
-    replaced = stage is not None and stage["promoted_at"] is not None
+    promoted_at, backup = stage if stage is not None else (None, None)
+    replaced = promoted_at is not None
     if side == "compressed":
-        source = Path(str(item["source_path"])) if replaced else None
+        source = Path(str(item)) if replaced else None
     elif replaced:
-        source = Path(str(stage["archived_source_path"])) if stage["archived_source_path"] else None
+        source = Path(str(backup)) if backup else None
     else:
-        source = Path(str(item["source_path"]))
+        source = Path(str(item))
     if source is None or not source.is_file():
         return None
     stat = source.stat()

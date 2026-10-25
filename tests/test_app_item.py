@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
@@ -35,12 +36,13 @@ def _episode(connection: DBClient, root: Path, number: int, *, size: int, status
     path = root / rel_path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"N" * size)
-    return int(connection.execute(library_items.insert().values(
+    connection.execute(library_items.insert().values(
         source_path=str(path), rel_path=rel_path, media_root="tv", parent_dir=SEASON, file_name=path.name,
         container=".mkv", size_bytes=size, mtime_ns=1, fingerprint=rel_path, audio_summary_json="[]",
         subtitle_summary_json="[]", status=status, last_scan_id="scan", discovered_at=NOW, last_seen_at=NOW,
         updated_at=NOW,
-    )).inserted_primary_key[0])
+    ))
+    return connection.execute(select(library_items.c.id).where(library_items.c.rel_path == rel_path)).scalar_one()
 
 
 def _replaced(connection: DBClient, root: Path, number: int, *, size: int, original_size: int) -> int:
