@@ -37,11 +37,27 @@ enum Words {
     }
 
     static func sampleState(_ sample: MainWindowFacts.Sample) -> String {
-        switch (sample.state, sample.action) {
+        seasonState(sample.state, sample.action)
+    }
+
+    static func seasonState(_ state: String?, _ action: String?) -> String {
+        switch (state, action) {
         case ("ready_to_compare", _): "Sample ready"
         case ("needs_help", "choose_size"): "Needs a size decision"
+        case ("needs_help", "retry_encode"): "Compressing stopped"
+        case ("needs_help", "review_files"): "Some files need you"
         case ("needs_help", _): "Sample needs making again"
         case ("ready_to_make", _): "Approved"
+        case ("needs_test", _): "Needs sample"
+        case ("sample_waiting", _): "Sample waiting"
+        case ("making_test", _): "Making sample"
+        case ("making_season", _): "Compressing"
+        case ("motion_held", "decide_motion"): "Needs a motion decision"
+        case ("motion_held", _): "Stays original"
+        case ("ready_to_check", _): "Ready to check"
+        case ("finish_blocked", _): "Not ready to replace"
+        case ("ready_to_finish", _): "Ready to replace"
+        case ("finished", _): "Finished"
         default: "Waiting"
         }
     }
@@ -323,4 +339,40 @@ extension ActionNotice {
         title: "Choose a size first",
         message: "This season's sample needs a size chosen before it can be made again."
     )
+}
+
+extension Words {
+    static let tvShows = "TV shows"
+    static let showColumn = "Show"
+    static let seasonsColumn = "Seasons"
+    static let sizeColumn = "Size"
+    static let estimatedSavedColumn = "Estimated space saved"
+    static let stateColumn = "State"
+    static let searchShows = "Search shows or seasons"
+    static let allStates = "All"
+    static let noMatchingShows = "No shows match."
+    static let chooseShow = "Choose a show to see its seasons."
+    static let notKnownYet = "Not known yet"
+
+    static func tvShowState(_ group: TVShowsFacts.StateGroup) -> String {
+        switch group {
+        case .needsYou: "Needs you"
+        case .inProgress: "In progress"
+        case .readyForYou: "Ready for you"
+        case .noActiveWork: "No active work"
+        }
+    }
+
+    static func seasonName(_ season: TVShowsFacts.Season) -> String {
+        season.season.map { "Season \($0)" } ?? season.folder
+    }
+
+    static func seasonButton(_ season: TVShowsFacts.Season) -> String {
+        guard season.opensSample else { return openInBrowser }
+        return season.action == "queue_encode" ? startCompressing : sampleAction(season.action) ?? sample
+    }
+
+    static func showsShown(_ shown: Int, of total: Int) -> String {
+        shown == total ? count(total, "show") : "\(shown.formatted()) of \(count(total, "show"))"
+    }
 }

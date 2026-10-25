@@ -178,6 +178,47 @@ def season_identity(prefix: str) -> dict[str, Any]:
     }
 
 
+def tv_shows_payload(season_cards: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    shows: dict[str, list[tuple[dict[str, Any], Mapping[str, Any]]]] = defaultdict(list)
+    for card in season_cards:
+        if card.get("prefix"):
+            identity = season_identity(str(card["prefix"]))
+            shows[identity["show_prefix"]].append((identity, card))
+    listed = [_tv_show(show_prefix, seasons) for show_prefix, seasons in shows.items()]
+    return {"shows": sorted(listed, key=lambda show: (-show["bytes"], show["show"]))}
+
+
+def _tv_show(show_prefix: str, seasons: list[tuple[dict[str, Any], Mapping[str, Any]]]) -> dict[str, Any]:
+    cards = [card for _, card in seasons]
+    return {
+        "show_prefix": show_prefix,
+        "show": seasons[0][0]["show"],
+        "season_count": len(seasons),
+        "episode_count": sum(int(card.get("item_count") or 0) for card in cards),
+        "bytes": sum(int(card.get("total_size_bytes") or 0) for card in cards),
+        "estimated_saved_bytes": None if any(card.get("details_loading") for card in cards)
+        else sum(int(card.get("projected_reclaim_bytes") or 0) for card in cards),
+        "seasons": [
+            _tv_season(identity, card)
+            for identity, card in sorted(seasons, key=lambda season: (season[0]["season"] is None, season[0]["season"] or 0, season[0]["prefix"]))
+        ],
+    }
+
+
+def _tv_season(identity: Mapping[str, Any], card: Mapping[str, Any]) -> dict[str, Any]:
+    state = card.get("page_state") or {}
+    return {
+        "prefix": identity["prefix"],
+        "season": identity["season"],
+        "state": state.get("key"),
+        "action": state.get("primary_action"),
+        "failure": state.get("failure"),
+        "tone": state.get("tone"),
+        "episode_count": int(card.get("item_count") or 0),
+        "bytes": int(card.get("total_size_bytes") or 0),
+    }
+
+
 def _library_totals(items: list[_Item]) -> dict[str, Any]:
     by_kind: dict[str, list[_Item]] = defaultdict(list)
     for item in items:

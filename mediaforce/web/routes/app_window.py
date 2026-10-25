@@ -12,6 +12,7 @@ def register_app_window_routes(
         app: FastAPI,
         *,
         main_window_payload: Callable[[], dict[str, Any]],
+        tv_shows_payload: Callable[[], dict[str, Any]],
         sample_payload: Callable[[str], dict[str, Any] | None],
         approve_sample_action: Callable[[str, Collection[str], str], dict[str, Any]],
         make_sample_action: Callable[[str, str | None], dict[str, Any]],
@@ -20,6 +21,10 @@ def register_app_window_routes(
     @app.get("/api/app/main-window")
     def api_app_main_window() -> JSONResponse:
         return JSONResponse(main_window_payload())
+
+    @app.get("/api/app/tv-shows")
+    def api_app_tv_shows() -> JSONResponse:
+        return JSONResponse(tv_shows_payload())
 
     @app.get("/api/app/samples/{prefix:path}")
     def api_app_sample(prefix: str) -> JSONResponse:

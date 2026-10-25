@@ -1,0 +1,68 @@
+import Foundation
+
+struct TVShowsFacts: Decodable, Sendable {
+    let shows: [Show]
+
+    struct Show: Decodable, Sendable, Identifiable {
+        let showPrefix: String
+        let show: String
+        let seasonCount: Int
+        let episodeCount: Int
+        let bytes: Int64
+        let estimatedSavedBytes: Int64?
+        let seasons: [Season]
+        var id: String { showPrefix }
+
+        var stateGroup: StateGroup { StateGroup(seasons) }
+        var stateRank: Int { stateGroup.rawValue }
+        var estimatedSavedSortBytes: Int64 { estimatedSavedBytes ?? -1 }
+
+        func matches(_ search: String) -> Bool {
+            search.isEmpty || show.localizedStandardContains(search)
+                || seasons.contains { $0.folder.localizedStandardContains(search) }
+        }
+    }
+
+    struct Season: Decodable, Sendable, Identifiable {
+        let prefix: String
+        let season: Int?
+        let state: String?
+        let action: String?
+        let failure: String?
+        let tone: String?
+        let episodeCount: Int
+        let bytes: Int64
+        var id: String { prefix }
+
+        static let sampleActions: Set<String> = ["make_sample", "retry_sample", "choose_size"]
+
+        var folder: String { prefix.split(separator: "/").last.map(String.init) ?? prefix }
+
+        var opensSample: Bool {
+            ["ready_to_compare", "needs_test", "ready_to_make"].contains(state) || (state == "needs_help" && action.map(Self.sampleActions.contains) == true)
+        }
+    }
+
+    // The same grouping as the web library's TV list, so a show reads the same in both.
+    enum StateGroup: Int, CaseIterable, Identifiable {
+        case needsYou, inProgress, readyForYou, noActiveWork
+
+        static let needsYouTones: Set<String> = ["attention", "fail", "wait"]
+
+        var id: Int { rawValue }
+
+        init(_ seasons: [Season]) {
+            let tones = Set(seasons.compactMap(\.tone))
+            let states = Set(seasons.compactMap(\.state))
+            if !tones.isDisjoint(with: Self.needsYouTones) {
+                self = .needsYou
+            } else if tones.contains("active") || states.contains("sample_waiting") {
+                self = .inProgress
+            } else if tones.contains("ready") || states.contains("needs_test") {
+                self = .readyForYou
+            } else {
+                self = .noActiveWork
+            }
+        }
+    }
+}
