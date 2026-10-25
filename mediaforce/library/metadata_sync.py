@@ -19,6 +19,7 @@ from mediaforce.core.db_tables import library_items, metadata_sync_state, plex_i
 from mediaforce.library.external_metadata import FetchImage, FetchJson, PlexClient, PlexPathMapping, PlexShow, \
     ProviderHttpError, TmdbClient, fetch_image, fetch_json, map_plex_part_path, plex_thumb_path, tmdb_id_from_guids
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
+from mediaforce.library.movie_workflow import classify_movie_path
 
 
 @dataclass(slots=True)
@@ -573,13 +574,16 @@ def _movie_prefix(
         *,
         library_types: Mapping[str, str] | None = None,
 ) -> str | None:
-    """A movie file's title folder ("movies/Title (Year)"), as the Mac app's movie list names it."""
+    """A movie's title prefix as the Mac app's movie list names it: its title folder ("movies/Title (Year)"), or the
+    file itself for a movie stored straight under the library root. Only the feature gives the title its poster, so
+    an extra Plex matched on its own can't make the poster a guess."""
     parts = Path(rel_path).parts
     root = parts[0] if parts else ""
     configured_type = str((library_types or {}).get(root) or "").strip().lower()
-    if len(parts) < 3 or (configured_type or root.lower()) not in {"movie", "movies"}:
+    if (configured_type or root.lower()) not in {"movie", "movies"}:
         return None
-    return "/".join(parts[:2])
+    membership = classify_movie_path(rel_path, root=root)
+    return membership.title_prefix if membership is not None and membership.role == "feature" else None
 
 
 def _normalized_local_path(value: str | None) -> str:
