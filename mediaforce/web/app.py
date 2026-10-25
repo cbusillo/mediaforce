@@ -151,7 +151,7 @@ from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_show_poster
 from mediaforce.web.runtime.app_samples import approve_sample, make_sample, sample_facts, start_compressing
-from mediaforce.web.runtime.app_window import app_window_payload
+from mediaforce.web.runtime.app_window import app_window_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
 from mediaforce.web.runtime.show_settings_runtime import prefixes_with_samples, use_show_settings
 from mediaforce.web.checked_output_preview import (
@@ -1169,6 +1169,10 @@ def create_app(
                 storage_admits_work=controller_storage_admission_issue(config, None) is None,
                 observed_at=datetime.now(UTC),
             )
+
+    def _tv_shows_payload() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            return tv_shows_payload([asdict(card) for card in _list_library_detail_cards(config, connection)])
 
     register_dashboard_routes(
         app,
@@ -2510,6 +2514,7 @@ def create_app(
     register_app_window_routes(
         app,
         main_window_payload=_main_window_payload,
+        tv_shows_payload=_tv_shows_payload,
         sample_payload=_app_sample_payload,
         approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
             prefix, confirm, draft_hash,

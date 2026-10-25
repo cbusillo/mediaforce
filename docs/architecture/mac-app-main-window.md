@@ -97,6 +97,23 @@ the chosen or recommended size. It answers `409` with `choose_size` when a
 size must be chosen, `choose_balance` when the season has no size and detail
 balance chosen yet (the app then offers the web page), or `refused`.
 
+## TV shows
+
+The TV shows page lists every show in the library. `GET /api/app/tv-shows`
+gives its facts, read from the same season cards as the main window's
+samples and only while the page is open: `shows`, biggest first, each with
+`show_prefix`, `show`, `season_count`, `episode_count`, `bytes`,
+`estimated_saved_bytes` (the seasons' projected savings, or null while any
+season's details are still loading) and `seasons` in season order. Each season
+has its `prefix`, `season` number (null for a folder without one), the page
+state codes `state`, `action`, `failure` and `tone`, its `episode_count`
+and `bytes`, `files_need_you` (compressing while some files already need the
+Director) and `checks_only` (approved, but starting it only runs motion-pattern
+checks first). The app groups a show by its seasons the way the web library
+does (needs you, in progress, ready for you, no active work), opens the sample
+page for a season whose sample waits on the Director, and opens the season's
+web page for anything else.
+
 ## Notifications and the Dock badge
 
 The app reads these facts every 30 seconds while it runs, even with its window
