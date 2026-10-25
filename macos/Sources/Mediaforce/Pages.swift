@@ -90,11 +90,11 @@ struct SpaceSavedPage: View {
                     Text(Words.season(season.show, season.season))
                 }
                 TableColumn("Episodes") { (season: MainWindowFacts.FinishedSeason) in
-                    Text("\(season.episodeCount)").monospacedDigit()
+                    Text("\(season.episodeCount + season.keptOriginalCount)").monospacedDigit()
                 }
                 .width(70)
                 TableColumn("Saved") { (season: MainWindowFacts.FinishedSeason) in
-                    Text(Words.size(season.bytesSaved)).monospacedDigit()
+                    Text(season.keptEntirelyOriginal ? Words.keptOriginal : Words.size(season.bytesSaved)).monospacedDigit()
                 }
                 .width(80)
                 TableColumn("Finished") { (season: MainWindowFacts.FinishedSeason) in

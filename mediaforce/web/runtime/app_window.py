@@ -147,7 +147,12 @@ def _promotions(connection: DBClient) -> dict[int, _Promotion]:
 
 def _kept_original_rows(connection: DBClient) -> dict[int, Mapping[str, Any]]:
     rows = connection.execute(
-        select(motion_keep_decisions.c.library_item_id, motion_keep_decisions.c.prefix, motion_keep_decisions.c.reason_code)
+        select(
+            motion_keep_decisions.c.library_item_id,
+            motion_keep_decisions.c.prefix,
+            motion_keep_decisions.c.reason_code,
+            motion_keep_decisions.c.kept_at,
+        )
         .select_from(motion_keep_decisions.join(library_items, motion_keep_decisions.c.library_item_id == library_items.c.id))
         .where(LIBRARY_ITEM_PRESENT, motion_keep_decisions.c.source_fingerprint == library_item_source_sql())
     ).mappings()
@@ -353,15 +358,19 @@ def _finished_seasons(
     items_by_id = {item.item_id: item for item in items}
     finished = []
     for season in seasons.values():
-        replaced = [promotions[item_id] for item_id in season.item_ids if item_id in promotions and items_by_id[item_id].promoted]
-        if not replaced or not all(_is_settled(item_id, items_by_id, kept) for item_id in season.item_ids):
+        if not all(_is_settled(item_id, items_by_id, kept) for item_id in season.item_ids):
             continue
+        replaced = [promotions[item_id] for item_id in season.item_ids if item_id in promotions and items_by_id[item_id].promoted]
+        kept_rows = [kept[item_id] for item_id in season.item_ids if item_id in kept]
+        if not replaced and not kept_rows:
+            continue
+        settled_at = [promotion.promoted_at or "" for promotion in replaced] + [str(row["kept_at"] or "") for row in kept_rows]
         finished.append({
             **season_identity(season.prefix),
             "episode_count": len(replaced),
-            "kept_original_count": sum(1 for item_id in season.item_ids if item_id in kept),
+            "kept_original_count": len(kept_rows),
             "bytes_saved": sum(promotion.bytes_saved for promotion in replaced),
-            "finished_at": max((promotion.promoted_at or "" for promotion in replaced), default="") or None,
+            "finished_at": max(settled_at) or None,
         })
     return sorted(finished, key=lambda finished_season: finished_season["finished_at"] or "", reverse=True)
 
@@ -372,7 +381,7 @@ def _space_saved(items: list[_Item], promotions: Mapping[int, _Promotion], finis
         "bytes": sum(promotions[item.item_id].bytes_saved for item in replaced),
         "item_count": len(replaced),
         "episode_count": sum(1 for item in replaced if item.kind == "tv"),
-        "season_count": len(finished),
+        "season_count": sum(1 for season in finished if season["episode_count"]),
     }
 
 

@@ -95,11 +95,13 @@ def _computer(key: str, **fields: Any) -> dict[str, Any]:
     }
 
 
-def _keep_original(connection: DBClient, item_id: int, rel_path: str, *, source_fingerprint: str | None = None) -> None:
+def _keep_original(
+        connection: DBClient, item_id: int, rel_path: str, *, source_fingerprint: str | None = None, at: str = NOW,
+) -> None:
     connection.execute(
         motion_keep_decisions.insert().values(
             library_item_id=item_id, source_fingerprint=source_fingerprint or f"fp-{rel_path}", reason_code="mixed",
-            prefix=str(Path(rel_path).parent), kept_at=NOW,
+            prefix=str(Path(rel_path).parent), kept_at=at,
         )
     )
     connection.commit()
@@ -143,7 +145,8 @@ def test_library_totals_count_present_files_and_bytes_still_original(connection:
 def test_season_is_finished_only_when_every_file_is_replaced_or_kept(connection: DBClient) -> None:
     _replaced(connection, "tv/Futurama/Season 3/e1.mkv", saved=100, at="2026-10-22T01:00:00+00:00")
     _replaced(connection, "tv/Futurama/Season 3/e2.mkv", saved=200, at="2026-10-22T02:00:00+00:00")
-    _keep_original(connection, _item(connection, "tv/Futurama/Season 3/e3.mkv"), "tv/Futurama/Season 3/e3.mkv")
+    kept_path = "tv/Futurama/Season 3/e3.mkv"
+    _keep_original(connection, _item(connection, kept_path), kept_path, at="2026-10-21T00:00:00+00:00")
     _replaced(connection, "tv/Futurama/Season 5/e1.mkv", saved=50, at=NOW)
     lapsed_path = "tv/Futurama/Season 5/e2.mkv"
     _keep_original(connection, _item(connection, lapsed_path), lapsed_path, source_fingerprint="an older source")
@@ -164,6 +167,26 @@ def test_season_is_finished_only_when_every_file_is_replaced_or_kept(connection:
     assert payload["kept_original"]["kept"] == [
         {**_identity("tv/Futurama/Season 3"), "reason": "motion_mixed", "item_count": 1},
     ]
+
+
+def test_season_kept_entirely_original_is_finished_without_counting_as_space_saved(connection: DBClient) -> None:
+    _replaced(connection, "tv/Lucifer/Season 1/e1.mkv", saved=700, at="2026-10-20T00:00:00+00:00")
+    for episode, at in (("e1", "2026-10-23T01:00:00+00:00"), ("e2", "2026-10-23T03:00:00+00:00")):
+        path = f"tv/Lucifer/Season 2/{episode}.mkv"
+        _keep_original(connection, _item(connection, path), path, at=at)
+    unsettled_path = "tv/Lucifer/Season 3/e1.mkv"
+    _keep_original(connection, _item(connection, unsettled_path), unsettled_path, at=NOW)
+    _item(connection, "tv/Lucifer/Season 3/e2.mkv")
+
+    payload = _payload(connection)
+
+    assert [season["prefix"] for season in payload["recently_finished_seasons"]] == [
+        "tv/Lucifer/Season 2", "tv/Lucifer/Season 1",
+    ]
+    kept_season = payload["recently_finished_seasons"][0]
+    assert (kept_season["episode_count"], kept_season["kept_original_count"], kept_season["bytes_saved"]) == (0, 2, 0)
+    assert kept_season["finished_at"] == "2026-10-23T03:00:00+00:00"
+    assert payload["space_saved"] == {"bytes": 700, "item_count": 1, "episode_count": 1, "season_count": 1}
 
 
 def _identity(prefix: str) -> dict[str, Any]:

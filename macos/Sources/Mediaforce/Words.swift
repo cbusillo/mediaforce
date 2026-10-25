@@ -214,6 +214,32 @@ extension Words {
         }
     }
 
+    static func finishedNotice(_ season: MainWindowFacts.FinishedSeason, keptReasons: [String]) -> String {
+        if season.keptEntirelyOriginal {
+            var reasons: [String] = []
+            for reason in keptReasons.map(keptReason) where !reasons.contains(reason) {
+                reasons.append(reason)
+            }
+            guard !reasons.isEmpty else { return "Every episode was kept original." }
+            return "Every episode was kept original: \(reasons.joined(separator: ", "))."
+        }
+        let kept = season.keptOriginalCount > 0 ? " \(count(season.keptOriginalCount, "episode")) kept original." : ""
+        return "\(count(season.episodeCount, "episode")) compressed, checked and replaced.\(kept) \(size(season.bytesSaved)) saved."
+    }
+
+    static func finishedSaved(_ season: MainWindowFacts.FinishedSeason) -> String {
+        season.keptEntirelyOriginal ? keptOriginal : "\(size(season.bytesSaved)) saved"
+    }
+
+    static func finishedSummary(_ season: MainWindowFacts.FinishedSeason) -> String {
+        let name = Words.season(season.show, season.season)
+        if season.keptEntirelyOriginal { return "\(name): every episode kept original" }
+        let kept = season.keptOriginalCount > 0 ? ", \(season.keptOriginalCount) kept original" : ""
+        return "\(name): \(count(season.episodeCount, "episode")) replaced\(kept), \(size(season.bytesSaved)) saved"
+    }
+
+    static let keptOriginal = "Kept original"
+
     static func holdReason(_ code: String) -> String {
         switch code {
         case "current_season": "still airing"
