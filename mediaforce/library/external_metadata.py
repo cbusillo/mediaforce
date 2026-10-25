@@ -11,11 +11,11 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 JSONPayload = dict[str, Any]
 FetchJson = Callable[[str, Mapping[str, str], float], tuple[JSONPayload, Mapping[str, str]]]
-FetchImage = Callable[[str, float], bytes]
+FetchImage = Callable[[str, Mapping[str, str], float], bytes]
 MAX_JSON_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_IMAGE_RESPONSE_BYTES = 5 * 1024 * 1024
-TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w342"
-TMDB_IMAGE_PATH = re.compile(r"^/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png)$")
+# A poster path Plex gives a show or movie, such as /library/metadata/123/thumb/1700000000.
+PLEX_THUMB_PATH = re.compile(r"^/library/metadata/[0-9]+/thumb(?:/[0-9]+)?$")
 MAX_PLEX_METADATA_ITEMS = 1_000_000
 
 
@@ -40,12 +40,14 @@ class PlexItem:
     added_at: str | None
     part_id: str | None
     part_path: str
+    thumb: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class PlexShow:
     rating_key: str
     guids: tuple[str, ...]
+    thumb: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +56,6 @@ class TmdbSeries:
     status: str | None
     in_production: bool | None
     genres: tuple[str, ...] = ()
-    poster_path: str | None = None
 
 
 class _SameOriginRedirectHandler(HTTPRedirectHandler):
@@ -98,10 +99,10 @@ def fetch_json(url: str, headers: Mapping[str, str], timeout_seconds: float) -> 
         raise ProviderHttpError(f"Provider request failed: {type(exc).__name__}") from exc
 
 
-def fetch_image(url: str, timeout_seconds: float) -> bytes:
+def fetch_image(url: str, headers: Mapping[str, str], timeout_seconds: float) -> bytes:
     opener = build_opener(_SameOriginRedirectHandler())
     try:
-        with opener.open(Request(url, method="GET"), timeout=timeout_seconds) as response:
+        with opener.open(Request(url, headers=dict(headers), method="GET"), timeout=timeout_seconds) as response:
             if not str(response.headers.get("Content-Type") or "").startswith("image/"):
                 raise ProviderHttpError("Provider image response was not an image")
             body = response.read(MAX_IMAGE_RESPONSE_BYTES + 1)
@@ -125,10 +126,12 @@ class PlexClient:
             client_identifier: str,
             timeout_seconds: float = 20.0,
             fetch_json_fn: FetchJson = fetch_json,
+            fetch_image_fn: FetchImage = fetch_image,
     ) -> None:
         self._base_url = base_url.rstrip("/") + "/"
         self._timeout_seconds = timeout_seconds
         self._fetch_json = fetch_json_fn
+        self._fetch_image = fetch_image_fn
         self._headers = {
             "Accept": "application/json",
             "X-Plex-Client-Identifier": client_identifier,
@@ -168,6 +171,7 @@ class PlexClient:
                         added_at=added_at,
                         part_id=str(part.get("id") or "").strip() or None,
                         part_path=part_path,
+                        thumb=plex_thumb_path(metadata.get("thumb")),
                     )
 
     def shows(self) -> Iterator[PlexShow]:
@@ -185,7 +189,15 @@ class PlexClient:
                 for value in guid_rows
                 if str(value.get("id") or "").strip()
             }))
-            yield PlexShow(rating_key=rating_key, guids=guids)
+            yield PlexShow(rating_key=rating_key, guids=guids, thumb=plex_thumb_path(metadata.get("thumb")))
+
+    def poster(self, thumb: str) -> bytes:
+        """The poster image at a thumb path Plex gave, sent with the token in a header rather than the URL."""
+        path = plex_thumb_path(thumb)
+        if path is None:
+            raise ProviderHttpError("Plex poster path was not a metadata thumb")
+        headers = {key: value for key, value in self._headers.items() if key != "Accept"}
+        return self._fetch_image(urljoin(self._base_url, path.lstrip("/")), headers, self._timeout_seconds)
 
     def _metadata(self, metadata_type: int, *, include_guids: bool = False) -> Iterator[JSONPayload]:
         page_size = 500
@@ -266,12 +278,11 @@ class TmdbClient:
             status=str(payload.get("status") or "").strip() or None,
             in_production=in_production if isinstance(in_production, bool) else None,
             genres=_tmdb_genre_names(payload.get("genres")),
-            poster_path=tmdb_image_path(payload.get("poster_path")),
         )
 
 
-def tmdb_image_path(value: object) -> str | None:
-    return value if isinstance(value, str) and TMDB_IMAGE_PATH.match(value) else None
+def plex_thumb_path(value: object) -> str | None:
+    return value if isinstance(value, str) and PLEX_THUMB_PATH.match(value) else None
 
 
 def _tmdb_genre_names(value: Any) -> tuple[str, ...]:

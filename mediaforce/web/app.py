@@ -150,7 +150,7 @@ from mediaforce.web.routes import register_app_window_routes, register_completed
     register_metadata_settings_routes, register_operator_work_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
-from mediaforce.library.metadata_sync import cached_show_poster, metadata_configuration_status
+from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status
 from mediaforce.web.runtime.app_samples import approve_sample, make_sample, sample_facts, start_compressing
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
@@ -1438,11 +1438,11 @@ def create_app(
         confirm_originals_removed_action=lambda prefixes: _confirm_originals_removed_action(prefixes),
     )
 
-    def _show_poster(show_prefix: str) -> Path | None:
+    def _title_poster(title_prefix: str) -> Path | None:
         with open_db(config.paths.db_path) as connection:
-            return cached_show_poster(connection, config.paths.poster_dir, show_prefix)
+            return cached_poster(connection, config.paths.poster_dir, title_prefix)
 
-    register_poster_routes(app, show_poster=_show_poster)
+    register_poster_routes(app, title_poster=_title_poster)
     register_host_routes(
         app,
         hosts_payload=_hosts_payload,

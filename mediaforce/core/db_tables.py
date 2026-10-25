@@ -281,11 +281,20 @@ series_metadata = Table(
     Column("tmdb_status", Text),
     Column("tmdb_in_production", Integer),
     Column("tmdb_genres_json", Text),
-    Column("tmdb_poster_path", Text),
     Column("tmdb_observed_at", Text),
     Column("updated_at", Text, nullable=False),
 )
 Index("idx_series_metadata_tmdb", series_metadata.c.tmdb_series_id)
+
+# Each show's or movie's poster as Plex shows it, by its title prefix ("tv/Show" or "movies/Title (Year)").
+# The thumb path changes when a different poster is chosen in Plex, so the cached image follows it.
+title_posters = Table(
+    "title_posters",
+    metadata,
+    Column("title_prefix", Text, primary_key=True),
+    Column("plex_thumb", Text, nullable=False),
+    Column("observed_at", Text, nullable=False),
+)
 
 metadata_sync_state = Table(
     "metadata_sync_state",

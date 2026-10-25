@@ -11,12 +11,13 @@ final class PosterStore {
         self.client = client
     }
 
-    func image(for showPrefix: String) -> NSImage? {
-        if !requested.contains(showPrefix) {
-            requested.insert(showPrefix)
-            Task { images[showPrefix] = await client.poster(showPrefix: showPrefix) }
+    /// A show's or movie's poster by its title prefix ("tv/Show" or "movies/Title (Year)"), fetched once.
+    func image(for titlePrefix: String) -> NSImage? {
+        if !requested.contains(titlePrefix) {
+            requested.insert(titlePrefix)
+            Task { images[titlePrefix] = await client.poster(titlePrefix: titlePrefix) }
         }
-        return images[showPrefix]
+        return images[titlePrefix]
     }
 }
 

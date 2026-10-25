@@ -43,8 +43,8 @@ struct MediaforceClient: Sendable {
         return try await decode(OtherMediaFacts.self, from: request)
     }
 
-    func poster(showPrefix: String) async -> NSImage? {
-        let url = baseURL.appending(path: "api/app/posters").appending(path: showPrefix)
+    func poster(titlePrefix: String) async -> NSImage? {
+        let url = baseURL.appending(path: "api/app/posters").appending(path: titlePrefix)
         guard let (data, response) = try? await session.data(from: url),
               (response as? HTTPURLResponse)?.statusCode == 200 else {
             return nil

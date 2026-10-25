@@ -164,7 +164,7 @@ class ReadPathPurityTests(unittest.TestCase):
         )
         hosts_endpoint = self._endpoint(app, "/api/hosts", "api_hosts")
         main_window_endpoint = self._endpoint(app, "/api/app/main-window", "api_app_main_window")
-        poster_endpoint = self._endpoint(app, "/api/app/posters/{show_prefix:path}", "api_app_show_poster")
+        poster_endpoint = self._endpoint(app, "/api/app/posters/{title_prefix:path}", "api_app_title_poster")
 
         unexpected_process = AssertionError("GET request attempted to launch a child process")
         with patch("subprocess.run", side_effect=unexpected_process) as run_mock, patch(
