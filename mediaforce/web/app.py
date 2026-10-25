@@ -146,11 +146,11 @@ from mediaforce.tuning.target_provenance import exact_item_target_provenance_blo
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_app_window_routes, register_completed_routes, \
     register_computer_settings_routes, register_dashboard_routes, register_folder_routes, register_frontend_routes, \
-    register_host_routes, register_library_settings_routes, register_operator_work_routes, register_queue_routes, \
-    register_settings_routes
+    register_host_routes, register_library_settings_routes, register_metadata_settings_routes, \
+    register_operator_work_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
-from mediaforce.library.metadata_sync import cached_show_poster
+from mediaforce.library.metadata_sync import cached_show_poster, metadata_configuration_status
 from mediaforce.web.runtime.app_samples import approve_sample, make_sample, sample_facts, start_compressing
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
@@ -317,6 +317,8 @@ from mediaforce.web.settings_runtime import (
     library_section_rows as _library_section_rows,
     library_settings_facts as _library_settings_facts_runtime,
     merge_runtime_settings_payload as _merge_runtime_settings_payload,
+    build_runtime_metadata_settings as _build_runtime_metadata_settings,
+    metadata_settings_facts as _metadata_settings_facts_runtime,
     normalize_encode_queue_scheduler as _normalize_encode_queue_scheduler,
     settings_archive_root as _settings_archive_root_runtime,
     settings_catalog_refresh_hours_for_config as _settings_catalog_refresh_hours_runtime,
@@ -1187,6 +1189,33 @@ def create_app(
             settings = None
         return {"ok": True, "settings": settings}
 
+    def _metadata_settings_facts() -> dict[str, Any]:
+        """The Plex and TMDB tab's connections and revision, both from one stored state."""
+        snapshot, revision = _settings_snapshot("metadata")
+        return _metadata_settings_facts_runtime(status=metadata_configuration_status(snapshot), revision=revision)
+
+    def _save_metadata_settings_action(
+            *,
+            plex: dict[str, Any],
+            tmdb: dict[str, Any],
+            revision: str,
+    ) -> dict[str, Any]:
+        """Save the Plex and TMDB tab alone; libraries, computers, schedules and size defaults stay as saved.
+
+        Like the other tabs, the payload is built from freshly loaded settings and written only if the stored
+        metadata section is still the revision the tab loaded, checked under the runtime settings lock.
+        """
+        nonlocal config
+        config = load_config(config.paths.config_path)
+        app.state.config = config
+        payload = _build_runtime_metadata_settings(plex=plex, tmdb=tmdb, saved=config.metadata)
+        _apply_settings_payload(payload, section="metadata", revision=revision)
+        try:
+            settings: dict[str, Any] | None = _metadata_settings_facts()
+        except SettingsValidationError:
+            settings = None
+        return {"ok": True, "settings": settings}
+
     def _library_type_preview_action(key: str, library_type: str) -> dict[str, Any]:
         definition = config.library_definition_map.get(key)
         if definition is None:
@@ -1340,6 +1369,11 @@ def create_app(
         app,
         computer_settings_facts=_computer_settings_facts,
         save_computer_settings_action=_save_computer_settings_action,
+    )
+    register_metadata_settings_routes(
+        app,
+        metadata_settings_facts=_metadata_settings_facts,
+        save_metadata_settings_action=_save_metadata_settings_action,
     )
     register_completed_routes(
         app,

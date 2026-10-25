@@ -866,6 +866,7 @@ SETTINGS_SECTION_KEYS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("encode_queue", "schedule_profiles"),
         ("heavy_queue",),
     ),
+    "metadata": (("metadata",),),
 }
 
 
@@ -910,6 +911,58 @@ def library_settings_facts(
         "types": [option["key"] for option in LIBRARY_TYPE_OPTIONS],
         "revision": revision,
     }
+
+
+def metadata_settings_facts(*, status: dict[str, Any], revision: str) -> dict[str, Any]:
+    """The Mac app's Plex and TMDB tab: each connection's on/off, the Plex address and whether its key is set.
+
+    `status` is `metadata_configuration_status`, which names the variable a key is read from and says only
+    whether it is set; no key value is ever part of these facts.
+    """
+    plex = status["plex"]
+    tmdb = status["tmdb"]
+    return {
+        "plex": {
+            "enabled": bool(plex["enabled"]),
+            "address": str(plex["base_url"]),
+            "key_name": str(plex["token_env"]),
+            "key_found": bool(plex["token_configured"]),
+        },
+        "tmdb": {
+            "enabled": bool(tmdb["enabled"]),
+            "key_name": str(tmdb["token_env"]),
+            "key_found": bool(tmdb["token_configured"]),
+        },
+        "revision": revision,
+    }
+
+
+def build_runtime_metadata_settings(
+        *,
+        plex: dict[str, Any],
+        tmdb: dict[str, Any],
+        saved: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the `metadata` runtime settings from the Plex and TMDB tab: on/off for each and the Plex address.
+
+    Key variable names, refresh intervals and the TMDB address carry over from `saved`, normalized as the website
+    save does. Every saved Plex path carries over verbatim, including one kept for a removed library, since the
+    Libraries side owns those paths and keeps them so a removal can be undone.
+    """
+    if not isinstance(plex.get("enabled"), bool) or not isinstance(tmdb.get("enabled"), bool):
+        raise SettingsValidationError("Choose on or off for Plex and TMDB.")
+    saved_plex = saved.get("plex") if isinstance(saved.get("plex"), dict) else {}
+    saved_tmdb = saved.get("tmdb") if isinstance(saved.get("tmdb"), dict) else {}
+    library_roots = saved_plex.get("library_roots") if isinstance(saved_plex.get("library_roots"), dict) else {}
+    normalized = normalize_metadata_settings(
+        {
+            "plex": {**saved_plex, "enabled": plex["enabled"], "base_url": _text(plex.get("address"))},
+            "tmdb": {**saved_tmdb, "enabled": tmdb["enabled"]},
+        },
+        known_library_keys=set(),
+    )
+    normalized["plex"]["library_roots"] = dict(library_roots)
+    return {"metadata": normalized}
 
 
 def library_key_references(raw: dict[str, Any]) -> set[str]:
@@ -1411,10 +1464,11 @@ def normalize_metadata_settings(
     payload = dict(raw) if isinstance(raw, dict) else {}
     plex = dict(payload.get("plex")) if isinstance(payload.get("plex"), dict) else {}
     tmdb = dict(payload.get("tmdb")) if isinstance(payload.get("tmdb"), dict) else {}
-    plex_base_url = _normalized_provider_url(plex.get("base_url"), allow_http=True)
+    plex_base_url = _normalized_provider_url(plex.get("base_url"), allow_http=True, code="plex_address_invalid")
     tmdb_base_url = _normalized_provider_url(
         tmdb.get("base_url") or "https://api.themoviedb.org/3",
         allow_http=False,
+        code="tmdb_address_invalid",
     )
     library_roots = {
         str(key): str(Path(str(value)).expanduser())
@@ -1438,16 +1492,18 @@ def normalize_metadata_settings(
     }
 
 
-def _normalized_provider_url(value: object, *, allow_http: bool) -> str:
+def _normalized_provider_url(value: object, *, allow_http: bool, code: str) -> str:
     text = str(value or "").strip().rstrip("/")
     if not text:
         return ""
     parsed = urlsplit(text)
     allowed_schemes = {"https"} | ({"http"} if allow_http else set())
     if parsed.scheme not in allowed_schemes or not parsed.netloc or parsed.username or parsed.password:
-        raise SettingsValidationError("Provider URLs must use an allowed HTTP scheme and cannot contain credentials.")
+        raise SettingsValidationError(
+            "Provider URLs must use an allowed HTTP scheme and cannot contain credentials.", code
+        )
     if parsed.query or parsed.fragment:
-        raise SettingsValidationError("Provider URLs cannot contain query parameters or fragments.")
+        raise SettingsValidationError("Provider URLs cannot contain query parameters or fragments.", code)
     return text
 
 

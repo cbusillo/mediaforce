@@ -8,7 +8,7 @@ from mediaforce.web.routes.operator_work import register_operator_work_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.web.routes.queues import register_queue_routes
 from mediaforce.web.routes.settings import register_computer_settings_routes, register_library_settings_routes, \
-    register_settings_routes
+    register_metadata_settings_routes, register_settings_routes
 
 __all__ = [
     "register_app_window_routes",
@@ -19,6 +19,7 @@ __all__ = [
     "register_folder_routes",
     "register_host_routes",
     "register_library_settings_routes",
+    "register_metadata_settings_routes",
     "register_operator_work_routes",
     "register_poster_routes",
     "register_queue_routes",

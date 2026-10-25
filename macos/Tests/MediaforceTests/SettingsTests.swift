@@ -196,4 +196,43 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(Set(words).count, codes.count)
         XCTAssertFalse(words.contains(Words.computerSaveRefused("invalid_settings")))
     }
+
+    private let metadataFacts = """
+    {"plex": {"enabled": true, "address": "http://plex.local:32400", "key_name": "MEDIAFORCE_PLEX_TOKEN",
+              "key_found": true},
+     "tmdb": {"enabled": false, "key_name": "MEDIAFORCE_TMDB_TOKEN", "key_found": false},
+     "revision": "m1"}
+    """
+
+    func testMetadataSettingsDecodeFromServerShape() throws {
+        let decoded = try JSONDecoder.mediaforce.decode(MetadataSettingsFacts.self, from: Data(metadataFacts.utf8))
+        XCTAssertEqual(decoded.plex, .init(
+            enabled: true, address: "http://plex.local:32400", keyName: "MEDIAFORCE_PLEX_TOKEN", keyFound: true
+        ))
+        XCTAssertEqual(decoded.tmdb, .init(enabled: false, keyName: "MEDIAFORCE_TMDB_TOKEN", keyFound: false))
+        XCTAssertEqual(decoded.revision, "m1")
+    }
+
+    func testMetadataSaveBodySendsOnlyWhatTheTabEdits() throws {
+        let decoded = try JSONDecoder.mediaforce.decode(MetadataSettingsFacts.self, from: Data(metadataFacts.utf8))
+        var draft = MetadataSettingsDraft(decoded)
+        draft.plex.address = " https://plex.example.com "
+        draft.tmdb.enabled = true
+
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder.mediaforce.encode(draft.saveBody)) as? NSDictionary
+        )
+        XCTAssertEqual(body, [
+            "plex": ["enabled": true, "address": "https://plex.example.com"],
+            "tmdb": ["enabled": true],
+            "revision": "m1",
+        ] as NSDictionary)
+    }
+
+    func testEveryMetadataRefusalCodeHasItsOwnWords() {
+        let codes = ["plex_address_invalid", "tmdb_address_invalid"]
+        let words = codes.map { Words.metadataSaveRefused($0) }
+        XCTAssertEqual(Set(words).count, codes.count)
+        XCTAssertFalse(words.contains(Words.metadataSaveRefused("invalid_settings")))
+    }
 }
