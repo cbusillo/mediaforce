@@ -451,6 +451,13 @@ extension Words {
     static let libraryName = "Name"
     static let libraryFolder = "Folder"
     static let libraryType = "Kind"
+    static let plexPath = "Path reported by Plex"
+    static let plexPathHelp = "Leave blank when Plex reports the same path Mediaforce uses."
+
+    static func plexPathSummary(_ path: String) -> String {
+        path.trimmingCharacters(in: .whitespaces).isEmpty ? "Plex: uses this folder" : "Plex: its own path"
+    }
+
     static let addLibrary = "Add Library"
     static let removeLibrary = "Remove"
     static let chooseFolder = "Choose…"
@@ -506,6 +513,8 @@ extension Words {
         case "library_type_unsupported": "Choose a kind for each library."
         case "library_type_unconfirmed": "A library's kind changed without its preview being confirmed. Choose the kind again."
         case "no_libraries": "Keep at least one library."
+        case "plex_path_relative": "A path reported by Plex must be a full path, starting with /."
+        case "plex_path_duplicate": "Two libraries use the same path reported by Plex. Each library needs its own."
         default: "Mediaforce couldn't save these settings. Check the libraries and folders."
         }
     }

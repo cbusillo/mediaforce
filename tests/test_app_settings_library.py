@@ -26,11 +26,11 @@ def _json_request(payload: dict[str, Any]) -> Request:
     )
 
 
-def _endpoint(app: FastAPI, method: str) -> Any:
+def _endpoint(app: FastAPI, method: str, path: str = "/api/app/settings/library") -> Any:
     for route in app.routes:
-        if isinstance(route, Route) and route.path == "/api/app/settings/library" and method in route.methods:
+        if isinstance(route, Route) and route.path == path and method in route.methods:
             return route.endpoint
-    raise AssertionError(f"{method} /api/app/settings/library is not registered")
+    raise AssertionError(f"{method} {path} is not registered")
 
 
 def _seed_runtime_settings(root: Path) -> dict[str, Any]:
@@ -110,7 +110,10 @@ def _save(app: FastAPI, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
 def _facts_body(app: FastAPI) -> dict[str, Any]:
     facts = json.loads(_endpoint(app, "GET")().body)
     return {
-        "libraries": [{key: library[key] for key in ("key", "name", "folder", "type")} for library in facts["libraries"]],
+        "libraries": [
+            {key: library[key] for key in ("key", "name", "folder", "type", "plex_path")}
+            for library in facts["libraries"]
+        ],
         "working_folder": facts["working_folder"],
         "catalog_refresh_hours": facts["catalog_refresh_hours"],
         "revision": facts["revision"],
@@ -165,6 +168,8 @@ def test_library_type_change_needs_the_preview_acknowledgement(library_app: tupl
         (lambda body: body["libraries"][0].update(folder="relative/tv"), "library_folder_not_absolute"),
         (lambda body: body["libraries"][0].update(folder=""), "library_incomplete"),
         (lambda body: body.update(libraries=[]), "no_libraries"),
+        (lambda body: body["libraries"][0].update(plex_path="plex/tv"), "plex_path_relative"),
+        (lambda body: body["libraries"][0].update(plex_path="/plex/movies/"), "plex_path_duplicate"),
     ],
 )
 def test_refused_library_save_writes_nothing_and_answers_with_a_code(
@@ -266,3 +271,77 @@ def test_settings_read_after_the_file_changed_shows_the_file_and_a_save_keeps_it
     media = json.loads(runtime_settings_path.read_text())["media"]
     assert (media["catalog_refresh_hours"], media["staging_root"]) == (24, str(tmp_path / "elsewhere"))
     assert [library["key"] for library in media["libraries"]] == ["tv", "movies", "home"]
+
+
+def test_plex_path_edit_changes_only_that_library(library_app: tuple[FastAPI, Path]) -> None:
+    app, runtime_settings_path = library_app
+    stored = json.loads(runtime_settings_path.read_text())
+    stored["metadata"]["plex"]["library_roots"]["removed_home"] = "/plex/home"
+    runtime_settings_path.write_text(json.dumps(stored), encoding="utf-8")
+    assert _save(app, _facts_body(app))[0] == 200  # a save without edits fills in each library's stored defaults
+    before = json.loads(runtime_settings_path.read_text())
+    other_tabs = ("computers", "metadata", "compression")
+    revisions = {tab: json.loads(_endpoint(app, "GET", f"/api/app/settings/{tab}")().body)["revision"] for tab in other_tabs}
+    body = _facts_body(app)
+    body["libraries"][0]["plex_path"] = "/plex/tv"
+
+    status, result = _save(app, body)
+
+    after = json.loads(runtime_settings_path.read_text())
+    assert status == 200
+    assert {key: after.get(key) for key in OTHER_SECTIONS} == {key: before.get(key) for key in OTHER_SECTIONS}
+    changed = [
+        (old["key"], new.get("plex_path"))
+        for old, new in zip(before["media"]["libraries"], after["media"]["libraries"], strict=True)
+        if old != new
+    ]
+    assert changed == [("tv", "/plex/tv")]
+    assert [library["plex_path"] for library in result["settings"]["libraries"]] == ["/plex/tv", "/plex/movies"]
+    assert {tab: json.loads(_endpoint(app, "GET", f"/api/app/settings/{tab}")().body)["revision"] for tab in other_tabs} == revisions
+
+
+def test_plex_path_facts_fall_back_to_the_plex_settings(library_app: tuple[FastAPI, Path]) -> None:
+    app, runtime_settings_path = library_app
+    stored = json.loads(runtime_settings_path.read_text())
+    stored["media"]["libraries"][1].pop("plex_path")
+    runtime_settings_path.write_text(json.dumps(stored), encoding="utf-8")
+
+    libraries = {library["key"]: library["plex_path"] for library in _facts_body(app)["libraries"]}
+
+    assert libraries == {"tv": "", "movies": "/plex/movies"}
+
+
+def test_clearing_a_plex_path_removes_only_that_librarys_kept_root(library_app: tuple[FastAPI, Path]) -> None:
+    app, runtime_settings_path = library_app
+    stored = json.loads(runtime_settings_path.read_text())
+    stored["metadata"]["plex"]["library_roots"].update(tv="/plex/tv", removed_home="/plex/home")
+    runtime_settings_path.write_text(json.dumps(stored), encoding="utf-8")
+    before = json.loads(runtime_settings_path.read_text())
+    body = _facts_body(app)
+    body["libraries"][1]["plex_path"] = ""
+
+    status, result = _save(app, body)
+
+    after = json.loads(runtime_settings_path.read_text())
+    assert status == 200
+    untouched = [key for key in OTHER_SECTIONS if key != "metadata"]
+    assert {key: after.get(key) for key in untouched} == {key: before.get(key) for key in untouched}
+    expected_metadata = json.loads(json.dumps(before["metadata"]))
+    del expected_metadata["plex"]["library_roots"]["movies"]
+    assert after["metadata"] == expected_metadata
+    movies = next(library for library in after["media"]["libraries"] if library["key"] == "movies")
+    assert not movies.get("plex_path")
+    assert [library["plex_path"] for library in result["settings"]["libraries"]] == ["/plex/tv", ""]
+
+
+def test_save_after_a_kept_plex_root_changed_elsewhere_is_refused(library_app: tuple[FastAPI, Path]) -> None:
+    app, runtime_settings_path = library_app
+    body = _facts_body(app)
+    stored = json.loads(runtime_settings_path.read_text())
+    stored["metadata"]["plex"]["library_roots"]["tv"] = "/plex/tv"
+    runtime_settings_path.write_text(json.dumps(stored), encoding="utf-8")
+    changed_elsewhere = runtime_settings_path.read_bytes()
+    body["libraries"][1]["plex_path"] = ""
+
+    assert _save(app, body) == (400, {"ok": False, "code": "settings_changed"})
+    assert runtime_settings_path.read_bytes() == changed_elsewhere

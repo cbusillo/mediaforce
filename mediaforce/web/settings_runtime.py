@@ -840,9 +840,9 @@ def build_runtime_media_settings(
         if plex_path:
             normalized_plex_path = Path(plex_path).expanduser()
             if not normalized_plex_path.is_absolute():
-                raise SettingsValidationError("Custom Plex paths must be absolute.")
+                raise SettingsValidationError("Custom Plex paths must be absolute.", "plex_path_relative")
             if str(normalized_plex_path) in seen_plex_paths:
-                raise SettingsValidationError("Each custom Plex path must be unique.")
+                raise SettingsValidationError("Each custom Plex path must be unique.", "plex_path_duplicate")
             plex_library_roots[normalized_key] = str(normalized_plex_path)
             seen_plex_paths.add(str(normalized_plex_path))
         library_definitions.append(
@@ -874,7 +874,7 @@ def build_runtime_media_settings(
 
 
 SETTINGS_SECTION_KEYS: dict[str, tuple[tuple[str, ...], ...]] = {
-    "library": (("media",),),
+    "library": (("media",), ("metadata", "plex", "library_roots")),
     "computers": (
         ("remote_hosts",),
         ("encode_queue", "scheduler"),
@@ -889,8 +889,9 @@ SETTINGS_SECTION_KEYS: dict[str, tuple[tuple[str, ...], ...]] = {
 def settings_section_revision(runtime_settings: dict[str, Any], section: str) -> str:
     """Names one stored Settings section, so a save built from it is refused once anything else has changed it.
 
-    Each section hashes only the runtime settings keys it saves (see `SETTINGS_SECTION_KEYS`), so saving one
-    section never makes another section's open form stale.
+    Each section hashes only the runtime settings keys it saves or shows (see `SETTINGS_SECTION_KEYS`), so saving
+    one section never makes another section's open form stale. The library section covers the Plex paths kept in
+    the metadata, which its facts fall back to and a cleared Plex path removes.
     """
     def _stored(path: tuple[str, ...]) -> Any:
         value: Any = runtime_settings
@@ -918,6 +919,7 @@ def library_settings_facts(
                 "name": str(row.get("label") or ""),
                 "folder": str(row.get("path") or ""),
                 "type": str(row.get("library_type") or ""),
+                "plex_path": str(row.get("plex_path") or ""),
             }
             for row in libraries
             if str(row.get("key") or "").strip()
@@ -1081,9 +1083,11 @@ def library_section_rows(
         saved_rows: list[dict[str, Any]],
         reserved_keys: Collection[str] = (),
 ) -> list[dict[str, Any]]:
-    """Turn the Libraries tab's name, folder and type edits into full library rows.
+    """Turn the Libraries tab's name, folder, type and Plex path edits into full library rows.
 
-    Settings the tab does not show (color, compression, policy, Plex path) carry over from the saved library.
+    Settings the tab does not show (color, compression, policy) carry over from the saved library, and so does the
+    Plex path when an item leaves it out. An empty Plex path clears it, as the website's blank field does; see
+    `cleared_plex_path_keys` for the Plex settings side of that.
     A type change starts that library over from the new type's defaults, as the website's confirmed change does,
     and a new library gets a root ID from its name that no saved library has and that `reserved_keys` (what the
     stored settings still mention, see `library_key_references`) does not hold, so it never inherits a removed
@@ -1096,6 +1100,8 @@ def library_section_rows(
         key = _text(item.get("key"))
         library_type = _text(item.get("type"))
         edits = {"label": _text(item.get("name")), "path": _text(item.get("folder")), "library_type": library_type}
+        if "plex_path" in item:
+            edits["plex_path"] = _text(item.get("plex_path"))
         previous = saved.get(key)
         if previous is None:
             key = key or _new_library_key(edits["label"], used_keys)
@@ -1116,6 +1122,36 @@ def library_section_rows(
             "type_change_confirmation": _text(item.get("type_change_confirmation")),
         })
     return rows
+
+
+def cleared_plex_path_keys(submitted: list[dict[str, Any]], saved_rows: list[dict[str, Any]]) -> set[str]:
+    """The saved libraries whose Plex path the Libraries tab sent back empty.
+
+    A saved library's Plex path may live only in `metadata.plex.library_roots`, which wins when the library entry
+    has none, so clearing it means removing that library's root there too (`without_plex_library_roots`).
+    """
+    had_path = {str(row.get("key") or "") for row in saved_rows if str(row.get("plex_path") or "").strip()}
+    return {
+        key
+        for item in submitted
+        if (key := _text(item.get("key"))) in had_path and "plex_path" in item and not _text(item.get("plex_path"))
+    }
+
+
+def without_plex_library_roots(runtime_settings: dict[str, Any], keys: Collection[str]) -> dict[str, Any]:
+    """`runtime_settings` without those libraries' `metadata.plex.library_roots` entries; nothing else changes."""
+    metadata = runtime_settings.get("metadata")
+    plex = metadata.get("plex") if isinstance(metadata, dict) else None
+    roots = plex.get("library_roots") if isinstance(plex, dict) else None
+    if not isinstance(roots, dict) or not set(keys) & set(roots):
+        return runtime_settings
+    return {
+        **runtime_settings,
+        "metadata": {
+            **metadata,
+            "plex": {**plex, "library_roots": {key: value for key, value in roots.items() if key not in keys}},
+        },
+    }
 
 
 def _new_library_key(name: str, used_keys: set[str]) -> str:

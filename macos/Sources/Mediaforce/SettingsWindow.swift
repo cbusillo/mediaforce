@@ -262,6 +262,13 @@ struct LibraryRowEditor: View {
                     .help(Words.removeLibrary)
             }
             FolderField(title: Words.libraryFolder, path: $row.library.folder)
+            DisclosureGroup(Words.plexPathSummary(row.library.plexPath)) {
+                TextField(Words.plexPath, text: $row.library.plexPath)
+                    .font(.body.monospaced())
+                Text(Words.plexPathHelp)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.vertical, 4)
     }
