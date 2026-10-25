@@ -11,6 +11,8 @@ struct TVShowsFacts: Decodable, Sendable {
         let bytes: Int64
         let estimatedSavedBytes: Int64?
         let seasons: [Season]
+        // Files directly in the show's folder, which no season covers; nil when there are none.
+        let looseFiles: LooseFiles?
         var id: String { showPrefix }
 
         var stateGroup: LibraryStateGroup { LibraryStateGroup(seasons) }
@@ -21,6 +23,12 @@ struct TVShowsFacts: Decodable, Sendable {
             search.isEmpty || show.localizedStandardContains(search)
                 || seasons.contains { $0.folder.localizedStandardContains(search) }
         }
+    }
+
+    struct LooseFiles: Decodable, Sendable {
+        let state: String
+        let episodeCount: Int
+        let bytes: Int64
     }
 
     struct Season: Decodable, Sendable, Identifiable {

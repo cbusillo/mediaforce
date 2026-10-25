@@ -10,10 +10,10 @@ final class TVShowsTests: XCTestCase {
         return #"{"prefix": "tv/Futurama/\#(folder)", "season": \#(seasonJSON), "state": "\#(state)", "action": \#(actionJSON), "failure": null, "tone": "\#(tone)", "episode_count": 13, "bytes": 4000000000}"#
     }
 
-    private func show(_ seasons: [String], estimate: String = "5100000000") throws -> TVShowsFacts.Show {
+    private func show(_ seasons: [String], estimate: String = "5100000000", looseFiles: String = "") throws -> TVShowsFacts.Show {
         let json = """
         {"shows": [{"show_prefix": "tv/Futurama", "show": "Futurama", "season_count": \(seasons.count), "episode_count": 26,
-                    "bytes": 8000000000, "estimated_saved_bytes": \(estimate), "seasons": [\(seasons.joined(separator: ", "))]}]}
+                    "bytes": 8000000000, "estimated_saved_bytes": \(estimate), "seasons": [\(seasons.joined(separator: ", "))]\(looseFiles)}]}
         """
         return try XCTUnwrap(JSONDecoder.mediaforce.decode(TVShowsFacts.self, from: Data(json.utf8)).shows.first)
     }
@@ -25,6 +25,29 @@ final class TVShowsTests: XCTestCase {
         XCTAssertEqual(decoded.seasons.map(\.season), [2, nil])
         XCTAssertEqual(decoded.seasons.map(Words.seasonName), ["Season 2", "Specials"])
         XCTAssertNil(try show([], estimate: "null").estimatedSavedBytes)
+        XCTAssertNil(decoded.looseFiles)
+    }
+
+    func testAShowWithOnlyFilesOutsideASeasonFolderIsListedAndSaysWhy() throws {
+        let loose = #", "loose_files": {"state": "not_in_season_folder", "episode_count": 3, "bytes": 2000000000}"#
+        let decoded = try show([], estimate: "0", looseFiles: loose)
+        let files = try XCTUnwrap(decoded.looseFiles)
+        XCTAssertEqual(decoded.id, "tv/Futurama")
+        XCTAssertEqual(files.state, "not_in_season_folder")
+        XCTAssertEqual(files.episodeCount, 3)
+        XCTAssertEqual(files.bytes, 2_000_000_000)
+        let many = Words.looseFiles(files)
+        XCTAssertTrue(many.hasPrefix("3 episodes (\(Words.size(2_000_000_000)))"), many)
+        let oneJSON = loose.replacingOccurrences(of: #""episode_count": 3"#, with: #""episode_count": 1"#)
+        let oneFile = try XCTUnwrap(try show([], looseFiles: oneJSON).looseFiles)
+        let one = Words.looseFiles(oneFile)
+        XCTAssertTrue(one.hasPrefix("1 episode ("), one)
+        // One file reads in the singular past its count, not as "1 episode aren't ... move them".
+        XCTAssertNotEqual(one.replacingOccurrences(of: "1 episode", with: "3 episodes"), many)
+    }
+
+    func testASeasonWithNothingLeftToCompressDoesNotSayItIsWaiting() {
+        XCTAssertNotEqual(Words.seasonState("no_work", nil), Words.seasonState(nil, nil))
     }
 
     func testAShowTakesTheMostUrgentStateOfItsSeasons() throws {
