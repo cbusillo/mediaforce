@@ -2,20 +2,38 @@ import AppKit
 import SwiftUI
 
 struct SettingsWindow: View {
-    let client: MediaforceClient
+    enum Tab: Hashable {
+        case libraries, compression, computers, metadata
+    }
+
+    let model: MainWindowModel
+    @State private var tab = Tab.libraries
+
+    private var client: MediaforceClient { model.client }
 
     var body: some View {
-        TabView {
+        TabView(selection: $tab) {
             LibrarySettingsTab(client: client)
                 .tabItem { Label(Words.librariesTab, systemImage: "books.vertical") }
+                .tag(Tab.libraries)
             CompressionSettingsTab(client: client)
                 .tabItem { Label(Words.compressionTab, systemImage: "arrow.down.right.and.arrow.up.left") }
-            ComputerSettingsTab(client: client)
+                .tag(Tab.compression)
+            ComputerSettingsTab(main: model)
                 .tabItem { Label(Words.computersTab, systemImage: "desktopcomputer") }
+                .tag(Tab.computers)
             MetadataSettingsTab(client: client)
                 .tabItem { Label(Words.metadataTab, systemImage: "network") }
+                .tag(Tab.metadata)
         }
         .frame(width: 760)
+        // Asked to show a computer, or the Computers tab, from a notification, the main window or the menu bar.
+        .onChange(of: model.settingsRequest, initial: true) { _, request in
+            guard let request else { return }
+            tab = .computers
+            model.requestedComputer = request.computer
+            model.settingsRequest = nil
+        }
     }
 }
 
@@ -319,9 +337,25 @@ final class ComputerSettingsModel {
     var notice: ActionNotice?
     var pendingComputerRemoval: ComputerSettingsDraft.ComputerRow?
     var pendingScheduleRemoval: ComputerSettingsDraft.ScheduleRow?
+    /// Each computer's setup facts from the server, by address; empty until they arrive.
+    private(set) var hosts: [String: HostsFacts.Host] = [:]
 
     init(client: MediaforceClient) {
         self.client = client
+    }
+
+    func loadHosts() async {
+        if let facts = try? await client.hosts() {
+            hosts = Dictionary(facts.hosts.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        }
+    }
+
+    /// Runs one fix, then reads the computers' state again so the page shows what changed.
+    func act(_ action: ComputerAction, _ address: String, password: String?, main: MainWindowModel) async -> HostActionResult? {
+        let result = try? await client.computerAction(action, address, password: password)
+        await loadHosts()
+        await main.refresh()
+        return result ?? HostActionResult(ok: false, message: ActionNotice.unanswered.message)
     }
 
     var hasChanges: Bool {
@@ -336,6 +370,7 @@ final class ComputerSettingsModel {
         } catch {
             loadFailed = true
         }
+        await loadHosts()
     }
 
     func revert() {
@@ -362,8 +397,11 @@ final class ComputerSettingsModel {
         do {
             let result = try await client.saveComputerSettings(draft.saveBody)
             if result.ok {
-                if let settings = result.settings { show(settings) } else { await load() }
+                // Said before the rows are rebuilt, so the list keeps the chosen computer by its place.
                 justSaved = true
+                if let settings = result.settings { show(settings) } else { await load() }
+                // A new or readdressed computer has its own setup facts.
+                await loadHosts()
             } else if result.code == "settings_changed" {
                 notice = .settingsChangedElsewhere
                 await load()
@@ -393,16 +431,18 @@ final class ComputerSettingsModel {
 }
 
 struct ComputerSettingsTab: View {
+    let main: MainWindowModel
     @State private var model: ComputerSettingsModel
 
-    init(client: MediaforceClient) {
-        _model = State(initialValue: ComputerSettingsModel(client: client))
+    init(main: MainWindowModel) {
+        self.main = main
+        _model = State(initialValue: ComputerSettingsModel(client: main.client))
     }
 
     var body: some View {
         Group {
             if let saved = model.saved, model.draft != nil {
-                ComputerSettingsForm(model: model, facts: saved)
+                ComputerSettingsForm(model: model, facts: saved, main: main)
             } else if model.loadFailed {
                 ServerStatusView(state: .unreachable) {
                     Task { await model.load() }
@@ -413,63 +453,66 @@ struct ComputerSettingsTab: View {
             }
         }
         .task { await model.load() }
+        // Recovery runs by itself in the background, so the fixes on offer can change while the tab is open.
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: MainWindowModel.refreshInterval)
+                await model.loadHosts()
+            }
+        }
         .alert(item: $model.notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
     }
 }
 
+/// Settings › Computers as a list and its detail: each computer with its state on the left, and the chosen one's
+/// state, fixes and settings on the right. Work windows are the last item, since every computer can use them.
 struct ComputerSettingsForm: View {
+    enum Pane: Hashable {
+        case computer(ComputerSettingsDraft.ComputerRow.ID)
+        case workWindows
+    }
+
     @Bindable var model: ComputerSettingsModel
     let facts: ComputerSettingsFacts
+    let main: MainWindowModel
+    @State private var selection: Pane?
+    // The chosen computer's stored id and its place in the list, so rebuilding the rows keeps it chosen, even when
+    // its address was edited. A save stores the list in the draft's order and numbers it afresh, so after a save the
+    // place is what holds; after a revert or reload the stored ids are unchanged, so the id is.
+    @State private var chosenID: String?
+    @State private var chosenIndex: Int?
 
     var body: some View {
         VStack(spacing: 0) {
-            Form {
-                if model.draft?.computers.isEmpty ?? true {
-                    Section(Words.computersSection) {
-                        Text(Words.noComputers)
-                            .foregroundStyle(.secondary)
+            HStack(spacing: 0) {
+                List(selection: $selection) {
+                    ForEach(computers.wrappedValue) { row in
+                        ComputerListRow(name: row.computer.name, state: state(row))
+                            .tag(Pane.computer(row.id))
                     }
+                    Label(Words.workWindowsItem, systemImage: "calendar")
+                        .tag(Pane.workWindows)
                 }
-                ForEach(computers) { $row in
-                    Section(row.computer.name.isEmpty ? Words.unnamedComputer : row.computer.name) {
-                        ComputerEditor(
-                            computer: $row.computer,
-                            facts: facts,
-                            schedules: model.draft?.schedules.map(\.schedule) ?? []
-                        )
-                        Button(Words.removeComputer, systemImage: "minus.circle", role: .destructive) {
-                            model.pendingComputerRemoval = row
-                        }
-                    }
-                }
-                Section {
+                .listStyle(.sidebar)
+                .safeAreaInset(edge: .bottom) {
                     Button(Words.addComputer, systemImage: "plus") {
                         model.draft?.addComputer(abilities: facts.abilities, mediaAccess: facts.mediaAccessOptions.first ?? "mounted")
+                        if let added = model.draft?.computers.last { selection = .computer(added.id) }
                     }
+                    .buttonStyle(.borderless)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
                 }
-                Section(Words.workWindowsSection) {
-                    if model.draft?.schedules.isEmpty ?? true {
-                        Text(Words.noWorkWindows)
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(schedules) { $row in
-                        WorkWindowEditor(schedule: $row.schedule, days: facts.days) {
-                            model.pendingScheduleRemoval = row
-                        }
-                    }
-                    Button(Words.addWorkWindow, systemImage: "plus") {
-                        model.draft?.addSchedule(days: facts.days)
-                    }
-                    Text(Words.workWindowHelp)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                .frame(width: 220)
+                Divider()
+                detail
+                    .frame(maxWidth: .infinity)
             }
-            .formStyle(.grouped)
             .disabled(model.saving)
             .onChange(of: model.draft) { model.edited() }
+            Divider()
             HStack {
                 if model.justSaved {
                     Text(Words.settingsSaved)
@@ -485,6 +528,21 @@ struct ComputerSettingsForm: View {
             .padding(16)
         }
         .frame(minHeight: 560)
+        .onChange(of: computers.wrappedValue.map(\.id), initial: true) { keepSelection() }
+        .onChange(of: selection) { _, chosen in
+            if case .computer(let id) = chosen {
+                chosenIndex = computers.wrappedValue.firstIndex { $0.id == id }
+                chosenID = chosenIndex.map { computers.wrappedValue[$0].computer.id }
+            }
+        }
+        // A notification or the menu bar asked for one computer.
+        .onChange(of: main.requestedComputer, initial: true) { _, requested in
+            guard let requested else { return }
+            if let row = computers.wrappedValue.first(where: { savedAddress($0) == requested }) {
+                selection = .computer(row.id)
+            }
+            main.requestedComputer = nil
+        }
         .confirmationDialog(
             Words.removeComputerTitle(model.pendingComputerRemoval?.computer.name ?? ""),
             isPresented: Binding(
@@ -513,12 +571,113 @@ struct ComputerSettingsForm: View {
         }
     }
 
+    @ViewBuilder
+    private var detail: some View {
+        switch selection {
+        case .computer(let id):
+            if let row = computers.first(where: { $0.id == id }) {
+                Form {
+                    Section {
+                        ComputerStatus(
+                            name: row.wrappedValue.computer.name,
+                            state: state(row.wrappedValue),
+                            host: model.hosts[savedAddress(row.wrappedValue)]
+                        ) { action, password in
+                            await model.act(action, savedAddress(row.wrappedValue), password: password, main: main)
+                        }
+                        // A different computer starts with no password typed and no earlier result.
+                        .id(row.wrappedValue.id)
+                    }
+                    Section(row.wrappedValue.computer.name.isEmpty ? Words.unnamedComputer : row.wrappedValue.computer.name) {
+                        ComputerEditor(
+                            computer: row.computer,
+                            facts: facts,
+                            schedules: model.draft?.schedules.map(\.schedule) ?? []
+                        )
+                        Button(Words.removeComputer, systemImage: "minus.circle", role: .destructive) {
+                            model.pendingComputerRemoval = row.wrappedValue
+                        }
+                    }
+                }
+                .formStyle(.grouped)
+            }
+        case .workWindows:
+            Form {
+                Section(Words.workWindowsSection) {
+                    if model.draft?.schedules.isEmpty ?? true {
+                        Text(Words.noWorkWindows)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(schedules) { $row in
+                        WorkWindowEditor(schedule: $row.schedule, days: facts.days) {
+                            model.pendingScheduleRemoval = row
+                        }
+                    }
+                    Button(Words.addWorkWindow, systemImage: "plus") {
+                        model.draft?.addSchedule(days: facts.days)
+                    }
+                    Text(Words.workWindowHelp)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+        case nil:
+            Text(Words.noComputers)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// The address the server knows this computer by: the saved one, while an edit to it is unsaved.
+    private func savedAddress(_ row: ComputerSettingsDraft.ComputerRow) -> String {
+        guard !row.computer.id.isEmpty else { return row.computer.address }
+        return facts.computers.first { $0.id == row.computer.id }?.address ?? row.computer.address
+    }
+
+    /// The state the main window's facts give this computer, matched by the address the server knows.
+    private func state(_ row: ComputerSettingsDraft.ComputerRow) -> String? {
+        main.facts?.computers.first { $0.key == savedAddress(row) }?.state
+    }
+
+    /// Keeps the chosen computer chosen when a load or save rebuilds the rows, else chooses the first.
+    private func keepSelection() {
+        let rows = computers.wrappedValue
+        if case .computer(let id) = selection, rows.contains(where: { $0.id == id }) { return }
+        if selection == .workWindows { return }
+        let byPlace = chosenIndex.flatMap { rows.indices.contains($0) ? rows[$0] : nil }
+        let byID = chosenID.flatMap { id in id.isEmpty ? nil : rows.first { $0.computer.id == id } }
+        let kept = (model.justSaved ? byPlace ?? byID : byID ?? byPlace) ?? rows.first
+        selection = kept.map { .computer($0.id) } ?? .workWindows
+    }
+
     private var computers: Binding<[ComputerSettingsDraft.ComputerRow]> {
         Binding(get: { model.draft?.computers ?? [] }, set: { model.draft?.computers = $0 })
     }
 
     private var schedules: Binding<[ComputerSettingsDraft.ScheduleRow]> {
         Binding(get: { model.draft?.schedules ?? [] }, set: { model.draft?.schedules = $0 })
+    }
+}
+
+/// A computer in the list: its name, and its state when the server has said.
+struct ComputerListRow: View {
+    let name: String
+    let state: String?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: Words.computerNeedsYou(state) ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(Words.computerNeedsYou(state) ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name.isEmpty ? Words.unnamedComputer : name)
+                Text(state.map(Words.computerState) ?? Words.computerNotHeardFrom)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.vertical, 3)
     }
 }
 
@@ -531,7 +690,6 @@ struct ComputerEditor: View {
         TextField(Words.computerName, text: $computer.name)
         VStack(alignment: .leading, spacing: 4) {
             TextField(Words.computerAddress, text: $computer.address)
-                .font(.body.monospaced())
             Text(Words.computerAddressHelp)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -572,7 +730,6 @@ struct ComputerEditor: View {
         }
         VStack(alignment: .leading, spacing: 4) {
             TextField(Words.wakeAddress, text: $computer.wakeAddress, prompt: Text(Words.wakeAddressPrompt))
-                .font(.body.monospaced())
             Text(Words.wakeAddressHelp)
                 .font(.caption)
                 .foregroundStyle(.secondary)

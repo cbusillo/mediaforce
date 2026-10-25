@@ -7,6 +7,7 @@ import SwiftUI
 struct MenuBarPanel: View {
     let model: MainWindowModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -103,8 +104,13 @@ struct MenuBarPanel: View {
     /// Brings the main window forward, on a page when one is named, and closes the panel.
     private func open(_ place: Place?) {
         NSApp.keyWindow?.close()
-        if let place { model.requestedPlace = place }
-        openWindow(id: MainWindow.id)
+        if case .computer(let key) = place {
+            model.settingsRequest = SettingsRequest(computer: key)
+            openSettings()
+        } else {
+            if let place { model.requestedPlace = place }
+            openWindow(id: MainWindow.id)
+        }
         NSApp.activate()
     }
 }
@@ -139,7 +145,7 @@ struct WaitingLine: View {
     private var symbol: String {
         switch notice.opens {
         case .spaceSaved: "trash"
-        case .computers: "desktopcomputer"
+        case .computer: "desktopcomputer"
         default: "film"
         }
     }
@@ -198,7 +204,7 @@ extension MainWindowFacts {
     /// Computers while work waits for one. Nil when the line names nothing to open.
     var statusOpens: Place? {
         if work.pausedByOwner || work.stopReasons.contains("storage_unavailable") { return nil }
-        if work.stopReasons.contains("no_computer_ready") { return .computers }
+        if work.stopReasons.contains("no_computer_ready") { return .computer(nil) }
         if work.runningCount > 0, let season = work.runningSeasons.first { return .item(season.prefix) }
         return nil
     }

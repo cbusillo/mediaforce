@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI, Request
 from starlette.routing import Route
 
+from mediaforce.library.library_settings import normalize_library_definition
 from mediaforce.web import app as web_app
 
 OTHER_SECTIONS = ("remote_hosts", "encode_queue", "video", "metadata", "folder_policy_overrides")
@@ -377,3 +378,9 @@ def test_library_save_rescans_when_a_plex_path_in_effect_changes(
         assert _save(app, body)[0] == 200
 
     assert schedule_scan.called is rescans
+
+
+def test_a_library_without_its_own_name_is_named_for_its_type() -> None:
+    assert normalize_library_definition({"path": "/media/tv"}, key="tv")["label"] == "TV"
+    assert normalize_library_definition({"path": "/media/kids"}, key="kids_shows")["label"] == "Kids Shows"
+    assert normalize_library_definition({"path": "/media/tv", "label": "Shows"}, key="tv")["label"] == "Shows"

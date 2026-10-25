@@ -78,7 +78,7 @@ struct Attention: Equatable, Sendable {
                 id: "computer:\(computer.key):\(computer.state)",
                 title: "\(computer.name ?? computer.key) needs you",
                 body: "\(Words.computerState(computer.state)). Open Mediaforce to fix it.",
-                opens: .computers
+                opens: .computer(computer.key)
             )
         }
         return samples + computers

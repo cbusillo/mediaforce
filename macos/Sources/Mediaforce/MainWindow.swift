@@ -14,6 +14,10 @@ final class MainWindowModel {
     var onFacts: ((MainWindowFacts) -> Void)?
     // Whether work was asked to run or pause and the server hasn't confirmed it yet; nil when nothing is pending.
     private(set) var switching: Bool?
+    // Settings › Computers was asked for, from a notification, a page or the menu bar; Settings takes it and clears it.
+    var settingsRequest: SettingsRequest?
+    // The computer Settings › Computers should show; its list takes it and clears it.
+    var requestedComputer: String?
     // Shows spot-checked on Space saved since the app opened.
     var checkedShows: Set<String> = []
     let client: MediaforceClient
@@ -77,6 +81,13 @@ final class MainWindowModel {
     }
 }
 
+/// A request to open Settings › Computers, on one computer when it names one. Each request is new, so asking for the
+/// same computer twice still opens it.
+struct SettingsRequest: Equatable {
+    let id = UUID()
+    let computer: String?
+}
+
 struct ActionNotice: Identifiable, Equatable {
     let id = UUID()
     let title: String
@@ -111,7 +122,9 @@ struct ActionNotice: Identifiable, Equatable {
 }
 
 enum Place: Hashable {
-    case library, spaceSaved, media, computers
+    case library, spaceSaved, media
+    // Settings › Computers, on one computer when it names one.
+    case computer(String?)
     case sample(String)
     case item(String)
 
@@ -128,7 +141,8 @@ enum Place: Hashable {
         switch self {
         case .sample(let prefix): "sample:\(prefix)"
         case .item(let prefix): "item:\(prefix)"
-        case .computers: "computers"
+        case .computer(let key?): "computer:\(key)"
+        case .computer(nil): "computer"
         case .library: "library"
         default: "spaceSaved"
         }
@@ -141,7 +155,9 @@ enum Place: Hashable {
         case ("item", let prefix?): self = .item(prefix)
         case ("library", nil): self = .library
         case ("spaceSaved", nil): self = .spaceSaved
-        case ("computers", nil): self = .computers
+        case ("computer", let key?): self = .computer(key)
+        // "computers" is what notifications sent before Computers moved into Settings carry.
+        case ("computer", nil), ("computers", nil): self = .computer(nil)
         default: return nil
         }
     }
@@ -152,6 +168,7 @@ struct MainWindow: View {
 
     let model: MainWindowModel
     @State private var place: Place? = .library
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Group {
@@ -166,11 +183,10 @@ struct MainWindow: View {
                             SpaceSavedPage(facts: facts, model: model)
                                 // Deleting backups changes what the page shows, so it reads its facts again at once.
                                 .id(facts.originalBackups.count)
-                        case .computers: ComputersPage(computers: facts.computers)
                         case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }
                         case .item(let prefix): ItemPage(prefix: prefix, model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
                         case .media: MediaPage(model: model) { place = .item($0) }
-                        default: LibraryPage(facts: facts, posters: model.posters) { place = .sample($0) }
+                        default: LibraryPage(facts: facts, posters: model.posters, openComputer: { openComputer($0) }) { place = .sample($0) }
                         }
                     }
                     .safeAreaInset(edge: .top, spacing: 0) {
@@ -200,12 +216,22 @@ struct MainWindow: View {
         // Initial too: the menu bar may ask for a page while it opens this window.
         .onChange(of: model.requestedPlace, initial: true) { _, requested in
             guard let requested else { return }
-            place = requested
+            if case .computer(let key) = requested {
+                openComputer(key)
+            } else {
+                place = requested
+            }
             model.requestedPlace = nil
         }
         .alert(item: Bindable(model).notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
+    }
+
+    /// Computers live in Settings › Computers; this opens it, on one computer when it names one.
+    private func openComputer(_ key: String?) {
+        model.settingsRequest = SettingsRequest(computer: key)
+        openSettings()
     }
 }
 
@@ -257,10 +283,6 @@ struct Sidebar: View {
                 // No count: the page counts shows, titles and folders, while the facts count other media by file.
                 Label(Words.media, systemImage: "film.stack")
                     .tag(Place.media)
-                Section {
-                    Label("Computers", systemImage: "desktopcomputer")
-                        .tag(Place.computers)
-                }
             }
             .listStyle(.sidebar)
             BackupsRow(backups: facts.originalBackups) { place = .spaceSaved }
