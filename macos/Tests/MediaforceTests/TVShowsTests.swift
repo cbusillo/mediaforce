@@ -61,6 +61,20 @@ final class TVShowsTests: XCTestCase {
         XCTAssertFalse(decoded.filter(\.opensSample).contains { Words.seasonButton($0) == Words.openInBrowser })
     }
 
+    func testCompressingWithFilesThatNeedYouAndMotionChecksFirstAreSaid() throws {
+        func flagged(_ json: String, _ flag: String) -> String {
+            json.replacingOccurrences(of: #""bytes": 4000000000}"#, with: #""bytes": 4000000000, "\#(flag)": true}"#)
+        }
+        let compressing = season(1, state: "making_season", tone: "active")
+        let approved = season(2, state: "ready_to_make", tone: "ready", action: "queue_encode")
+        let decoded = try show([compressing, approved, flagged(compressing, "files_need_you"), flagged(approved, "checks_only")]).seasons
+        XCTAssertEqual(decoded.map(\.filesNeedYou), [false, false, true, false])
+        XCTAssertEqual(decoded.map(\.checksOnly), [false, false, false, true])
+        XCTAssertNotEqual(Words.tvSeasonState(decoded[2]), Words.tvSeasonState(decoded[0]))
+        XCTAssertNotEqual(Words.tvSeasonState(decoded[3]), Words.tvSeasonState(decoded[1]))
+        XCTAssertEqual(Words.seasonButton(decoded[3]), Words.startCompressing)
+    }
+
     func testSearchMatchesTheShowOrASeasonFolder() throws {
         let decoded = try show([season(2, state: "needs_test", tone: "quiet"), season(nil, state: "needs_test", tone: "quiet")])
         XCTAssertTrue(decoded.matches(""))

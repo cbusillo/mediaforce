@@ -32,7 +32,27 @@ struct TVShowsFacts: Decodable, Sendable {
         let tone: String?
         let episodeCount: Int
         let bytes: Int64
+        var filesNeedYou = false
+        var checksOnly = false
         var id: String { prefix }
+
+        enum CodingKeys: CodingKey {
+            case prefix, season, state, action, failure, tone, episodeCount, bytes, filesNeedYou, checksOnly
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            prefix = try container.decode(String.self, forKey: .prefix)
+            season = try container.decodeIfPresent(Int.self, forKey: .season)
+            state = try container.decodeIfPresent(String.self, forKey: .state)
+            action = try container.decodeIfPresent(String.self, forKey: .action)
+            failure = try container.decodeIfPresent(String.self, forKey: .failure)
+            tone = try container.decodeIfPresent(String.self, forKey: .tone)
+            episodeCount = try container.decode(Int.self, forKey: .episodeCount)
+            bytes = try container.decode(Int64.self, forKey: .bytes)
+            filesNeedYou = try container.decodeIfPresent(Bool.self, forKey: .filesNeedYou) ?? false
+            checksOnly = try container.decodeIfPresent(Bool.self, forKey: .checksOnly) ?? false
+        }
 
         static let sampleActions: Set<String> = ["make_sample", "retry_sample", "choose_size"]
 

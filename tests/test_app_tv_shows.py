@@ -39,13 +39,32 @@ def test_seasons_group_into_shows_with_their_totals_biggest_show_first() -> None
     assert [season["season"] for season in futurama["seasons"]] == [2, 10, None]
     assert futurama["seasons"][0] == {
         "prefix": "tv/Futurama/Season 2", "season": 2, "state": "ready_to_compare", "action": "review_sample",
-        "failure": None, "tone": "ready", "episode_count": 20, "bytes": 3000,
+        "failure": None, "tone": "ready", "episode_count": 20, "bytes": 3000, "files_need_you": False,
+        "checks_only": False,
     }
 
 
 def test_a_show_has_no_estimate_while_any_season_is_still_loading() -> None:
     shows = tv_shows_payload([_card("tv/ER/Season 1"), _card("tv/ER/Season 2", loading=True)])["shows"]
     assert shows[0]["estimated_saved_bytes"] is None
+
+
+def test_seasons_say_when_files_need_the_owner_or_only_motion_checks_can_start() -> None:
+    compressing = _card("tv/ER/Season 1", key="making_season", tone="active", action=None)
+    approved = _card("tv/ER/Season 2", key="ready_to_make", tone="ready", action="queue_encode")
+    seasons = tv_shows_payload([
+        compressing | {"review_badge_label": "Needs attention"},
+        approved | {"lifecycle": {"eligible_candidate_count": 0, "motion_check_candidate_count": 3}},
+        compressing | {"prefix": "tv/ER/Season 3", "review_badge_label": "Compressing"},
+        approved | {"prefix": "tv/ER/Season 4", "lifecycle": {"eligible_candidate_count": 2, "motion_check_candidate_count": 3}},
+        _card("tv/ER/Season 5") | {
+            "review_badge_label": "Needs attention",
+            "lifecycle": {"eligible_candidate_count": 0, "motion_check_candidate_count": 3},
+        },
+    ])["shows"][0]["seasons"]
+    assert [(season["files_need_you"], season["checks_only"]) for season in seasons] == [
+        (True, False), (False, True), (False, False), (False, False), (False, False),
+    ]
 
 
 def test_the_route_serves_the_shows() -> None:

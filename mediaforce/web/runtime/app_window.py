@@ -207,6 +207,7 @@ def _tv_show(show_prefix: str, seasons: list[tuple[dict[str, Any], Mapping[str, 
 
 def _tv_season(identity: Mapping[str, Any], card: Mapping[str, Any]) -> dict[str, Any]:
     state = card.get("page_state") or {}
+    lifecycle = card.get("lifecycle") or {}
     return {
         "prefix": identity["prefix"],
         "season": identity["season"],
@@ -216,6 +217,13 @@ def _tv_season(identity: Mapping[str, Any], card: Mapping[str, Any]) -> dict[str
         "tone": state.get("tone"),
         "episode_count": int(card.get("item_count") or 0),
         "bytes": int(card.get("total_size_bytes") or 0),
+        # A compressing season still says so when some of its files already need the owner.
+        "files_need_you": state.get("key") == "making_season"
+        and "attention" in str(card.get("review_badge_label") or "").lower(),
+        # An approved season whose action only starts motion-pattern checks says so, not that it compresses now.
+        "checks_only": state.get("key") == "ready_to_make"
+        and lifecycle.get("eligible_candidate_count") == 0
+        and int(lifecycle.get("motion_check_candidate_count") or 0) > 0,
     }
 
 

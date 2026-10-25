@@ -367,6 +367,12 @@ extension Words {
         season.season.map { "Season \($0)" } ?? season.folder
     }
 
+    static func tvSeasonState(_ season: TVShowsFacts.Season) -> String {
+        if season.filesNeedYou { return "Compressing. Some files need you." }
+        if season.checksOnly { return "Approved. Motion-pattern checks run first." }
+        return seasonState(season.state, season.action)
+    }
+
     static func seasonButton(_ season: TVShowsFacts.Season) -> String {
         guard season.opensSample else { return openInBrowser }
         return season.action == "queue_encode" ? startCompressing : sampleAction(season.action) ?? sample

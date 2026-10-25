@@ -4,7 +4,8 @@ struct TVShowsPage: View {
     let model: MainWindowModel
     let openSample: (String) -> Void
     @State private var facts: TVShowsFacts?
-    @State private var unreadable = false
+    @State private var refreshFailed = false
+    @State private var lastHeard: Date?
     @State private var search = ""
     @State private var stateGroup: TVShowsFacts.StateGroup?
     @State private var selected: TVShowsFacts.Show.ID?
@@ -15,6 +16,10 @@ struct TVShowsPage: View {
         PageFrame(title: Words.tvShows) {
             if let facts {
                 let shows = visibleShows(facts)
+                if refreshFailed {
+                    StaleNotice(connection: .failing, lastHeard: lastHeard)
+                        .padding(.horizontal, -34)
+                }
                 HStack(spacing: 12) {
                     TextField(Words.searchShows, text: $search)
                         .textFieldStyle(.roundedBorder)
@@ -41,7 +46,7 @@ struct TVShowsPage: View {
                     Text(Words.chooseShow)
                         .foregroundStyle(.secondary)
                 }
-            } else if unreadable {
+            } else if refreshFailed {
                 Text(Words.staleNotice(.failing, lastHeard: nil))
                     .foregroundStyle(.secondary)
             } else {
@@ -61,9 +66,10 @@ struct TVShowsPage: View {
         while !Task.isCancelled {
             do {
                 facts = try await model.client.tvShows()
-                unreadable = false
+                refreshFailed = false
+                lastHeard = .now
             } catch {
-                unreadable = facts == nil
+                refreshFailed = true
             }
             try? await Task.sleep(for: MainWindowModel.refreshInterval)
         }
@@ -130,7 +136,7 @@ struct TVSeasonList: View {
                         Text(Words.size(season.bytes))
                             .monospacedDigit()
                             .gridColumnAlignment(.trailing)
-                        Text(Words.seasonState(season.state, season.action))
+                        Text(Words.tvSeasonState(season))
                             .help(Words.sampleFailure(season.failure) ?? "")
                         Button(Words.seasonButton(season)) {
                             if season.opensSample {
