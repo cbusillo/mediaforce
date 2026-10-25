@@ -1049,6 +1049,11 @@ extension Words {
         case .replaceOriginals: "No originals were replaced"
         case .retryUnfinished: "Nothing was retried"
         case .keepMotionOriginals: "Nothing was kept original"
+        }
+    }
+}
+
+extension Words {
     static let media = "Media"
     static let seasonsHeading = "Seasons"
     static let kindLabel = "Kind"
