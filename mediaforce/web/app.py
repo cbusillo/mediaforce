@@ -151,7 +151,7 @@ from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_show_poster
 from mediaforce.web.runtime.app_samples import approve_sample, make_sample, sample_facts, start_compressing
-from mediaforce.web.runtime.app_window import app_window_payload, tv_shows_payload
+from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
 from mediaforce.web.runtime.show_settings_runtime import prefixes_with_samples, use_show_settings
 from mediaforce.web.checked_output_preview import (
@@ -2515,6 +2515,7 @@ def create_app(
         app,
         main_window_payload=_main_window_payload,
         tv_shows_payload=_tv_shows_payload,
+        movies_payload=lambda: movies_payload(_dashboard_movie_library_details_payload()["titles"]),
         sample_payload=_app_sample_payload,
         approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
             prefix, confirm, draft_hash,

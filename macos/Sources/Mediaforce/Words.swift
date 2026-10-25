@@ -354,7 +354,7 @@ extension Words {
     static let chooseShow = "Choose a show to see its seasons."
     static let notKnownYet = "Not known yet"
 
-    static func tvShowState(_ group: TVShowsFacts.StateGroup) -> String {
+    static func libraryState(_ group: LibraryStateGroup) -> String {
         switch group {
         case .needsYou: "Needs you"
         case .inProgress: "In progress"
@@ -378,7 +378,36 @@ extension Words {
         return season.action == "queue_encode" ? startCompressing : sampleAction(season.action) ?? sample
     }
 
-    static func showsShown(_ shown: Int, of total: Int) -> String {
-        shown == total ? count(total, "show") : "\(shown.formatted()) of \(count(total, "show"))"
+    static func shown(_ shown: Int, of total: Int, _ noun: String) -> String {
+        shown == total ? count(total, noun) : "\(shown.formatted()) of \(count(total, noun))"
+    }
+}
+
+extension Words {
+    static let movies = "Movies"
+    static let titleColumn = "Title"
+    static let filesColumn = "Files"
+    static let searchMovies = "Search movies"
+    static let noMatchingMovies = "No movies match."
+    static let chooseMovie = "Choose a movie to see more about it."
+
+    static func movieState(_ code: String) -> String {
+        switch code {
+        case "view_only": "View only"
+        case "finished": "Finished"
+        case "cannot_start": "Can't start"
+        case "needs_file_choice": "Needs a file choice"
+        case "motion_held": "Stays original"
+        case "needs_attention": "Needs attention"
+        case "compressing": "Compressing"
+        case "ready": "Ready for you"
+        default: "No work needed"
+        }
+    }
+
+    static func movieDetail(_ movie: MoviesFacts.Movie) -> String {
+        let place = movie.library.map { " in \($0)" } ?? ""
+        let saved = movie.estimatedSavedBytes.map { "About \(size($0)) could be saved." } ?? "No estimate of space saved yet."
+        return "\(movieState(movie.state)). \(count(movie.fileCount, "file")), \(size(movie.bytes))\(place). \(saved)"
     }
 }

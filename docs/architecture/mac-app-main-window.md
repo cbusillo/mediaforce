@@ -114,6 +114,20 @@ does (needs you, in progress, ready for you, no active work), opens the sample
 page for a season whose sample waits on the Director, and opens the season's
 web page for anything else.
 
+## Movies
+
+The Movies page lists every movie title in the library. `GET /api/app/movies`
+gives its facts, built from the same titles as the web movie library's details
+and read only while the page is open: `movies`, biggest first, each with
+`prefix`, `title`, `library` (the movie library's name), `file_count`,
+`bytes`, `estimated_saved_bytes` (the title's projected savings, or null while
+its details load or no sample measured it) and one `state` code. `state` is
+the web movie library's state group, checked in its order: `view_only`,
+`finished`, `cannot_start`, `needs_file_choice`, `motion_held`,
+`needs_attention`, `compressing`, `ready` or `no_work`. The app groups those
+codes the same way as TV shows (needs you, in progress, ready for you, no
+active work) and opens a movie's web page for anything it does.
+
 ## Notifications and the Dock badge
 
 The app reads these facts every 30 seconds while it runs, even with its window
