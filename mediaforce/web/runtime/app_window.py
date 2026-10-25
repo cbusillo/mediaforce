@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
-from mediaforce.encoding.encode_queue import count_pending_encode_work, load_queue_state
+from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, count_pending_encode_work, load_queue_state
 from mediaforce.library.candidate_selection import SEASON_PATTERN
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_source_sql
@@ -508,12 +508,24 @@ def _work(
         "paused_by_owner": paused,
         "stop_reasons": stop_reasons,
         "running_count": running_count,
+        "running_seasons": _running_seasons(connection),
         "waiting_count": waiting_count,
         "storage": [
             {"mount_point": mount.get("mount_point"), "status": mount.get("status"), "failure": mount.get("last_failure_kind")}
             for mount in controller_storage.get("mounts") or []
         ],
     }
+
+
+def _running_seasons(connection: DBClient) -> list[dict[str, Any]]:
+    """The seasons or titles being compressed now, oldest job first, each named once."""
+    prefixes = connection.execute(
+        select(encode_jobs.c.prefix)
+        .where(encode_jobs.c.status == "running")
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+        .order_by(encode_jobs.c.created_at.asc())
+    ).scalars().all()
+    return [season_identity(prefix) for prefix in dict.fromkeys(str(prefix) for prefix in prefixes)]
 
 
 def _computer(row: Mapping[str, Any]) -> dict[str, Any]:

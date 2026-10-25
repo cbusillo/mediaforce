@@ -78,6 +78,10 @@ struct MediaforceClient: Sendable {
         baseURL.appending(path: path)
     }
 
+    func lookForNewFiles() async throws {
+        _ = try await post("api/catalog/refresh")
+    }
+
     func pause() async throws {
         _ = try await post("api/encode-queue/pause")
     }
