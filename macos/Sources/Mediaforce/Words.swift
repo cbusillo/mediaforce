@@ -1050,6 +1050,7 @@ extension Words {
         case .retryUnfinished: "Nothing was retried"
         case .keepMotionOriginals: "Nothing was kept original"
     static let media = "Media"
+    static let seasonsHeading = "Seasons"
     static let kindLabel = "Kind"
     static let viewLabel = "View"
     static let tableView = "Show as a table"

@@ -149,7 +149,7 @@ struct MainWindow: View {
                         case .spaceSaved: SpaceSavedPage(facts: facts)
                         case .computers: ComputersPage(computers: facts.computers)
                         case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }
-                        case .item(let prefix): ItemPage(prefix: prefix, model: model) { place = .sample($0) }
+                        case .item(let prefix): ItemPage(prefix: prefix, model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
                         case .media: MediaPage(model: model) { place = .item($0) }
                         default: LibraryPage(facts: facts, posters: model.posters) { place = .sample($0) }
                         }

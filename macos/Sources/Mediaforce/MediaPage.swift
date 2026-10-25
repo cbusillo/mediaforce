@@ -37,6 +37,11 @@ struct MediaPage: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
+            if rows.contains(where: \.listCutShort) && (kind == .everything || kind == .other) {
+                Text(Words.otherMediaTruncated)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             if visible.isEmpty {
                 Text(Words.noMatchingMedia).foregroundStyle(.secondary)
             } else if view == .posters {
@@ -71,6 +76,8 @@ struct MediaRow: Identifiable, Sendable {
     let bytes: Int64
     let saved: Int64?
     let state: LibraryStateGroup
+    // The server's Other media listing stopped at its cap, so this list is not the whole library.
+    var listCutShort = false
 
     var savedBytes: Int64 { (saved ?? 0) > 0 ? saved ?? 0 : 0 }
     var stateRank: Int { state.rawValue }
@@ -89,7 +96,7 @@ struct MediaRow: Identifiable, Sendable {
                      bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)
         } + others.items.map {
             MediaRow(id: $0.prefix, name: $0.title, kind: .other, detail: Words.count($0.fileCount, "file"),
-                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)
+                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup, listCutShort: others.truncated)
         }
         // What needs the Director comes first, then the biggest.
         return rows.sorted { ($0.stateRank, -$0.bytes) < ($1.stateRank, -$1.bytes) }
