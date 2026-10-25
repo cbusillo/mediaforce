@@ -142,6 +142,35 @@ library's state group, checked in its order: `cannot_start`, `view_only`,
 media number counts files; the page counts folders and files and names the
 files they hold, which match that number unless `truncated`.
 
+## Settings
+
+Mediaforce > Settings… (⌘,) opens the Settings window, one tab per section of
+the web settings page. The Libraries tab is the web page's library and working
+space: each library's name, folder and kind, the working folder, and how often
+Mediaforce looks for new files.
+
+`GET /api/app/settings/library` gives `libraries` (each `key`, `name`,
+`folder`, `type`), `working_folder`, `catalog_refresh_hours`, the `types`
+a library can be and `revision`, a hash of the stored `media` section.
+The fields and the revision come from one stored state: the read reloads the
+settings and retries while the file changes underneath it, answering `409`
+`settings_changed` if it keeps changing.
+`POST /api/app/settings/library` takes the same fields, including that
+`revision`, and is refused with `settings_changed`, writing nothing, when the
+stored section no longer matches it under the runtime settings lock; the app
+then says so and reloads. It
+saves only the runtime settings `media` keys, with the same validation, type
+change binding, rescan and reload as the web save; computers, schedules, size
+defaults and metadata stay as saved. A library with an empty `key` is new and
+gets one from its name that no saved library has and that the stored
+settings do not still mention (Plex paths, folder overrides, computers), so it
+never inherits a removed library's retained settings. Settings the tab does not show carry over from the
+saved library; a confirmed kind change starts from the new kind's defaults,
+as on the web. A saved library changes kind only with the
+`type_change_confirmation` from `POST /api/settings/library-type-preview`,
+and removing a library asks first. A refusal answers `400` with
+`{"ok": false, "code": ...}` and writes nothing.
+
 ## Notifications and the Dock badge
 
 The app reads these facts every 30 seconds while it runs, even with its window

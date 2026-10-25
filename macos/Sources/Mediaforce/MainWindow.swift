@@ -97,15 +97,8 @@ struct ActionNotice: Identifiable, Equatable {
 }
 
 enum Place: Hashable {
-    case library, spaceSaved, keptOriginal, tv, movies, otherMedia, computers, settings
+    case library, spaceSaved, keptOriginal, tv, movies, otherMedia, computers
     case sample(String)
-
-    static func webPath(_ place: Place) -> String? {
-        switch place {
-        case .settings: "settings"
-        default: nil
-        }
-    }
 }
 
 struct MainWindow: View {
@@ -136,11 +129,6 @@ struct MainWindow: View {
                             StaleNotice(connection: model.connection, lastHeard: model.lastHeard)
                         }
                     }
-                }
-                .onChange(of: place) { previous, chosen in
-                    guard let path = chosen.flatMap(Place.webPath) else { return }
-                    NSWorkspace.shared.open(model.client.webPage(path))
-                    place = previous
                 }
                 .toolbar {
                     if case .sample = place {
@@ -223,8 +211,6 @@ struct Sidebar: View {
                 Section {
                     Label("Computers", systemImage: "desktopcomputer")
                         .tag(Place.computers)
-                    Label("Settings", systemImage: "gearshape")
-                        .tag(Place.settings)
                 }
             }
             .listStyle(.sidebar)

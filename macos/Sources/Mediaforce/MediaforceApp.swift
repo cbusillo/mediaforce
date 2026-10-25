@@ -9,5 +9,8 @@ struct MediaforceApp: App {
             MainWindow(model: appDelegate.model)
         }
         .windowResizability(.contentMinSize)
+        Settings {
+            SettingsWindow(client: appDelegate.model.client)
+        }
     }
 }

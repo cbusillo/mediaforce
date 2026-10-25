@@ -443,3 +443,86 @@ extension Words {
         return "\(otherMediaState(item.state)). \(count(item.fileCount, "file")), \(size(item.bytes))\(place). \(saved)"
     }
 }
+
+extension Words {
+    static let librariesTab = "Libraries"
+    static let librariesSection = "Libraries"
+    static let workingSpaceSection = "Working space"
+    static let libraryName = "Name"
+    static let libraryFolder = "Folder"
+    static let libraryType = "Kind"
+    static let addLibrary = "Add Library"
+    static let removeLibrary = "Remove"
+    static let chooseFolder = "Choose…"
+    static let workingFolder = "Working folder"
+    static let workingFolderHelp = "Compressed files are made here before they replace originals. Original backups wait in its Cleanup folder."
+    static let lookForNewFiles = "Look for new files every"
+    static let hours = "hours"
+    static let lookForNewFilesHelp = "0 turns automatic checks off."
+    static let saveSettings = "Save"
+    static let revertSettings = "Revert"
+    static let settingsSaved = "Saved."
+    static let noLibraries = "No libraries yet."
+    static let keepCurrentKind = "Keep current kind"
+    static let changeKind = "Change kind"
+    static let keepLibrary = "Keep library"
+    static let removeFromMediaforce = "Remove from Mediaforce"
+
+    static func libraryKind(_ code: String) -> String {
+        switch code {
+        case "tv": "TV shows"
+        case "movie": "Movies"
+        case "spatial": "3D and VR"
+        case "other": "Other"
+        default: "Unknown"
+        }
+    }
+
+    static func changeKindTitle(_ preview: LibraryTypePreview) -> String {
+        "Change this library from \(libraryKind(preview.fromType)) to \(libraryKind(preview.toType))?"
+    }
+
+    static func changeKindMessage(_ preview: LibraryTypePreview) -> String {
+        "This changes how \(count(preview.itemCount, "scanned item")) are grouped. After you save, the library is view only until you review it, and a fresh scan applies the new grouping. Saved compression choices are kept but no longer apply. No media files move or are deleted."
+    }
+
+    static func removeLibraryTitle(_ name: String) -> String {
+        "Remove \(name.isEmpty ? "this library" : name)?"
+    }
+
+    static let removeLibraryMessage = "Mediaforce stops scanning this folder after you save. Files stay where they are and are never deleted."
+
+    static func librarySaveRefused(_ code: String?) -> String {
+        switch code {
+        case "working_folder_missing": "Choose a working folder."
+        case "working_folder_not_absolute": "The working folder must be a full path, starting with /."
+        case "refresh_interval_invalid": "How often to look for new files must be between 0 and 8760 hours."
+        case "library_incomplete": "Each library needs a folder."
+        case "library_name_too_long": "Library names must be 80 characters or fewer."
+        case "library_folder_not_absolute": "Each library folder must be a full path, starting with /."
+        case "library_folder_duplicate": "Two libraries use the same folder. Each library needs its own."
+        case "library_folders_overlap": "One library's folder is inside another's. Library folders can't contain each other."
+        case "library_contains_working_folder": "The working folder can't be inside a library folder or contain one."
+        case "library_type_unsupported": "Choose a kind for each library."
+        case "library_type_unconfirmed": "A library's kind changed without its preview being confirmed. Choose the kind again."
+        case "no_libraries": "Keep at least one library."
+        default: "Mediaforce couldn't save these settings. Check the libraries and folders."
+        }
+    }
+}
+
+extension ActionNotice {
+    static let previewUnavailable = ActionNotice(
+        title: "Kind not changed",
+        message: "Mediaforce couldn't check what changing this library's kind would do, so the kind stays as it was."
+    )
+
+    static let settingsChangedElsewhere = ActionNotice(
+        title: "Settings not saved",
+        message: "These settings changed somewhere else while this window was open. It now shows them as saved; make your changes again."
+    )
+
+    static func settingsNotSaved(_ code: String?) -> ActionNotice {
+        ActionNotice(title: "Settings not saved", message: Words.librarySaveRefused(code))
+    }
+}

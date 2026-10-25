@@ -3,7 +3,9 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
+from mediaforce.web.routes.folders import request_body
 from mediaforce.web.settings_runtime import SettingsValidationError
 
 SETTINGS_SAVE_ERROR_MESSAGE = (
@@ -64,3 +66,37 @@ def register_settings_routes(
     async def api_archive_cleanup_clear(request: Request) -> JSONResponse:
         body = await request.json()
         return JSONResponse(clear_archive_cleanup_action(str(body.get("transcode_root", "")).strip() or None))
+
+
+def register_library_settings_routes(
+        app: FastAPI,
+        *,
+        library_settings_facts: Callable[[], dict[str, Any]],
+        save_library_settings_action: Callable[..., dict[str, Any]],
+) -> None:
+    """The Mac app's Libraries settings tab. Refusals carry a code the app words; never a sentence."""
+
+    @app.get("/api/app/settings/library")
+    def api_app_library_settings() -> JSONResponse:
+        try:
+            return JSONResponse(library_settings_facts())
+        except SettingsValidationError as exc:
+            return JSONResponse({"ok": False, "code": exc.code}, status_code=409)
+
+    @app.post("/api/app/settings/library")
+    async def api_app_library_settings_save(request: Request) -> JSONResponse:
+        body = await request_body(request)
+        libraries = body.get("libraries")
+        try:
+            result = await run_in_threadpool(
+                save_library_settings_action,
+                libraries=[dict(item) for item in libraries if isinstance(item, dict)] if isinstance(libraries, list) else [],
+                working_folder=str(body.get("working_folder") or "").strip(),
+                catalog_refresh_hours=body.get("catalog_refresh_hours"),
+                revision=str(body.get("revision") or ""),
+            )
+        except SettingsValidationError as exc:
+            return JSONResponse({"ok": False, "code": exc.code}, status_code=400)
+        except ValueError:
+            return JSONResponse({"ok": False, "code": "invalid_settings"}, status_code=400)
+        return JSONResponse(result)

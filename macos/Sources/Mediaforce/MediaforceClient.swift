@@ -52,10 +52,6 @@ struct MediaforceClient: Sendable {
         return NSImage(data: data)
     }
 
-    func webPage(_ path: String) -> URL {
-        baseURL.appending(path: path)
-    }
-
     func seasonPage(_ prefix: String) -> URL {
         baseURL.appending(path: "folders").appending(path: prefix)
     }
@@ -99,6 +95,30 @@ struct MediaforceClient: Sendable {
     func deleteCleanupFolder() async throws -> CleanupResult {
         let data = try await post("api/archive-cleanup/clear", body: Data("{}".utf8))
         return try JSONDecoder.mediaforce.decode(CleanupResult.self, from: data)
+    }
+
+    func librarySettings() async throws -> LibrarySettingsFacts {
+        var request = URLRequest(url: baseURL.appending(path: "api/app/settings/library"))
+        request.timeoutInterval = Self.factsTimeout
+        return try await decode(LibrarySettingsFacts.self, from: request)
+    }
+
+    func saveLibrarySettings(_ save: LibrarySettingsSave) async throws -> LibrarySettingsSaveResult {
+        var request = URLRequest(url: baseURL.appending(path: "api/app/settings/library"))
+        request.httpMethod = "POST"
+        request.httpBody = try JSONEncoder.mediaforce.encode(save)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await session.data(for: request)
+        guard [200, 400].contains((response as? HTTPURLResponse)?.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        return try JSONDecoder.mediaforce.decode(LibrarySettingsSaveResult.self, from: data)
+    }
+
+    func libraryTypePreview(key: String, type: String) async throws -> LibraryTypePreview {
+        let body = try JSONSerialization.data(withJSONObject: ["key": key, "library_type": type])
+        let data = try await post("api/settings/library-type-preview", body: body)
+        return try JSONDecoder.mediaforce.decode(LibraryTypePreviewResult.self, from: data).preview
     }
 
     private func samplePath(_ prefix: String) -> URL {
