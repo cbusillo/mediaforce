@@ -264,6 +264,8 @@ extension Words {
     static let openItem = "Open"
     static let openInBrowser = "Open in browser"
     static let cancel = "Cancel"
+    static let resume = "Resume"
+    static let pausedBar = "Mediaforce is paused. Nothing new starts."
     static let none = "None"
     static let next = "Next"
     static let looksGood = "Looks Good"

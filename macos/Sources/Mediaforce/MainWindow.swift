@@ -176,6 +176,8 @@ struct MainWindow: View {
                     .safeAreaInset(edge: .top, spacing: 0) {
                         if model.connection != .reachable {
                             StaleNotice(connection: model.connection, lastHeard: model.lastHeard)
+                        } else if PausedBar.shows(facts) {
+                            PausedBar(model: model)
                         }
                     }
                 }
@@ -209,6 +211,31 @@ struct MainWindow: View {
     }
 }
 
+/// On every page while the Director has paused Mediaforce, so a pause is never only a changed icon.
+struct PausedBar: View {
+    let model: MainWindowModel
+
+    static func shows(_ facts: MainWindowFacts) -> Bool {
+        facts.work.pausedByOwner
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "pause.circle.fill")
+                .foregroundStyle(Color.accentColor)
+            Text(Words.pausedBar)
+            Spacer(minLength: 0)
+            Button(Words.resume) { Task { await model.setRunning(true) } }
+                .controlSize(.small)
+                .disabled(model.switching != nil)
+        }
+        .font(.callout)
+        .padding(.horizontal, 34)
+        .padding(.vertical, 8)
+        .background(Color.accentColor.opacity(0.12))
+    }
+}
+
 struct StaleNotice: View {
     let connection: ServerState
     let lastHeard: Date?
@@ -235,8 +262,10 @@ struct PauseButton: View {
         Button {
             Task { await model.setRunning(paused) }
         } label: {
-            Label(paused ? "Resume Mediaforce" : "Pause Mediaforce", systemImage: paused ? "play.fill" : "pause.fill")
+            Label(paused ? Words.resume : Words.pause, systemImage: paused ? "play.fill" : "pause.fill")
         }
+        // A toolbar shows only the icon by default; the word says what pressing it does, and that it took effect.
+        .labelStyle(.titleAndIcon)
         .disabled(model.switching != nil)
         .help(paused ? Words.resumeHelp : Words.pauseHelp(facts.work))
     }
