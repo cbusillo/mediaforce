@@ -12,6 +12,8 @@ final class MainWindowModel {
     // A page a notification asked to open; the window takes it and clears it.
     var requestedPlace: Place?
     var onFacts: ((MainWindowFacts) -> Void)?
+    // Shows spot-checked on Space saved since the app opened.
+    var checkedShows: Set<String> = []
     let client: MediaforceClient
     let posters: PosterStore
 
@@ -117,6 +119,7 @@ enum Place: Hashable {
         case .sample(let prefix): "sample:\(prefix)"
         case .item(let prefix): "item:\(prefix)"
         case .computers: "computers"
+        case .library: "library"
         default: "spaceSaved"
         }
     }
@@ -126,6 +129,7 @@ enum Place: Hashable {
         switch (parts.first, parts.count == 2 ? parts[1] : nil) {
         case ("sample", let prefix?): self = .sample(prefix)
         case ("item", let prefix?): self = .item(prefix)
+        case ("library", nil): self = .library
         case ("spaceSaved", nil): self = .spaceSaved
         case ("computers", nil): self = .computers
         default: return nil
@@ -146,7 +150,10 @@ struct MainWindow: View {
                 } detail: {
                     Group {
                         switch place {
-                        case .spaceSaved: SpaceSavedPage(facts: facts)
+                        case .spaceSaved:
+                            SpaceSavedPage(facts: facts, model: model)
+                                // Deleting backups changes what the page shows, so it reads its facts again at once.
+                                .id(facts.originalBackups.count)
                         case .computers: ComputersPage(computers: facts.computers)
                         case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }
                         case .item(let prefix): ItemPage(prefix: prefix, model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
@@ -242,7 +249,7 @@ struct Sidebar: View {
                 }
             }
             .listStyle(.sidebar)
-            BackupBin(backups: facts.originalBackups, model: model)
+            BackupsRow(backups: facts.originalBackups) { place = .spaceSaved }
         }
     }
 }
@@ -263,60 +270,30 @@ struct SidebarRow: View {
     }
 }
 
-struct BackupBin: View {
+/// Original backups wait in the Cleanup folder until they are deleted on Space saved, the one place that deletes them.
+struct BackupsRow: View {
     let backups: MainWindowFacts.OriginalBackups
-    let model: MainWindowModel
-    @State private var folder: CleanupFolder?
-    @State private var confirming = false
+    let open: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(spacing: 0) {
             Divider()
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: backups.count > 0 ? "trash.fill" : "trash")
-                    .font(.system(size: 20, weight: .light))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 24)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Original backups")
-                        .font(.headline)
-                    Text(backups.count > 0 ? "\(backups.count) ready to delete, \(Words.size(backups.bytes))" : "Nothing to delete")
-                        .font(.caption)
+            Button(action: open) {
+                HStack(spacing: 8) {
+                    Image(systemName: backups.count > 0 ? "trash.fill" : "trash")
                         .foregroundStyle(.secondary)
+                    Text(Words.originalBackups)
+                    Spacer()
+                    Text(backups.count > 0 ? Words.size(backups.bytes) : Words.none)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
                 }
+                .font(.callout)
+                .padding(14)
+                .contentShape(Rectangle())
             }
-            .help("When a season is replaced, its originals wait here until you delete them.")
-            .padding(.horizontal, 16)
-            Button("Delete original backups…") {
-                Task {
-                    do {
-                        let found = try await model.client.cleanupFolder()
-                        if found.fileCount > 0 {
-                            folder = found
-                            confirming = true
-                        } else {
-                            model.notice = .emptyCleanupFolder
-                        }
-                    } catch {
-                        model.notice = .unanswered
-                    }
-                }
-            }
-            .controlSize(.small)
-            .help("Delete everything in the Cleanup folder. Mediaforce shows what is there and asks first.")
-            .padding(.leading, 50)
-            .confirmationDialog(
-                "Delete everything in the Cleanup folder?",
-                isPresented: $confirming,
-                presenting: folder
-            ) { _ in
-                Button("Delete all original backups", role: .destructive) {
-                    Task { await model.deleteCleanupFolder() }
-                }
-            } message: { folder in
-                Text("\(Words.count(folder.fileCount, "file")), \(Words.size(folder.totalSizeBytes)). Mediaforce keeps any original a file still being finished needs. The replaced files stay in your library. This cannot be undone.")
-            }
+            .buttonStyle(.plain)
+            .help(Words.originalBackupsHelp)
         }
-        .padding(.bottom, 14)
     }
 }

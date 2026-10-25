@@ -73,7 +73,7 @@ final class ItemTests: XCTestCase {
     }
 
     func testANotificationOpensThePageItIsAbout() {
-        for place in [Place.item("tv/Futurama/Season 2"), .sample("tv/The Expanse/Season 3"), .spaceSaved, .computers] {
+        for place in [Place.item("tv/Futurama/Season 2"), .sample("tv/The Expanse/Season 3"), .library, .spaceSaved, .computers] {
             XCTAssertEqual(Place(notificationValue: place.notificationValue), place)
         }
         XCTAssertNil(Place(notificationValue: "web:/folders/tv"))
