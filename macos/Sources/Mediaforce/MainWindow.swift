@@ -233,7 +233,8 @@ struct Sidebar: View {
                     .tag(Place.library)
                 SidebarRow(title: "Space saved", symbol: "arrow.down.right.and.arrow.up.left", trailing: Words.size(facts.spaceSaved.bytes))
                     .tag(Place.spaceSaved)
-                SidebarRow(title: Words.media, symbol: "film.stack", trailing: "\(facts.library.tv.showCount + facts.library.movies.titleCount + facts.library.other.itemCount)")
+                // No count: the page counts shows, titles and folders, while the facts count other media by file.
+                Label(Words.media, systemImage: "film.stack")
                     .tag(Place.media)
                 Section {
                     Label("Computers", systemImage: "desktopcomputer")
