@@ -40,8 +40,24 @@ class PutBackRestoreError(RuntimeError):
     """A failed put-back could not return its files, so the original or its copy may be out of place."""
 
 
+def reconcile_unfinished_put_backs(connection: DBClient, library_item_id: int | None = None) -> int:
+    """Return the files of put-backs stopped partway to where the catalog says they are; count those that cannot be."""
+    connection.commit()
+    statement = select(source_transitions.c.operation_id).where(
+        source_transitions.c.kind == "put-back",
+        source_transitions.c.outcome.in_(("prepared", "unresolved")),
+    )
+    if library_item_id is not None:
+        statement = statement.where(source_transitions.c.library_item_id == library_item_id)
+    return sum(not reconcile_source_publish(connection, operation)
+               for operation in connection.execute(statement).scalars().all())
+
+
 def _original_version(connection: DBClient, item_id: int, active: str, archive_identity: dict[str, Any]) -> str:
-    """The version the publish replaced, or a new one in the same generation for a publish made before the journal."""
+    """The version the publish replaced, or a new one in the same generation for a publish made before the journal.
+
+    A recorded original that differs from the backup on disk is refused: that backup is not this file's original.
+    """
     replaced = connection.execute(select(source_transitions.c.before_version_id).where(
         source_transitions.c.library_item_id == item_id,
         source_transitions.c.kind == "publish",
@@ -50,9 +66,10 @@ def _original_version(connection: DBClient, item_id: int, active: str, archive_i
     ).order_by(source_transitions.c.recorded_at.desc())).scalars().first()
     if replaced:
         version = connection.execute(select(source_versions).where(source_versions.c.version_id == replaced)).mappings().one()
-        if (version["size_bytes"] == archive_identity["size_bytes"]
-                and version["sample_fingerprint"] == archive_identity["sample_fingerprint"]):
-            return str(replaced)
+        if (version["size_bytes"] != archive_identity["size_bytes"]
+                or version["sample_fingerprint"] != archive_identity["sample_fingerprint"]):
+            raise PutBackRefused("backup_changed", "Its original backup changed since it was made, so it was not put back.")
+        return str(replaced)
     generation = connection.execute(select(source_versions.c.generation_id).where(
         source_versions.c.version_id == active,
     )).scalar_one()
@@ -103,7 +120,13 @@ def put_original_back(
         timestamp: Callable[[], str],
         record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
 ) -> Path:
-    """Return the original to the library and keep it original; refuse plainly when that cannot be done safely."""
+    """Return the original to the library and keep it original; refuse plainly when that cannot be done safely.
+
+    An earlier put-back stopped partway is first returned to where the catalog says its files are, so a retry
+    starts from a known place.
+    """
+    if reconcile_unfinished_put_backs(connection, library_item_id):
+        raise PutBackRestoreError("An earlier put-back left files Mediaforce cannot place")
     item = connection.execute(select(library_items).where(library_items.c.id == library_item_id)).mappings().one_or_none()
     stage = connection.execute(select(staged_artifacts).where(
         staged_artifacts.c.library_item_id == library_item_id,
@@ -126,8 +149,12 @@ def put_original_back(
     original_path.parent.mkdir(parents=True, exist_ok=True)
 
     now = timestamp()
-    operation = _prepare(connection, dict(item), library_path=library_path, out_path=out_path,
-                         archive_path=archive_path, original_path=original_path, now=now)
+    try:
+        operation = _prepare(connection, dict(item), library_path=library_path, out_path=out_path,
+                             archive_path=archive_path, original_path=original_path, now=now)
+    except PutBackRefused:
+        connection.rollback()
+        raise
     try:
         apply_source_moves(connection, operation)
         stat = original_path.stat()

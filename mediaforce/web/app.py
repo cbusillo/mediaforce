@@ -214,6 +214,7 @@ from mediaforce.web.runtime.production_approval import effective_production_appr
     production_approval_identity, production_calibration
 from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
 from mediaforce.web.runtime.motion_keep import keep_motion_held_originals, undo_motion_keep
+from mediaforce.encoding.put_back import reconcile_unfinished_put_backs
 from mediaforce.web.runtime.put_back import put_original_back_action
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
@@ -658,6 +659,8 @@ def create_app(
                     if repaired_scan_rows:
                         LOGGER.warning("Repaired %s interrupted scan runs.", repaired_scan_rows)
                     _recover_calibration_jobs(connection, config)
+                    if reconcile_unfinished_put_backs(connection):
+                        LOGGER.error("An interrupted put-back left files Mediaforce cannot place; see source_moves.")
                     resolved_review_rows = reconcile_pending_review_samples(
                         connection,
                         config,

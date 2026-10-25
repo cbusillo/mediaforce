@@ -13,7 +13,9 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, metadata, motion_keep_decisions, staged_artifacts
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint, timestamp
 from mediaforce.encoding.free_space import ReservePreflight
-from mediaforce.encoding.put_back import PUT_BACK_EVENT, PutBackRefused, put_original_back
+from mediaforce.encoding.put_back import PUT_BACK_EVENT, PutBackRefused, PutBackRestoreError, put_original_back, \
+    reconcile_unfinished_put_backs
+from mediaforce.encoding.source_publication import path_in_pending_move
 from mediaforce.encoding.staging import promote_one_item
 from mediaforce.library.evidence_state import library_item_source_fingerprint
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
@@ -157,3 +159,45 @@ def test_interrupted_put_back_returns_every_file(connection: DBClient, tmp_path:
     assert not published["staging"].exists()
     assert connection.execute(select(staged_artifacts.c.promoted_at)).scalar_one() is not None
     assert connection.execute(select(motion_keep_decisions)).first() is None
+
+
+@pytest.mark.parametrize("killed_after_moves", [1, 2])
+def test_put_back_killed_partway_is_returned_then_retried(connection: DBClient, tmp_path: Path, killed_after_moves: int) -> None:
+    published = _published(connection, tmp_path, "episode.mp4")
+    move = shutil.move
+    calls = 0
+
+    def killed(old: str, new: str) -> str:
+        nonlocal calls
+        result = move(old, new)
+        calls += 1
+        if calls == killed_after_moves:
+            raise KeyboardInterrupt()
+        return result
+
+    with patch("mediaforce.encoding.source_publication.shutil.move", side_effect=killed):
+        with patch("mediaforce.encoding.put_back.reconcile_source_publish", return_value=False):
+            with pytest.raises((KeyboardInterrupt, PutBackRestoreError)):
+                _put_back(connection, published["id"])
+    # A scan meanwhile leaves the files of the unfinished move alone.
+    assert path_in_pending_move(connection, str(published["staging"]))
+    assert path_in_pending_move(connection, str(published["source"]))
+
+    assert reconcile_unfinished_put_backs(connection) == 0
+    assert published["library"].read_bytes() == COMPRESSED
+    assert published["archive"].read_bytes() == ORIGINAL
+    assert _put_back(connection, published["id"]) == published["source"]
+    assert published["source"].read_bytes() == ORIGINAL
+
+
+def test_put_back_refuses_a_backup_that_is_not_the_recorded_original(connection: DBClient, tmp_path: Path) -> None:
+    published = _published(connection, tmp_path, "episode.mp4")
+    published["archive"].write_bytes(b"X" * 1600)
+
+    with pytest.raises(PutBackRefused) as refused:
+        _put_back(connection, published["id"])
+
+    assert refused.value.code == "backup_changed"
+    assert published["library"].read_bytes() == COMPRESSED
+    assert published["archive"].read_bytes() == b"X" * 1600
+    assert not path_in_pending_move(connection, str(published["source"]))
