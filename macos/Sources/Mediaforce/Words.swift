@@ -209,3 +209,118 @@ extension Words {
         }
     }
 }
+
+extension Words {
+    static let approveSample = "Approve and compress the season"
+    static let makeSampleAgain = "Make sample again"
+    static let makeSample = "Make sample"
+    static let startCompressing = "Start compressing"
+    static let tryAnotherSize = "Try another size"
+    static let chooseSizeHeadline = "Choose a size"
+    static let openInBrowser = "Open in browser"
+    static let cancel = "Cancel"
+    static let original = "Original"
+    static let sample = "Sample"
+    static let play = "Play"
+    static let pause = "Pause"
+    static let startOver = "Start over"
+    static let hear = "Hear"
+    static let momentChoice = "Moment"
+
+    static func sampleHeadline(_ facts: SampleFacts) -> String {
+        switch (facts.state, facts.action) {
+        case ("making_test", _): "Making the sample now."
+        case ("sample_waiting", _): "The sample waits for a free computer."
+        case ("ready_to_compare", _): "The sample is ready. Watch it next to the original."
+        case ("needs_help", "choose_size"): "The sample can't reach the size goal at good quality. Choose another size."
+        case ("needs_help", "retry_encode"): "Compressing stopped. Finished episodes are safe; the rest need trying again."
+        case ("needs_help", "review_files"): "Some files need you before the season can go on."
+        case ("needs_help", _): "The sample needs making again."
+        case ("needs_test", _): "This season has no sample yet."
+        case ("ready_to_make", _): "Approved. The season waits to be compressed."
+        case ("making_season", _): "Compressing the season."
+        case ("motion_held", "decide_motion"): "Some episodes need a decision about their motion pattern."
+        case ("motion_held", _): "The remaining episodes stay original because their motion can't be converted safely."
+        case ("ready_to_check", _): "The compressed episodes are ready for their safety check."
+        case ("finish_blocked", _): "Some compressed episodes aren't ready to replace their originals yet."
+        case ("ready_to_finish", _): "The compressed episodes passed their checks and can replace the originals."
+        case ("finished", _): "This season is finished."
+        default: "Nothing needs you here right now."
+        }
+    }
+
+    static func sizeChoice(_ choice: SampleFacts.SizeChoice) -> String {
+        let name = switch choice.key {
+        case "recommended": "Recommended"
+        case "smaller": "Save more space"
+        case "roomier": "Keep more detail"
+        case "confirm_normalized": "Scale with runtime"
+        case "confirm_absolute": "Keep this size"
+        default: "Size goal"
+        }
+        return "\(name), \(size(choice.targetBytes)) an episode"
+    }
+
+    static func clipSize(_ clip: SampleFacts.Clip) -> String {
+        "\(size(clip.sizeBytes)) clip"
+    }
+
+    static func momentTime(_ seconds: Double) -> String {
+        Duration.seconds(seconds).formatted(.time(pattern: seconds >= 3600 ? .hourMinuteSecond : .minuteSecond))
+    }
+
+    static func sampleFacts(_ facts: SampleFacts) -> [(label: String, value: String)] {
+        [
+            ("This episode now", facts.episodeBytes > 0 ? size(facts.episodeBytes) : "Not known"),
+            ("Estimated after", facts.estimatedEpisodeBytes > 0 ? "About \(size(facts.estimatedEpisodeBytes))" : "No estimate yet"),
+            ("Season space saved", facts.estimatedSavedBytes.map { "About \(size($0)) from \(count(facts.seasonEpisodeCount, "episode"))" } ?? "No estimate yet"),
+            ("Size goal", facts.goalBytes > 0 ? "\(size(facts.goalBytes)) an episode" : "Not set"),
+        ]
+    }
+
+    static func sampleConfirmation(_ code: String) -> (title: String, message: String)? {
+        switch code {
+        case "confirm_high_impact": (
+            "This sample changed important picture settings.",
+            "The sample you watched shows those changes. Approve it only if the picture and sound still feel right."
+        )
+        case "confirm_size_tradeoff": (
+            "This sample missed your size goal.",
+            "The season may come out larger or smaller than the goal. The estimate on this page is the size you would accept."
+        )
+        default: nil
+        }
+    }
+}
+
+extension ActionNotice {
+    static let sampleRefused = ActionNotice(
+        title: "Mediaforce didn't do that",
+        message: "It refused the request. The page shows what Mediaforce reports now."
+    )
+
+    static let approvedNotCompressing = ActionNotice(
+        title: "Compressing didn't start",
+        message: "The sample is approved, but the season isn't compressing. Press Start compressing to try again."
+    )
+
+    static let sampleChanged = ActionNotice(
+        title: "The sample changed",
+        message: "A new sample replaced the one you watched, so nothing was approved. Watch the new sample first."
+    )
+
+    static let finishInBrowser = ActionNotice(
+        title: "Compressing needs a choice first",
+        message: "The sample is approved, but this season needs a choice made on its page in the browser before it can compress."
+    )
+
+    static let chooseBalance = ActionNotice(
+        title: "Choose this season's balance first",
+        message: "This season needs its balance of size and detail chosen before a new sample. Choose it in the browser."
+    )
+
+    static let chooseSize = ActionNotice(
+        title: "Choose a size first",
+        message: "This season's sample needs a size chosen before it can be made again."
+    )
+}

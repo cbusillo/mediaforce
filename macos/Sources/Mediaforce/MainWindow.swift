@@ -98,6 +98,7 @@ struct ActionNotice: Identifiable, Equatable {
 
 enum Place: Hashable {
     case library, spaceSaved, keptOriginal, tv, movies, otherMedia, computers, settings
+    case sample(String)
 
     static func webPath(_ place: Place) -> String? {
         switch place {
@@ -126,7 +127,8 @@ struct MainWindow: View {
                         case .spaceSaved: SpaceSavedPage(facts: facts)
                         case .keptOriginal: KeptOriginalPage(kept: facts.keptOriginal)
                         case .computers: ComputersPage(computers: facts.computers)
-                        default: LibraryPage(facts: facts, posters: model.posters, client: model.client)
+                        case .sample(let prefix): SamplePage(prefix: prefix, model: model)
+                        default: LibraryPage(facts: facts, posters: model.posters) { place = .sample($0) }
                         }
                     }
                     .safeAreaInset(edge: .top, spacing: 0) {
@@ -141,6 +143,11 @@ struct MainWindow: View {
                     place = previous
                 }
                 .toolbar {
+                    if case .sample = place {
+                        ToolbarItem(placement: .navigation) {
+                            Button("Library", systemImage: "chevron.backward") { place = .library }
+                        }
+                    }
                     ToolbarItem(placement: .primaryAction) {
                         PauseButton(facts: facts, model: model)
                     }

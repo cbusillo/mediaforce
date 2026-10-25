@@ -7,6 +7,8 @@ from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
+from mediaforce.web.runtime.folder_actions import APPROVED_SAMPLE_NOTES
+
 
 def object_dict_or_none(value: Any) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
@@ -25,7 +27,7 @@ def _request_item_ids(body: dict[str, Any]) -> list[int]:
     return item_ids
 
 
-async def _request_body(request: Request) -> dict[str, Any]:
+async def request_body(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
     except Exception:
@@ -120,7 +122,7 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/ai-tune")
     async def api_folder_ai_tune(prefix: str, request: Request) -> JSONResponse:
-        body = await _request_body(request)
+        body = await request_body(request)
         result = await run_in_threadpool(
             folder_ai_tune_action,
             prefix.strip("/"),
@@ -133,7 +135,7 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/ai-tune/preview")
     async def api_folder_ai_tune_preview(prefix: str, request: Request) -> JSONResponse:
-        body = await _request_body(request)
+        body = await request_body(request)
         result = await run_in_threadpool(
             folder_ai_tune_preview_action,
             prefix.strip("/"),
@@ -146,7 +148,7 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/ai-tune/confirm")
     async def api_folder_ai_tune_confirm(prefix: str, request: Request) -> JSONResponse:
-        body = await _request_body(request)
+        body = await request_body(request)
         result = await run_in_threadpool(
             folder_ai_tune_confirm_action,
             prefix.strip("/"),
@@ -170,7 +172,7 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/series-lifecycle")
     async def api_folder_series_lifecycle(prefix: str, request: Request) -> JSONResponse:
-        body = await _request_body(request)
+        body = await request_body(request)
         result = save_series_lifecycle_action(
             prefix.strip("/"),
             str(body.get("mode", "")),
@@ -179,7 +181,7 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/audio-preset")
     async def api_folder_audio_preset(prefix: str, request: Request) -> JSONResponse:
-        body = await _request_body(request)
+        body = await request_body(request)
         result = await run_in_threadpool(
             save_audio_preset_action,
             prefix.strip("/"),
@@ -194,7 +196,7 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/queue-encode")
     async def api_folder_queue_encode(prefix: str, request: Request) -> JSONResponse:
-        body = await _request_body(request)
+        body = await request_body(request)
         result = await run_in_threadpool(
             queue_folder_encode_action,
             prefix.strip("/"),
@@ -207,7 +209,7 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/approve-recovery")
     async def api_folder_approve_recovery(prefix: str, request: Request) -> JSONResponse:
-        body = await _request_body(request)
+        body = await request_body(request)
         result = await run_in_threadpool(
             approve_measured_encode_recovery_action,
             prefix.strip("/"),
@@ -228,7 +230,7 @@ def register_folder_routes(
 
         @app.post("/api/folders/{prefix:path}/keep-motion-original")
         async def api_folder_keep_motion_original(prefix: str, request: Request) -> JSONResponse:
-            item_ids = _request_item_ids(await _request_body(request))
+            item_ids = _request_item_ids(await request_body(request))
             result = await run_in_threadpool(keep_originals, prefix.strip("/"), item_ids)
             return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
@@ -237,13 +239,13 @@ def register_folder_routes(
 
         @app.post("/api/folders/{prefix:path}/undo-keep-motion-original")
         async def api_folder_undo_keep_motion_original(prefix: str, request: Request) -> JSONResponse:
-            item_ids = _request_item_ids(await _request_body(request))
+            item_ids = _request_item_ids(await request_body(request))
             result = await run_in_threadpool(undo_keep, prefix.strip("/"), item_ids)
             return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/queue-older-seasons")
     async def api_folder_queue_older_seasons(prefix: str, request: Request) -> JSONResponse:
-        body = await _request_body(request)
+        body = await request_body(request)
         result = await run_in_threadpool(
             queue_older_seasons_encode_action,
             prefix.strip("/"),
@@ -256,7 +258,7 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/validate-outputs")
     async def api_folder_validate_outputs(prefix: str, request: Request) -> JSONResponse:
-        body = await _request_body(request)
+        body = await request_body(request)
         result = await run_in_threadpool(
             validate_folder_outputs_action,
             prefix.strip("/"),
@@ -266,7 +268,7 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/promote-outputs")
     async def api_folder_promote_outputs(prefix: str, request: Request) -> JSONResponse:
-        body = await _request_body(request)
+        body = await request_body(request)
         result = await run_in_threadpool(
             promote_folder_outputs_action,
             prefix.strip("/"),
@@ -279,7 +281,7 @@ def register_folder_routes(
 
         @app.post("/api/folders/{prefix:path}/size-held-decision")
         async def api_folder_size_held_decision(prefix: str, request: Request) -> JSONResponse:
-            body = await _request_body(request)
+            body = await request_body(request)
             item_id = body.get("library_item_id")
             item_ids = body.get("library_item_ids")
             keep = body.get("keep")
@@ -296,7 +298,7 @@ def register_folder_routes(
 
     @app.post("/api/folders/{prefix:path}/save-profile")
     async def api_folder_save_profile(prefix: str, request: Request) -> JSONResponse:
-        body = await _request_body(request)
+        body = await request_body(request)
         result = await run_in_threadpool(
             save_profile_action,
             prefix.strip("/"),
@@ -319,7 +321,7 @@ def register_folder_routes(
         The approval is already saved, so a queue failure is reported beside it instead of
         failing the request; the page then shows the approved state with one retry action.
         """
-        notes = str(body.get("start_notes", "")) or "Approved after comparing the representative sample."
+        notes = str(body.get("start_notes", "")) or APPROVED_SAMPLE_NOTES
         token = str(body.get("scope_membership_token", ""))
         try:
             if start_mode == "older_seasons":

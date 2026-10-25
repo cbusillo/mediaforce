@@ -704,3 +704,82 @@ def _allowed_policy_values(policy: dict[str, Any], keys: tuple[str, ...]) -> dic
         for key in keys
         if key in policy
     }
+
+
+def sample_goal_request(option: dict[str, Any]) -> str:
+    """The sample request the season page sends for a chosen size goal option."""
+    intent = object_dict(option.get("operator_intent"))
+    size = object_dict(intent.get("size_goal"))
+    resolution_intent = object_dict(intent.get("resolution"))
+    resolution = (
+        "Keep the current resolution."
+        if resolution_intent.get("mode") == "source"
+        else f"Limit the encoded height to {_request_number(resolution_intent.get('max_height'))}p."
+    )
+    if size.get("mode") == "normalized":
+        per_episode = _round_half_up(float_value(object_dict(option.get("resolved_size_goal")).get("target_size_mb")))
+        return (
+            f"Use the {_request_number(size.get('value_mb'))} MB / "
+            f"{_request_number(size.get('reference_runtime_minutes'))} minute runtime-normalized goal, which resolves "
+            f"to about {per_episode} MB for this episode. {resolution} "
+            "Make a representative test so I can judge the picture and sound."
+        )
+    return (
+        f"Use an absolute {_request_number(size.get('value_mb'))} MB per-episode target. {resolution} "
+        "Make a representative test so I can judge the picture and sound."
+    )
+
+
+def measured_followup_request(analysis: dict[str, Any], *, accepts_under_target: bool = False) -> str:
+    """The sample request the season page sends to make a measured sample again at the same goal."""
+    target_megabytes = _round_half_up(float_value(analysis.get("budget_bytes")) / DECIMAL_MEGABYTE_BYTES)
+    if target_megabytes <= 0:
+        return ""
+    status = str(analysis.get("status") or "")
+    predicted = float_value(analysis.get("predicted_total_size_bytes"))
+    keep_goal = f"keep the {target_megabytes} MB per episode goal"
+    if status == "over_target" and predicted > 0:
+        ratio = float_value(analysis.get("predicted_to_budget_ratio"))
+        return (
+            f"Measured follow-up: {keep_goal}. The last representative test was {ratio:.1f} times over that goal. "
+            "Keep the current resolution and make the next representative test materially smaller toward the goal "
+            "while preserving as much picture and sound quality as possible."
+        )
+    if status == "under_target" and predicted > 0:
+        if accepts_under_target:
+            return (
+                f"Measured follow-up: {keep_goal}. The last representative test landed below that goal, which is "
+                "acceptable for this compression goal. Preserve the smaller result unless the operator's picture or "
+                "sound review requires another measured change; do not spend unused size automatically."
+            )
+        return (
+            f"Measured follow-up: {keep_goal}. The last representative test landed below that goal. Keep the current "
+            "resolution and make the next representative test spend more of the available size on picture and sound "
+            "quality."
+        )
+    if status == "inside_target_band" and predicted > 0:
+        return (
+            f"Measured revision: {keep_goal} and current resolution. Make another representative test that addresses "
+            "the operator's picture or sound concerns without changing the size target."
+        )
+    return (
+        f"Aim for about {target_megabytes} MB per episode. Keep the current resolution and repeat the representative "
+        "test because the previous run did not produce a usable full-episode size estimate."
+    )
+
+
+def with_compression_intent(intent: dict[str, Any], compression_intent: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **intent,
+        "schema_version": OPERATOR_INTENT_SCHEMA_VERSION,
+        "compression_intent": {**compression_intent, "confirmed": True},
+    }
+
+
+def _round_half_up(value: float) -> int:
+    return int(Decimal(str(value)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def _request_number(value: Any) -> str:
+    number = float_value(value)
+    return str(int(number)) if number.is_integer() else repr(number)

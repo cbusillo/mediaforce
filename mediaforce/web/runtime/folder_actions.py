@@ -6,7 +6,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 import uuid
 from pathlib import Path
-from typing import Any, cast, Protocol, TypeAlias
+from typing import Any, cast, Literal, Protocol, TypeAlias
 
 from fastapi import HTTPException
 from sqlalchemy import delete, func, or_, select, update
@@ -91,6 +91,32 @@ ClearPendingProposalFn: TypeAlias = Callable[[MediaforceConfig, str], None]
 LoadSampleItemFn: TypeAlias = Callable[[DBClient, MediaforceConfig, str], FolderItem | None]
 QueueFolderEncodeActionFn: TypeAlias = Callable[[str, str, bool], ActionPayload]
 ValidateScopeActionFn: TypeAlias = Callable[[DBClient, str], ActionPayload | None]
+
+APPROVED_SAMPLE_NOTES = "Approved after comparing the representative sample."
+
+
+class ApprovalNeedsConfirmation(HTTPException):
+    """An approval the owner must confirm again: the sample changed important settings or missed its size goal."""
+
+    def __init__(self, confirm: Literal["high_impact", "size_tradeoff"], detail: str) -> None:
+        super().__init__(status_code=409, detail=detail)
+        self.confirm = confirm
+
+
+class ReviewedDraftChanged(HTTPException):
+    """The sample's draft is not the one the owner watched, so nothing was approved."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=409, detail="This sample changed after it was reviewed. Watch the new sample first.")
+
+
+class QueueNeedsChoice(HTTPException):
+    """Queueing refused until the owner makes a choice the season page asks for."""
+
+    def __init__(self, code: Literal["confirm_legacy_size", "confirm_compression_goal"], detail: str) -> None:
+        super().__init__(status_code=400, detail=detail)
+        self.code = code
+
 
 _FINAL_SIZE_RECOVERY_BLOCKER_CODE = "final_size_recovery_contract_unchanged"
 _FINAL_SIZE_RECOVERY_BLOCKER_MESSAGE = (
@@ -827,12 +853,10 @@ def queue_folder_encode_action(
         )
         if {"target_size_mb", "target_size_bytes", "size_goal_mode"} & calibration_video.keys():
             if calibration_intent.size_goal.requires_confirmation:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Confirm whether the saved legacy size is runtime-normalized or an absolute per-episode "
-                        "target before queueing production."
-                    ),
+                raise QueueNeedsChoice(
+                    "confirm_legacy_size",
+                    "Confirm whether the saved legacy size is runtime-normalized or an absolute per-episode "
+                    "target before queueing production.",
                 )
         calibration_sample_item = object_dict(calibration_payload.get("sample_item"))
         frozen_compression_intent = (
@@ -841,9 +865,9 @@ def queue_folder_encode_action(
             else compression_intent_from_policy(calibration_video)
         )
         if frozen_compression_intent.requires_confirmation:
-            raise HTTPException(
-                status_code=400,
-                detail="Choose and confirm a compression goal before queueing production.",
+            raise QueueNeedsChoice(
+                "confirm_compression_goal",
+                "Choose and confirm a compression goal before queueing production.",
             )
         # The owner's current sound choice and lifecycle win over the sample's snapshot of them.
         production_policy = policy_with_owner_settings(calibration_policy, config, approval_prefix)
@@ -2982,6 +3006,7 @@ def save_profile_action(
         confirm_high_impact: bool = False,
         confirm_size_tradeoff: bool = False,
         reviewed_draft_hash: str = "",
+        require_reviewed_draft: bool = False,
 ) -> ActionPayload:
     production_blocker = production_action_blocker(config, normalized_prefix)
     if production_blocker is not None:
@@ -2991,6 +3016,8 @@ def save_profile_action(
         raise HTTPException(status_code=400, detail="No draft calibration found for this folder")
     calibration_payload = object_dict(calibration)
     current_draft_hash = str(calibration_payload.get("draft_hash") or calibration_draft_hash(calibration_payload)).strip()
+    if require_reviewed_draft and reviewed_draft_hash.strip() != current_draft_hash:
+        raise ReviewedDraftChanged()
     baseline_policy = object_dict(object_dict(calibration_payload.get("sample_item")).get("resolved_policy"))
     if not baseline_policy:
         with open_db(config.paths.db_path) as connection:
@@ -3001,14 +3028,14 @@ def save_profile_action(
             object_dict(calibration_payload.get("policy")),
     ):
         if not confirm_high_impact:
-            raise HTTPException(
-                status_code=409,
-                detail="This draft includes high-impact policy changes. Review the diff, then confirm approval again.",
+            raise ApprovalNeedsConfirmation(
+                "high_impact",
+                "This draft includes high-impact policy changes. Review the diff, then confirm approval again.",
             )
         if reviewed_draft_hash.strip() != current_draft_hash:
-            raise HTTPException(
-                status_code=409,
-                detail="This draft changed after the high-impact review. Review the diff and confirm approval again.",
+            raise ApprovalNeedsConfirmation(
+                "high_impact",
+                "This draft changed after the high-impact review. Review the diff and confirm approval again.",
             )
     advice_state = object_dict(load_advice_state(config, normalized_prefix))
     operator_request = object_dict(advice_state.get("operator_request"))
@@ -3070,11 +3097,11 @@ def save_profile_action(
         if size_status == "missing_prediction":
             raise HTTPException(status_code=409, detail=size_issue)
         if not confirm_size_tradeoff:
-            raise HTTPException(status_code=409, detail=size_issue)
+            raise ApprovalNeedsConfirmation("size_tradeoff", size_issue)
         if reviewed_draft_hash.strip() != current_draft_hash:
-            raise HTTPException(
-                status_code=409,
-                detail="This draft changed after the size tradeoff review. Review the result and confirm approval again.",
+            raise ApprovalNeedsConfirmation(
+                "size_tradeoff",
+                "This draft changed after the size tradeoff review. Review the result and confirm approval again.",
             )
     latest_failed_sample_job = None
     if load_latest_failed_target_size_job_state is not None:

@@ -3,7 +3,7 @@ import SwiftUI
 struct LibraryPage: View {
     let facts: MainWindowFacts
     let posters: PosterStore
-    let client: MediaforceClient
+    let openSample: (String) -> Void
 
     var body: some View {
         ScrollView {
@@ -19,13 +19,13 @@ struct LibraryPage: View {
                     VStack(alignment: .leading, spacing: 20) {
                         FinishedShelf(seasons: Array(facts.recentlyFinishedSeasons.prefix(6)), posters: posters)
                         if !facts.samples.waitingOnYou.isEmpty || !facts.samples.approvedNotStarted.isEmpty {
-                            SampleShelf(facts: facts, posters: posters, client: client)
+                            SampleShelf(facts: facts, posters: posters, openSample: openSample)
                         }
                         Latest(events: Array(facts.events.prefix(4)))
                     }
                     .frame(width: 556, alignment: .leading)
                     VStack(alignment: .leading, spacing: 26) {
-                        BiggestTable(shows: Array(facts.biggestNotStarted.prefix(BiggestTable.rowLimit)), samples: facts.samples.waitingOnYou)
+                        BiggestTable(shows: Array(facts.biggestNotStarted.prefix(BiggestTable.rowLimit)), samples: facts.samples.waitingOnYou, openSample: openSample)
                         Computers(computers: facts.computers)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
