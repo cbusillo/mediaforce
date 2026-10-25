@@ -186,7 +186,7 @@ struct MainWindow: View {
                         case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }
                         case .item(let prefix): ItemPage(prefix: prefix, model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
                         case .media: MediaPage(model: model) { place = .item($0) }
-                        default: LibraryPage(facts: facts, posters: model.posters, openComputer: { openComputer($0) }) { place = .sample($0) }
+                        default: LibraryPage(facts: facts, posters: model.posters) { go($0) }
                         }
                     }
                     .safeAreaInset(edge: .top, spacing: 0) {
@@ -226,6 +226,11 @@ struct MainWindow: View {
         .alert(item: Bindable(model).notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
+    }
+
+    /// Opens a place from a link on a page: a page of this window, or Settings › Computers for a computer.
+    private func go(_ requested: Place) {
+        if case .computer(let key) = requested { openComputer(key) } else { place = requested }
     }
 
     /// Computers live in Settings › Computers; this opens it, on one computer when it names one.
