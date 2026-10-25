@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3f63ec"/>
+      <stop offset="1" stop-color="#1d3aae"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9ec3ff"/>
+      <stop offset="1" stop-color="#dfe9ff"/>
+    </linearGradient>
+    <linearGradient id="plate" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f4f6ff"/>
+      <stop offset="1" stop-color="#c9d3fb"/>
+    </linearGradient>
+    <filter id="drop" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#0b1a5c" flood-opacity="0.45"/>
+    </filter>
+    <filter id="tile" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000000" flood-opacity="0.28"/>
+    </filter>
+    <clipPath id="picture"><rect x="406" y="318" width="212" height="388" rx="18"/></clipPath>
+  </defs>
+  <!-- macOS icon tile: 824 square on the 1024 grid -->
+  <g filter="url(#tile)">
+    <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
+  </g>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#sheen)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="184.5" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="3"/>
+  <!-- the film frame, squeezed narrow: same picture, less space -->
+  <g filter="url(#drop)">
+    <rect x="346" y="262" width="332" height="500" rx="40" fill="#f2f3ee"/>
+  </g>
+  <g fill="#2b4bd6">
+    <rect x="364" y="300" width="24" height="40" rx="7"/><rect x="364" y="376" width="24" height="40" rx="7"/>
+    <rect x="364" y="452" width="24" height="40" rx="7"/><rect x="364" y="528" width="24" height="40" rx="7"/>
+    <rect x="364" y="604" width="24" height="40" rx="7"/><rect x="364" y="680" width="24" height="40" rx="7"/>
+    <rect x="636" y="300" width="24" height="40" rx="7"/><rect x="636" y="376" width="24" height="40" rx="7"/>
+    <rect x="636" y="452" width="24" height="40" rx="7"/><rect x="636" y="528" width="24" height="40" rx="7"/>
+    <rect x="636" y="604" width="24" height="40" rx="7"/><rect x="636" y="680" width="24" height="40" rx="7"/>
+  </g>
+  <!-- the picture itself: sky, sun and hills, unchanged by the squeeze -->
+  <g clip-path="url(#picture)">
+    <rect x="406" y="318" width="212" height="388" fill="url(#sky)"/>
+    <circle cx="560" cy="420" r="34" fill="#ffd36b"/>
+    <path d="M396 610 Q470 520 540 590 T640 560 L640 720 L396 720 Z" fill="#7aa36f"/>
+    <path d="M396 650 Q500 590 640 640 L640 720 L396 720 Z" fill="#4f7d4f"/>
+  </g>
+  <!-- two press plates closing in from the sides -->
+  <g filter="url(#drop)">
+    <rect x="214" y="352" width="72" height="320" rx="30" fill="url(#plate)"/>
+    <rect x="738" y="352" width="72" height="320" rx="30" fill="url(#plate)"/>
+  </g>
+  <g fill="#ffffff" opacity="0.92">
+    <path d="M332 512 L298 482 L298 542 Z"/>
+    <path d="M692 512 L726 482 L726 542 Z"/>
+  </g>
+</svg>
