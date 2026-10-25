@@ -71,7 +71,7 @@ struct Attention: Equatable, Sendable {
         facts.keptOriginal.kept.filter { $0.prefix == prefix }.map(\.reason)
     }
 
-    private static func waitingNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {
+    static func waitingNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {
         let samples = facts.samples.waitingOnYou.map(sampleNotice)
         let computers = facts.computers.filter { computerStatesNeedingYou.contains($0.state) }.map { computer in
             AttentionNotice(
@@ -110,7 +110,7 @@ struct Attention: Equatable, Sendable {
         )
     }
 
-    private static func backupsNotice(_ backups: MainWindowFacts.OriginalBackups) -> AttentionNotice {
+    static func backupsNotice(_ backups: MainWindowFacts.OriginalBackups) -> AttentionNotice {
         AttentionNotice(
             id: "backups",
             title: "Original backups are ready to delete",

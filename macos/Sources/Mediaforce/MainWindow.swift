@@ -138,6 +138,8 @@ enum Place: Hashable {
 }
 
 struct MainWindow: View {
+    static let id = "main"
+
     let model: MainWindowModel
     @State private var place: Place? = .library
 
@@ -185,7 +187,8 @@ struct MainWindow: View {
             }
         }
         .frame(minWidth: 1100, minHeight: 700)
-        .onChange(of: model.requestedPlace) { _, requested in
+        // Initial too: the menu bar may ask for a page while it opens this window.
+        .onChange(of: model.requestedPlace, initial: true) { _, requested in
             guard let requested else { return }
             place = requested
             model.requestedPlace = nil
@@ -224,7 +227,7 @@ struct PauseButton: View {
         } label: {
             Label(paused ? "Resume Mediaforce" : "Pause Mediaforce", systemImage: paused ? "play.fill" : "pause.fill")
         }
-        .help(paused ? "Resume work on every computer." : Words.pauseHelp(facts.work))
+        .help(paused ? Words.resumeHelp : Words.pauseHelp(facts.work))
     }
 }
 

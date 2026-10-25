@@ -321,6 +321,22 @@ def test_work_says_whether_it_is_paused_and_why_it_stopped(
     assert (work["state"], work["paused_by_owner"], work["stop_reasons"]) == (expected_state, paused, expected_reasons)
 
 
+def test_work_names_each_season_being_compressed_once(connection: DBClient) -> None:
+    _encode_job(connection, "tv/A/Season 2", status="running", host_key="mbp")
+    _encode_job(connection, "tv/B/Season 1", status="queued")
+    connection.execute(
+        encode_jobs.insert().values(
+            job_id="job-shard", prefix="tv/A/Season 2", job_kind="shard", status="running", host_json="{}",
+            manifest_path="/runs/manifest.json", created_at=NOW, updated_at=NOW,
+        )
+    )
+    connection.commit()
+
+    work = _payload(connection, computers=[_computer("mbp")])["work"]
+
+    assert [(season["show"], season["season"]) for season in work["running_seasons"]] == [("A", 2)]
+
+
 def test_original_backups_leave_out_originals_already_removed(connection: DBClient) -> None:
     _replaced(connection, "tv/A/Season 1/e1.mkv", saved=1, at=NOW, original_size=700)
     removed = _replaced(connection, "tv/A/Season 1/e2.mkv", saved=1, at=NOW, original_size=900)
