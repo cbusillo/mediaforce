@@ -18,6 +18,11 @@ over it within stated limits.
 The app is something the Director enjoys using: beautiful, obvious at a glance,
 and written in plain words. A term the Director has to look up is a defect.
 
+Mediaforce is a native Mac app. An iOS and iPadOS companion app comes only
+after the Mac app is stable and the Director is happy with it. When something
+needs the Director, Mediaforce sends a notification and a badge, and the item
+itself says it is waiting.
+
 Judge every change by one question: does this reclaim more of the library
 safely, with less of the Director's attention and less to decode?
 
@@ -59,6 +64,8 @@ Whatever blocks that journey is the next piece of work.
 - internal terms (CRF, VMAF, ledger, cadence, shard, manifest) as the
   Director's words on a screen
 - the "semi-automated, review everything" stance in the README
+- the web app as the Director's main screen, and any page the Director has to
+  visit to find what needs them
 
 ## Milestones
 
