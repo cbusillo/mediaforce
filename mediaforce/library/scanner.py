@@ -177,7 +177,7 @@ def _execute_scan_library(
             ).mappings().fetchone()
             _throw_if_scan_cancelled(process_controller)
 
-            # A file mid-move belongs to its publish or put-back, which records it when the move finishes.
+            # A file mid-move belongs to the publishing or put-back moving it, which records it when the move finishes.
             if ((row is not None and pending_source_operation(connection, int(row["id"])))
                     or path_in_pending_move(connection, source_path)):
                 continue

@@ -58,14 +58,16 @@ def _published(connection: DBClient, root: Path, original_name: str) -> dict[str
     source.parent.mkdir(parents=True)
     source.write_bytes(ORIGINAL)
     now = timestamp()
-    item_id = int(connection.execute(library_items.insert().values(
+    inserted = connection.execute(library_items.insert().values(
         source_path=str(source), rel_path=f"tv/Show/Season 1/{original_name}", media_root="tv", parent_dir="tv/Show/Season 1",
         file_name=source.name, container=source.suffix, size_bytes=source.stat().st_size, mtime_ns=source.stat().st_mtime_ns,
         fingerprint=file_fingerprint(source, source.stat(), 60),
         content_version_fingerprint=content_version_fingerprint(source, source.stat()),
         video_codec="h264", width=1920, height=1080, duration_seconds=60, audio_summary_json="[]", subtitle_summary_json="[]",
         last_scan_id="fixture", discovered_at=now, last_seen_at=now, updated_at=now,
-    )).inserted_primary_key[0])
+    )).inserted_primary_key
+    assert inserted is not None
+    item_id = int(inserted[0])
     staging = root / "staging/tv/Show/Season 1/episode.mkv"
     staging.parent.mkdir(parents=True)
     staging.write_bytes(COMPRESSED)
@@ -111,7 +113,7 @@ def test_put_back_returns_the_original_and_keeps_it(connection: DBClient, tmp_pa
     assert connection.execute(select(staged_artifacts)).first() is None
     # Kept for the source that came back, so queueing, dispatch and publishing leave it alone.
     keep = connection.execute(select(motion_keep_decisions)).mappings().one()
-    assert (keep["reason_code"], keep["source_fingerprint"]) == ("put_back", library_item_source_fingerprint(item))
+    assert (keep["reason_code"], keep["source_fingerprint"]) == ("put_back", library_item_source_fingerprint(dict(item)))
     assert library_item_ids_kept_original(connection, [published["id"]]) == {published["id"]}
     assert [kind for kind, _details in events] == [PUT_BACK_EVENT]
     # The episode list words it as the owner's put-back, not a motion-pattern choice.

@@ -1,14 +1,14 @@
 """Put a replaced file's original back from its backup, at the owner's request.
 
 The compressed copy leaves the library for its staging place and the original returns to where it was,
-through the same journaled moves a publish uses, so an interruption is reconciled the same way. Once the
+through the same journaled moves publishing uses, so an interruption is reconciled the same way. Once the
 catalog records the original, the compressed copy and its stage are removed, as when a rescan finds a
 replaced file changed. The file is then kept original for the source that came back, so nothing
 compresses it again until the owner undoes that choice.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
@@ -17,11 +17,12 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_items, motion_keep_decisions, source_moves, source_transitions, \
+from mediaforce.core.db_tables import library_items, motion_keep_decisions, source_transitions, \
     source_versions, staged_artifacts
 from mediaforce.library.source_evidence import append_version, ensure_active_source_version, json_text, observe_file, \
     pending_source_operation
-from mediaforce.encoding.source_publication import apply_source_moves, commit_source_publish, reconcile_source_publish
+from mediaforce.encoding.source_publication import apply_source_moves, commit_source_publish, reconcile_source_publish, \
+    record_prepared_moves
 
 LOGGER = logging.getLogger(__name__)
 PUT_BACK_REASON = "put_back"
@@ -54,7 +55,7 @@ def reconcile_unfinished_put_backs(connection: DBClient, library_item_id: int | 
 
 
 def _original_version(connection: DBClient, item_id: int, active: str, archive_identity: dict[str, Any]) -> str:
-    """The version the publish replaced, or a new one in the same generation for a publish made before the journal.
+    """The version publishing replaced, or a new one in the same generation when it was published before the journal.
 
     A recorded original that differs from the backup on disk is refused: that backup is not this file's original.
     """
@@ -77,9 +78,9 @@ def _original_version(connection: DBClient, item_id: int, active: str, archive_i
                           recorded_at=str(archive_identity.get("observed_at") or ""))
 
 
-def _prepare(connection: DBClient, item: dict[str, Any], *, library_path: Path, out_path: Path,
+def _prepare(connection: DBClient, item: Mapping[str, Any], *, library_path: Path, out_path: Path,
              archive_path: Path, original_path: Path, now: str) -> str:
-    """Persist both intended moves before touching media, as a publish does."""
+    """Persist both intended moves before touching media, as publishing does."""
     connection.commit()
     item_id = int(item["id"])
     if pending_source_operation(connection, item_id):
@@ -101,12 +102,7 @@ def _prepare(connection: DBClient, item: dict[str, Any], *, library_path: Path, 
         recorded_at=now,
     ))
     moves = [(active, library_path, out_path, library_identity), (original, archive_path, original_path, archive_identity)]
-    for ordinal, (version_id, old, new, identity) in enumerate(moves):
-        connection.execute(source_moves.insert().values(
-            operation_id=operation, ordinal=ordinal, version_id=version_id, from_path=str(old), to_path=str(new),
-            phase="prepared", checks_json=json_text(identity),
-        ))
-    connection.commit()
+    record_prepared_moves(connection, operation, moves)
     return operation
 
 
@@ -150,7 +146,7 @@ def put_original_back(
 
     now = timestamp()
     try:
-        operation = _prepare(connection, dict(item), library_path=library_path, out_path=out_path,
+        operation = _prepare(connection, item, library_path=library_path, out_path=out_path,
                              archive_path=archive_path, original_path=original_path, now=now)
     except PutBackRefused:
         connection.rollback()
