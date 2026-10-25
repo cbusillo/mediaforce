@@ -219,6 +219,7 @@ from mediaforce.web.runtime.put_back import put_original_back_action
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
 from mediaforce.web.runtime.episode_progress import folder_episodes_payload
+from mediaforce.web.runtime.app_item import item_payload, player_file
 from mediaforce.web.runtime.sample_history import sample_history_payload
 from mediaforce.web.runtime.encode_runtime import ControllerShutdownCancelledError, mark_host_cooldowns, \
     release_host_cooldowns, sync_encode_job_parent, sweep_stopped_remote_encodes
@@ -2768,6 +2769,8 @@ def create_app(
         ),
         make_sample_action=_make_app_sample_action,
         compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=_queue_folder_encode_action),
+        item_payload=lambda prefix: item_payload(config, prefix, sound=_show_audio_preset_payload),
+        player_file=lambda library_item_id, side: player_file(config, library_item_id, side),
     )
     register_child_recovery_routes(app, recover_children_action=_recover_children_action)
     register_size_decision_routes(app, decide_size_exception_action=_decide_size_exception_action)

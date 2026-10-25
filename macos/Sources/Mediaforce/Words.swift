@@ -261,6 +261,7 @@ extension Words {
     static let startCompressing = "Start compressing"
     static let tryAnotherSize = "Try another size"
     static let chooseSizeHeadline = "Choose a size"
+    static let openItem = "Open"
     static let openInBrowser = "Open in browser"
     static let cancel = "Cancel"
     static let original = "Original"
@@ -402,7 +403,7 @@ extension Words {
     }
 
     static func seasonButton(_ season: TVShowsFacts.Season) -> String {
-        guard season.opensSample else { return openInBrowser }
+        guard season.opensSample else { return openItem }
         return season.action == "queue_encode" ? startCompressing : sampleAction(season.action) ?? sample
     }
 
@@ -839,5 +840,163 @@ extension Words {
 extension ActionNotice {
     static func compressionSettingsNotSaved(_ code: String?) -> ActionNotice {
         ActionNotice(title: "Settings not saved", message: Words.compressionSaveRefused(code))
+    }
+}
+
+extension Words {
+    static let waitingForYou = "Waiting for you"
+    static let keepThisCopy = "Keep this copy"
+    static let makeItAgain = "Make it again"
+    static let putOriginalBack = "Put original back…"
+    static let compressed = "Compressed"
+    static let soundLabel = "Sound"
+    static let stillAiringLabel = "Still airing"
+    static let stillAiringModes = ["auto", "on", "off"]
+    static let putOriginalBackDetail =
+        "The compressed copy is removed and the original goes back in the library. Mediaforce keeps it original until you choose otherwise."
+
+    static func itemTitle(_ facts: ItemFacts) -> String {
+        facts.season.map { "Season \($0)" } ?? facts.title
+    }
+
+    static func beforeAfter(_ before: Int64, _ after: Int64) -> String {
+        before == after ? size(after) : "\(size(before)) → \(size(after))"
+    }
+
+    static func itemSummary(_ facts: ItemFacts) -> String {
+        let noun = facts.domain == "tv" ? "episode" : "file"
+        var parts: [String] = []
+        if facts.compressedCount > 0 { parts.append("\(count(facts.compressedCount, noun)) compressed") }
+        if facts.keptCount > 0 { parts.append("\(facts.keptCount) kept original") }
+        if !facts.waiting.isEmpty { parts.append("\(facts.waiting.count) waiting for you") }
+        if parts.isEmpty { return "Nothing compressed yet." }
+        return parts.joined(separator: ", ") + "."
+    }
+
+    static func fileName(_ file: ItemFacts.File) -> String {
+        file.episode.map { "Episode \($0)" } ?? file.name
+    }
+
+    static func fileState(_ file: ItemFacts.File) -> String {
+        switch file.stage {
+        case "needs_you":
+            if file.sizeQuestion != nil { "Needs more than its size goal" }
+            else if file.validation == "size_held" { "Much smaller than its sample" }
+            else if file.validation == "failed" { "Didn't pass its check" }
+            else { "Needs a decision" }
+        case "kept_original": "\(keptOriginal): \(keptReason("motion_\(file.keptReason ?? "")"))"
+        case "held": file.heldReason == "motion_pattern" ? "Kept original: Mediaforce can't convert its motion safely" : "Waiting to start"
+        case "compressing": file.percentComplete.map { "Compressing, \($0)%" } ?? "Compressing"
+        case "measuring": "Finding the right size"
+        case "getting_ready": "Getting ready"
+        case "checking": "Checking the compressed copy"
+        case "waiting": "Waiting its turn"
+        default: "Not compressed yet"
+        }
+    }
+
+    static func waitingReason(_ file: ItemFacts.File) -> String {
+        if let question = file.sizeQuestion {
+            return "To look right it needs \(size(question.smallestQualitySafeBytes)), more than its \(size(question.goalBytes)) goal."
+        }
+        return switch file.validation {
+        case "failed": "The compressed copy didn't pass its check. The original stays in the library until you decide."
+        case "size_held": "It came out much smaller than its sample. Keep this copy, or make it again."
+        default: "It needs a decision the app can't make yet. The web page has it."
+        }
+    }
+
+    static let keepTheOriginal = "Keep the original"
+
+    static func allowLarger(_ question: ItemFacts.SizeQuestion) -> String {
+        "Allow \(size(question.smallestQualitySafeBytes))"
+    }
+
+    static func couldNotPlay(_ file: ItemFacts.File) -> String {
+        "\(fileName(file)) couldn't be made ready to play."
+    }
+
+    static func actionRefused(_ action: ItemAction) -> String {
+        switch action {
+        case .makeAgain: "Not made again"
+        case .keepThisCopy: "Not kept"
+        case .putOriginalBack: "The original was not put back"
+        case .allowLarger: "The larger size was not allowed"
+        case .keepOriginal: "Not kept original"
+        }
+    }
+
+    static func actionRefusal(_ code: String?, _ message: String?) -> String {
+        switch code {
+        case "backup_gone": "Its original backup was deleted, so there is nothing to put back."
+        case "backup_changed": "Its original backup changed since it was made, so Mediaforce left everything as it was."
+        case "busy": "This file is being worked on right now. Try again when that finishes."
+        case "occupied": "Another file is already in the way. Nothing was moved."
+        case "unsafe": "It stopped partway and Mediaforce could not put the files back. Check the library and the original backups folder."
+        default: message ?? "Mediaforce left everything as it was."
+        }
+    }
+
+    static func gettingReady(_ file: ItemFacts.File) -> String {
+        "Getting \(fileName(file)) ready to play"
+    }
+
+    static func playTime(_ position: Double, _ duration: Double) -> String {
+        "\(clock(position)) / \(clock(duration))"
+    }
+
+    private static func clock(_ seconds: Double) -> String {
+        let total = Int(seconds.isFinite ? max(seconds, 0) : 0)
+        return total >= 3600
+            ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
+            : String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    static func playerCaption(_ file: ItemFacts.File, comparing: Bool) -> String {
+        if comparing, let before = file.originalBytes {
+            return "\(fileName(file)): \(beforeAfter(before, file.bytes)). Drag across the picture to compare."
+        }
+        if file.compressed { return "\(fileName(file)): \(size(file.bytes)). Its original backup is deleted." }
+        return "\(fileName(file)): \(size(file.bytes)), as it is now."
+    }
+
+    static func putOriginalBackQuestion(_ file: ItemFacts.File) -> String {
+        "Put the original of \(fileName(file)) back?"
+    }
+
+    static func forEverySeason(_ show: String) -> String {
+        "For every season of \(show)"
+    }
+
+    static func soundName(_ key: String) -> String {
+        switch key {
+        case "keep_surround": "Film"
+        case "speech_stereo": "Speech-heavy"
+        default: key
+        }
+    }
+
+    static func soundExplanation(_ key: String?) -> String {
+        switch key {
+        case "speech_stereo": "Stereo sound, which saves more space. Suits shows that are mostly people talking."
+        default: "Keeps surround sound at its usual quality."
+        }
+    }
+
+    static func stillAiringName(_ mode: String) -> String {
+        switch mode {
+        case "on": "Yes"
+        case "off": "No"
+        default: "Follow TMDB"
+        }
+    }
+
+    static func stillAiringExplanation(_ airing: ItemFacts.StillAiring) -> String {
+        let tmdb = switch airing.airing {
+        case true?: " TMDB says it is still airing."
+        case false?: " TMDB says it has ended."
+        case nil: ""
+        }
+        return "While a show is still airing, Mediaforce leaves its newest season alone until the season ends.\(tmdb)"
     }
 }

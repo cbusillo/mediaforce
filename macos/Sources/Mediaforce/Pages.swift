@@ -108,40 +108,6 @@ struct SpaceSavedPage: View {
     }
 }
 
-struct KeptOriginalPage: View {
-    let kept: MainWindowFacts.KeptOriginal
-
-    var body: some View {
-        PageFrame(title: "Kept original") {
-            Text("Files you chose to keep as they are, and seasons waiting for a reason that lifts by itself.")
-                .foregroundStyle(.secondary)
-            Text("Kept original")
-                .font(.headline)
-            if kept.kept.isEmpty {
-                Text("Nothing is kept original.").foregroundStyle(.secondary)
-            }
-            ForEach(kept.kept) { season in
-                LabeledContent(Words.season(season.show, season.season)) {
-                    Text("\(Words.count(season.itemCount, "file")), \(Words.keptReason(season.reason))")
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Text("Waiting")
-                .font(.headline)
-                .padding(.top, 8)
-            if kept.held.isEmpty {
-                Text("Nothing is waiting.").foregroundStyle(.secondary)
-            }
-            ForEach(kept.held) { season in
-                LabeledContent(Words.season(season.show, season.season)) {
-                    Text(season.reasons.map(Words.holdReason).joined(separator: ", "))
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-}
-
 struct ComputersPage: View {
     let computers: [MainWindowFacts.Computer]
 

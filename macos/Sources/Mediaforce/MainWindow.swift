@@ -9,6 +9,8 @@ final class MainWindowModel {
     private(set) var connection: ServerState = .checking
     private(set) var lastHeard: Date?
     var notice: ActionNotice?
+    // A page a notification asked to open; the window takes it and clears it.
+    var requestedPlace: Place?
     var onFacts: ((MainWindowFacts) -> Void)?
     let client: MediaforceClient
     let posters: PosterStore
@@ -97,8 +99,38 @@ struct ActionNotice: Identifiable, Equatable {
 }
 
 enum Place: Hashable {
-    case library, spaceSaved, keptOriginal, tv, movies, otherMedia, computers
+    case library, spaceSaved, tv, movies, otherMedia, computers
     case sample(String)
+    case item(String)
+
+    static let notificationKey = "opens"
+
+    var opensFromList: Bool {
+        switch self {
+        case .sample, .item: true
+        default: false
+        }
+    }
+
+    var notificationValue: String {
+        switch self {
+        case .sample(let prefix): "sample:\(prefix)"
+        case .item(let prefix): "item:\(prefix)"
+        case .computers: "computers"
+        default: "spaceSaved"
+        }
+    }
+
+    init?(notificationValue value: String) {
+        let parts = value.split(separator: ":", maxSplits: 1).map(String.init)
+        switch (parts.first, parts.count == 2 ? parts[1] : nil) {
+        case ("sample", let prefix?): self = .sample(prefix)
+        case ("item", let prefix?): self = .item(prefix)
+        case ("spaceSaved", nil): self = .spaceSaved
+        case ("computers", nil): self = .computers
+        default: return nil
+        }
+    }
 }
 
 struct MainWindow: View {
@@ -115,12 +147,12 @@ struct MainWindow: View {
                     Group {
                         switch place {
                         case .spaceSaved: SpaceSavedPage(facts: facts)
-                        case .keptOriginal: KeptOriginalPage(kept: facts.keptOriginal)
                         case .computers: ComputersPage(computers: facts.computers)
                         case .sample(let prefix): SamplePage(prefix: prefix, model: model)
-                        case .tv: TVShowsPage(model: model) { place = .sample($0) }
-                        case .movies: MoviesPage(model: model)
-                        case .otherMedia: OtherMediaPage(model: model)
+                        case .item(let prefix): ItemPage(prefix: prefix, model: model)
+                        case .tv: TVShowsPage(model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
+                        case .movies: MoviesPage(model: model) { place = .item($0) }
+                        case .otherMedia: OtherMediaPage(model: model) { place = .item($0) }
                         default: LibraryPage(facts: facts, posters: model.posters) { place = .sample($0) }
                         }
                     }
@@ -131,7 +163,7 @@ struct MainWindow: View {
                     }
                 }
                 .toolbar {
-                    if case .sample = place {
+                    if place?.opensFromList == true {
                         ToolbarItem(placement: .navigation) {
                             Button("Library", systemImage: "chevron.backward") { place = .library }
                         }
@@ -148,6 +180,11 @@ struct MainWindow: View {
             }
         }
         .frame(minWidth: 1100, minHeight: 700)
+        .onChange(of: model.requestedPlace) { _, requested in
+            guard let requested else { return }
+            place = requested
+            model.requestedPlace = nil
+        }
         .alert(item: Bindable(model).notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
@@ -198,8 +235,6 @@ struct Sidebar: View {
                     .tag(Place.library)
                 SidebarRow(title: "Space saved", symbol: "arrow.down.right.and.arrow.up.left", trailing: Words.size(facts.spaceSaved.bytes))
                     .tag(Place.spaceSaved)
-                SidebarRow(title: "Kept original", symbol: "hand.raised", trailing: "\(facts.keptOriginal.keptItemCount)")
-                    .tag(Place.keptOriginal)
                 Section("Media") {
                     SidebarRow(title: "TV shows", symbol: "tv", trailing: "\(facts.library.tv.showCount)")
                         .tag(Place.tv)

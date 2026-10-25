@@ -2,11 +2,11 @@ import SwiftUI
 
 struct OtherMediaPage: View {
     let model: MainWindowModel
+    let openItem: (String) -> Void
     @State private var search = ""
     @State private var stateGroup: LibraryStateGroup?
     @State private var selected: OtherMediaFacts.Item.ID?
     @State private var sortOrder = [KeyPathComparator(\OtherMediaFacts.Item.bytes, order: .reverse)]
-    @Environment(\.openURL) private var openURL
 
     var body: some View {
         RefreshingPage(title: Words.otherMedia, load: { try await model.client.otherMedia() }) { (facts: OtherMediaFacts) in
@@ -30,7 +30,7 @@ struct OtherMediaPage: View {
                 Text(Words.noMatchingOtherMedia)
                     .foregroundStyle(.secondary)
             } else if let item = items.first(where: { $0.id == selected }) {
-                OtherMediaDetail(item: item) { openURL(model.client.seasonPage(item.prefix)) }
+                OtherMediaDetail(item: item) { openItem(item.prefix) }
             } else {
                 Text(Words.chooseOtherMedia)
                     .foregroundStyle(.secondary)
@@ -86,7 +86,7 @@ struct OtherMediaTable: View {
 
 struct OtherMediaDetail: View {
     let item: OtherMediaFacts.Item
-    let openInBrowser: () -> Void
+    let open: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -94,7 +94,7 @@ struct OtherMediaDetail: View {
                 .font(.headline)
             Text(Words.otherMediaDetail(item))
                 .foregroundStyle(.secondary)
-            Button(Words.openInBrowser, action: openInBrowser)
+            Button(Words.openItem, action: open)
                 .controlSize(.small)
         }
     }

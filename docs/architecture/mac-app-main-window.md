@@ -112,7 +112,7 @@ Director) and `checks_only` (approved, but starting it only runs motion-pattern
 checks first). The app groups a show by its seasons the way the web library
 does (needs you, in progress, ready for you, no active work), opens the sample
 page for a season whose sample waits on the Director, and opens the season's
-web page for anything else.
+item page for anything else.
 
 ## Movies
 
@@ -126,7 +126,7 @@ the web movie library's state group, checked in its order: `view_only`,
 `finished`, `cannot_start`, `needs_file_choice`, `motion_held`,
 `needs_attention`, `compressing`, `ready` or `no_work`. The app groups those
 codes the same way as TV shows (needs you, in progress, ready for you, no
-active work) and opens a movie's web page for anything it does.
+active work) and opens a movie's item page for anything it does.
 
 ## Other media
 
@@ -141,6 +141,34 @@ library's state group, checked in its order: `cannot_start`, `view_only`,
 `needs_attention`, `compressing`, `ready` or `no_work`. The sidebar's Other
 media number counts files; the page counts folders and files and names the
 files they hold, which match that number unless `truncated`.
+
+## One show season, movie or folder
+
+Every list row, the sample page and a finished season's notification open the
+item page; the app never opens the web page. `GET /api/app/items/{prefix}`
+gives its facts, or `404` when the prefix names no present file: `prefix`,
+`domain`, `kind` and `title` (the media scope's), for a TV season `show`,
+`show_prefix` and `season`, and `files` in episode order. Each file has its
+`library_item_id`, `rel_path`, `name`, `episode` number (null outside
+`SxxEyy` names), `stage` (the episode list's stage codes), `validation`
+(`failed` or `size_held` when its copy waits on the Director), `kept_reason`
+(the keep decision's reason, such as `mixed` or `put_back`), `held_reason`
+(`motion_pattern`), `percent_complete`, `size_question`, `bytes` (the file in
+the library now), `original_bytes` (its size before replacement, or null) and
+`original_backup` (whether its backup is still there to compare). A TV item
+also has `sound` (`show_prefix`, `current`, `options`) and `still_airing`
+(`series_prefix`, `mode` `auto`, `on` or `off`, and `airing`, TMDB's answer or
+null). The page saves those through the folder routes `audio-preset` and
+`series-lifecycle`, and acts on a file through `size-held-decision` (keep this
+copy, or make it again) and `put-original-back`.
+
+`GET /api/app/player/{library_item_id}/{side}` serves one file for the page's
+player, `side` `compressed` or `original` (the backup of a replaced file, or the
+file itself when it was never replaced), or `404` when that side is gone. The
+Mac player cannot open MKV, so the first request remuxes the file to MP4,
+copying the picture and making the sound stereo AAC, into the `player`
+folder of the web state folder (`paths.web_state_dir`); the newest six stay cached. It answers byte
+ranges, so the player can seek.
 
 ## Settings
 
@@ -238,6 +266,10 @@ closed, and asks the Director only by Mac notification and Dock badge:
   made again, a sample that needs a size decision, or a computer that needs its
   password, Remote Login, or a trust check;
 - original backups becoming ready to delete (when their number rises).
+
+Clicking a notification opens the page it is about: a finished season's item
+page, a sample's sample page, a computer the Computers page, and original
+backups Space saved.
 
 The Dock badge counts what waits on the Director: samples waiting, computers
 that need the Director, and one for original backups ready to delete. It clears
