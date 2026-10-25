@@ -203,8 +203,13 @@ def player_file(config: MediaforceConfig, library_item_id: int, side: str) -> Pa
 
 def _player_sources(library_file: Path, backup: Path | None, *, replaced: bool) -> dict[str, Path]:
     """Each side that can play now: a replaced file has its compressed copy and maybe its backup."""
-    sides = {"compressed": library_file, "original": backup} if replaced else {"original": library_file}
-    return {side: path for side, path in sides.items() if path is not None and path.is_file()}
+    sides: list[tuple[str, Path | None]] = [("compressed", library_file), ("original", backup)] if replaced \
+        else [("original", library_file)]
+    playable: dict[str, Path] = {}
+    for side, path in sides:
+        if path is not None and path.is_file():
+            playable[side] = path
+    return playable
 
 
 def _cached_name(cache: Path, library_item_id: int, side: str, source: Path) -> Path:
