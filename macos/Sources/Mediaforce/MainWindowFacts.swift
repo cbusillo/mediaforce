@@ -69,9 +69,11 @@ struct MainWindowFacts: Decodable, Sendable {
         let show: String
         let season: Int?
         let episodeCount: Int
+        let keptOriginalCount: Int
         let bytesSaved: Int64
         let finishedAt: String?
         var id: String { prefix }
+        var keptEntirelyOriginal: Bool { episodeCount == 0 && keptOriginalCount > 0 }
     }
 
     struct NotStartedShow: Decodable, Sendable, Identifiable {

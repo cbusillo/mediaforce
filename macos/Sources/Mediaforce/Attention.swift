@@ -51,7 +51,7 @@ struct Attention: Equatable, Sendable {
                 AttentionNotice(
                     id: "finished:\(season.prefix)",
                     title: "\(Words.season(season.show, season.season)) is finished",
-                    body: "\(Words.count(season.episodeCount, "episode")) compressed, checked and replaced. \(Words.size(season.bytesSaved)) saved."
+                    body: Words.finishedNotice(season, keptReasons: keptReasons(facts, season.prefix))
                 )
             }
         }
@@ -61,6 +61,10 @@ struct Attention: Equatable, Sendable {
             title: mayHaveMore ? "At least \(newlyFinished.count) seasons finished" : "\(newlyFinished.count) seasons finished",
             body: "See Finished lately in Mediaforce for what was saved."
         )]
+    }
+
+    private static func keptReasons(_ facts: MainWindowFacts, _ prefix: String) -> [String] {
+        facts.keptOriginal.kept.filter { $0.prefix == prefix }.map(\.reason)
     }
 
     private static func waitingNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {

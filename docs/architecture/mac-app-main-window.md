@@ -21,12 +21,12 @@ still answers when that storage is gone, and it starts no work.
 - `library`: per kind (`tv`, `movies`, `other`), counts of present files and
   `total_bytes`, plus `original_bytes`, the size still in original form.
 - `space_saved`: bytes saved by replaced files, the replaced file and episode
-  counts, and `season_count`, the number of finished seasons.
+  counts, and `season_count`, the number of finished seasons with at least one
+  replaced file.
 - `recently_finished_seasons`: finished seasons, newest first. A season is
-  finished when at least one file was replaced and every present file is
-  replaced or kept original; its `finished_at` is its last replacement. A
-  season kept entirely original saved nothing and appears only under
-  `kept_original`.
+  finished when every present file is replaced or kept original, including a
+  season kept entirely original, which saved nothing; its `finished_at` is its
+  last replacement or keep decision.
 - `biggest_not_started`: the largest shows with no encode job, no replaced
   file and no approved sample. `waiting_sample_prefix` names a season whose
   sample waits on the owner.

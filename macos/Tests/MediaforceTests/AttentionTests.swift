@@ -6,6 +6,9 @@ final class AttentionTests: XCTestCase {
     private struct Finished {
         let prefix: String
         let at: String
+        var replaced = 15
+        var kept = 0
+        var saved: Int64 = 4_000_000_000
     }
 
     private func facts(
@@ -15,7 +18,10 @@ final class AttentionTests: XCTestCase {
         backups: Int = 0
     ) throws -> MainWindowFacts {
         let finishedJSON = finished.map { season in
-            #"{"prefix": "\#(season.prefix)", "show_prefix": "tv/Futurama", "show": "Futurama", "season": 3, "episode_count": 15, "bytes_saved": 4000000000, "finished_at": "\#(season.at)"}"#
+            #"{"prefix": "\#(season.prefix)", "show_prefix": "tv/Futurama", "show": "Futurama", "season": 3, "episode_count": \#(season.replaced), "kept_original_count": \#(season.kept), "bytes_saved": \#(season.saved), "finished_at": "\#(season.at)"}"#
+        }
+        let keptJSON = finished.filter { $0.kept > 0 }.map { season in
+            #"{"prefix": "\#(season.prefix)", "show_prefix": "tv/Futurama", "show": "Futurama", "season": 3, "reason": "motion_mixed", "item_count": \#(season.kept)}"#
         }
         let samplesJSON = waitingSamples.map { sample in
             #"{"prefix": "\#(sample.prefix)", "show_prefix": "tv/Expanse", "show": "The Expanse", "season": 3, "state": "\#(sample.state)", "action": "\#(sample.action)", "failure": null}"#
@@ -36,7 +42,7 @@ final class AttentionTests: XCTestCase {
          "computers": [\(computersJSON.joined(separator: ","))],
          "events": [], "last_change": null,
          "original_backups": {"count": \(backups), "bytes": \(backups * 1_000_000_000)},
-         "kept_original": {"kept_item_count": 0}}
+         "kept_original": {"kept_item_count": 0, "kept": [\(keptJSON.joined(separator: ","))]}}
         """
         return try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(json.utf8))
     }
@@ -126,6 +132,31 @@ final class AttentionTests: XCTestCase {
         let attention = Attention.review(try facts(computers: [("mini", "storage_unreachable"), ("x", "outside_schedule")]), remembered: AttentionMemory())
         XCTAssertEqual(attention.notices, [])
         XCTAssertEqual(attention.badgeCount, 0)
+    }
+
+    func testASeasonKeptEntirelyOriginalSaysWhyInsteadOfWhatWasSaved() throws {
+        let allKept = Finished(prefix: "tv/F/Season 4", at: "2026-10-23T00:00:00+00:00", replaced: 0, kept: 3, saved: 0)
+        let mixed = Finished(prefix: "tv/F/Season 5", at: "2026-10-22T12:00:00+00:00", replaced: 12, kept: 3)
+        let before = Attention.review(try facts(finished: [older]), remembered: nil).memory
+
+        let bodies = Attention.review(try facts(finished: [allKept, mixed, newer, older]), remembered: before).notices.map(\.body)
+
+        guard bodies.count == 3 else { return XCTFail("Expected three finished notices, got \(bodies)") }
+        let (keptBody, mixedBody, replacedBody) = (bodies[0], bodies[1], bodies[2])
+        XCTAssertNotEqual(keptBody, replacedBody)
+        XCTAssertTrue(keptBody.contains(Words.keptReason("motion_mixed")))
+        XCTAssertFalse(keptBody.contains(Words.size(0)))
+        XCTAssertTrue(mixedBody.contains("\(Words.count(3, "episode")) kept original"))
+        XCTAssertFalse(replacedBody.contains("kept original"))
+    }
+
+    func testFinishedLatelyShowsKeptOriginalForASeasonThatSavedNothing() throws {
+        let allKept = Finished(prefix: "tv/F/Season 4", at: "2026-10-23T00:00:00+00:00", replaced: 0, kept: 3, saved: 0)
+        let seasons = try facts(finished: [allKept, newer]).recentlyFinishedSeasons
+
+        XCTAssertEqual(Words.finishedSaved(seasons[0]), Words.keptOriginal)
+        XCTAssertNotEqual(Words.finishedSaved(seasons[1]), Words.keptOriginal)
+        XCTAssertFalse(Words.finishedSummary(seasons[0]).contains(Words.size(0)))
     }
 
     func testCountsReadNaturally() {

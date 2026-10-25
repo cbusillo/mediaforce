@@ -104,14 +104,14 @@ struct FinishedShelf: View {
                         PosterView(
                             show: season.show,
                             image: posters.image(for: season.showPrefix),
-                            headline: "\(Words.size(season.bytesSaved)) saved",
+                            headline: Words.finishedSaved(season),
                             detail: season.season.map { "Season \($0)" } ?? season.show
                         )
                         Text(Words.day(season.finishedAt))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    .help("\(Words.season(season.show, season.season)): \(season.episodeCount) episodes replaced, \(Words.size(season.bytesSaved)) saved")
+                    .help(Words.finishedSummary(season))
                 }
             }
         }
