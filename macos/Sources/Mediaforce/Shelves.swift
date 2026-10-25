@@ -122,8 +122,7 @@ struct SampleShelf: View {
     let facts: MainWindowFacts
     private var samples: MainWindowFacts.Samples { facts.samples }
     let posters: PosterStore
-    let client: MediaforceClient
-    @Environment(\.openURL) private var openURL
+    let openSample: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -140,7 +139,7 @@ struct SampleShelf: View {
                         )
                         .help([Words.season(sample.show, sample.season), Words.sampleFailure(sample.failure)].compactMap { $0 }.joined(separator: ": "))
                         if let action = Words.sampleAction(sample.action) {
-                            let open = { openURL(client.seasonPage(sample.prefix)) }
+                            let open = { openSample(sample.prefix) }
                             if index == 0 {
                                 Button(action, action: open)
                                     .buttonStyle(.borderedProminent)
@@ -186,6 +185,7 @@ struct BiggestTable: View {
 
     let shows: [MainWindowFacts.NotStartedShow]
     let samples: [MainWindowFacts.Sample]
+    let openSample: (String) -> Void
 
     var body: some View {
         let largest = Double(shows.map(\.bytes).max() ?? 1)
@@ -196,8 +196,9 @@ struct BiggestTable: View {
                 TableColumn("Show") { (show: MainWindowFacts.NotStartedShow) in
                     VStack(alignment: .leading, spacing: 1) {
                         Text(show.show)
-                        if let note = waitingNote(show) {
-                            Text(note)
+                        if let note = waitingNote(show), let prefix = show.waitingSamplePrefix {
+                            Button(note) { openSample(prefix) }
+                                .buttonStyle(.plain)
                                 .font(.caption)
                                 .foregroundStyle(Color.accentColor)
                         }
