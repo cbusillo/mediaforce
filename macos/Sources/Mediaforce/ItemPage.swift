@@ -7,8 +7,10 @@ struct ItemPage: View {
     let prefix: String
     let model: MainWindowModel
     let openSample: (String) -> Void
+    let openItem: (String) -> Void
     @State private var facts: ItemFacts?
     @State private var work: SampleFacts?
+    @State private var show: TVShowsFacts.Show?
     @State private var refreshFailed = false
     @State private var selected: ItemFacts.File.ID?
     @State private var notice: ActionNotice?
@@ -30,6 +32,9 @@ struct ItemPage: View {
                                         perform(action, facts)
                                     }
                                 }
+                            }
+                            if let show {
+                                ShowSeasons(show: show, openSample: openSample, openItem: openItem)
                             }
                             if !facts.waiting.isEmpty {
                                 WaitingBox(files: facts.waiting) { file, action in
@@ -160,6 +165,10 @@ struct ItemPage: View {
         }
         // The season's own next step, read the same way the sample page reads it; none for a plain folder.
         work = try? await model.client.sample(prefix)
+        // A whole show's page lists its seasons, each with its own next step.
+        if facts?.kind == "tv_series" {
+            show = (try? await model.client.tvShows())?.shows.first { $0.showPrefix == prefix } ?? show
+        }
     }
 
     private func act(_ action: ItemAction, _ file: ItemFacts.File) async {

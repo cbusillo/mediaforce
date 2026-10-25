@@ -387,7 +387,7 @@ extension Words {
         switch group {
         case .needsYou: "Needs you"
         case .inProgress: "In progress"
-        case .readyForYou: "Ready for you"
+        case .readyToCompress: "Ready to compress"
         case .noActiveWork: "No active work"
         }
     }
@@ -437,7 +437,7 @@ extension Words {
         case "motion_held": "Stays original"
         case "needs_attention": "Needs attention"
         case "compressing": "Compressing"
-        case "ready": "Ready for you"
+        case "ready": "Ready to compress"
         default: "No work needed"
         }
     }
@@ -469,7 +469,7 @@ extension Words {
         case "view_only": "View only"
         case "needs_attention": "Needs attention"
         case "compressing": "Compressing"
-        case "ready": "Ready for you"
+        case "ready": "Ready to compress"
         default: "No work needed"
         }
     }
@@ -874,7 +874,9 @@ extension Words {
     }
 
     static func fileName(_ file: ItemFacts.File) -> String {
-        file.episode.map { "Episode \($0)" } ?? file.name
+        guard let episode = file.episode else { return file.name }
+        if file.inShowPage, let season = file.season { return "Season \(season), Episode \(episode)" }
+        return "Episode \(episode)"
     }
 
     static func fileState(_ file: ItemFacts.File) -> String {
@@ -1047,6 +1049,26 @@ extension Words {
         case .replaceOriginals: "No originals were replaced"
         case .retryUnfinished: "Nothing was retried"
         case .keepMotionOriginals: "Nothing was kept original"
+        }
+    }
+}
+
+extension Words {
+    static let media = "Media"
+    static let seasonsHeading = "Seasons"
+    static let kindLabel = "Kind"
+    static let viewLabel = "View"
+    static let tableView = "Show as a table"
+    static let posterView = "Show as posters"
+    static let searchMedia = "Search"
+    static let noMatchingMedia = "Nothing matches. Try another kind, state or search."
+
+    static func mediaKind(_ kind: MediaKind) -> String {
+        switch kind {
+        case .everything: "Everything"
+        case .tv: "TV shows"
+        case .movies: "Movies"
+        case .other: "Other media"
         }
     }
 }

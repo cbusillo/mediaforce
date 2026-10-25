@@ -10,7 +10,7 @@ struct ItemFacts: Decodable, Sendable {
     let showPrefix: String?
     let season: Int?
     let parentPrefix: String?
-    let files: [File]
+    private(set) var files: [File]
     let sound: Sound?
     let stillAiring: StillAiring?
 
@@ -18,6 +18,7 @@ struct ItemFacts: Decodable, Sendable {
         let libraryItemId: Int
         let relPath: String
         let name: String
+        let season: Int?
         let episode: Int?
         let stage: String
         let validation: String?
@@ -29,6 +30,13 @@ struct ItemFacts: Decodable, Sendable {
         let originalBytes: Int64?
         let originalBackup: Bool
         var id: Int { libraryItemId }
+        // A whole show's page names the season too, since episode numbers repeat across seasons.
+        var inShowPage = false
+
+        private enum CodingKeys: String, CodingKey {
+            case libraryItemId, relPath, name, season, episode, stage, validation, keptReason, heldReason
+            case percentComplete, sizeQuestion, bytes, originalBytes, originalBackup
+        }
 
         var compressed: Bool { stage == "published" }
         var needsYou: Bool { stage == "needs_you" }
@@ -51,6 +59,16 @@ struct ItemFacts: Decodable, Sendable {
         let seriesPrefix: String
         let mode: String
         let airing: Bool?
+    }
+
+    /// A whole show's page names each episode's season, since episode numbers repeat.
+    mutating func markShowPage() {
+        guard kind == "tv_series" else { return }
+        files = files.map { file in
+            var file = file
+            file.inShowPage = true
+            return file
+        }
     }
 
     var waiting: [File] { files.filter(\.needsYou) }
@@ -100,7 +118,9 @@ extension MediaforceClient {
         request.timeoutInterval = Self.factsTimeout
         let (data, response) = try await session.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-        return try JSONDecoder.mediaforce.decode(ItemFacts.self, from: data)
+        var facts = try JSONDecoder.mediaforce.decode(ItemFacts.self, from: data)
+        facts.markShowPage()
+        return facts
     }
 
     func player(_ libraryItemId: Int, _ side: PlayerSide) -> URL {

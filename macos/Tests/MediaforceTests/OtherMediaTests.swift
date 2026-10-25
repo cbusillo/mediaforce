@@ -8,7 +8,7 @@ final class OtherMediaTests: XCTestCase {
         ("cannot_start", .needsYou),
         ("needs_attention", .needsYou),
         ("compressing", .inProgress),
-        ("ready", .readyForYou),
+        ("ready", .readyToCompress),
         ("view_only", .noActiveWork),
         ("no_work", .noActiveWork),
     ]
@@ -27,7 +27,7 @@ final class OtherMediaTests: XCTestCase {
         """)
         XCTAssertEqual(decoded.items.map(\.id), ["other/Trips", "other/Wedding.mkv"])
         XCTAssertEqual(decoded.items.map(\.estimatedSavedBytes), [6_000_000_000, nil])
-        XCTAssertEqual(decoded.items.map(\.stateGroup), [.readyForYou, .noActiveWork])
+        XCTAssertEqual(decoded.items.map(\.stateGroup), [.readyToCompress, .noActiveWork])
         XCTAssertEqual(decoded.fileCount, 13)
         XCTAssertTrue(decoded.truncated)
         XCTAssertTrue(decoded.items[0].matches("trip"))

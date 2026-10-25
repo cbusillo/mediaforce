@@ -9,7 +9,7 @@ final class MoviesTests: XCTestCase {
         ("needs_file_choice", .needsYou),
         ("needs_attention", .needsYou),
         ("compressing", .inProgress),
-        ("ready", .readyForYou),
+        ("ready", .readyToCompress),
         ("view_only", .noActiveWork),
         ("finished", .noActiveWork),
         ("motion_held", .noActiveWork),
@@ -29,7 +29,7 @@ final class MoviesTests: XCTestCase {
         """)
         XCTAssertEqual(decoded.map(\.id), ["movies/Heat (1995)", "movies/Up (2009)"])
         XCTAssertEqual(decoded.map(\.estimatedSavedBytes), [6_000_000_000, nil])
-        XCTAssertEqual(decoded.map(\.stateGroup), [.readyForYou, .noActiveWork])
+        XCTAssertEqual(decoded.map(\.stateGroup), [.readyToCompress, .noActiveWork])
         XCTAssertTrue(decoded[0].matches("heat"))
         XCTAssertFalse(decoded[0].matches("alien"))
     }

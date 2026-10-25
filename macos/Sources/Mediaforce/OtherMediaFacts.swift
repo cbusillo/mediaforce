@@ -32,7 +32,7 @@ extension LibraryStateGroup {
         switch code {
         case "cannot_start", "needs_attention": self = .needsYou
         case "compressing": self = .inProgress
-        case "ready": self = .readyForYou
+        case "ready": self = .readyToCompress
         default: self = .noActiveWork
         }
     }

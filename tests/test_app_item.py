@@ -248,3 +248,18 @@ def test_an_old_copy_of_the_same_file_is_not_kept_as_its_pair(config: Mediaforce
         assert player_file(config, replaced, "original") is not None
 
     assert not stale.exists()
+
+
+def test_a_whole_show_lists_every_season_in_order(config: MediaforceConfig, tmp_path: Path) -> None:
+    with open_db(config.paths.db_path) as connection:
+        second = _episode(connection, tmp_path, 1, size=10)
+        connection.execute(library_items.update().where(library_items.c.id == second).values(
+            rel_path="tv/Show/Season 2/Show.S02E01.mkv", parent_dir="tv/Show/Season 2"))
+        first = _episode(connection, tmp_path, 3, size=10)
+        connection.commit()
+
+    facts = item_payload(config, "tv/Show", sound=lambda _connection, _prefix: None)
+
+    assert facts is not None
+    assert (facts["kind"], facts["show"], facts["show_prefix"], facts["season"]) == ("tv_series", "Show", "tv/Show", None)
+    assert [(row["library_item_id"], row["season"], row["episode"]) for row in facts["files"]] == [(first, 1, 3), (second, 2, 1)]
