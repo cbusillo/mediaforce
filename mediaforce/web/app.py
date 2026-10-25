@@ -145,8 +145,8 @@ from mediaforce.tuning.size_goals import guided_size_goal_options, operator_inte
 from mediaforce.tuning.target_provenance import exact_item_target_provenance_blocker, target_size_provenance
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_app_window_routes, register_completed_routes, register_dashboard_routes, \
-    register_folder_routes, register_frontend_routes, register_host_routes, register_operator_work_routes, \
-    register_queue_routes, register_settings_routes
+    register_folder_routes, register_frontend_routes, register_host_routes, register_library_settings_routes, \
+    register_operator_work_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_show_poster
@@ -303,14 +303,18 @@ from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, build_op
 from mediaforce.web.settings_runtime import (
     ALWAYS_SCHEDULE_PROFILE,
     DEFAULT_HOST_SCHEDULE_PROFILE,
+    build_runtime_media_settings as _build_runtime_media_settings,
     build_runtime_settings_payload as _build_runtime_settings_payload,
     canonical_schedule_profile_key as _canonical_schedule_profile_key,
     host_max_parallel_encodes as _host_max_parallel_encodes,
     host_schedule_profile_key as _host_schedule_profile_key,
     library_color_map_for_config as _library_color_map_for_config,
+    library_section_rows as _library_section_rows,
+    library_settings_facts as _library_settings_facts_runtime,
     merge_runtime_settings_payload as _merge_runtime_settings_payload,
     normalize_encode_queue_scheduler as _normalize_encode_queue_scheduler,
     settings_archive_root as _settings_archive_root_runtime,
+    settings_catalog_refresh_hours_for_config as _settings_catalog_refresh_hours_runtime,
     settings_library_rows_for_config as _settings_library_rows_for_config_runtime,
     settings_remote_rows_for_config as _settings_remote_rows_for_config_runtime,
     settings_transcode_root_value as _settings_transcode_root_value_runtime,
@@ -981,43 +985,28 @@ def create_app(
             )
         return {**detail, "promotion_readiness": promotion_readiness}
 
-    def _save_settings_action(
-            *,
-            libraries: list[dict[str, Any]],
-            remote_hosts: list[dict[str, Any]],
-            transcode_root: str,
-            catalog_refresh_hours: Any,
-            video_defaults: dict[str, Any],
-            encode_queue_scheduler: dict[str, Any],
-            schedule_profiles: list[dict[str, Any]],
-            metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        nonlocal config
-        if not transcode_root:
-            raise ValueError("A transcode folder is required.")
-        payload = _build_runtime_settings_payload(
-            libraries=libraries,
-            remote_hosts=remote_hosts,
-            transcode_root=transcode_root,
-            catalog_refresh_hours=catalog_refresh_hours,
-            video_defaults=video_defaults,
-            encode_queue_scheduler=encode_queue_scheduler,
-            schedule_profiles=schedule_profiles,
-            metadata=metadata if metadata is not None else config.metadata,
-            existing_library_types={
+    def _saved_library_context() -> dict[str, Any]:
+        """What the settings builders compare a submitted library list against."""
+        media = config.media
+        return {
+            "existing_library_types": {
                 key: str(definition.get("type") or "")
                 for key, definition in config.library_definition_map.items()
             },
-            existing_libraries={
+            "existing_libraries": {
                 str(item.get("key") or ""): dict(item)
-                for item in config.media.get("libraries", [])
+                for item in media.get("libraries", [])
                 if isinstance(item, dict) and str(item.get("key") or "").strip()
-            } if isinstance(config.media.get("libraries"), list) else {},
-            existing_library_paths={
+            } if isinstance(media.get("libraries"), list) else {},
+            "existing_library_paths": {
                 str(key): str(path)
-                for key, path in config.media.get("source_roots", {}).items()
-            } if isinstance(config.media.get("source_roots"), dict) else {},
-        )
+                for key, path in media.get("source_roots", {}).items()
+            } if isinstance(media.get("source_roots"), dict) else {},
+        }
+
+    def _apply_settings_payload(payload: dict[str, Any]) -> None:
+        """Merge only the given runtime settings keys, then reload and rescan when the library changed."""
+        nonlocal config
         changed_type_roots = {
             str(definition.get("key") or ""): str(
                 config.library_definition_map[str(definition.get("key") or "")].get("type") or ""
@@ -1051,7 +1040,55 @@ def create_app(
             with open_db(config.paths.db_path) as connection:
                 _maybe_schedule_scan(connection, config, prefix=None, force=True)
         _refresh_host_status_cache(config)
+
+    def _save_settings_action(
+            *,
+            libraries: list[dict[str, Any]],
+            remote_hosts: list[dict[str, Any]],
+            transcode_root: str,
+            catalog_refresh_hours: Any,
+            video_defaults: dict[str, Any],
+            encode_queue_scheduler: dict[str, Any],
+            schedule_profiles: list[dict[str, Any]],
+            metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not transcode_root:
+            raise ValueError("A transcode folder is required.")
+        _apply_settings_payload(_build_runtime_settings_payload(
+            libraries=libraries,
+            remote_hosts=remote_hosts,
+            transcode_root=transcode_root,
+            catalog_refresh_hours=catalog_refresh_hours,
+            video_defaults=video_defaults,
+            encode_queue_scheduler=encode_queue_scheduler,
+            schedule_profiles=schedule_profiles,
+            metadata=metadata if metadata is not None else config.metadata,
+            **_saved_library_context(),
+        ))
         return {"ok": True, "message": "Settings saved.", "settings": _settings_page_payload(saved=True)}
+
+    def _library_settings_facts() -> dict[str, Any]:
+        return _library_settings_facts_runtime(
+            libraries=_settings_library_rows_for_config_runtime(config, min_rows=0),
+            transcode_root=_settings_transcode_root_value_runtime(config),
+            catalog_refresh_hours=_settings_catalog_refresh_hours_runtime(config),
+        )
+
+    def _save_library_settings_action(
+            *,
+            libraries: list[dict[str, Any]],
+            working_folder: str,
+            catalog_refresh_hours: Any,
+    ) -> dict[str, Any]:
+        """Save the Libraries tab alone; computers, schedules, size defaults and metadata stay as saved."""
+        media, _plex_library_roots = _build_runtime_media_settings(
+            libraries=_library_section_rows(libraries, _settings_library_rows_for_config_runtime(config, min_rows=0)),
+            transcode_root=working_folder,
+            catalog_refresh_hours=catalog_refresh_hours,
+            **_saved_library_context(),
+        )
+        _apply_settings_payload({"media": media})
+        return {"ok": True, "settings": _library_settings_facts()}
 
     def _library_type_preview_action(key: str, library_type: str) -> dict[str, Any]:
         definition = config.library_definition_map.get(key)
@@ -1196,6 +1233,11 @@ def create_app(
             transcode_root=transcode_root,
         ),
         clear_archive_cleanup_action=lambda transcode_root=None: _clear_archive_cleanup_action(transcode_root),
+    )
+    register_library_settings_routes(
+        app,
+        library_settings_facts=_library_settings_facts,
+        save_library_settings_action=_save_library_settings_action,
     )
     register_completed_routes(
         app,

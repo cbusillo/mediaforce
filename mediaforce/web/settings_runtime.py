@@ -70,8 +70,11 @@ HOST_CAPABILITY_OPTIONS = (
 
 
 class SettingsValidationError(ValueError):
-    def __init__(self, public_message: str) -> None:
+    """`public_message` is the website's sentence; `code` is what the Mac app words itself."""
+
+    def __init__(self, public_message: str, code: str = "invalid_settings") -> None:
         self.public_message = public_message
+        self.code = code
         super().__init__("Settings validation failed.")
 
 
@@ -714,25 +717,22 @@ def _library_policy_integer(value: Any, *, label: str, minimum: int, maximum: in
     return normalized
 
 
-def build_runtime_settings_payload(
+def _text(value: JSONValue, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def build_runtime_media_settings(
         *,
         libraries: list[dict[str, Any]],
-        remote_hosts: list[dict[str, Any]],
         transcode_root: str,
         catalog_refresh_hours: Any = DEFAULT_CATALOG_REFRESH_HOURS,
-        video_defaults: dict[str, Any] | None = None,
-        encode_queue_scheduler: dict[str, Any],
-        schedule_profiles: list[dict[str, Any]],
-        metadata: dict[str, Any] | None = None,
         existing_library_types: dict[str, str] | None = None,
         existing_libraries: dict[str, dict[str, Any]] | None = None,
         existing_library_paths: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    def _text(value: JSONValue, default: str = "") -> str:
-        if value is None:
-            return default
-        return str(value).strip()
-
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Build the `media` runtime settings and each library's custom Plex path from the library section."""
     source_roots: dict[str, str] = {}
     library_colors: dict[str, str] = {}
     library_definitions: list[dict[str, Any]] = []
@@ -742,16 +742,21 @@ def build_runtime_settings_payload(
     current_types = existing_library_types or {}
     current_libraries = existing_libraries or {}
     current_paths = existing_library_paths or {}
-    _reject_submitted_secrets(metadata)
+    if not transcode_root.strip():
+        raise SettingsValidationError("A transcode folder is required.", "working_folder_missing")
     staging_root = Path(transcode_root).expanduser()
     if not staging_root.is_absolute():
-        raise SettingsValidationError("The working folder must be an absolute path.")
+        raise SettingsValidationError("The working folder must be an absolute path.", "working_folder_not_absolute")
     try:
         refresh_hours = float(str(catalog_refresh_hours).strip())
     except (TypeError, ValueError) as exc:
-        raise SettingsValidationError("Catalog refresh interval must be a number of hours.") from exc
+        raise SettingsValidationError(
+            "Catalog refresh interval must be a number of hours.", "refresh_interval_invalid"
+        ) from exc
     if not math.isfinite(refresh_hours) or refresh_hours < 0 or refresh_hours > 8760:
-        raise SettingsValidationError("Catalog refresh interval must be between 0 and 8760 hours.")
+        raise SettingsValidationError(
+            "Catalog refresh interval must be between 0 and 8760 hours.", "refresh_interval_invalid"
+        )
     normalized_refresh_hours: int | float = int(refresh_hours) if refresh_hours.is_integer() else refresh_hours
     for row in libraries:
         key_text = _text(row.get("key", ""))
@@ -761,28 +766,32 @@ def build_runtime_settings_payload(
             continue
         normalized_key = normalize_library_key(key_text)
         if not normalized_key or not path_text:
-            raise SettingsValidationError("Each library needs a root ID and local path.")
+            raise SettingsValidationError("Each library needs a root ID and local path.", "library_incomplete")
         if normalized_key != key_text or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", key_text):
-            raise SettingsValidationError("Library root IDs use lowercase letters, numbers, underscores, and hyphens.")
+            raise SettingsValidationError(
+                "Library root IDs use lowercase letters, numbers, underscores, and hyphens.", "library_key_invalid"
+            )
         if not label_text:
             label_text = normalized_key.replace("_", " ").replace("-", " ").title()
         if len(label_text) > 80:
-            raise SettingsValidationError("Library labels must be 80 characters or fewer.")
+            raise SettingsValidationError("Library labels must be 80 characters or fewer.", "library_name_too_long")
         if normalized_key in source_roots:
-            raise SettingsValidationError(f"Duplicate library root ID: {normalized_key}")
+            raise SettingsValidationError(f"Duplicate library root ID: {normalized_key}", "library_duplicate")
         path = Path(path_text).expanduser()
         if not path.is_absolute() and current_paths.get(normalized_key) != path_text:
-            raise SettingsValidationError("Library local paths must be absolute.")
+            raise SettingsValidationError("Library local paths must be absolute.", "library_folder_not_absolute")
         normalized_path = str(path)
         if normalized_path in seen_paths:
-            raise SettingsValidationError("Each library needs a distinct local path.")
+            raise SettingsValidationError("Each library needs a distinct local path.", "library_folder_duplicate")
         if any(_paths_overlap(path, Path(existing)) for existing in seen_paths):
-            raise SettingsValidationError("Library local paths cannot contain one another.")
+            raise SettingsValidationError("Library local paths cannot contain one another.", "library_folders_overlap")
         if _paths_overlap(path, staging_root):
-            raise SettingsValidationError("Library paths cannot contain the working folder or be inside it.")
+            raise SettingsValidationError(
+                "Library paths cannot contain the working folder or be inside it.", "library_contains_working_folder"
+            )
         explicit_type = _text(row.get("library_type", ""))
         if explicit_type and explicit_type not in {option["key"] for option in LIBRARY_TYPE_OPTIONS}:
-            raise SettingsValidationError("Choose a supported library type.")
+            raise SettingsValidationError("Choose a supported library type.", "library_type_unsupported")
         library_type = normalize_library_type(explicit_type or None, key=normalized_key)
         availability_text = _text(row.get("availability", ""))
         if availability_text and availability_text not in {"production", "browse_only", "disabled"}:
@@ -791,7 +800,9 @@ def build_runtime_settings_payload(
         previous_type = current_types.get(normalized_key)
         expected_confirmation = f"{normalized_key}:{previous_type}->{library_type}" if previous_type else ""
         if previous_type and previous_type != library_type and row.get("type_change_confirmation") != expected_confirmation:
-            raise SettingsValidationError("Confirm the library type compatibility preview before saving.")
+            raise SettingsValidationError(
+                "Confirm the library type compatibility preview before saving.", "library_type_unconfirmed"
+            )
         if previous_type and previous_type != library_type:
             availability = "browse_only"
         if availability == "production" and not library_production_supported(library_type):
@@ -832,9 +843,118 @@ def build_runtime_settings_payload(
             }
         )
     if not source_roots:
-        raise SettingsValidationError("Add at least one library before saving settings.")
+        raise SettingsValidationError("Add at least one library before saving settings.", "no_libraries")
     library_colors = library_color_map_from_source_roots(source_roots, library_colors)
-    known_library_keys = set(source_roots)
+    media = {
+        "source_roots": source_roots,
+        "library_colors": library_colors,
+        "libraries": library_definitions,
+        "staging_root": str(staging_root),
+        "archive_root": str(staging_root / "_replaced"),
+        "catalog_refresh_hours": normalized_refresh_hours,
+    }
+    return media, plex_library_roots
+
+
+def library_settings_facts(
+        *,
+        libraries: list[dict[str, Any]],
+        transcode_root: str,
+        catalog_refresh_hours: str,
+) -> dict[str, Any]:
+    """The Mac app's Libraries tab: configured library rows, the working folder and the refresh interval."""
+    return {
+        "libraries": [
+            {
+                "key": str(row["key"]),
+                "name": str(row.get("label") or ""),
+                "folder": str(row.get("path") or ""),
+                "type": str(row.get("library_type") or ""),
+            }
+            for row in libraries
+            if str(row.get("key") or "").strip()
+        ],
+        "working_folder": transcode_root,
+        "catalog_refresh_hours": float(catalog_refresh_hours or DEFAULT_CATALOG_REFRESH_HOURS),
+        "types": [option["key"] for option in LIBRARY_TYPE_OPTIONS],
+    }
+
+
+def library_section_rows(
+        submitted: list[dict[str, Any]],
+        saved_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Turn the Libraries tab's name, folder and type edits into full library rows.
+
+    Settings the tab does not show (color, compression, policy, Plex path) carry over from the saved library.
+    A type change starts that library over from the new type's defaults, as the website's confirmed change does,
+    and a new library gets a root ID from its name.
+    """
+    saved = {str(row.get("key") or ""): row for row in saved_rows if str(row.get("key") or "").strip()}
+    used_keys = {_text(item.get("key")) for item in submitted} - {""}
+    rows: list[dict[str, Any]] = []
+    for item in submitted:
+        key = _text(item.get("key"))
+        library_type = _text(item.get("type"))
+        edits = {"label": _text(item.get("name")), "path": _text(item.get("folder")), "library_type": library_type}
+        previous = saved.get(key)
+        if previous is None:
+            key = key or _new_library_key(edits["label"], used_keys)
+            used_keys.add(key)
+            rows.append({"key": key, **edits})
+            continue
+        if library_type in {"", previous.get("library_type")}:
+            rows.append({**previous, **edits, "library_type": previous.get("library_type")})
+            continue
+        carried = {
+            name: value
+            for name, value in previous.items()
+            if name not in {"availability", "default_profile", "policy"}
+        }
+        rows.append({
+            **carried,
+            **edits,
+            "type_change_confirmation": _text(item.get("type_change_confirmation")),
+        })
+    return rows
+
+
+def _new_library_key(name: str, used_keys: set[str]) -> str:
+    base = normalize_library_key(name)[:56].strip("_-") or "library"
+    if not base[0].isalnum():
+        base = f"library_{base}"
+    key = base
+    suffix = 2
+    while key in used_keys:
+        key = f"{base}_{suffix}"
+        suffix += 1
+    return key
+
+
+def build_runtime_settings_payload(
+        *,
+        libraries: list[dict[str, Any]],
+        remote_hosts: list[dict[str, Any]],
+        transcode_root: str,
+        catalog_refresh_hours: Any = DEFAULT_CATALOG_REFRESH_HOURS,
+        video_defaults: dict[str, Any] | None = None,
+        encode_queue_scheduler: dict[str, Any],
+        schedule_profiles: list[dict[str, Any]],
+        metadata: dict[str, Any] | None = None,
+        existing_library_types: dict[str, str] | None = None,
+        existing_libraries: dict[str, dict[str, Any]] | None = None,
+        existing_library_paths: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    _reject_submitted_secrets(metadata)
+    media, plex_library_roots = build_runtime_media_settings(
+        libraries=libraries,
+        transcode_root=transcode_root,
+        catalog_refresh_hours=catalog_refresh_hours,
+        existing_library_types=existing_library_types,
+        existing_libraries=existing_libraries,
+        existing_library_paths=existing_library_paths,
+    )
+    known_library_keys = set(media["source_roots"])
 
     normalized_remotes: list[dict[str, Any]] = []
     for row in remote_hosts:
@@ -985,14 +1105,7 @@ def build_runtime_settings_payload(
     metadata_payload["plex"] = plex_payload
     normalized_metadata = normalize_metadata_settings(metadata_payload, known_library_keys=known_library_keys)
     return {
-        "media": {
-            "source_roots": source_roots,
-            "library_colors": library_colors,
-            "libraries": library_definitions,
-            "staging_root": str(staging_root),
-            "archive_root": str(staging_root / "_replaced"),
-            "catalog_refresh_hours": normalized_refresh_hours,
-        },
+        "media": media,
         "video": normalized_video_defaults,
         "remote_hosts": normalized_remotes,
         "encode_queue": {
