@@ -162,8 +162,9 @@ then says so and reloads. It
 saves only the runtime settings `media` keys, with the same validation, type
 change binding, rescan and reload as the web save; computers, schedules, size
 defaults and metadata stay as saved. A library with an empty `key` is new and
-gets one from its name that no saved library has, even one removed in the
-same save. Settings the tab does not show carry over from the
+gets one from its name that no saved library has and that the stored
+settings do not still mention (Plex paths, folder overrides, computers), so it
+never inherits a removed library's retained settings. Settings the tab does not show carry over from the
 saved library; a confirmed kind change starts from the new kind's defaults,
 as on the web. A saved library changes kind only with the
 `type_change_confirmation` from `POST /api/settings/library-type-preview`,

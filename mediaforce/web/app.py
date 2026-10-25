@@ -310,6 +310,7 @@ from mediaforce.web.settings_runtime import (
     host_max_parallel_encodes as _host_max_parallel_encodes,
     host_schedule_profile_key as _host_schedule_profile_key,
     library_color_map_for_config as _library_color_map_for_config,
+    library_key_references as _library_key_references,
     library_section_rows as _library_section_rows,
     library_settings_facts as _library_settings_facts_runtime,
     library_settings_revision as _library_settings_revision,
@@ -1112,7 +1113,11 @@ def create_app(
         config = load_config(config.paths.config_path)
         app.state.config = config
         media, _plex_library_roots = _build_runtime_media_settings(
-            libraries=_library_section_rows(libraries, _settings_library_rows_for_config_runtime(config, min_rows=0)),
+            libraries=_library_section_rows(
+                libraries,
+                _settings_library_rows_for_config_runtime(config, min_rows=0),
+                _library_key_references(config.raw),
+            ),
             transcode_root=working_folder,
             catalog_refresh_hours=catalog_refresh_hours,
             **_saved_library_context(),

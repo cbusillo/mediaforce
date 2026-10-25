@@ -222,6 +222,25 @@ def test_new_library_never_takes_the_key_of_one_removed_in_the_same_save(
     assert "plex_path" not in added or not added["plex_path"]
 
 
+def test_new_library_never_takes_the_key_of_one_removed_in_an_earlier_save(
+        library_app: tuple[FastAPI, Path], tmp_path: Path,
+) -> None:
+    app, runtime_settings_path = library_app
+    body = _facts_body(app)
+    body["libraries"] = [library for library in body["libraries"] if library["key"] != "movies"]
+    assert _save(app, body)[0] == 200
+
+    body = _facts_body(app)
+    body["libraries"].append({"key": "", "name": "Movies", "folder": str(tmp_path / "media" / "films"), "type": "movie"})
+    assert _save(app, body)[0] == 200
+
+    stored = json.loads(runtime_settings_path.read_text())
+    added = next(library for library in stored["media"]["libraries"] if library["label"] == "Movies")
+    assert added["key"] != "movies"
+    assert added["key"] not in stored["metadata"]["plex"]["library_roots"]
+    assert not added.get("plex_path")
+
+
 def test_settings_read_after_the_file_changed_shows_the_file_and_a_save_keeps_it(
         library_app: tuple[FastAPI, Path], tmp_path: Path,
 ) -> None:

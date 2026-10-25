@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -889,19 +890,42 @@ def library_settings_facts(
     }
 
 
+def library_key_references(raw: dict[str, Any]) -> set[str]:
+    """Every library root ID the loaded settings still mention, including ones kept for a removed library."""
+    def _mapping(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    def _items(value: Any) -> list[dict[str, Any]]:
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    media = _mapping(raw.get("media"))
+    keys = set(_mapping(media.get("source_roots"))) | set(_mapping(media.get("library_colors")))
+    keys |= {str(item.get("key") or "") for item in _items(media.get("libraries"))}
+    keys |= set(_mapping(_mapping(_mapping(raw.get("metadata")).get("plex")).get("library_roots")))
+    for override in _items(raw.get("overrides")) + _items(raw.get(FOLDER_POLICY_OVERRIDES_KEY)):
+        keys.add(str(override.get("path_prefix") or "").strip("/").split("/", 1)[0])
+    for host in _items(raw.get("remote_hosts")):
+        allowed = host.get("allowed_libraries")
+        keys |= {str(key) for key in allowed} if isinstance(allowed, list) else set()
+        keys |= set(_mapping(host.get("source_roots")))
+    return {str(key).strip() for key in keys} - {""}
+
+
 def library_section_rows(
         submitted: list[dict[str, Any]],
         saved_rows: list[dict[str, Any]],
+        reserved_keys: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """Turn the Libraries tab's name, folder and type edits into full library rows.
 
     Settings the tab does not show (color, compression, policy, Plex path) carry over from the saved library.
     A type change starts that library over from the new type's defaults, as the website's confirmed change does,
-    and a new library gets a root ID from its name that no saved library has, even one removed in this save,
-    so it never inherits a removed library's stored settings, Plex path or folder overrides.
+    and a new library gets a root ID from its name that no saved library has and that `reserved_keys` (what the
+    stored settings still mention, see `library_key_references`) does not hold, so it never inherits a removed
+    library's stored settings, Plex path or folder overrides, whether it was removed in this save or an earlier one.
     """
     saved = {str(row.get("key") or ""): row for row in saved_rows if str(row.get("key") or "").strip()}
-    used_keys = set(saved) | {_text(item.get("key")) for item in submitted} - {""}
+    used_keys = set(saved) | set(reserved_keys) | {_text(item.get("key")) for item in submitted} - {""}
     rows: list[dict[str, Any]] = []
     for item in submitted:
         key = _text(item.get("key"))
