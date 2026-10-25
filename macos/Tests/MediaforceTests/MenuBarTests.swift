@@ -3,11 +3,15 @@ import XCTest
 @testable import Mediaforce
 
 final class MenuBarTests: XCTestCase {
-    /// The shared facts with their work and samples replaced.
-    private func facts(work: String, samplesWaiting: Bool = false) throws -> MainWindowFacts {
+    /// The shared facts with their work replaced, and with nothing waiting for the owner unless asked.
+    private func facts(work: String, ownerWaiting: Bool = false) throws -> MainWindowFacts {
         var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as? [String: Any])
         json["work"] = try JSONSerialization.jsonObject(with: Data(work.utf8))
-        if !samplesWaiting { json["samples"] = ["waiting_on_you": [], "approved_not_started": []] }
+        if !ownerWaiting {
+            json["samples"] = ["waiting_on_you": [], "approved_not_started": []]
+            json["computers"] = []
+            json["original_backups"] = ["count": 0, "bytes": 0]
+        }
         return try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: JSONSerialization.data(withJSONObject: json))
     }
 
@@ -30,10 +34,19 @@ final class MenuBarTests: XCTestCase {
         XCTAssertEqual(Words.menuStatus(try facts(work: work(running: 1, seasons: ["tv/Futurama/Season 3"]))), "Compressing Futurama, Season 3")
         XCTAssertEqual(Words.menuStatus(try facts(work: work(running: 3, seasons: ["movies/Heat (1995)", "tv/ER/Season 1"]))),
                        "Compressing Heat (1995) and 1 more")
-        XCTAssertEqual(Words.menuStatus(try facts(work: work(), samplesWaiting: true)), "Waiting for you")
+        XCTAssertEqual(Words.menuStatus(try facts(work: work(), ownerWaiting: true)), "Waiting for you")
         XCTAssertEqual(Words.menuStatus(try facts(work: work())), "Up to date")
         XCTAssertEqual(Words.menuStatus(try facts(work: work(paused: true, running: 1, seasons: ["tv/ER/Season 1"]))), "Paused")
         XCTAssertEqual(Words.menuStatus(try facts(work: work(reasons: ["no_computer_ready"], waiting: 2))), "Waiting for a computer")
+    }
+
+    func testAComputerNeedingTheOwnerIsWaitingForYou() throws {
+        var facts = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as? [String: Any])
+        facts["work"] = try JSONSerialization.jsonObject(with: Data(work().utf8))
+        facts["samples"] = ["waiting_on_you": [], "approved_not_started": []]
+        facts["original_backups"] = ["count": 0, "bytes": 0]
+        let decoded = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: JSONSerialization.data(withJSONObject: facts))
+        XCTAssertEqual(Words.menuStatus(decoded), "Waiting for you")
     }
 
     func testFactsFromAServerWithoutRunningSeasonsStillDecode() throws {

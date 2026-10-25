@@ -12,6 +12,8 @@ final class MainWindowModel {
     // A page a notification asked to open; the window takes it and clears it.
     var requestedPlace: Place?
     var onFacts: ((MainWindowFacts) -> Void)?
+    // Whether work was asked to run or pause and the server hasn't confirmed it yet; nil when nothing is pending.
+    private(set) var switching: Bool?
     // Shows spot-checked on Space saved since the app opened.
     var checkedShows: Set<String> = []
     let client: MediaforceClient
@@ -54,6 +56,14 @@ final class MainWindowModel {
             notice = .unanswered
         }
         await refresh()
+    }
+
+    /// Pauses or resumes work once at a time, so a second click can't repeat a request still on its way.
+    func setRunning(_ on: Bool) async {
+        guard switching == nil else { return }
+        switching = on
+        await perform { on ? try await $0.resume() : try await $0.pause() }
+        switching = nil
     }
 
     func deleteCleanupFolder() async {
@@ -223,10 +233,11 @@ struct PauseButton: View {
     var body: some View {
         let paused = facts.work.pausedByOwner
         Button {
-            Task { await model.perform { paused ? try await $0.resume() : try await $0.pause() } }
+            Task { await model.setRunning(paused) }
         } label: {
             Label(paused ? "Resume Mediaforce" : "Pause Mediaforce", systemImage: paused ? "play.fill" : "pause.fill")
         }
+        .disabled(model.switching != nil)
         .help(paused ? Words.resumeHelp : Words.pauseHelp(facts.work))
     }
 }

@@ -44,7 +44,7 @@ struct MenuBarPanel: View {
                 Task { await model.perform { try await $0.lookForNewFiles() } }
             }
             .buttonStyle(MenuRowStyle())
-            .disabled(model.facts == nil)
+            .disabled(model.connection != .reachable)
             Button(Words.openMediaforce) { open(nil) }
                 .buttonStyle(MenuRowStyle())
             SettingsLink { Text(Words.settingsEllipsis) }
@@ -53,6 +53,8 @@ struct MenuBarPanel: View {
         }
         .padding(.bottom, 6)
         .frame(width: 370)
+        // Once the panel has shown a failed action, it doesn't keep saying so.
+        .onDisappear { model.notice = nil }
     }
 
     private func header(_ facts: MainWindowFacts) -> some View {
@@ -60,17 +62,24 @@ struct MenuBarPanel: View {
             HStack {
                 Text(Words.appName).font(.headline)
                 Spacer()
+                // Shows the requested state until the server confirms it.
                 Toggle(Words.appName, isOn: Binding(
-                    get: { !facts.work.pausedByOwner },
-                    set: { on in Task { await model.perform { on ? try await $0.resume() : try await $0.pause() } } }
+                    get: { model.switching ?? !facts.work.pausedByOwner },
+                    set: { on in Task { await model.setRunning(on) } }
                 ))
                 .toggleStyle(.switch)
                 .labelsHidden()
+                .disabled(model.switching != nil || model.connection != .reachable)
                 .help(facts.work.pausedByOwner ? Words.resumeHelp : Words.pauseHelp(facts.work))
             }
-            Text(Words.menuStatus(facts))
+            // Facts kept from before the server stopped answering are not said as if current.
+            Text(model.connection == .reachable ? Words.menuStatus(facts) : Words.staleNotice(model.connection, lastHeard: model.lastHeard))
                 .foregroundStyle(.secondary)
-                .lineLimit(2)
+                .lineLimit(3)
+            // The main window may be closed, so an action that went wrong is said here too.
+            if let notice = model.notice {
+                Text(notice.title).foregroundStyle(.orange).lineLimit(2)
+            }
             Text(Words.savedSoFar(facts.spaceSaved.bytes))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()

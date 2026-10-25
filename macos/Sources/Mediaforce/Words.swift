@@ -287,7 +287,7 @@ extension Words {
             return more > 0 ? "Compressing \(name) and \(more) more" : "Compressing \(name)"
         }
         if work.waitingCount > 0 { return "Waiting to start" }
-        return facts.samples.waitingOnYou.isEmpty ? "Up to date" : "Waiting for you"
+        return Attention.waitingOnYou(facts) > 0 ? waitingForYou : "Up to date"
     }
     static let tryAgain = "Try Again"
     static let spotCheckNoEpisode = "None of this show's episodes still has its original backup to compare."
