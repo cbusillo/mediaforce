@@ -19,8 +19,8 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata
 from mediaforce.library.external_metadata import PlexClient, PlexPathMapping, ProviderHttpError, TmdbClient, \
-    FetchImage, FetchJson, JSONPayload, map_plex_part_path, tmdb_id_from_guids, tmdb_image_path
-from mediaforce.library.metadata_sync import MetadataSyncStats, cached_show_poster, sync_external_metadata
+    FetchImage, FetchJson, JSONPayload, map_plex_part_path, plex_thumb_path, tmdb_id_from_guids
+from mediaforce.library.metadata_sync import MetadataSyncStats, cached_poster, sync_external_metadata
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.web.settings_runtime import normalize_metadata_settings
 
@@ -522,64 +522,94 @@ class ExternalMetadataTests(unittest.TestCase):
         self.assertEqual(payload["tmdb"]["token_env"], "MEDIAFORCE_TMDB_HOME_TOKEN")
         self.assertEqual(payload["tmdb"]["refresh_interval_hours"], 48.0)
 
-    def test_tmdb_poster_path_accepts_only_a_plain_image_name(self) -> None:
-        self.assertEqual(tmdb_image_path("/abc_D-9.jpg"), "/abc_D-9.jpg")
-        for value in (None, "", "abc.jpg", "/../secret.jpg", "/a/b.jpg", "https://x.test/a.jpg", "/a.gif", 7):
-            self.assertIsNone(tmdb_image_path(value), value)
+    def test_plex_poster_path_accepts_only_a_metadata_thumb(self) -> None:
+        self.assertEqual(plex_thumb_path("/library/metadata/7/thumb/1700000001"), "/library/metadata/7/thumb/1700000001")
+        self.assertEqual(plex_thumb_path("/library/metadata/7/thumb"), "/library/metadata/7/thumb")
+        for value in (None, "", "/library/metadata/7/art/1", "/../thumb", "https://x.test/library/metadata/7/thumb", 7):
+            self.assertIsNone(plex_thumb_path(value), value)
 
-    def test_sync_caches_each_show_poster_once_and_serves_it(self) -> None:
+    def test_sync_caches_each_show_and_movie_poster_from_plex_once_and_serves_it(self) -> None:
         config = self._config(keep_posters=True)
-        image_urls: list[str] = []
+        requests: list[tuple[str, Mapping[str, str]]] = []
         with open_db(config.paths.db_path) as connection:
-            first = self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch(image_urls))
-            second = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch(image_urls))
-            poster = cached_show_poster(connection, config.paths.poster_dir, "tv/Show")
-            missing = cached_show_poster(connection, config.paths.poster_dir, "tv/Unknown Show")
+            first = self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch(requests))
+            second = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch(requests))
+            show = cached_poster(connection, config.paths.poster_dir, "tv/Show")
+            movie = cached_poster(connection, config.paths.poster_dir, "movies/Heat (1995)")
+            single_file_movie = cached_poster(connection, config.paths.poster_dir, "movies/Up (2009).mkv")
+            missing = cached_poster(connection, config.paths.poster_dir, "tv/Unknown Show")
 
-        self.assertEqual(image_urls, ["https://image.tmdb.org/t/p/w342/poster42.jpg"])
-        self.assertEqual((first.posters.refreshed, second.posters.cached), (1, 1))
-        assert poster is not None
-        self.assertEqual(poster.read_bytes(), b"poster-bytes")
-        self.assertTrue(poster.is_relative_to(config.paths.poster_dir))
+        self.assertEqual(sorted(url for url, _ in requests), [
+            "http://plex.local:32400/library/metadata/11/thumb/1700000000",
+            "http://plex.local:32400/library/metadata/7/thumb/1700000001",
+            "http://plex.local:32400/library/metadata/8/thumb/1700000002",
+        ])
+        # The token goes in a header, never in the poster's URL.
+        self.assertTrue(all(headers.get("X-Plex-Token") == "plex-secret" and "plex-secret" not in url for url, headers in requests))
+        self.assertEqual((first.posters.refreshed, second.posters.cached), (3, 3))
+        assert show is not None and movie is not None and config.paths.poster_dir is not None
+        self.assertIsNotNone(single_file_movie)
+        self.assertEqual(show.read_bytes(), b"poster-bytes")
+        self.assertTrue(show.is_relative_to(config.paths.poster_dir))
+        self.assertNotEqual(show, movie)
         self.assertIsNone(missing)
 
-    def test_show_without_tmdb_poster_reads_none(self) -> None:
+    def test_a_poster_chosen_anew_in_plex_is_fetched_again(self) -> None:
         config = self._config(keep_posters=True)
-        image_urls: list[str] = []
-
-        def no_poster_fetch(url: str, headers: Mapping[str, str], timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
-            payload, response_headers = self._successful_fetch(url, headers, timeout)
-            return {key: value for key, value in payload.items() if key != "poster_path"}, response_headers
-
+        requests: list[tuple[str, Mapping[str, str]]] = []
         with open_db(config.paths.db_path) as connection:
-            for minutes in (0, 30):
-                cached = self._sync_show(
-                    connection, config, minutes=minutes, fetch_json_fn=no_poster_fetch,
-                    fetch_image_fn=self._poster_fetch(image_urls),
-                )
-            poster = cached_show_poster(connection, config.paths.poster_dir, "tv/Show")
+            self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch(requests))
+            before = cached_poster(connection, config.paths.poster_dir, "tv/Show")
+            self._sync_show(
+                connection, config, minutes=90, fetch_image_fn=self._poster_fetch(requests),
+                fetch_json_fn=self._fetch_with_show_thumb("/library/metadata/11/thumb/1800000000"),
+            )
+            after = cached_poster(connection, config.paths.poster_dir, "tv/Show")
+
+        self.assertIn("http://plex.local:32400/library/metadata/11/thumb/1800000000", [url for url, _ in requests])
+        self.assertNotEqual(before, after)
+
+    def test_a_title_without_a_plex_poster_reads_none(self) -> None:
+        config = self._config(keep_posters=True)
+        requests: list[tuple[str, Mapping[str, str]]] = []
+        with open_db(config.paths.db_path) as connection:
+            self._sync_show(
+                connection, config, minutes=0, fetch_image_fn=self._poster_fetch(requests),
+                fetch_json_fn=self._fetch_with_show_thumb(None),
+            )
+            poster = cached_poster(connection, config.paths.poster_dir, "tv/Show")
 
         self.assertIsNone(poster)
-        self.assertEqual(image_urls, [])
-        self.assertEqual(cached.tmdb.cached, 1)
+        self.assertNotIn("11", "".join(url for url, _ in requests))
+
+    def test_posters_are_kept_without_tmdb(self) -> None:
+        config = self._config(keep_posters=True)
+        requests: list[tuple[str, Mapping[str, str]]] = []
+        with open_db(config.paths.db_path) as connection:
+            stats = self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch(requests), tmdb=False)
+            poster = cached_poster(connection, config.paths.poster_dir, "tv/Show")
+
+        self.assertEqual(stats.tmdb.status, "not_configured")
+        self.assertEqual(stats.posters.refreshed, 3)
+        self.assertIsNotNone(poster)
 
     def test_failed_poster_download_keeps_metadata_and_retries_next_sync(self) -> None:
         config = self._config(keep_posters=True)
-        image_urls: list[str] = []
+        requests: list[tuple[str, Mapping[str, str]]] = []
 
-        def failing_fetch(_url: str, _timeout: float) -> bytes:
+        def failing_fetch(_url: str, _headers: Mapping[str, str], _timeout: float) -> bytes:
             raise ProviderHttpError("Provider request failed with HTTP 503", status_code=503)
 
         with open_db(config.paths.db_path) as connection:
             failed = self._sync_show(connection, config, minutes=0, fetch_image_fn=failing_fetch)
             status = connection.execute(select(series_metadata.c.tmdb_status)).scalar_one()
-            retried = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch(image_urls))
+            retried = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch(requests))
 
-        self.assertEqual((failed.posters.status, failed.posters.failed), ("completed_with_warnings", 1))
+        self.assertEqual((failed.posters.status, failed.posters.failed), ("completed_with_warnings", 3))
         self.assertEqual((failed.status, retried.status), ("completed_with_warnings", "completed"))
         self.assertEqual(status, "Returning Series")
-        self.assertEqual(retried.posters.refreshed, 1)
-        self.assertEqual(len(image_urls), 1)
+        self.assertEqual(retried.posters.refreshed, 3)
+        self.assertEqual(len(requests), 3)
 
     def test_unwritable_poster_cache_is_a_warning_not_a_failed_sync(self) -> None:
         config = self._config(keep_posters=True)
@@ -590,7 +620,7 @@ class ExternalMetadataTests(unittest.TestCase):
             stats = self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch([]))
             status = connection.execute(select(series_metadata.c.tmdb_status)).scalar_one()
 
-        self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 1))
+        self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 3))
         self.assertEqual(status, "Returning Series")
 
     @unittest.skipIf(os.geteuid() == 0, "root can search any folder")
@@ -598,29 +628,17 @@ class ExternalMetadataTests(unittest.TestCase):
         config = self._config(keep_posters=True)
         poster_dir = config.paths.poster_dir
         assert poster_dir is not None
+        poster_dir.mkdir(parents=True)
         with open_db(config.paths.db_path) as connection:
-            self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch([]))
-            connection.execute(series_metadata.update().values(tmdb_poster_path=None))
             poster_dir.chmod(0)
             try:
-                stats = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch([]))
-                poster = cached_show_poster(connection, poster_dir, "tv/Show")
+                stats = self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch([]))
+                poster = cached_poster(connection, poster_dir, "tv/Show")
             finally:
                 poster_dir.chmod(0o755)
 
-        self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 1))
+        self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 3))
         self.assertIsNone(poster)
-
-    def test_series_saved_before_posters_refresh_without_waiting_for_the_interval(self) -> None:
-        config = self._config(keep_posters=True)
-        with open_db(config.paths.db_path) as connection:
-            self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch([]))
-            connection.execute(series_metadata.update().values(tmdb_poster_path=None))
-            refreshed = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch([]))
-            poster_path = connection.execute(select(series_metadata.c.tmdb_poster_path)).scalar_one()
-
-        self.assertEqual(refreshed.tmdb.refreshed, 1)
-        self.assertEqual(poster_path, "/poster42.jpg")
 
     def _sync_show(
             self,
@@ -630,15 +648,15 @@ class ExternalMetadataTests(unittest.TestCase):
             minutes: int,
             fetch_image_fn: FetchImage,
             fetch_json_fn: FetchJson | None = None,
+            tmdb: bool = True,
     ) -> MetadataSyncStats:
-        rel_path = "tv/Show/Season 1/Episode 01.mkv"
         if minutes == 0:
-            self._insert_item(connection, self.root / "source" / rel_path, rel_path)
-        with patch.dict(
-                os.environ,
-                {"MEDIAFORCE_PLEX_TOKEN": "plex-secret", "MEDIAFORCE_TMDB_TOKEN": "tmdb-secret"},
-                clear=False,
-        ):
+            for rel_path in ("tv/Show/Season 1/Episode 01.mkv", "movies/Heat (1995)/Heat.mkv", "movies/Up (2009).mkv"):
+                self._insert_item(connection, self.root / "source" / rel_path, rel_path)
+        secrets = {"MEDIAFORCE_PLEX_TOKEN": "plex-secret"} | ({"MEDIAFORCE_TMDB_TOKEN": "tmdb-secret"} if tmdb else {})
+        with patch.dict(os.environ, secrets, clear=False):
+            if not tmdb:
+                os.environ.pop("MEDIAFORCE_TMDB_TOKEN", None)
             return sync_external_metadata(
                 connection,
                 config,
@@ -651,10 +669,10 @@ class ExternalMetadataTests(unittest.TestCase):
         poster = self.root / "poster.jpg"
         poster.write_bytes(b"poster-bytes")
         app = FastAPI()
-        register_poster_routes(app, show_poster=lambda show_prefix: poster if show_prefix == "tv/Show" else None)
+        register_poster_routes(app, title_poster=lambda title_prefix: poster if title_prefix == "tv/Show" else None)
         endpoint = next(
             route.endpoint for route in app.router.routes
-            if isinstance(route, APIRoute) and route.path == "/api/app/posters/{show_prefix:path}"
+            if isinstance(route, APIRoute) and route.path == "/api/app/posters/{title_prefix:path}"
         )
 
         served = endpoint("tv/Show")
@@ -666,11 +684,11 @@ class ExternalMetadataTests(unittest.TestCase):
     def _config(self, *, keep_posters: bool = False) -> MediaforceConfig:
         with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
             raw = copy.deepcopy(tomllib.load(handle))
-        raw["media"]["source_roots"] = {"tv": str(self.root / "source" / "tv")}
+        raw["media"]["source_roots"] = {"tv": str(self.root / "source" / "tv"), "movies": str(self.root / "source" / "movies")}
         raw["media"]["staging_root"] = str(self.root / "staging")
         raw["media"]["archive_root"] = str(self.root / "archive")
         raw["metadata"]["plex"]["base_url"] = "http://plex.local:32400"
-        raw["metadata"]["plex"]["library_roots"] = {"tv": "/plex/tv"}
+        raw["metadata"]["plex"]["library_roots"] = {"tv": "/plex/tv", "movies": "/plex/movies"}
         paths = ConfigPaths(
             project_root=self.root,
             config_path=self.root / "config.toml",
@@ -724,6 +742,7 @@ class ExternalMetadataTests(unittest.TestCase):
                         "Metadata": [{
                             "ratingKey": "show-1",
                             "Guid": [{"id": "tmdb://42"}, {"id": "imdb://tt42"}],
+                            "thumb": "/library/metadata/11/thumb/1700000000",
                         }],
                     }
                 }, {}
@@ -745,6 +764,21 @@ class ExternalMetadataTests(unittest.TestCase):
                         }],
                     }
                 }, {}
+            if metadata_type == "1":
+                return {
+                    "MediaContainer": {
+                        "totalSize": 2,
+                        "Metadata": [{
+                            "ratingKey": "7",
+                            "thumb": "/library/metadata/7/thumb/1700000001",
+                            "Media": [{"Part": [{"id": "part-7", "file": "/plex/movies/Heat (1995)/Heat.mkv"}]}],
+                        }, {
+                            "ratingKey": "8",
+                            "thumb": "/library/metadata/8/thumb/1700000002",
+                            "Media": [{"Part": [{"id": "part-8", "file": "/plex/movies/Up (2009).mkv"}]}],
+                        }],
+                    }
+                }, {}
             return {"MediaContainer": {"totalSize": 0, "Metadata": []}}, {}
         if parsed.path.endswith("/tv/42"):
             self_authorization = dict(headers).get("Authorization")
@@ -752,15 +786,28 @@ class ExternalMetadataTests(unittest.TestCase):
                 raise AssertionError("TMDB bearer token was not sent")
             return {
                 "id": 42, "status": "Returning Series", "in_production": True,
-                "genres": [{"id": 10764, "name": "Reality"}], "poster_path": "/poster42.jpg",
+                "genres": [{"id": 10764, "name": "Reality"}],
             }, {}
         raise AssertionError(url)
 
     @staticmethod
-    def _poster_fetch(requested: list[str]) -> FetchImage:
-        def fetch(url: str, _timeout: float) -> bytes:
-            requested.append(url)
+    def _poster_fetch(requested: list[tuple[str, Mapping[str, str]]]) -> FetchImage:
+        def fetch(url: str, headers: Mapping[str, str], _timeout: float) -> bytes:
+            requested.append((url, dict(headers)))
             return b"poster-bytes"
+
+        return fetch
+
+    def _fetch_with_show_thumb(self, thumb: str | None) -> FetchJson:
+        """The fake Plex and TMDB, with the show's poster path replaced, or removed when None."""
+        def fetch(url: str, headers: Mapping[str, str], timeout: float) -> tuple[JSONPayload, Mapping[str, str]]:
+            payload, response_headers = self._successful_fetch(url, headers, timeout)
+            if urlsplit(url).path.endswith("/library/all") and parse_qs(urlsplit(url).query).get("type") == ["2"]:
+                show = {key: value for key, value in payload["MediaContainer"]["Metadata"][0].items() if key != "thumb"}
+                if thumb is not None:
+                    show["thumb"] = thumb
+                payload = {"MediaContainer": {**payload["MediaContainer"], "Metadata": [show]}}
+            return payload, response_headers
 
         return fetch
 

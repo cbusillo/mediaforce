@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import uuid
@@ -13,11 +14,12 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_items, metadata_sync_state, plex_item_metadata, series_metadata
-from mediaforce.library.external_metadata import TMDB_IMAGE_BASE_URL, FetchImage, FetchJson, PlexClient, \
-    PlexPathMapping, ProviderHttpError, TmdbClient, fetch_image, fetch_json, map_plex_part_path, tmdb_id_from_guids, \
-    tmdb_image_path
+from mediaforce.core.db_tables import library_items, metadata_sync_state, plex_item_metadata, series_metadata, \
+    title_posters
+from mediaforce.library.external_metadata import FetchImage, FetchJson, PlexClient, PlexPathMapping, PlexShow, \
+    ProviderHttpError, TmdbClient, fetch_image, fetch_json, map_plex_part_path, plex_thumb_path, tmdb_id_from_guids
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
+from mediaforce.library.movie_workflow import classify_movie_path
 
 
 @dataclass(slots=True)
@@ -71,6 +73,14 @@ def sync_external_metadata(
         stats.tmdb.message = "Plex metadata is required before TMDB series status can be resolved."
         return stats
 
+    client_identifier = uuid.uuid5(uuid.NAMESPACE_URL, str(config.paths.db_path)).hex
+    plex_client = PlexClient(
+        base_url=plex_base_url,
+        token=plex_token,
+        client_identifier=f"mediaforce-{client_identifier}",
+        fetch_json_fn=fetch_json_fn,
+        fetch_image_fn=fetch_image_fn,
+    )
     plex_refresh_interval = timedelta(hours=_positive_float(plex_settings.get("refresh_interval_hours"), 1.0))
     previous_plex_refresh = _provider_last_success(connection, "plex")
     if previous_plex_refresh is not None and observed_at - previous_plex_refresh < plex_refresh_interval:
@@ -79,13 +89,6 @@ def sync_external_metadata(
         stats.plex.cached = _cached_plex_item_count(connection)
         stats.plex.message = f"Using Plex metadata cached at {previous_plex_refresh.isoformat(timespec='seconds')}."
     else:
-        client_identifier = uuid.uuid5(uuid.NAMESPACE_URL, str(config.paths.db_path)).hex
-        plex_client = PlexClient(
-            base_url=plex_base_url,
-            token=plex_token,
-            client_identifier=f"mediaforce-{client_identifier}",
-            fetch_json_fn=fetch_json_fn,
-        )
         try:
             series_prefixes = _sync_plex(
                 connection,
@@ -103,6 +106,8 @@ def sync_external_metadata(
             return stats
         _record_provider_success(connection, "plex", observed_at)
         connection.commit()
+    # Posters come from Plex alone, so they are kept even when TMDB isn't set up.
+    _cache_posters(connection, config.paths.poster_dir, plex_client, stats=stats.posters)
 
     tmdb_token = _environment_secret(tmdb_settings, "MEDIAFORCE_TMDB_TOKEN")
     if not bool(tmdb_settings.get("enabled", True)) or not tmdb_token:
@@ -125,13 +130,6 @@ def sync_external_metadata(
         stats=stats.tmdb,
     )
     connection.commit()
-    _cache_posters(
-        connection,
-        config.paths.poster_dir,
-        image_base_url=str(tmdb_settings.get("image_base_url") or TMDB_IMAGE_BASE_URL),
-        fetch_image_fn=fetch_image_fn,
-        stats=stats.posters,
-    )
     stats.status = (
         "completed"
         if stats.plex.status == "completed" and stats.tmdb.status == "completed" and not stats.posters.failed
@@ -277,7 +275,6 @@ def _sync_plex(
             tmdb_status=None,
             tmdb_in_production=None,
             tmdb_genres_json=None,
-            tmdb_poster_path=None,
             tmdb_observed_at=None,
             updated_at=observed_at_text,
         )
@@ -297,7 +294,6 @@ def _sync_plex(
                 "tmdb_status": None,
                 "tmdb_in_production": None,
                 "tmdb_genres_json": None,
-                "tmdb_poster_path": None,
                 "tmdb_observed_at": None,
             })
         connection.execute(
@@ -320,8 +316,44 @@ def _sync_plex(
             series_metadata.delete().where(series_metadata.c.series_prefix.in_(series_prefix_batch))
         )
 
+    _record_posters(connection, config, shows, series_claims, claims.values(), observed_at_text=observed_at_text)
     stats.status = "completed" if not stats.conflicts else "completed_with_warnings"
     return refreshed_series
+
+
+def _record_posters(
+        connection: DBClient,
+        config: MediaforceConfig,
+        shows: Mapping[str, PlexShow],
+        series_claims: Mapping[str, set[str]],
+        claims: Any,
+        *,
+        observed_at_text: str,
+) -> None:
+    """Each show's and movie's Plex poster path, replacing what the last full Plex sync saw.
+
+    A show takes its own poster; a movie takes its item's. A title folder that Plex matched to more than one show
+    or movie gets none, as its poster would be a guess.
+    """
+    thumbs: dict[str, set[str]] = {}
+    for series_prefix, rating_keys in series_claims.items():
+        show = shows.get(next(iter(rating_keys))) if len(rating_keys) == 1 else None
+        if show is not None and show.thumb:
+            thumbs.setdefault(series_prefix, set()).add(show.thumb)
+    for row, item in claims:
+        movie_prefix = None if item.show_rating_key else _movie_prefix(
+            str(row["rel_path"] or ""), library_types=config.library_type_map,
+        )
+        if movie_prefix and item.thumb:
+            thumbs.setdefault(movie_prefix, set()).add(item.thumb)
+    connection.execute(title_posters.delete())
+    rows = [
+        {"title_prefix": prefix, "plex_thumb": next(iter(found)), "observed_at": observed_at_text}
+        for prefix, found in sorted(thumbs.items())
+        if len(found) == 1
+    ]
+    if rows:
+        connection.execute(title_posters.insert(), rows)
 
 
 def _sync_tmdb(
@@ -338,7 +370,6 @@ def _sync_tmdb(
             series_metadata.c.series_prefix,
             series_metadata.c.tmdb_series_id,
             series_metadata.c.tmdb_genres_json,
-            series_metadata.c.tmdb_poster_path,
             series_metadata.c.tmdb_observed_at,
         ).where(series_metadata.c.series_prefix.in_(series_prefixes))
     ).mappings().fetchall()
@@ -349,12 +380,11 @@ def _sync_tmdb(
         if series_id is None:
             continue
         previous = _parse_timestamp(row["tmdb_observed_at"])
-        # Rows saved before genres or posters were kept refresh once, so neither waits a full interval.
+        # Rows saved before genres were kept refresh once, so they don't wait a full interval.
         if (
                 previous is not None
                 and observed_at - previous < refresh_interval
                 and row["tmdb_genres_json"] is not None
-                and row["tmdb_poster_path"] is not None
         ):
             stats.cached += 1
             continue
@@ -377,7 +407,6 @@ def _sync_tmdb(
                 tmdb_status=series.status,
                 tmdb_in_production=(1 if series.in_production else 0) if series.in_production is not None else None,
                 tmdb_genres_json=json.dumps(list(series.genres), separators=(",", ":")),
-                tmdb_poster_path=series.poster_path or "",
                 tmdb_observed_at=observed_at_text,
                 updated_at=observed_at_text,
             )
@@ -386,38 +415,39 @@ def _sync_tmdb(
         stats.status = "completed"
 
 
-def cached_show_poster(connection: DBClient, poster_dir: Path | None, show_prefix: str) -> Path | None:
-    poster_path = connection.execute(
-        select(series_metadata.c.tmdb_poster_path).where(series_metadata.c.series_prefix == show_prefix.strip("/"))
+def cached_poster(connection: DBClient, poster_dir: Path | None, title_prefix: str) -> Path | None:
+    """The cached Plex poster for a show ("tv/Show") or movie ("movies/Title (Year)"), when there is one."""
+    thumb = connection.execute(
+        select(title_posters.c.plex_thumb).where(title_posters.c.title_prefix == title_prefix.strip("/"))
     ).scalar_one_or_none()
-    target = poster_file(poster_dir, poster_path)
+    target = poster_file(poster_dir, thumb)
     try:
         return target if target is not None and target.is_file() else None
     except OSError:
         return None
 
 
-def poster_file(poster_dir: Path | None, poster_path: str | None) -> Path | None:
-    image_path = tmdb_image_path(poster_path)
-    return poster_dir / image_path.lstrip("/") if poster_dir is not None and image_path is not None else None
+def poster_file(poster_dir: Path | None, thumb: str | None) -> Path | None:
+    """Where a Plex poster is cached: named for its thumb path, so choosing another poster in Plex fetches it anew."""
+    path = plex_thumb_path(thumb)
+    if poster_dir is None or path is None:
+        return None
+    return poster_dir / "plex" / f"{hashlib.sha256(path.encode()).hexdigest()[:32]}.jpg"
 
 
 def _cache_posters(
         connection: DBClient,
         poster_dir: Path | None,
+        client: PlexClient,
         *,
-        image_base_url: str,
-        fetch_image_fn: FetchImage,
         stats: ProviderSyncStats,
 ) -> None:
     if poster_dir is None:
-        stats.message = "Set state.poster_dir to keep show posters."
+        stats.message = "Set state.poster_dir to keep posters."
         return
-    poster_paths = connection.execute(
-        select(series_metadata.c.tmdb_poster_path).where(series_metadata.c.tmdb_poster_path != "").distinct()
-    ).scalars()
-    for poster_path in poster_paths:
-        target = poster_file(poster_dir, poster_path)
+    thumbs = connection.execute(select(title_posters.c.plex_thumb).distinct()).scalars()
+    for thumb in thumbs:
+        target = poster_file(poster_dir, thumb)
         if target is None:
             continue
         try:
@@ -430,10 +460,10 @@ def _cache_posters(
             stats.cached += 1
             continue
         try:
-            image = fetch_image_fn(image_base_url.rstrip("/") + poster_path, 20.0)
+            image = client.poster(thumb)
         except ProviderHttpError as exc:
             stats.failed += 1
-            stats.message = _provider_error_message("TMDB images", exc)
+            stats.message = _provider_error_message("Plex posters", exc)
             continue
         try:
             _write_atomically(target, image)
@@ -537,6 +567,23 @@ def _series_prefix(
     if len(parts) < 3 or (configured_type or root.lower()) != "tv":
         return None
     return "/".join(parts[:2])
+
+
+def _movie_prefix(
+        rel_path: str,
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> str | None:
+    """A movie's title prefix as the Mac app's movie list names it: its title folder ("movies/Title (Year)"), or the
+    file itself for a movie stored straight under the library root. Only the feature gives the title its poster, so
+    an extra Plex matched on its own can't make the poster a guess."""
+    parts = Path(rel_path).parts
+    root = parts[0] if parts else ""
+    configured_type = str((library_types or {}).get(root) or "").strip().lower()
+    if (configured_type or root.lower()) not in {"movie", "movies"}:
+        return None
+    membership = classify_movie_path(rel_path, root=root)
+    return membership.title_prefix if membership is not None and membership.role == "feature" else None
 
 
 def _normalized_local_path(value: str | None) -> str:
