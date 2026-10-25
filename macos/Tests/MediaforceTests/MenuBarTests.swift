@@ -40,6 +40,13 @@ final class MenuBarTests: XCTestCase {
         XCTAssertEqual(Words.menuStatus(try facts(work: work(reasons: ["no_computer_ready"], waiting: 2))), "Waiting for a computer")
     }
 
+    func testTheStatusLineOpensWhatItNames() throws {
+        XCTAssertEqual(try facts(work: work(running: 1, seasons: ["tv/Futurama/Season 3"])).statusOpens, .item("tv/Futurama/Season 3"))
+        XCTAssertEqual(try facts(work: work(reasons: ["no_computer_ready"], waiting: 2)).statusOpens, .computers)
+        XCTAssertNil(try facts(work: work(paused: true, running: 1, seasons: ["tv/ER/Season 1"])).statusOpens)
+        XCTAssertNil(try facts(work: work()).statusOpens)
+    }
+
     func testAComputerNeedingTheOwnerIsWaitingForYou() throws {
         var facts = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as? [String: Any])
         facts["work"] = try JSONSerialization.jsonObject(with: Data(work().utf8))

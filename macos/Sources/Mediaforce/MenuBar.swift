@@ -73,15 +73,25 @@ struct MenuBarPanel: View {
                 .help(facts.work.pausedByOwner ? Words.resumeHelp : Words.pauseHelp(facts.work))
             }
             // Facts kept from before the server stopped answering are not said as if current.
-            Text(model.connection == .reachable ? Words.menuStatus(facts) : Words.staleNotice(model.connection, lastHeard: model.lastHeard))
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
+            if model.connection != .reachable {
+                Text(Words.staleNotice(model.connection, lastHeard: model.lastHeard))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            } else if let place = facts.statusOpens {
+                Button(Words.menuStatus(facts)) { open(place) }
+                    .buttonStyle(QuietLinkStyle())
+                    .lineLimit(2)
+            } else {
+                Text(Words.menuStatus(facts))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
             // The main window may be closed, so an action that went wrong is said here too.
             if let notice = model.notice {
                 Text(notice.title).foregroundStyle(.orange).lineLimit(2)
             }
-            Text(Words.savedSoFar(facts.spaceSaved.bytes))
-                .foregroundStyle(.secondary)
+            Button(Words.savedSoFar(facts.spaceSaved.bytes)) { open(.spaceSaved) }
+                .buttonStyle(QuietLinkStyle())
                 .monospacedDigit()
         }
         .font(.callout)
@@ -180,6 +190,17 @@ enum MenuBarGlyph {
         // A template image, so the menu bar draws it in its own colour in light, dark and when highlighted.
         image.isTemplate = true
         return image
+    }
+}
+
+extension MainWindowFacts {
+    /// What the menu's status line opens, following the same order as its words: the season being compressed, or
+    /// Computers while work waits for one. Nil when the line names nothing to open.
+    var statusOpens: Place? {
+        if work.pausedByOwner || work.stopReasons.contains("storage_unavailable") { return nil }
+        if work.stopReasons.contains("no_computer_ready") { return .computers }
+        if work.runningCount > 0, let season = work.runningSeasons.first { return .item(season.prefix) }
+        return nil
     }
 }
 
