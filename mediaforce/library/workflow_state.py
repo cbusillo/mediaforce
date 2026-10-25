@@ -392,7 +392,7 @@ def _load_item_rows_for_scopes(connection: DBClient, scopes: list[MediaScope]) -
         or_(*(scope_rel_path_filter(library_items.c.rel_path, root) for root in sorted({scope.root for scope in scopes})))
     )
     in_scopes = _rel_path_in_scopes(scopes)
-    return [row for row in connection.execute(query).mappings().fetchall() if in_scopes(str(row["rel_path"]))]
+    return [row for row in connection.execute(query).mappings() if in_scopes(str(row["rel_path"]))]
 
 
 def _rel_path_in_scopes(scopes: list[MediaScope]) -> Callable[[str], bool]:
