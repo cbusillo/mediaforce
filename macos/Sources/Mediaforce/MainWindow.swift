@@ -8,6 +8,8 @@ final class MainWindowModel {
     private(set) var facts: MainWindowFacts?
     private(set) var connection: ServerState = .checking
     private(set) var lastHeard: Date?
+    // What went wrong at the last failed check, for the window's Details; nil once Mediaforce answers again.
+    private(set) var problem: ServerProblem?
     var notice: ActionNotice?
     // A page a notification asked to open; the window takes it and clears it.
     var requestedPlace: Place?
@@ -34,13 +36,17 @@ final class MainWindowModel {
             self.facts = facts
             connection = .reachable
             lastHeard = .now
+            problem = nil
             onFacts?(facts)
         } catch is DecodingError {
             connection = .failing
+            problem = ServerProblem(kind: .unreadableReply, at: .now)
         } catch let error as URLError where error.code == .badServerResponse {
             connection = .failing
+            problem = ServerProblem(kind: .errorReply, at: .now)
         } catch {
             connection = .unreachable
+            problem = ServerProblem(kind: .noAnswer, at: .now)
         }
     }
 
@@ -207,7 +213,7 @@ struct MainWindow: View {
                 }
                 .toolbar(removing: .title)
             } else {
-                ServerStatusView(state: model.connection) {
+                ServerStatusView(state: model.connection, lastHeard: model.lastHeard, problem: model.problem) {
                     Task { await model.refresh() }
                 }
             }
