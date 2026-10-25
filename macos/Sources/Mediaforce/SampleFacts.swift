@@ -35,10 +35,13 @@ struct SampleFacts: Decodable, Sendable {
         var id: String { key }
     }
 
-    enum Action: Equatable {
-        case approve, makeAgain, makeSample, chooseSize, tryAnotherSize, startCompressing, openInBrowser
+    enum Action: Hashable {
+        case approve, makeAgain, makeSample, chooseSize, tryAnotherSize, startCompressing
+        case checkFiles, replaceOriginals, retryUnfinished, decideMotion
+        case openInBrowser
     }
 
+    static let seasonPageActions: Set<Action> = [.checkFiles, .replaceOriginals, .retryUnfinished, .decideMotion]
     static let inProgressStates: Set<String> = ["making_test", "sample_waiting", "making_season"]
     static let browserStates: Set<String> = ["finish_blocked", "ready_to_check", "ready_to_finish", "motion_held"]
 
@@ -56,7 +59,12 @@ struct SampleFacts: Decodable, Sendable {
         case "make_sample", "retry_sample": return [.makeSample] + others
         case "choose_size": return sizeChoices.isEmpty ? [] : [.chooseSize]
         case "queue_encode": return [.startCompressing]
-        case "retry_encode", "review_files", "validate_outputs", "promote_outputs", "decide_motion": return [.openInBrowser]
+        case "retry_encode": return [.retryUnfinished]
+        case "validate_outputs": return [.checkFiles]
+        // A blocked file (a failed check or a missing copy) has no step that settles it yet (#1083).
+        case "review_files": return [.openInBrowser]
+        case "promote_outputs": return [.replaceOriginals]
+        case "decide_motion": return [.decideMotion]
         default: return state.map(Self.browserStates.contains) == true ? [.openInBrowser] : []
         }
     }

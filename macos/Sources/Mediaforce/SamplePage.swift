@@ -7,6 +7,7 @@ struct SamplePage: View {
 
     let prefix: String
     let model: MainWindowModel
+    let openItem: (String) -> Void
     @State private var facts: SampleFacts?
     @State private var unreadable = false
     @State private var working = false
@@ -35,7 +36,8 @@ struct SamplePage: View {
                 SampleFactsGrid(facts: facts)
                 SampleActions(
                     facts: facts, working: working, approve: startApproval, make: { make(size: $0) }, compress: compress,
-                    openInBrowser: { openURL(model.client.seasonPage(prefix)) }
+                    openInBrowser: { openURL(model.client.seasonPage(prefix)) },
+                    openItem: { openItem(prefix) }
                 )
             } else if unreadable {
                 Text(Words.staleNotice(.failing, lastHeard: nil))
@@ -192,6 +194,7 @@ struct SampleActions: View {
     let make: (String?) -> Void
     let compress: () -> Void
     let openInBrowser: () -> Void
+    let openItem: () -> Void
 
     var body: some View {
         let actions = facts.actions
@@ -216,6 +219,11 @@ struct SampleActions: View {
                 }
                 if actions.contains(.openInBrowser) {
                     Button(Words.openInBrowser, action: openInBrowser)
+                        .buttonStyle(.borderedProminent)
+                }
+                // Checking, replacing, retrying and motion choices live on the season's page.
+                if let next = actions.first(where: SampleFacts.seasonPageActions.contains) {
+                    Button(Words.workAction(next), action: openItem)
                         .buttonStyle(.borderedProminent)
                 }
                 if actions.contains(.makeSample) {

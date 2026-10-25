@@ -900,9 +900,9 @@ extension Words {
             return "To look right it needs \(size(question.smallestQualitySafeBytes)), more than its \(size(question.goalBytes)) goal."
         }
         return switch file.validation {
-        case "failed": "The compressed copy didn't pass its check. The original stays in the library until you decide."
+        case "failed": "The compressed copy didn't pass its check, so the original stays in the library."
         case "size_held": "It came out much smaller than its sample. Keep this copy, or make it again."
-        default: "It needs a decision the app can't make yet. The web page has it."
+        default: "It needs a decision from you."
         }
     }
 
@@ -998,5 +998,55 @@ extension Words {
         case nil: ""
         }
         return "While a show is still airing, Mediaforce leaves its newest season alone until the season ends.\(tmdb)"
+    }
+}
+
+extension Words {
+    static func workAction(_ action: SampleFacts.Action) -> String {
+        switch action {
+        case .approve, .makeAgain, .makeSample, .chooseSize, .tryAnotherSize: "Watch the Sample"
+        case .startCompressing: startCompressing
+        case .checkFiles: "Check New Files"
+        case .replaceOriginals: "Replace Originals…"
+        case .retryUnfinished: "Retry Unfinished Episodes"
+        case .decideMotion: "Keep These Originals…"
+        case .openInBrowser: openInBrowser
+        }
+    }
+
+    static func workQuestion(_ action: WorkAction) -> String {
+        switch action {
+        case .replaceOriginals: "Replace the originals with the checked copies?"
+        case .keepMotionOriginals: "Keep these files original?"
+        default: ""
+        }
+    }
+
+    static func workButton(_ action: WorkAction) -> String {
+        switch action {
+        case .replaceOriginals: "Replace Originals"
+        case .keepMotionOriginals: "Keep Original"
+        default: ""
+        }
+    }
+
+    static func workDetail(_ action: WorkAction) -> String {
+        switch action {
+        case .replaceOriginals:
+            "Each checked copy takes its original's place in the library. The originals become backups you can put back until you delete them."
+        case .keepMotionOriginals:
+            "Mediaforce can't convert their motion pattern safely, so they stay as they are. You can undo this later."
+        default: ""
+        }
+    }
+
+    static func workRefused(_ action: WorkAction) -> String {
+        switch action {
+        case .startCompressing: "Compressing didn't start"
+        case .checkFiles: "Nothing was checked"
+        case .replaceOriginals: "No originals were replaced"
+        case .retryUnfinished: "Nothing was retried"
+        case .keepMotionOriginals: "Nothing was kept original"
+        }
     }
 }

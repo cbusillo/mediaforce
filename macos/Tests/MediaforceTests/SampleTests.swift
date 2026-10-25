@@ -36,12 +36,15 @@ final class SampleTests: XCTestCase {
         XCTAssertTrue(try decode(Self.facts(state: "making_season", action: nil)).isInProgress)
         XCTAssertFalse(try decode(Self.facts(state: "finished", action: nil)).isInProgress)
         XCTAssertEqual(try decode(Self.facts(state: "ready_to_make", action: "queue_encode")).actions, [.startCompressing])
-        let laterStages: [(String, String?)] = [("needs_help", "retry_encode"), ("needs_help", "review_files"), ("ready_to_check", "validate_outputs"),
-                           ("ready_to_finish", "promote_outputs"), ("motion_held", "decide_motion"), ("finish_blocked", nil),
-                           ("ready_to_check", nil), ("ready_to_finish", nil)]
-        for (state, action) in laterStages {
+        let laterStages: [(String, String?, SampleFacts.Action)] = [
+            ("needs_help", "retry_encode", .retryUnfinished), ("needs_help", "review_files", .openInBrowser),
+            ("ready_to_check", "validate_outputs", .checkFiles), ("ready_to_finish", "promote_outputs", .replaceOriginals),
+            ("motion_held", "decide_motion", .decideMotion), ("finish_blocked", nil, .openInBrowser),
+            ("ready_to_check", nil, .openInBrowser), ("ready_to_finish", nil, .openInBrowser),
+        ]
+        for (state, action, expected) in laterStages {
             let facts = try decode(Self.facts(state: state, action: action))
-            XCTAssertEqual(facts.actions, [.openInBrowser], state)
+            XCTAssertEqual(facts.actions, [expected], state)
             XCTAssertNotEqual(Words.sampleHeadline(facts), Words.sampleHeadline(try decode(Self.facts(state: "needs_help", action: "make_sample"))), state)
         }
     }
