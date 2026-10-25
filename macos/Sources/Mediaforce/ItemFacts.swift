@@ -68,6 +68,30 @@ struct ItemActionResult: Decodable, Sendable {
     let ok: Bool
     let code: String?
     let message: String?
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try values.decodeIfPresent(Bool.self, forKey: .ok) ?? false
+        code = try values.decodeIfPresent(String.self, forKey: .code)
+        // A refusal raised as a request error carries its sentence as `detail`.
+        message = try values.decodeIfPresent(String.self, forKey: .message) ?? values.decodeIfPresent(String.self, forKey: .detail)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ok, code, message, detail
+    }
+
+    private init(ok: Bool, message: String?) {
+        self.ok = ok
+        code = nil
+        self.message = message
+    }
+
+    static let done = ItemActionResult(ok: true, message: nil)
+
+    static func refused(_ message: String?) -> ItemActionResult {
+        ItemActionResult(ok: false, message: message)
+    }
 }
 
 extension MediaforceClient {
@@ -107,6 +131,26 @@ extension MediaforceClient {
         return try JSONDecoder.mediaforce.decode(ItemActionResult.self, from: data)
     }
 
+    func checkFiles(_ prefix: String) async throws -> ItemActionResult {
+        try await folderAction(prefix, "validate-outputs", body: [:])
+    }
+
+    func replaceOriginals(_ prefix: String) async throws -> ItemActionResult {
+        try await folderAction(prefix, "promote-outputs", body: [:])
+    }
+
+    func retryUnfinished(_ prefix: String) async throws -> ItemActionResult {
+        try await folderAction(prefix, "queue-encode", body: ["notes": "Retry unfinished episodes.", "bypass_schedule": false])
+    }
+
+    func keepMotionOriginals(_ prefix: String, _ libraryItemIds: [Int]) async throws -> ItemActionResult {
+        try await folderAction(prefix, "keep-motion-original", body: ["library_item_ids": libraryItemIds])
+    }
+
+    func compressAsIs(_ prefix: String) async throws -> ItemActionResult {
+        try await folderAction(prefix, "accept-ambiguous-motion", body: [:])
+    }
+
     func setSound(_ showPrefix: String, _ preset: String) async throws -> ItemActionResult {
         try await folderAction(showPrefix, "audio-preset", body: ["preset": preset])
     }
@@ -121,7 +165,7 @@ extension MediaforceClient {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let (data, response) = try await session.data(for: request)
-        guard [200, 409].contains((response as? HTTPURLResponse)?.statusCode) else {
+        guard [200, 400, 409].contains((response as? HTTPURLResponse)?.statusCode) else {
             throw URLError(.badServerResponse)
         }
         return try JSONDecoder.mediaforce.decode(ItemActionResult.self, from: data)

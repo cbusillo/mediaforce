@@ -46,7 +46,7 @@ final class ItemTests: XCTestCase {
 
         XCTAssertEqual(Words.fileState(season.files[0]), "Kept original: you put the original back")
         XCTAssertEqual(Words.fileState(season.files[1]), "Didn't pass its check")
-        XCTAssertTrue(Words.waitingReason(season.files[1]).hasPrefix("The compressed copy didn't pass its check."))
+        XCTAssertTrue(Words.waitingReason(season.files[1]).hasPrefix("The compressed copy didn't pass its check"))
     }
 
     func testASizeQuestionNamesBothSizes() throws {
