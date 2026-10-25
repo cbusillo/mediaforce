@@ -3331,17 +3331,29 @@ def _list_library_structure_cards(config: MediaforceConfig, connection: DBClient
 
 
 def _list_library_detail_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
-    library_types = config.library_type_map
     return _folder_cards_for_group(
         config,
         connection,
-        folder_group=lambda rel_path: _tv_season_folder_group(
-            rel_path,
-            library_types=library_types,
-        ),
+        folder_group=_season_group_by_folder(config.library_type_map),
         minimum_recommended_savings_bytes=None,
         media_roots={root for root, library_type in config.library_type_map.items() if library_type == "tv"},
     )
+
+
+def _season_group_by_folder(library_types: Mapping[str, str]) -> Callable[[str], tuple[str, str, str, str] | None]:
+    """A file's TV season group, worked out once per folder, since only the folder decides it."""
+    groups: dict[str, tuple[str, str, str, str] | None] = {}
+
+    def folder_group(rel_path: str) -> tuple[str, str, str, str] | None:
+        folder, _separator, name = rel_path.rpartition("/")
+        # A path ending in a slash or "." names its folder itself, so it does not share the folder's answer.
+        if name.strip() in {"", "."}:
+            return _tv_season_folder_group(rel_path, library_types=library_types)
+        if folder not in groups:
+            groups[folder] = _tv_season_folder_group(rel_path, library_types=library_types)
+        return groups[folder]
+
+    return folder_group
 
 
 def _list_folder_cards(
