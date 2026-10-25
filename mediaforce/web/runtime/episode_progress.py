@@ -18,7 +18,7 @@ from mediaforce.encoding.encode_queue import encode_run_rel_paths, list_child_en
 from mediaforce.encoding.put_back import PUT_BACK_REASON
 from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
 from mediaforce.library.motion_holds import queue_motion_holds
-from mediaforce.library.motion_keep_state import kept_original_clause
+from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.library.media_scopes import resolve_media_scope
 from mediaforce.library.staged_validation import staged_validation_outcome
 from mediaforce.library.workflow_state import ItemWorkflowState, build_folder_workflow_state
@@ -65,14 +65,14 @@ def folder_episodes_payload(config: MediaforceConfig, prefix: str) -> dict[str, 
             workflow.items,
             list_encode_runs_for_prefix(connection, scope.prefix),
         )
-        put_back = _put_back_rel_paths(connection, [episode["rel_path"] for episode in episodes])
+        put_back = put_back_rel_paths(connection, [episode["rel_path"] for episode in episodes])
     for episode in episodes:
         if episode["stage"] == "kept_original" and episode["rel_path"] in put_back:
             episode["detail"] = PUT_BACK_DETAIL
     return {"prefix": scope.prefix, "available": True, "episodes": episodes}
 
 
-def _put_back_rel_paths(connection: DBClient, rel_paths: list[str]) -> set[str]:
+def put_back_rel_paths(connection: DBClient, rel_paths: list[str]) -> set[str]:
     """The episodes kept original because the owner put their original back."""
     if not rel_paths:
         return set()
@@ -81,7 +81,7 @@ def _put_back_rel_paths(connection: DBClient, rel_paths: list[str]) -> set[str]:
     ).where(
         library_items.c.rel_path.in_(rel_paths),
         motion_keep_decisions.c.reason_code == PUT_BACK_REASON,
-        kept_original_clause(library_items.c.id),
+        motion_keep_decisions.c.source_fingerprint == library_item_source_sql(),
     )).scalars())
 
 

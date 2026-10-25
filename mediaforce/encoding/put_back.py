@@ -187,6 +187,7 @@ def put_original_back(
             content_version_changed_at=now,
             content_version_fingerprint=content,
             status="discovered",
+            missing_since=None,
             updated_at=now,
             last_seen_at=now,
         ))
