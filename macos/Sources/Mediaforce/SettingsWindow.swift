@@ -19,6 +19,7 @@ final class LibrarySettingsModel {
     struct PendingKind: Identifiable {
         let id: LibrarySettingsDraft.Row.ID
         let preview: LibraryTypePreview
+        let generation: Int
     }
 
     let client: MediaforceClient
@@ -30,6 +31,8 @@ final class LibrarySettingsModel {
     var notice: ActionNotice?
     var pendingKind: PendingKind?
     var pendingRemoval: LibrarySettingsDraft.Row?
+    /// Save, Revert and every reload bump this, so a kind preview asked for earlier can't edit the new draft.
+    private var draftGeneration = 0
 
     init(client: MediaforceClient) {
         self.client = client
@@ -54,33 +57,39 @@ final class LibrarySettingsModel {
     }
 
     func chooseKind(_ kind: String, for id: LibrarySettingsDraft.Row.ID) async {
-        guard let saved, case .needsPreview(let key)? = draft?.chooseType(kind, for: id, saved: saved) else { return }
+        guard !saving, let saved,
+              case .needsPreview(let key)? = draft?.chooseType(kind, for: id, saved: saved) else { return }
+        let generation = draftGeneration
         do {
             let preview = try await client.libraryTypePreview(key: key, type: kind)
-            pendingKind = PendingKind(id: id, preview: preview)
+            guard generation == draftGeneration, !saving else { return }
+            pendingKind = PendingKind(id: id, preview: preview, generation: generation)
         } catch {
-            notice = .previewUnavailable
+            if generation == draftGeneration { notice = .previewUnavailable }
         }
     }
 
     func confirmKind(_ pending: PendingKind) {
-        draft?.confirmType(pending.preview, for: pending.id)
         pendingKind = nil
+        guard !saving, pending.generation == draftGeneration else { return }
+        draft?.confirmType(pending.preview, for: pending.id)
     }
 
     func confirmRemoval(_ row: LibrarySettingsDraft.Row) {
-        draft?.remove(row.id)
         pendingRemoval = nil
+        guard !saving else { return }
+        draft?.remove(row.id)
     }
 
     func save() async {
-        guard let draft else { return }
+        guard let draft, !saving else { return }
+        discardPendingEdits()
         saving = true
         defer { saving = false }
         do {
             let result = try await client.saveLibrarySettings(draft.saveBody)
-            if result.ok, let settings = result.settings {
-                show(settings)
+            if result.ok {
+                if let settings = result.settings { show(settings) } else { await load() }
                 justSaved = true
             } else if result.code == "settings_changed" {
                 notice = .settingsChangedElsewhere
@@ -97,7 +106,14 @@ final class LibrarySettingsModel {
         if hasChanges { justSaved = false }
     }
 
+    private func discardPendingEdits() {
+        draftGeneration += 1
+        pendingKind = nil
+        pendingRemoval = nil
+    }
+
     private func show(_ facts: LibrarySettingsFacts) {
+        discardPendingEdits()
         saved = facts
         draft = LibrarySettingsDraft(facts)
         loadFailed = false

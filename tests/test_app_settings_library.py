@@ -220,3 +220,30 @@ def test_new_library_never_takes_the_key_of_one_removed_in_the_same_save(
     added = next(library for library in libraries if library["label"] == "Movies")
     assert added["key"] != "movies"
     assert "plex_path" not in added or not added["plex_path"]
+
+
+def test_settings_read_after_the_file_changed_shows_the_file_and_a_save_keeps_it(
+        library_app: tuple[FastAPI, Path], tmp_path: Path,
+) -> None:
+    app, runtime_settings_path = library_app
+    stored = json.loads(runtime_settings_path.read_text())
+    stored["media"]["catalog_refresh_hours"] = 24
+    stored["media"]["staging_root"] = str(tmp_path / "elsewhere")
+    stored["media"]["source_roots"]["home"] = str(tmp_path / "media" / "home")
+    stored["media"]["libraries"].append(
+        {"key": "home", "label": "Home", "path": str(tmp_path / "media" / "home"), "type": "other"}
+    )
+    runtime_settings_path.write_text(json.dumps(stored), encoding="utf-8")
+
+    body = _facts_body(app)
+
+    assert body["catalog_refresh_hours"] == 24
+    assert body["working_folder"] == str(tmp_path / "elsewhere")
+    assert [library["key"] for library in body["libraries"]] == ["tv", "movies", "home"]
+
+    body["libraries"][0]["name"] = "Television"
+    assert _save(app, body)[0] == 200
+
+    media = json.loads(runtime_settings_path.read_text())["media"]
+    assert (media["catalog_refresh_hours"], media["staging_root"]) == (24, str(tmp_path / "elsewhere"))
+    assert [library["key"] for library in media["libraries"]] == ["tv", "movies", "home"]

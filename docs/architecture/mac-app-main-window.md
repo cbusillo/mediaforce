@@ -152,6 +152,9 @@ Mediaforce looks for new files.
 `GET /api/app/settings/library` gives `libraries` (each `key`, `name`,
 `folder`, `type`), `working_folder`, `catalog_refresh_hours`, the `types`
 a library can be and `revision`, a hash of the stored `media` section.
+The fields and the revision come from one stored state: the read reloads the
+settings and retries while the file changes underneath it, answering `409`
+`settings_changed` if it keeps changing.
 `POST /api/app/settings/library` takes the same fields, including that
 `revision`, and is refused with `settings_changed`, writing nothing, when the
 stored section no longer matches it under the runtime settings lock; the app

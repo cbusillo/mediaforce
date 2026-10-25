@@ -78,7 +78,10 @@ def register_library_settings_routes(
 
     @app.get("/api/app/settings/library")
     def api_app_library_settings() -> JSONResponse:
-        return JSONResponse(library_settings_facts())
+        try:
+            return JSONResponse(library_settings_facts())
+        except SettingsValidationError as exc:
+            return JSONResponse({"ok": False, "code": exc.code}, status_code=409)
 
     @app.post("/api/app/settings/library")
     async def api_app_library_settings_save(request: Request) -> JSONResponse:

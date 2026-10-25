@@ -333,6 +333,7 @@ class VideoGeometry(NamedTuple):
     height: int
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
+LIBRARY_SETTINGS_SNAPSHOT_ATTEMPTS = 3
 REPRESENTATIVE_SELECTION_CACHE_LIMIT = 32
 REPRESENTATIVE_SELECTION_CACHE_TTL_SECONDS = 60.0
 FULL_SCAN_STALE_AFTER = timedelta(minutes=15)
@@ -1076,12 +1077,23 @@ def create_app(
         return {"ok": True, "message": "Settings saved.", "settings": _settings_page_payload(saved=True)}
 
     def _library_settings_facts() -> dict[str, Any]:
-        return _library_settings_facts_runtime(
-            libraries=_settings_library_rows_for_config_runtime(config, min_rows=0),
-            transcode_root=_settings_transcode_root_value_runtime(config),
-            catalog_refresh_hours=_settings_catalog_refresh_hours_runtime(config),
-            revision=_library_settings_revision(load_runtime_settings(config.paths.runtime_settings_path)),
-        )
+        """The Libraries tab's fields and revision, both from one stored state.
+
+        The cached config may lag the runtime settings file, so the fields come from a fresh load that the file's
+        revision did not change across; a file that keeps changing is refused as `settings_changed`.
+        """
+        runtime_settings_path = config.paths.runtime_settings_path
+        for _attempt in range(LIBRARY_SETTINGS_SNAPSHOT_ATTEMPTS):
+            revision = _library_settings_revision(load_runtime_settings(runtime_settings_path))
+            snapshot = load_config(config.paths.config_path)
+            if _library_settings_revision(load_runtime_settings(runtime_settings_path)) == revision:
+                return _library_settings_facts_runtime(
+                    libraries=_settings_library_rows_for_config_runtime(snapshot, min_rows=0),
+                    transcode_root=_settings_transcode_root_value_runtime(snapshot),
+                    catalog_refresh_hours=_settings_catalog_refresh_hours_runtime(snapshot),
+                    revision=revision,
+                )
+        raise SettingsValidationError("Settings kept changing while they were read.", "settings_changed")
 
     def _save_library_settings_action(
             *,
@@ -1106,7 +1118,11 @@ def create_app(
             **_saved_library_context(),
         )
         _apply_settings_payload({"media": media}, library_revision=revision)
-        return {"ok": True, "settings": _library_settings_facts()}
+        try:
+            settings: dict[str, Any] | None = _library_settings_facts()
+        except SettingsValidationError:
+            settings = None
+        return {"ok": True, "settings": settings}
 
     def _library_type_preview_action(key: str, library_type: str) -> dict[str, Any]:
         definition = config.library_definition_map.get(key)
