@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import RowMapping, delete, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.db import DBClient
@@ -55,7 +55,7 @@ def reconcile_unfinished_put_backs(connection: DBClient, library_item_id: int | 
 
 
 def _original_version(connection: DBClient, item_id: int, active: str, archive_identity: dict[str, Any]) -> str:
-    """The version publishing replaced, or a new one in the same generation when it was published before the journal.
+    """The original version publishing replaced; files published before the journal existed get a new version.
 
     A recorded original that differs from the backup on disk is refused: that backup is not this file's original.
     """
@@ -78,7 +78,7 @@ def _original_version(connection: DBClient, item_id: int, active: str, archive_i
                           recorded_at=str(archive_identity.get("observed_at") or ""))
 
 
-def _prepare(connection: DBClient, item: Mapping[str, Any], *, library_path: Path, out_path: Path,
+def _prepare(connection: DBClient, item: Mapping[str, Any] | RowMapping, *, library_path: Path, out_path: Path,
              archive_path: Path, original_path: Path, now: str) -> str:
     """Persist both intended moves before touching media, as publishing does."""
     connection.commit()
