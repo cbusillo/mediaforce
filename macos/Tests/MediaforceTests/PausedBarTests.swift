@@ -11,8 +11,12 @@ final class PausedBarTests: XCTestCase {
         return try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: JSONSerialization.data(withJSONObject: json))
     }
 
-    func testTheBarShowsExactlyWhileTheDirectorHasPaused() throws {
-        XCTAssertTrue(PausedBar.shows(try facts(pausedByOwner: true)))
-        XCTAssertFalse(PausedBar.shows(try facts(pausedByOwner: false)))
+    func testThePausedBarShowsWhilePausedEvenWhenTheConnectionIsLost() throws {
+        let paused = try facts(pausedByOwner: true)
+        let running = try facts(pausedByOwner: false)
+        XCTAssertEqual(TopNotice.shown(connection: .reachable, facts: paused), [.paused])
+        XCTAssertEqual(TopNotice.shown(connection: .unreachable, facts: paused), [.stale, .paused])
+        XCTAssertEqual(TopNotice.shown(connection: .failing, facts: running), [.stale])
+        XCTAssertEqual(TopNotice.shown(connection: .reachable, facts: running), [])
     }
 }

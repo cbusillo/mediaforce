@@ -174,10 +174,13 @@ struct MainWindow: View {
                         }
                     }
                     .safeAreaInset(edge: .top, spacing: 0) {
-                        if model.connection != .reachable {
-                            StaleNotice(connection: model.connection, lastHeard: model.lastHeard)
-                        } else if PausedBar.shows(facts) {
-                            PausedBar(model: model)
+                        VStack(spacing: 0) {
+                            ForEach(TopNotice.shown(connection: model.connection, facts: facts), id: \.self) { notice in
+                                switch notice {
+                                case .stale: StaleNotice(connection: model.connection, lastHeard: model.lastHeard)
+                                case .paused: PausedBar(model: model)
+                                }
+                            }
                         }
                     }
                 }
@@ -211,13 +214,19 @@ struct MainWindow: View {
     }
 }
 
+/// The bars across the top of every page. A lost connection doesn't hide that Mediaforce was paused: the last facts
+/// heard still say so, so both show.
+enum TopNotice: Hashable {
+    case stale, paused
+
+    static func shown(connection: ServerState, facts: MainWindowFacts) -> [TopNotice] {
+        (connection == .reachable ? [] : [.stale]) + (facts.work.pausedByOwner ? [.paused] : [])
+    }
+}
+
 /// On every page while the Director has paused Mediaforce, so a pause is never only a changed icon.
 struct PausedBar: View {
     let model: MainWindowModel
-
-    static func shows(_ facts: MainWindowFacts) -> Bool {
-        facts.work.pausedByOwner
-    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -227,7 +236,8 @@ struct PausedBar: View {
             Spacer(minLength: 0)
             Button(Words.resume) { Task { await model.setRunning(true) } }
                 .controlSize(.small)
-                .disabled(model.switching != nil)
+                // Resuming needs Mediaforce to answer.
+                .disabled(model.switching != nil || model.connection != .reachable)
         }
         .font(.callout)
         .padding(.horizontal, 34)
