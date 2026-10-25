@@ -86,6 +86,12 @@ struct MediaforceClient: Sendable {
         _ = try await post("api/encode-queue/resume")
     }
 
+    func completed() async throws -> SpaceSavedFacts {
+        var request = URLRequest(url: baseURL.appending(path: "api/completed"))
+        request.timeoutInterval = Self.factsTimeout
+        return try await decode(SpaceSavedFacts.self, from: request)
+    }
+
     func cleanupFolder() async throws -> CleanupFolder {
         var request = URLRequest(url: baseURL.appending(path: "api/archive-cleanup"))
         request.timeoutInterval = Self.factsTimeout
