@@ -1757,6 +1757,22 @@ def runtime_library_signature(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(signature, key=lambda item: str(item["key"]))
 
 
+def runtime_plex_paths(payload: dict[str, Any]) -> dict[str, str]:
+    """Each library's Plex path in effect: its own entry, else its kept root in the Plex settings, as metadata sync reads it."""
+    metadata = payload.get("metadata")
+    plex = metadata.get("plex") if isinstance(metadata, dict) else None
+    roots = plex.get("library_roots") if isinstance(plex, dict) else None
+    root_map = roots if isinstance(roots, dict) else {}
+    media = payload.get("media")
+    libraries = media.get("libraries") if isinstance(media, dict) else None
+    paths: dict[str, str] = {}
+    for item in libraries if isinstance(libraries, list) else []:
+        key = str(item.get("key") or "").strip() if isinstance(item, dict) else ""
+        if key:
+            paths[key] = str(item.get("plex_path") or root_map.get(key) or "").strip()
+    return paths
+
+
 def bind_runtime_library_overrides(payload: dict[str, Any], previous_types: dict[str, str]) -> dict[str, Any]:
     if not previous_types:
         return payload

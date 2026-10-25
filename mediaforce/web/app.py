@@ -334,6 +334,7 @@ from mediaforce.web.settings_runtime import (
     settings_transcode_root_value as _settings_transcode_root_value_runtime,
     runtime_source_roots as _runtime_source_roots,
     runtime_library_signature as _runtime_library_signature,
+    runtime_plex_paths as _runtime_plex_paths,
     bind_runtime_library_overrides as _bind_runtime_library_overrides,
 )
 
@@ -1056,6 +1057,7 @@ def create_app(
                 _runtime_source_roots(existing_runtime_settings) != _runtime_source_roots(merged_runtime_settings)
                 or _runtime_library_signature(existing_runtime_settings)
                 != _runtime_library_signature(merged_runtime_settings)
+                or _runtime_plex_paths(existing_runtime_settings) != _runtime_plex_paths(merged_runtime_settings)
                 or object_dict(existing_runtime_settings.get("metadata"))
                 != object_dict(merged_runtime_settings.get("metadata"))
             )

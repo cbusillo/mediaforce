@@ -345,3 +345,35 @@ def test_save_after_a_kept_plex_root_changed_elsewhere_is_refused(library_app: t
 
     assert _save(app, body) == (400, {"ok": False, "code": "settings_changed"})
     assert runtime_settings_path.read_bytes() == changed_elsewhere
+
+
+def _set_movies_definition_only_path(runtime_settings_path: Path) -> None:
+    stored = json.loads(runtime_settings_path.read_text())
+    stored["metadata"]["plex"]["library_roots"] = {}
+    runtime_settings_path.write_text(json.dumps(stored), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("prepare", "change", "rescans"),
+    [
+        (None, lambda libraries: libraries[1].update(plex_path="/plex/films"), True),
+        (None, lambda libraries: libraries[0].update(plex_path="/plex/tv"), True),
+        (_set_movies_definition_only_path, lambda libraries: libraries[1].update(plex_path=""), True),
+        (None, lambda libraries: libraries[0].update(name="Television"), False),
+    ],
+    ids=["edited", "added", "cleared_definition_only", "renamed_only"],
+)
+def test_library_save_rescans_when_a_plex_path_in_effect_changes(
+        library_app: tuple[FastAPI, Path], prepare: Any, change: Any, rescans: bool,
+) -> None:
+    app, runtime_settings_path = library_app
+    if prepare is not None:
+        prepare(runtime_settings_path)
+    assert _save(app, _facts_body(app))[0] == 200  # a save without edits fills in each library's stored defaults
+    body = _facts_body(app)
+    change(body["libraries"])
+
+    with patch("mediaforce.web.app._maybe_schedule_scan") as schedule_scan:
+        assert _save(app, body)[0] == 200
+
+    assert schedule_scan.called is rescans
