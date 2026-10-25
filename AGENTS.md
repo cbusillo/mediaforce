@@ -10,6 +10,12 @@ plans, and other docs.
 `AGENTS.md` is the only agent-instruction file. Keep any nested instructions
 in an `AGENTS.md` too.
 
+## What Mediaforce does
+
+Mediaforce reclaims media-library space by converting videos to AV1 and audio to Opus, while checking quality before publishing each file.
+Its direction is a native Mac app that handles measured problems automatically and asks the Director only for judgment calls and rollback-copy cleanup.
+Evidence: [DIRECTION.md](DIRECTION.md); its native-app direction takes precedence over older web-app descriptions.
+
 ## Naming
 
 - Product/repo name: `mediaforce`
