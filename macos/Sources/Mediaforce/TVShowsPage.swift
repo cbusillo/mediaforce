@@ -3,11 +3,11 @@ import SwiftUI
 struct TVShowsPage: View {
     let model: MainWindowModel
     let openSample: (String) -> Void
+    let openItem: (String) -> Void
     @State private var search = ""
     @State private var stateGroup: LibraryStateGroup?
     @State private var selected: TVShowsFacts.Show.ID?
     @State private var sortOrder = [KeyPathComparator(\TVShowsFacts.Show.bytes, order: .reverse)]
-    @Environment(\.openURL) private var openURL
 
     var body: some View {
         RefreshingPage(title: Words.tvShows, load: { try await model.client.tvShows() }) { (facts: TVShowsFacts) in
@@ -27,7 +27,7 @@ struct TVShowsPage: View {
                 Text(Words.noMatchingShows)
                     .foregroundStyle(.secondary)
             } else if let show = shows.first(where: { $0.id == selected }) {
-                TVSeasonList(show: show, openSample: openSample) { openURL(model.client.seasonPage($0)) }
+                TVSeasonList(show: show, openSample: openSample, openItem: openItem)
             } else {
                 Text(Words.chooseShow)
                     .foregroundStyle(.secondary)
@@ -86,7 +86,7 @@ struct TVShowsTable: View {
 struct TVSeasonList: View {
     let show: TVShowsFacts.Show
     let openSample: (String) -> Void
-    let openInBrowser: (String) -> Void
+    let openItem: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -108,7 +108,7 @@ struct TVSeasonList: View {
                             if season.opensSample {
                                 openSample(season.prefix)
                             } else {
-                                openInBrowser(season.prefix)
+                                openItem(season.prefix)
                             }
                         }
                         .controlSize(.small)

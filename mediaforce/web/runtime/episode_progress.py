@@ -160,6 +160,7 @@ def _episode(
         "bytes_saved": None,
         "size_question": None,
         "owner_action": None,
+        "validation": None,
     }
     if item.state == "complete":
         episode["stage"] = "published"
@@ -197,6 +198,7 @@ def _episode(
     if validation is not None:
         episode["stage"] = "needs_you"
         episode["detail"] = _VALIDATION_DETAILS[validation]
+        episode["validation"] = validation
         episode["owner_action"] = "keep_or_remake" if validation == "size_held" else None
         return episode
     # A finished run says nothing about now; the file's own state does.

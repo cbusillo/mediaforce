@@ -2,11 +2,11 @@ import SwiftUI
 
 struct MoviesPage: View {
     let model: MainWindowModel
+    let openItem: (String) -> Void
     @State private var search = ""
     @State private var stateGroup: LibraryStateGroup?
     @State private var selected: MoviesFacts.Movie.ID?
     @State private var sortOrder = [KeyPathComparator(\MoviesFacts.Movie.bytes, order: .reverse)]
-    @Environment(\.openURL) private var openURL
 
     var body: some View {
         RefreshingPage(title: Words.movies, load: { try await model.client.movies() }) { (facts: MoviesFacts) in
@@ -26,7 +26,7 @@ struct MoviesPage: View {
                 Text(Words.noMatchingMovies)
                     .foregroundStyle(.secondary)
             } else if let movie = movies.first(where: { $0.id == selected }) {
-                MovieDetail(movie: movie) { openURL(model.client.seasonPage(movie.prefix)) }
+                MovieDetail(movie: movie) { openItem(movie.prefix) }
             } else {
                 Text(Words.chooseMovie)
                     .foregroundStyle(.secondary)
@@ -82,7 +82,7 @@ struct MoviesTable: View {
 
 struct MovieDetail: View {
     let movie: MoviesFacts.Movie
-    let openInBrowser: () -> Void
+    let open: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -90,7 +90,7 @@ struct MovieDetail: View {
                 .font(.headline)
             Text(Words.movieDetail(movie))
                 .foregroundStyle(.secondary)
-            Button(Words.openInBrowser, action: openInBrowser)
+            Button(Words.openItem, action: open)
                 .controlSize(.small)
         }
     }

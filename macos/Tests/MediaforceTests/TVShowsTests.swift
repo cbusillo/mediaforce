@@ -80,8 +80,8 @@ final class TVShowsTests: XCTestCase {
         ]
         let decoded = try show(opensSample + opensBrowser).seasons
         XCTAssertEqual(decoded.map(\.opensSample), Array(repeating: true, count: 6) + Array(repeating: false, count: 3))
-        XCTAssertTrue(decoded.filter { !$0.opensSample }.allSatisfy { Words.seasonButton($0) == Words.openInBrowser })
-        XCTAssertFalse(decoded.filter(\.opensSample).contains { Words.seasonButton($0) == Words.openInBrowser })
+        XCTAssertTrue(decoded.filter { !$0.opensSample }.allSatisfy { Words.seasonButton($0) == Words.openItem })
+        XCTAssertFalse(decoded.filter(\.opensSample).contains { Words.seasonButton($0) == Words.openItem })
     }
 
     func testCompressingWithFilesThatNeedYouAndMotionChecksFirstAreSaid() throws {

@@ -99,6 +99,14 @@ struct ActionNotice: Identifiable, Equatable {
 enum Place: Hashable {
     case library, spaceSaved, keptOriginal, tv, movies, otherMedia, computers
     case sample(String)
+    case item(String)
+
+    var opensFromList: Bool {
+        switch self {
+        case .sample, .item: true
+        default: false
+        }
+    }
 }
 
 struct MainWindow: View {
@@ -117,10 +125,11 @@ struct MainWindow: View {
                         case .spaceSaved: SpaceSavedPage(facts: facts)
                         case .keptOriginal: KeptOriginalPage(kept: facts.keptOriginal)
                         case .computers: ComputersPage(computers: facts.computers)
-                        case .sample(let prefix): SamplePage(prefix: prefix, model: model)
-                        case .tv: TVShowsPage(model: model) { place = .sample($0) }
-                        case .movies: MoviesPage(model: model)
-                        case .otherMedia: OtherMediaPage(model: model)
+                        case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }
+                        case .item(let prefix): ItemPage(prefix: prefix, model: model)
+                        case .tv: TVShowsPage(model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
+                        case .movies: MoviesPage(model: model) { place = .item($0) }
+                        case .otherMedia: OtherMediaPage(model: model) { place = .item($0) }
                         default: LibraryPage(facts: facts, posters: model.posters) { place = .sample($0) }
                         }
                     }
@@ -131,7 +140,7 @@ struct MainWindow: View {
                     }
                 }
                 .toolbar {
-                    if case .sample = place {
+                    if place?.opensFromList == true {
                         ToolbarItem(placement: .navigation) {
                             Button("Library", systemImage: "chevron.backward") { place = .library }
                         }

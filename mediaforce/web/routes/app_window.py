@@ -1,8 +1,9 @@
 from collections.abc import Callable, Collection
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from mediaforce.web.routes.folders import request_body
@@ -19,6 +20,8 @@ def register_app_window_routes(
         approve_sample_action: Callable[[str, Collection[str], str], dict[str, Any]],
         make_sample_action: Callable[[str, str | None], dict[str, Any]],
         compress_season_action: Callable[[str], dict[str, Any]],
+        item_payload: Callable[[str], dict[str, Any] | None] | None = None,
+        player_file: Callable[[int, str], Path | None] | None = None,
 ) -> None:
     @app.get("/api/app/main-window")
     def api_app_main_window() -> JSONResponse:
@@ -35,6 +38,24 @@ def register_app_window_routes(
     @app.get("/api/app/other")
     def api_app_other() -> JSONResponse:
         return JSONResponse(other_media_payload())
+
+    if item_payload is not None:
+        item_facts = item_payload
+
+        @app.get("/api/app/items/{prefix:path}")
+        def api_app_item(prefix: str) -> JSONResponse:
+            facts = item_facts(prefix.strip("/"))
+            return JSONResponse(facts or {}, status_code=200 if facts else 404)
+
+    if player_file is not None:
+        playable = player_file
+
+        @app.get("/api/app/player/{library_item_id}/{side}")
+        def api_app_player(library_item_id: int, side: str) -> Response:
+            path = playable(library_item_id, side)
+            if path is None:
+                return JSONResponse({}, status_code=404)
+            return FileResponse(path, media_type="video/mp4")
 
     @app.get("/api/app/samples/{prefix:path}")
     def api_app_sample(prefix: str) -> JSONResponse:
