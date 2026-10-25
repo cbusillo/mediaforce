@@ -28,7 +28,7 @@ final class TVShowsTests: XCTestCase {
     }
 
     func testAShowTakesTheMostUrgentStateOfItsSeasons() throws {
-        let cases: [([String], TVShowsFacts.StateGroup)] = [
+        let cases: [([String], LibraryStateGroup)] = [
             ([season(1, state: "finished", tone: "success"), season(2, state: "needs_help", tone: "attention", action: "retry_sample")], .needsYou),
             ([season(1, state: "making_season", tone: "active"), season(2, state: "ready_to_compare", tone: "ready")], .inProgress),
             ([season(1, state: "sample_waiting", tone: "quiet"), season(2, state: "needs_test", tone: "quiet")], .inProgress),

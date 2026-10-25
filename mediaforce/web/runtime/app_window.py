@@ -227,6 +227,55 @@ def _tv_season(identity: Mapping[str, Any], card: Mapping[str, Any]) -> dict[str
     }
 
 
+def movies_payload(titles: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    listed = [
+        {
+            "prefix": title["prefix"],
+            "title": title.get("title") or title["prefix"],
+            "library": title.get("library_label"),
+            "file_count": int(title.get("item_count") or 0),
+            "bytes": int(title.get("total_size_bytes") or 0),
+            "estimated_saved_bytes": None if title.get("details_loading") or title.get("projected_reclaim_bytes") is None
+            else int(title["projected_reclaim_bytes"]),
+            "state": movie_state(title),
+        }
+        for title in titles
+        if title.get("prefix")
+    ]
+    return {"movies": sorted(listed, key=lambda movie: (-movie["bytes"], movie["title"]))}
+
+
+# The web movie library's state group (frontend/src/lib/movies/library.ts movieLibraryStateGroup), checked in its order.
+def movie_state(title: Mapping[str, Any]) -> str:
+    workflow = title.get("workflow_state") or {}
+    lane = workflow.get("primary_lane")
+    if title.get("availability") == "browse_only" or workflow.get("state") == "browse_only":
+        return "view_only"
+    if workflow.get("state") == "complete" or lane == "complete":
+        return "finished"
+    if title.get("promotion_conflicts") or lane == "blocked":
+        return "cannot_start"
+    if workflow.get("state") == "explicit_selection_required":
+        return "needs_file_choice"
+    if workflow.get("state") == "motion_held":
+        return "motion_held"
+    if _movie_review_pending(title, lane) or lane == "attention":
+        return "needs_attention"
+    if lane == "processing":
+        return "compressing"
+    if lane in {"encode", "validate", "promote", "mixed"}:
+        return "ready"
+    return "no_work"
+
+
+# moviePendingReviewBadge: a review badge counts unless it is fine or a lane already owns the movie's next step.
+def _movie_review_pending(title: Mapping[str, Any], lane: Any) -> bool:
+    badge = title.get("review_badge") or {}
+    if not str(badge.get("label") or "").strip() or badge.get("tone") == "ok":
+        return False
+    return lane not in {"processing", "validate", "promote", "blocked", "complete"}
+
+
 def _library_totals(items: list[_Item]) -> dict[str, Any]:
     by_kind: dict[str, list[_Item]] = defaultdict(list)
     for item in items:

@@ -70,7 +70,7 @@ def test_seasons_say_when_files_need_the_owner_or_only_motion_checks_can_start()
 def test_the_route_serves_the_shows() -> None:
     app = FastAPI()
     register_app_window_routes(
-        app, main_window_payload=dict, tv_shows_payload=lambda: tv_shows_payload([_card("tv/ER/Season 1")]),
+        app, main_window_payload=dict, tv_shows_payload=lambda: tv_shows_payload([_card("tv/ER/Season 1")]), movies_payload=dict,
         sample_payload=lambda _prefix: None, approve_sample_action=lambda *_args: {}, make_sample_action=lambda *_args: {},
         compress_season_action=lambda _prefix: {},
     )

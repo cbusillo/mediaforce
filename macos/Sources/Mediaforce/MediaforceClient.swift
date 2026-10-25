@@ -31,6 +31,12 @@ struct MediaforceClient: Sendable {
         return try await decode(TVShowsFacts.self, from: request)
     }
 
+    func movies() async throws -> MoviesFacts {
+        var request = URLRequest(url: baseURL.appending(path: "api/app/movies"))
+        request.timeoutInterval = Self.factsTimeout
+        return try await decode(MoviesFacts.self, from: request)
+    }
+
     func poster(showPrefix: String) async -> NSImage? {
         let url = baseURL.appending(path: "api/app/posters").appending(path: showPrefix)
         guard let (data, response) = try? await session.data(from: url),

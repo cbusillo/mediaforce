@@ -3,76 +3,42 @@ import SwiftUI
 struct TVShowsPage: View {
     let model: MainWindowModel
     let openSample: (String) -> Void
-    @State private var facts: TVShowsFacts?
-    @State private var refreshFailed = false
-    @State private var lastHeard: Date?
     @State private var search = ""
-    @State private var stateGroup: TVShowsFacts.StateGroup?
+    @State private var stateGroup: LibraryStateGroup?
     @State private var selected: TVShowsFacts.Show.ID?
     @State private var sortOrder = [KeyPathComparator(\TVShowsFacts.Show.bytes, order: .reverse)]
     @Environment(\.openURL) private var openURL
 
     var body: some View {
-        PageFrame(title: Words.tvShows) {
-            if let facts {
-                let shows = visibleShows(facts)
-                if refreshFailed {
-                    StaleNotice(connection: .failing, lastHeard: lastHeard)
-                        .padding(.horizontal, -34)
-                }
-                HStack(spacing: 12) {
-                    TextField(Words.searchShows, text: $search)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 260)
-                    Picker(Words.stateColumn, selection: $stateGroup) {
-                        Text(Words.allStates).tag(TVShowsFacts.StateGroup?.none)
-                        ForEach(TVShowsFacts.StateGroup.allCases) { choice in
-                            Text(Words.tvShowState(choice)).tag(Optional(choice))
-                        }
-                    }
-                    .fixedSize()
-                    Spacer()
-                    Text(Words.showsShown(shows.count, of: facts.shows.count))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                TVShowsTable(shows: shows, selected: $selected, sortOrder: $sortOrder)
-                if shows.isEmpty {
-                    Text(Words.noMatchingShows)
-                        .foregroundStyle(.secondary)
-                } else if let show = shows.first(where: { $0.id == selected }) {
-                    TVSeasonList(show: show, openSample: openSample) { openURL(model.client.seasonPage($0)) }
-                } else {
-                    Text(Words.chooseShow)
-                        .foregroundStyle(.secondary)
-                }
-            } else if refreshFailed {
-                Text(Words.staleNotice(.failing, lastHeard: nil))
+        RefreshingPage(title: Words.tvShows, load: { try await model.client.tvShows() }) { (facts: TVShowsFacts) in
+            let shows = visibleShows(facts)
+            HStack(spacing: 12) {
+                TextField(Words.searchShows, text: $search)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 260)
+                LibraryStatePicker(selection: $stateGroup)
+                Spacer()
+                Text(Words.shown(shows.count, of: facts.shows.count, "show"))
                     .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            TVShowsTable(shows: shows, selected: $selected, sortOrder: $sortOrder)
+            if shows.isEmpty {
+                Text(Words.noMatchingShows)
+                    .foregroundStyle(.secondary)
+            } else if let show = shows.first(where: { $0.id == selected }) {
+                TVSeasonList(show: show, openSample: openSample) { openURL(model.client.seasonPage($0)) }
             } else {
-                ProgressView()
+                Text(Words.chooseShow)
+                    .foregroundStyle(.secondary)
             }
         }
-        .task { await watch() }
     }
 
     private func visibleShows(_ facts: TVShowsFacts) -> [TVShowsFacts.Show] {
         facts.shows
             .filter { $0.matches(search) && (stateGroup == nil || $0.stateGroup == stateGroup) }
             .sorted(using: sortOrder)
-    }
-
-    private func watch() async {
-        while !Task.isCancelled {
-            do {
-                facts = try await model.client.tvShows()
-                refreshFailed = false
-                lastHeard = .now
-            } catch {
-                refreshFailed = true
-            }
-            try? await Task.sleep(for: MainWindowModel.refreshInterval)
-        }
     }
 }
 
@@ -108,7 +74,7 @@ struct TVShowsTable: View {
             }
             .width(150)
             TableColumn(Words.stateColumn, value: \TVShowsFacts.Show.stateRank) { (show: TVShowsFacts.Show) in
-                Text(Words.tvShowState(show.stateGroup))
+                Text(Words.libraryState(show.stateGroup))
             }
             .width(120)
         }

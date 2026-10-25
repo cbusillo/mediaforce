@@ -102,7 +102,6 @@ enum Place: Hashable {
 
     static func webPath(_ place: Place) -> String? {
         switch place {
-        case .movies: "movies"
         case .otherMedia: "other"
         case .settings: "settings"
         default: nil
@@ -128,6 +127,7 @@ struct MainWindow: View {
                         case .computers: ComputersPage(computers: facts.computers)
                         case .sample(let prefix): SamplePage(prefix: prefix, model: model)
                         case .tv: TVShowsPage(model: model) { place = .sample($0) }
+                        case .movies: MoviesPage(model: model)
                         default: LibraryPage(facts: facts, posters: model.posters) { place = .sample($0) }
                         }
                     }
