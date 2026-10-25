@@ -40,6 +40,7 @@ struct SampleFacts: Decodable, Sendable {
     }
 
     static let inProgressStates: Set<String> = ["making_test", "sample_waiting", "making_season"]
+    static let browserStates: Set<String> = ["finish_blocked", "ready_to_check", "ready_to_finish", "motion_held"]
 
     var isInProgress: Bool { state.map(Self.inProgressStates.contains) ?? false }
 
@@ -56,7 +57,7 @@ struct SampleFacts: Decodable, Sendable {
         case "choose_size": return sizeChoices.isEmpty ? [] : [.chooseSize]
         case "queue_encode": return [.startCompressing]
         case "retry_encode", "review_files", "validate_outputs", "promote_outputs", "decide_motion": return [.openInBrowser]
-        default: return []
+        default: return state.map(Self.browserStates.contains) == true ? [.openInBrowser] : []
         }
     }
 }
