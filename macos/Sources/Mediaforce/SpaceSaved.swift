@@ -17,29 +17,25 @@ struct SpaceSavedPage: View {
             } else {
                 SpotCheck(shows: saved.shows, model: model)
             }
-            SpaceSavedBar(library: facts.library, savedBytes: facts.spaceSaved.bytes, backupBytes: saved.backupBytes)
+            SpaceSavedBar(library: facts.library, savedBytes: facts.spaceSaved.bytes, backupBytes: saved.cleanup.totalSizeBytes)
                 .padding(.top, 8)
-            if saved.backupCount > 0 {
-                DeleteBackups(count: saved.backupCount, bytes: saved.backupBytes, model: model)
+            if saved.cleanup.fileCount > 0 {
+                DeleteBackups(count: saved.cleanup.fileCount, bytes: saved.cleanup.totalSizeBytes, model: model)
             }
         }
     }
 }
 
-struct SpaceSavedFacts: Decodable, Sendable {
-    let folders: [Folder]
-    let archiveCleanup: Cleanup
+struct SpaceSavedFacts: Sendable {
+    let shows: [Show]
+    // The whole Cleanup folder, as Delete clears it, not only the backups of seasons listed as finished.
+    let cleanup: CleanupFolder
 
     struct Folder: Decodable, Sendable {
         let prefix: String
         let subtitle: String
         let archivedBackupCount: Int
         let archivedBackupSizeBytes: Int64
-    }
-
-    struct Cleanup: Decodable, Sendable {
-        let fileCount: Int
-        let totalSizeBytes: Int64
     }
 
     /// A show, movie or folder whose replaced seasons still hold original backups.
@@ -51,10 +47,11 @@ struct SpaceSavedFacts: Decodable, Sendable {
         var id: String { prefix }
     }
 
-    var backupCount: Int { archiveCleanup.fileCount }
-    var backupBytes: Int64 { archiveCleanup.totalSizeBytes }
+    struct Completed: Decodable, Sendable {
+        let folders: [Folder]
+    }
 
-    var shows: [Show] {
+    static func shows(_ folders: [Folder]) -> [Show] {
         var shows: [Show] = []
         for folder in folders where folder.archivedBackupCount > 0 {
             let prefix = folder.prefix.split(separator: "/").prefix(2).joined(separator: "/")
@@ -70,7 +67,9 @@ struct SpaceSavedFacts: Decodable, Sendable {
 
     @MainActor
     static func load(_ client: MediaforceClient) async throws -> SpaceSavedFacts {
-        try await client.completed()
+        async let completed = client.completed()
+        async let cleanup = client.cleanupFolder()
+        return try await SpaceSavedFacts(shows: shows(completed.folders), cleanup: cleanup)
     }
 }
 
@@ -79,9 +78,15 @@ struct SpotCheck: View {
     let shows: [SpaceSavedFacts.Show]
     let model: MainWindowModel
     @State private var showPrefix: String?
-    @State private var season: String?
-    @State private var file: ItemFacts.File?
+    @State private var loaded = Loaded.loading
     @State private var notice: ActionNotice?
+
+    /// What the player has for the chosen show: an episode with its backup, or why it has none.
+    enum Loaded {
+        case loading
+        case episode(show: String, season: String, file: ItemFacts.File)
+        case noBackupEpisode, failed
+    }
 
     private var current: SpaceSavedFacts.Show? {
         shows.first { $0.prefix == showPrefix } ?? shows.first
@@ -92,19 +97,27 @@ struct SpotCheck: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(Words.spotCheckFirst).font(.headline)
                 Spacer()
-                if let season, let file {
+                if case .episode(_, let season, let file) = loaded {
                     Text(Words.spotCheckFile(season, file)).foregroundStyle(.secondary)
                 }
             }
             .frame(maxWidth: 760)
-            if let file, let season {
+            switch loaded {
+            case .episode(_, let season, let file):
                 ItemPlayer(file: file, client: model.client) {
                     Task { await putOriginalBack(season, file) }
                 }
                 .id("\(file.id) \(file.stage) \(file.originalBackup)")
                 .frame(maxWidth: 760)
-            } else {
+            case .loading:
                 ProgressView().frame(maxWidth: 760, minHeight: 200)
+            case .noBackupEpisode, .failed:
+                VStack(spacing: 10) {
+                    Text(loaded.failedToLoad ? Words.spotCheckUnanswered : Words.spotCheckNoEpisode)
+                        .foregroundStyle(.secondary)
+                    Button(Words.tryAgain) { Task { await load() } }
+                }
+                .frame(maxWidth: 760, minHeight: 200)
             }
             HStack {
                 Text(Words.spotCheckPrompt).foregroundStyle(.secondary)
@@ -112,10 +125,12 @@ struct SpotCheck: View {
                 Button(Words.next) { advance() }
                     .disabled(shows.count < 2)
                 Button(Words.looksGood) {
-                    if let current { model.checkedShows.insert(current.prefix) }
+                    if case .episode(let show, _, _) = loaded { model.checkedShows.insert(show) }
                     advance()
                 }
                 .buttonStyle(.borderedProminent)
+                // Only a show whose episode is on screen can be ticked.
+                .disabled(loaded.show == nil || loaded.show != current?.prefix)
             }
             .frame(maxWidth: 760)
             BackupShowTiles(shows: shows, selected: current?.prefix, checked: model.checkedShows, posters: model.posters) {
@@ -137,15 +152,22 @@ struct SpotCheck: View {
     }
 
     private func load() async {
-        file = nil
-        guard let current else { return }
-        for prefix in current.seasonPrefixes {
-            if let found = try? await model.client.item(prefix).files.first(where: \.originalBackup) {
-                season = prefix
-                file = found
-                return
+        guard let show = current else { return }
+        if loaded.show != show.prefix { loaded = .loading }
+        var result = Loaded.noBackupEpisode
+        do {
+            for prefix in show.seasonPrefixes {
+                if let found = try await model.client.item(prefix).files.first(where: \.originalBackup) {
+                    result = .episode(show: show.prefix, season: prefix, file: found)
+                    break
+                }
             }
+        } catch {
+            result = .failed
         }
+        // A slower answer for a show no longer chosen must not replace the one on screen.
+        guard current?.prefix == show.prefix else { return }
+        loaded = result
     }
 
     private func putOriginalBack(_ season: String, _ file: ItemFacts.File) async {
@@ -317,5 +339,15 @@ struct DeleteBackups: View {
         } message: { folder in
             Text(Words.deleteBackupsDetail(folder))
         }
+    }
+}
+
+extension SpotCheck.Loaded {
+    var show: String? {
+        if case .episode(let show, _, _) = self { show } else { nil }
+    }
+
+    var failedToLoad: Bool {
+        if case .failed = self { true } else { false }
     }
 }

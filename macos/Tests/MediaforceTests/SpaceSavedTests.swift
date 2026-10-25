@@ -4,7 +4,7 @@ import XCTest
 
 final class SpaceSavedTests: XCTestCase {
     func testSeasonsWithBackupsBecomeOneTilePerShow() throws {
-        let saved = try JSONDecoder.mediaforce.decode(SpaceSavedFacts.self, from: Data("""
+        let completed = try JSONDecoder.mediaforce.decode(SpaceSavedFacts.Completed.self, from: Data("""
         {"folders": [
           {"prefix": "tv/Futurama/Season 3", "title": "Futurama · Season 3", "subtitle": "Futurama",
            "archived_backup_count": 15, "archived_backup_size_bytes": 6000, "total_bytes_saved": 4000},
@@ -17,10 +17,10 @@ final class SpaceSavedTests: XCTestCase {
          "completed_count": 4,
          "archive_cleanup": {"archive_root": "/x", "file_count": 35, "total_size_bytes": 13300, "has_cleanup": true}}
         """.utf8))
-        XCTAssertEqual(saved.shows.map(\.prefix), ["tv/Futurama", "tv/House"])
-        XCTAssertEqual(saved.shows.first?.seasonPrefixes, ["tv/Futurama/Season 3", "tv/Futurama/Season 2"])
-        XCTAssertEqual(saved.shows.first?.backupBytes, 13000)
-        XCTAssertEqual(saved.backupCount, 35)
+        let shows = SpaceSavedFacts.shows(completed.folders)
+        XCTAssertEqual(shows.map(\.prefix), ["tv/Futurama", "tv/House"])
+        XCTAssertEqual(shows.first?.seasonPrefixes, ["tv/Futurama/Season 3", "tv/Futurama/Season 2"])
+        XCTAssertEqual(shows.first?.backupBytes, 13000)
     }
 
     func testTheDeleteLineSaysWhatComesBack() {

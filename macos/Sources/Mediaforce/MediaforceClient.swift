@@ -86,10 +86,10 @@ struct MediaforceClient: Sendable {
         _ = try await post("api/encode-queue/resume")
     }
 
-    func completed() async throws -> SpaceSavedFacts {
+    func completed() async throws -> SpaceSavedFacts.Completed {
         var request = URLRequest(url: baseURL.appending(path: "api/completed"))
         request.timeoutInterval = Self.factsTimeout
-        return try await decode(SpaceSavedFacts.self, from: request)
+        return try await decode(SpaceSavedFacts.Completed.self, from: request)
     }
 
     func cleanupFolder() async throws -> CleanupFolder {
