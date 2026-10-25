@@ -46,8 +46,8 @@ from mediaforce.tuning.target_default_context import (
     load_target_default_evidence,
     unavailable_target_default_evidence,
 )
-from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, migrate_config_state, \
-    set_runtime_folder_audio_preset, update_runtime_settings, update_runtime_folder_policy_values, \
+from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, load_runtime_settings, \
+    migrate_config_state, set_runtime_folder_audio_preset, update_runtime_settings, update_runtime_folder_policy_values, \
     upsert_runtime_folder_policy_override
 from mediaforce.web.runtime.audio_preset_runtime import dismiss_suggestion, series_genres, show_audio_preset_payload, \
     tv_show_prefix
@@ -303,6 +303,7 @@ from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, build_op
 from mediaforce.web.settings_runtime import (
     ALWAYS_SCHEDULE_PROFILE,
     DEFAULT_HOST_SCHEDULE_PROFILE,
+    SettingsValidationError,
     build_runtime_media_settings as _build_runtime_media_settings,
     build_runtime_settings_payload as _build_runtime_settings_payload,
     canonical_schedule_profile_key as _canonical_schedule_profile_key,
@@ -311,6 +312,7 @@ from mediaforce.web.settings_runtime import (
     library_color_map_for_config as _library_color_map_for_config,
     library_section_rows as _library_section_rows,
     library_settings_facts as _library_settings_facts_runtime,
+    library_settings_revision as _library_settings_revision,
     merge_runtime_settings_payload as _merge_runtime_settings_payload,
     normalize_encode_queue_scheduler as _normalize_encode_queue_scheduler,
     settings_archive_root as _settings_archive_root_runtime,
@@ -1004,8 +1006,12 @@ def create_app(
             } if isinstance(media.get("source_roots"), dict) else {},
         }
 
-    def _apply_settings_payload(payload: dict[str, Any]) -> None:
-        """Merge only the given runtime settings keys, then reload and rescan when the library changed."""
+    def _apply_settings_payload(payload: dict[str, Any], *, library_revision: str | None = None) -> None:
+        """Merge only the given runtime settings keys, then reload and rescan when the library changed.
+
+        With `library_revision`, the merge happens only if the stored library section is still that revision when
+        the runtime settings lock is held; otherwise nothing is written.
+        """
         nonlocal config
         changed_type_roots = {
             str(definition.get("key") or ""): str(
@@ -1021,6 +1027,8 @@ def create_app(
 
         def _apply_runtime_settings(existing_runtime_settings: dict[str, Any]) -> dict[str, Any]:
             nonlocal catalog_refresh_needed
+            if library_revision is not None and _library_settings_revision(existing_runtime_settings) != library_revision:
+                raise SettingsValidationError("Settings changed since they were loaded.", "settings_changed")
             merged_runtime_settings = _merge_runtime_settings_payload(existing_runtime_settings, payload)
             merged_runtime_settings = _bind_runtime_library_overrides(merged_runtime_settings, changed_type_roots)
             catalog_refresh_needed = (
@@ -1072,6 +1080,7 @@ def create_app(
             libraries=_settings_library_rows_for_config_runtime(config, min_rows=0),
             transcode_root=_settings_transcode_root_value_runtime(config),
             catalog_refresh_hours=_settings_catalog_refresh_hours_runtime(config),
+            revision=_library_settings_revision(load_runtime_settings(config.paths.runtime_settings_path)),
         )
 
     def _save_library_settings_action(
@@ -1079,15 +1088,24 @@ def create_app(
             libraries: list[dict[str, Any]],
             working_folder: str,
             catalog_refresh_hours: Any,
+            revision: str,
     ) -> dict[str, Any]:
-        """Save the Libraries tab alone; computers, schedules, size defaults and metadata stay as saved."""
+        """Save the Libraries tab alone; computers, schedules, size defaults and metadata stay as saved.
+
+        The tab sends the revision it loaded. The payload is built from freshly loaded settings and written only if
+        the stored library section is still that revision under the lock, so a save never overwrites a change made
+        elsewhere, and type changes are confirmed and bound against the types actually saved.
+        """
+        nonlocal config
+        config = load_config(config.paths.config_path)
+        app.state.config = config
         media, _plex_library_roots = _build_runtime_media_settings(
             libraries=_library_section_rows(libraries, _settings_library_rows_for_config_runtime(config, min_rows=0)),
             transcode_root=working_folder,
             catalog_refresh_hours=catalog_refresh_hours,
             **_saved_library_context(),
         )
-        _apply_settings_payload({"media": media})
+        _apply_settings_payload({"media": media}, library_revision=revision)
         return {"ok": True, "settings": _library_settings_facts()}
 
     def _library_type_preview_action(key: str, library_type: str) -> dict[str, Any]:

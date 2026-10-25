@@ -5,6 +5,7 @@ struct LibrarySettingsFacts: Decodable, Sendable, Equatable {
     let workingFolder: String
     let catalogRefreshHours: Double
     let types: [String]
+    let revision: String
 
     struct Library: Codable, Sendable, Equatable {
         var key: String
@@ -19,6 +20,7 @@ struct LibrarySettingsSave: Encodable, Sendable, Equatable {
     let libraries: [LibrarySettingsFacts.Library]
     let workingFolder: String
     let catalogRefreshHours: Double
+    let revision: String
 }
 
 struct LibrarySettingsSaveResult: Decodable, Sendable {
@@ -53,18 +55,21 @@ struct LibrarySettingsDraft: Equatable {
     var rows: [Row]
     var workingFolder: String
     var catalogRefreshHours: Double
+    let revision: String
 
     init(_ facts: LibrarySettingsFacts) {
         rows = facts.libraries.map { Row(library: $0) }
         workingFolder = facts.workingFolder
         catalogRefreshHours = facts.catalogRefreshHours
+        revision = facts.revision
     }
 
     var saveBody: LibrarySettingsSave {
         LibrarySettingsSave(
             libraries: rows.map(\.library),
             workingFolder: workingFolder.trimmingCharacters(in: .whitespaces),
-            catalogRefreshHours: catalogRefreshHours
+            catalogRefreshHours: catalogRefreshHours,
+            revision: revision
         )
     }
 

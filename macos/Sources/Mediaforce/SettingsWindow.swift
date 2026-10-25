@@ -82,6 +82,9 @@ final class LibrarySettingsModel {
             if result.ok, let settings = result.settings {
                 show(settings)
                 justSaved = true
+            } else if result.code == "settings_changed" {
+                notice = .settingsChangedElsewhere
+                await load()
             } else {
                 notice = .settingsNotSaved(result.code)
             }
@@ -164,6 +167,7 @@ struct LibrarySettingsForm: View {
                 }
             }
             .formStyle(.grouped)
+            .disabled(model.saving)
             .onChange(of: model.draft) { model.edited() }
             HStack {
                 if model.justSaved {

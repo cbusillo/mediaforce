@@ -517,6 +517,11 @@ extension ActionNotice {
         message: "Mediaforce couldn't check what changing this library's kind would do, so the kind stays as it was."
     )
 
+    static let settingsChangedElsewhere = ActionNotice(
+        title: "Settings not saved",
+        message: "These settings changed somewhere else while this window was open. It now shows them as saved; make your changes again."
+    )
+
     static func settingsNotSaved(_ code: String?) -> ActionNotice {
         ActionNotice(title: "Settings not saved", message: Words.librarySaveRefused(code))
     }

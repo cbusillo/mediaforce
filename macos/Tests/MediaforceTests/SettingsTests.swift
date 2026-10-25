@@ -7,7 +7,7 @@ final class SettingsTests: XCTestCase {
     {"libraries": [{"key": "movies", "name": "Movies", "folder": "/Volumes/media/movies", "type": "movie"},
                    {"key": "tv", "name": "Tv", "folder": "/Volumes/media/tv", "type": "tv"}],
      "working_folder": "/Volumes/media/transcode", "catalog_refresh_hours": 6.0,
-     "types": ["tv", "movie", "spatial", "other"]}
+     "types": ["tv", "movie", "spatial", "other"], "revision": "r1"}
     """
 
     private func facts() throws -> LibrarySettingsFacts {
@@ -27,6 +27,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(decoded.workingFolder, "/Volumes/media/transcode")
         XCTAssertEqual(decoded.catalogRefreshHours, 6)
         XCTAssertEqual(decoded.types, ["tv", "movie", "spatial", "other"])
+        XCTAssertEqual(decoded.revision, "r1")
     }
 
     func testSaveBodyIsTheLibrarySectionTheServerReads() throws {
@@ -46,6 +47,7 @@ final class SettingsTests: XCTestCase {
             ],
             "working_folder": "/Volumes/media/work",
             "catalog_refresh_hours": 12,
+            "revision": "r1",
         ] as NSDictionary)
     }
 

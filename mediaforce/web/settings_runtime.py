@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import re
@@ -856,11 +857,18 @@ def build_runtime_media_settings(
     return media, plex_library_roots
 
 
+def library_settings_revision(runtime_settings: dict[str, Any]) -> str:
+    """Names the stored library section, so a save built from it is refused once anything else has changed it."""
+    media = runtime_settings.get("media")
+    return hashlib.sha256(json.dumps(media, sort_keys=True, default=str).encode()).hexdigest()
+
+
 def library_settings_facts(
         *,
         libraries: list[dict[str, Any]],
         transcode_root: str,
         catalog_refresh_hours: str,
+        revision: str,
 ) -> dict[str, Any]:
     """The Mac app's Libraries tab: configured library rows, the working folder and the refresh interval."""
     return {
@@ -877,6 +885,7 @@ def library_settings_facts(
         "working_folder": transcode_root,
         "catalog_refresh_hours": float(catalog_refresh_hours or DEFAULT_CATALOG_REFRESH_HOURS),
         "types": [option["key"] for option in LIBRARY_TYPE_OPTIONS],
+        "revision": revision,
     }
 
 
@@ -888,10 +897,11 @@ def library_section_rows(
 
     Settings the tab does not show (color, compression, policy, Plex path) carry over from the saved library.
     A type change starts that library over from the new type's defaults, as the website's confirmed change does,
-    and a new library gets a root ID from its name.
+    and a new library gets a root ID from its name that no saved library has, even one removed in this save,
+    so it never inherits a removed library's stored settings, Plex path or folder overrides.
     """
     saved = {str(row.get("key") or ""): row for row in saved_rows if str(row.get("key") or "").strip()}
-    used_keys = {_text(item.get("key")) for item in submitted} - {""}
+    used_keys = set(saved) | {_text(item.get("key")) for item in submitted} - {""}
     rows: list[dict[str, Any]] = []
     for item in submitted:
         key = _text(item.get("key"))

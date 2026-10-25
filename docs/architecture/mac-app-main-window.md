@@ -150,12 +150,17 @@ space: each library's name, folder and kind, the working folder, and how often
 Mediaforce looks for new files.
 
 `GET /api/app/settings/library` gives `libraries` (each `key`, `name`,
-`folder`, `type`), `working_folder`, `catalog_refresh_hours` and the `types`
-a library can be. `POST /api/app/settings/library` takes the same fields and
+`folder`, `type`), `working_folder`, `catalog_refresh_hours`, the `types`
+a library can be and `revision`, a hash of the stored `media` section.
+`POST /api/app/settings/library` takes the same fields, including that
+`revision`, and is refused with `settings_changed`, writing nothing, when the
+stored section no longer matches it under the runtime settings lock; the app
+then says so and reloads. It
 saves only the runtime settings `media` keys, with the same validation, type
 change binding, rescan and reload as the web save; computers, schedules, size
 defaults and metadata stay as saved. A library with an empty `key` is new and
-gets one from its name. Settings the tab does not show carry over from the
+gets one from its name that no saved library has, even one removed in the
+same save. Settings the tab does not show carry over from the
 saved library; a confirmed kind change starts from the new kind's defaults,
 as on the web. A saved library changes kind only with the
 `type_change_confirmation` from `POST /api/settings/library-type-preview`,

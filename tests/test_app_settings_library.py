@@ -113,6 +113,7 @@ def _facts_body(app: FastAPI) -> dict[str, Any]:
         "libraries": [{key: library[key] for key in ("key", "name", "folder", "type")} for library in facts["libraries"]],
         "working_folder": facts["working_folder"],
         "catalog_refresh_hours": facts["catalog_refresh_hours"],
+        "revision": facts["revision"],
     }
 
 
@@ -149,6 +150,7 @@ def test_library_type_change_needs_the_preview_acknowledgement(library_app: tupl
     assert runtime_settings_path.read_bytes() == before
 
     body["libraries"][1]["type_change_confirmation"] = "movies:movie->other"
+    body["revision"] = _facts_body(app)["revision"]
     status, _result = _save(app, body)
 
     movies = next(item for item in json.loads(runtime_settings_path.read_text())["media"]["libraries"] if item["key"] == "movies")
@@ -175,3 +177,46 @@ def test_refused_library_save_writes_nothing_and_answers_with_a_code(
 
     assert _save(app, body) == (400, {"ok": False, "code": code})
     assert runtime_settings_path.read_bytes() == before
+
+
+def test_second_save_from_the_same_loaded_settings_is_refused(library_app: tuple[FastAPI, Path]) -> None:
+    app, runtime_settings_path = library_app
+    first = _facts_body(app)
+    second = json.loads(json.dumps(first))
+    first["libraries"][0]["name"] = "Television"
+    second["libraries"][1]["name"] = "Films"
+
+    assert _save(app, first)[0] == 200
+    after_first = runtime_settings_path.read_bytes()
+
+    assert _save(app, second) == (400, {"ok": False, "code": "settings_changed"})
+    assert runtime_settings_path.read_bytes() == after_first
+
+
+def test_save_after_the_library_section_changed_elsewhere_is_refused(library_app: tuple[FastAPI, Path]) -> None:
+    app, runtime_settings_path = library_app
+    body = _facts_body(app)
+    stored = json.loads(runtime_settings_path.read_text())
+    stored["media"]["catalog_refresh_hours"] = 24
+    runtime_settings_path.write_text(json.dumps(stored), encoding="utf-8")
+    changed_elsewhere = runtime_settings_path.read_bytes()
+    body["libraries"][0]["name"] = "Television"
+
+    assert _save(app, body) == (400, {"ok": False, "code": "settings_changed"})
+    assert runtime_settings_path.read_bytes() == changed_elsewhere
+
+
+def test_new_library_never_takes_the_key_of_one_removed_in_the_same_save(
+        library_app: tuple[FastAPI, Path], tmp_path: Path,
+) -> None:
+    app, runtime_settings_path = library_app
+    body = _facts_body(app)
+    body["libraries"] = [library for library in body["libraries"] if library["key"] != "movies"]
+    body["libraries"].append({"key": "", "name": "Movies", "folder": str(tmp_path / "media" / "films"), "type": "movie"})
+
+    assert _save(app, body)[0] == 200
+
+    libraries = json.loads(runtime_settings_path.read_text())["media"]["libraries"]
+    added = next(library for library in libraries if library["label"] == "Movies")
+    assert added["key"] != "movies"
+    assert "plex_path" not in added or not added["plex_path"]

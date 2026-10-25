@@ -90,6 +90,7 @@ def register_library_settings_routes(
                 libraries=[dict(item) for item in libraries if isinstance(item, dict)] if isinstance(libraries, list) else [],
                 working_folder=str(body.get("working_folder") or "").strip(),
                 catalog_refresh_hours=body.get("catalog_refresh_hours"),
+                revision=str(body.get("revision") or ""),
             )
         except SettingsValidationError as exc:
             return JSONResponse({"ok": False, "code": exc.code}, status_code=400)
