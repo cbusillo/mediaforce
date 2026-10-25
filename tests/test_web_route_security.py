@@ -113,6 +113,34 @@ class WebRouteSecurityTests(unittest.TestCase):
                 self.assertEqual(raised.exception.status_code, 400)
         self.assertEqual(len(calls), 2)
 
+    def test_put_original_back_route_takes_exactly_one_file(self) -> None:
+        app = FastAPI()
+        calls: list[tuple[str, int]] = []
+        register_folder_routes(
+            app, folder_status_payload=lambda _prefix: {},
+            folder_content_payload=lambda _prefix: ({}, 200),
+            download_review_compare_action=_empty_file_response,
+            folder_ai_tune_action=lambda *_args: {}, folder_ai_tune_preview_action=lambda *_args: {},
+            folder_ai_tune_confirm_action=lambda *_args: {}, clear_folder_tuning_action=lambda *_args: {},
+            save_series_lifecycle_action=lambda *_args: {}, save_audio_preset_action=lambda *_args: {},
+            audio_preset_payload=lambda _prefix: None, dismiss_audio_preset_suggestion_action=lambda *_args: {},
+            approve_measured_encode_recovery_action=lambda *_args: {},
+            queue_folder_encode_action=lambda *_args: {}, queue_older_seasons_encode_action=lambda *_args: {},
+            validate_folder_outputs_action=lambda *_args: {}, promote_folder_outputs_action=lambda *_args: {},
+            save_profile_action=lambda *_args: {},
+            put_original_back_action=lambda prefix, item_id: calls.append((prefix, item_id)) or {"ok": item_id == 7},
+        )
+        put_back = _route_endpoint(app, "/api/folders/{prefix:path}/put-original-back", "POST")
+
+        self.assertEqual(asyncio.run(put_back("/tv/Show/", _json_request({"library_item_ids": [7]}))).status_code, 200)
+        # A refusal, such as a deleted backup, is a conflict the page words, not a server error.
+        self.assertEqual(asyncio.run(put_back("tv/Show", _json_request({"library_item_ids": [8]}))).status_code, 409)
+        for payload in ({}, {"library_item_ids": [7, 8]}, {"library_item_ids": [0]}, {"library_item_ids": [True]}):
+            with self.subTest(payload=payload), self.assertRaises(HTTPException) as raised:
+                asyncio.run(put_back("tv/Show", _json_request(payload)))
+            self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(calls, [("tv/Show", 7), ("tv/Show", 8)])
+
     def test_sound_choice_read_is_not_taken_by_the_folder_route(self) -> None:
         app = FastAPI()
         reads: list[str] = []

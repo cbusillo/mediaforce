@@ -61,6 +61,7 @@ def register_folder_routes(
         accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
         keep_motion_held_originals_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
         undo_motion_keep_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
+        put_original_back_action: Callable[[str, int], dict[str, Any]] | None = None,
         decide_size_held_action: Callable[[str, int | Collection[int], bool], dict[str, Any]] | None = None,
         folder_episodes_payload: Callable[[str], dict[str, Any]] | None = None,
         use_show_settings_action: Callable[[str], dict[str, Any]] | None = None,
@@ -241,6 +242,17 @@ def register_folder_routes(
         async def api_folder_undo_keep_motion_original(prefix: str, request: Request) -> JSONResponse:
             item_ids = _request_item_ids(await request_body(request))
             result = await run_in_threadpool(undo_keep, prefix.strip("/"), item_ids)
+            return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    if put_original_back_action is not None:
+        put_back = put_original_back_action
+
+        @app.post("/api/folders/{prefix:path}/put-original-back")
+        async def api_folder_put_original_back(prefix: str, request: Request) -> JSONResponse:
+            item_ids = _request_item_ids(await request_body(request))
+            if len(item_ids) != 1:
+                raise HTTPException(status_code=400, detail="Name one file with library_item_ids.")
+            result = await run_in_threadpool(put_back, prefix.strip("/"), item_ids[0])
             return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/queue-older-seasons")

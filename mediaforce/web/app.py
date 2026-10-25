@@ -214,6 +214,7 @@ from mediaforce.web.runtime.production_approval import effective_production_appr
     production_approval_identity, production_calibration
 from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
 from mediaforce.web.runtime.motion_keep import keep_motion_held_originals, undo_motion_keep
+from mediaforce.web.runtime.put_back import put_original_back_action
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
 from mediaforce.web.runtime.episode_progress import folder_episodes_payload
@@ -2291,6 +2292,15 @@ def create_app(
         _reset_folder_card_cache()
         return result
 
+    def _put_original_back_action(normalized_prefix: str, library_item_id: int) -> ActionPayload:
+        blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
+        result = put_original_back_action(config, normalized_prefix, library_item_id)
+        # Library cards and space saved count this file again as an original.
+        _reset_folder_card_cache()
+        return result
+
     def _approve_measured_encode_recovery_action(
             normalized_prefix: str,
             scope_membership_token: str = "",
@@ -2713,6 +2723,7 @@ def create_app(
         accept_ambiguous_motion_action=_accept_ambiguous_motion_action,
         keep_motion_held_originals_action=_keep_motion_held_originals_action,
         undo_motion_keep_action=_undo_motion_keep_action,
+        put_original_back_action=_put_original_back_action,
         queue_folder_encode_action=_queue_folder_encode_action,
         queue_older_seasons_encode_action=_queue_older_seasons_encode_action,
         validate_folder_outputs_action=_validate_folder_outputs_action,
