@@ -144,9 +144,10 @@ from mediaforce.tuning.compression_intent import compression_intent_options
 from mediaforce.tuning.size_goals import guided_size_goal_options, operator_intent_from_policy
 from mediaforce.tuning.target_provenance import exact_item_target_provenance_blocker, target_size_provenance
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
-from mediaforce.web.routes import register_app_window_routes, register_completed_routes, register_dashboard_routes, \
-    register_folder_routes, register_frontend_routes, register_host_routes, register_library_settings_routes, \
-    register_operator_work_routes, register_queue_routes, register_settings_routes
+from mediaforce.web.routes import register_app_window_routes, register_completed_routes, \
+    register_computer_settings_routes, register_dashboard_routes, register_folder_routes, register_frontend_routes, \
+    register_host_routes, register_library_settings_routes, register_operator_work_routes, register_queue_routes, \
+    register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_show_poster
@@ -307,19 +308,22 @@ from mediaforce.web.settings_runtime import (
     build_runtime_media_settings as _build_runtime_media_settings,
     build_runtime_settings_payload as _build_runtime_settings_payload,
     canonical_schedule_profile_key as _canonical_schedule_profile_key,
+    computer_section_settings as _computer_section_settings,
+    computer_settings_facts as _computer_settings_facts_runtime,
     host_max_parallel_encodes as _host_max_parallel_encodes,
     host_schedule_profile_key as _host_schedule_profile_key,
     library_color_map_for_config as _library_color_map_for_config,
     library_key_references as _library_key_references,
     library_section_rows as _library_section_rows,
     library_settings_facts as _library_settings_facts_runtime,
-    library_settings_revision as _library_settings_revision,
     merge_runtime_settings_payload as _merge_runtime_settings_payload,
     normalize_encode_queue_scheduler as _normalize_encode_queue_scheduler,
     settings_archive_root as _settings_archive_root_runtime,
     settings_catalog_refresh_hours_for_config as _settings_catalog_refresh_hours_runtime,
     settings_library_rows_for_config as _settings_library_rows_for_config_runtime,
     settings_remote_rows_for_config as _settings_remote_rows_for_config_runtime,
+    settings_schedule_profile_rows_for_config as _settings_schedule_profile_rows_for_config,
+    settings_section_revision as _settings_section_revision,
     settings_transcode_root_value as _settings_transcode_root_value_runtime,
     runtime_source_roots as _runtime_source_roots,
     runtime_library_signature as _runtime_library_signature,
@@ -334,7 +338,7 @@ class VideoGeometry(NamedTuple):
     height: int
 
 MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
-LIBRARY_SETTINGS_SNAPSHOT_ATTEMPTS = 3
+SETTINGS_SNAPSHOT_ATTEMPTS = 3
 REPRESENTATIVE_SELECTION_CACHE_LIMIT = 32
 REPRESENTATIVE_SELECTION_CACHE_TTL_SECONDS = 60.0
 FULL_SCAN_STALE_AFTER = timedelta(minutes=15)
@@ -1008,11 +1012,13 @@ def create_app(
             } if isinstance(media.get("source_roots"), dict) else {},
         }
 
-    def _apply_settings_payload(payload: dict[str, Any], *, library_revision: str | None = None) -> None:
+    def _apply_settings_payload(
+            payload: dict[str, Any], *, section: str | None = None, revision: str | None = None,
+    ) -> None:
         """Merge only the given runtime settings keys, then reload and rescan when the library changed.
 
-        With `library_revision`, the merge happens only if the stored library section is still that revision when
-        the runtime settings lock is held; otherwise nothing is written.
+        With a `section` and its `revision`, the merge happens only if that stored section is still that revision
+        when the runtime settings lock is held; otherwise nothing is written.
         """
         nonlocal config
         changed_type_roots = {
@@ -1029,7 +1035,7 @@ def create_app(
 
         def _apply_runtime_settings(existing_runtime_settings: dict[str, Any]) -> dict[str, Any]:
             nonlocal catalog_refresh_needed
-            if library_revision is not None and _library_settings_revision(existing_runtime_settings) != library_revision:
+            if section is not None and _settings_section_revision(existing_runtime_settings, section) != revision:
                 raise SettingsValidationError("Settings changed since they were loaded.", "settings_changed")
             merged_runtime_settings = _merge_runtime_settings_payload(existing_runtime_settings, payload)
             merged_runtime_settings = _bind_runtime_library_overrides(merged_runtime_settings, changed_type_roots)
@@ -1077,24 +1083,29 @@ def create_app(
         ))
         return {"ok": True, "message": "Settings saved.", "settings": _settings_page_payload(saved=True)}
 
-    def _library_settings_facts() -> dict[str, Any]:
-        """The Libraries tab's fields and revision, both from one stored state.
+    def _settings_snapshot(section: str) -> tuple[MediaforceConfig, str]:
+        """Loaded settings and the stored `section` revision, both from one stored state.
 
-        The cached config may lag the runtime settings file, so the fields come from a fresh load that the file's
-        revision did not change across; a file that keeps changing is refused as `settings_changed`.
+        The cached config may lag the runtime settings file, so the settings come from a fresh load that the
+        section's revision did not change across; a file that keeps changing is refused as `settings_changed`.
         """
         runtime_settings_path = config.paths.runtime_settings_path
-        for _attempt in range(LIBRARY_SETTINGS_SNAPSHOT_ATTEMPTS):
-            revision = _library_settings_revision(load_runtime_settings(runtime_settings_path))
+        for _attempt in range(SETTINGS_SNAPSHOT_ATTEMPTS):
+            revision = _settings_section_revision(load_runtime_settings(runtime_settings_path), section)
             snapshot = load_config(config.paths.config_path)
-            if _library_settings_revision(load_runtime_settings(runtime_settings_path)) == revision:
-                return _library_settings_facts_runtime(
-                    libraries=_settings_library_rows_for_config_runtime(snapshot, min_rows=0),
-                    transcode_root=_settings_transcode_root_value_runtime(snapshot),
-                    catalog_refresh_hours=_settings_catalog_refresh_hours_runtime(snapshot),
-                    revision=revision,
-                )
+            if _settings_section_revision(load_runtime_settings(runtime_settings_path), section) == revision:
+                return snapshot, revision
         raise SettingsValidationError("Settings kept changing while they were read.", "settings_changed")
+
+    def _library_settings_facts() -> dict[str, Any]:
+        """The Libraries tab's fields and revision, both from one stored state."""
+        snapshot, revision = _settings_snapshot("library")
+        return _library_settings_facts_runtime(
+            libraries=_settings_library_rows_for_config_runtime(snapshot, min_rows=0),
+            transcode_root=_settings_transcode_root_value_runtime(snapshot),
+            catalog_refresh_hours=_settings_catalog_refresh_hours_runtime(snapshot),
+            revision=revision,
+        )
 
     def _save_library_settings_action(
             *,
@@ -1122,9 +1133,56 @@ def create_app(
             catalog_refresh_hours=catalog_refresh_hours,
             **_saved_library_context(),
         )
-        _apply_settings_payload({"media": media}, library_revision=revision)
+        _apply_settings_payload({"media": media}, section="library", revision=revision)
         try:
             settings: dict[str, Any] | None = _library_settings_facts()
+        except SettingsValidationError:
+            settings = None
+        return {"ok": True, "settings": settings}
+
+    def _computer_settings_facts() -> dict[str, Any]:
+        """The Computers tab's computers, work schedules and revision, all from one stored state."""
+        snapshot, revision = _settings_snapshot("computers")
+        return _computer_settings_facts_runtime(
+            remote_rows=_settings_remote_rows_for_config_runtime(snapshot, min_rows=0),
+            schedule_rows=_settings_schedule_profile_rows_for_config(snapshot, min_rows=0),
+            libraries=[dict(definition) for definition in snapshot.library_definitions],
+            revision=revision,
+        )
+
+    def _save_computer_settings_action(
+            *,
+            computers: list[dict[str, Any]],
+            schedules: list[dict[str, Any]],
+            revision: str,
+    ) -> dict[str, Any]:
+        """Save the Computers tab alone; libraries, size defaults and metadata stay as saved.
+
+        Like the Libraries tab, the payload is built from freshly loaded settings and written only if the stored
+        computers and schedules are still the revision the tab loaded, checked under the runtime settings lock.
+        """
+        nonlocal config
+        config = load_config(config.paths.config_path)
+        app.state.config = config
+        raw = config.raw
+        encode_queue = object_dict(raw.get("encode_queue"))
+        scheduler = encode_queue.get("scheduler")
+        if not isinstance(scheduler, dict):
+            scheduler = object_dict(raw.get("heavy_queue")).get("scheduler")
+        source_roots = object_dict(object_dict(raw.get("media")).get("source_roots"))
+        payload = _computer_section_settings(
+            computers=computers,
+            schedules=schedules,
+            saved_hosts=[dict(host) for host in config.remote_hosts if isinstance(host, dict)],
+            saved_schedule_keys=[
+                str(row["key"]) for row in _settings_schedule_profile_rows_for_config(config, min_rows=0)
+            ],
+            encode_queue_scheduler=scheduler if isinstance(scheduler, dict) else None,
+            known_library_keys={str(key) for key in source_roots},
+        )
+        _apply_settings_payload(payload, section="computers", revision=revision)
+        try:
+            settings: dict[str, Any] | None = _computer_settings_facts()
         except SettingsValidationError:
             settings = None
         return {"ok": True, "settings": settings}
@@ -1277,6 +1335,11 @@ def create_app(
         app,
         library_settings_facts=_library_settings_facts,
         save_library_settings_action=_save_library_settings_action,
+    )
+    register_computer_settings_routes(
+        app,
+        computer_settings_facts=_computer_settings_facts,
+        save_computer_settings_action=_save_computer_settings_action,
     )
     register_completed_routes(
         app,

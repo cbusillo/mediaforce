@@ -104,7 +104,30 @@ struct MediaforceClient: Sendable {
     }
 
     func saveLibrarySettings(_ save: LibrarySettingsSave) async throws -> LibrarySettingsSaveResult {
-        var request = URLRequest(url: baseURL.appending(path: "api/app/settings/library"))
+        try await saveSettings("api/app/settings/library", save, as: LibrarySettingsSaveResult.self)
+    }
+
+    func computerSettings() async throws -> ComputerSettingsFacts {
+        var request = URLRequest(url: baseURL.appending(path: "api/app/settings/computers"))
+        request.timeoutInterval = Self.factsTimeout
+        return try await decode(ComputerSettingsFacts.self, from: request)
+    }
+
+    func saveComputerSettings(_ save: ComputerSettingsSave) async throws -> ComputerSettingsSaveResult {
+        try await saveSettings("api/app/settings/computers", save, as: ComputerSettingsSaveResult.self)
+    }
+
+    func libraryTypePreview(key: String, type: String) async throws -> LibraryTypePreview {
+        let body = try JSONSerialization.data(withJSONObject: ["key": key, "library_type": type])
+        let data = try await post("api/settings/library-type-preview", body: body)
+        return try JSONDecoder.mediaforce.decode(LibraryTypePreviewResult.self, from: data).preview
+    }
+
+    /// A Settings section save answers 400 with a refusal code the app words, so both 200 and 400 decode.
+    private func saveSettings<Body: Encodable, Result: Decodable>(
+        _ path: String, _ save: Body, as type: Result.Type
+    ) async throws -> Result {
+        var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "POST"
         request.httpBody = try JSONEncoder.mediaforce.encode(save)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -112,13 +135,7 @@ struct MediaforceClient: Sendable {
         guard [200, 400].contains((response as? HTTPURLResponse)?.statusCode) else {
             throw URLError(.badServerResponse)
         }
-        return try JSONDecoder.mediaforce.decode(LibrarySettingsSaveResult.self, from: data)
-    }
-
-    func libraryTypePreview(key: String, type: String) async throws -> LibraryTypePreview {
-        let body = try JSONSerialization.data(withJSONObject: ["key": key, "library_type": type])
-        let data = try await post("api/settings/library-type-preview", body: body)
-        return try JSONDecoder.mediaforce.decode(LibraryTypePreviewResult.self, from: data).preview
+        return try JSONDecoder.mediaforce.decode(type, from: data)
     }
 
     private func samplePath(_ prefix: String) -> URL {

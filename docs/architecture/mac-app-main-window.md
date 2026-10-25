@@ -171,6 +171,28 @@ as on the web. A saved library changes kind only with the
 and removing a library asks first. A refusal answers `400` with
 `{"ok": false, "code": ...}` and writes nothing.
 
+The Computers tab is the web page's computers and work windows: each
+computer's name, address, what it can do, its work window, which libraries it
+works on, how many files at once, its priority and wake address, with the
+technical fields under Connection details; and the custom work windows' days,
+all-day days and hours. `GET /api/app/settings/computers` gives `computers`
+(each with an `id`, its place in the stored list), `schedules`, the
+`built_in_schedules`, `abilities`, `media_access_options`, `days`, the
+`libraries` a computer can work on, and `revision`, a hash of the stored
+`remote_hosts`, `encode_queue.scheduler`, `encode_queue.schedule_profiles` and
+legacy `heavy_queue`; each tab's revision covers only its own keys, so saving
+one tab never makes the other stale. The read and the save work as the
+Libraries tab's do, and `POST /api/app/settings/computers` saves only the
+runtime settings `remote_hosts` and `encode_queue` keys, through the same
+validation as the web save; the overall work schedule, which no tab edits, is
+written back normalized as the web save does. A computer is known by its
+address, as everywhere in Mediaforce; its `id` only carries over stored fields
+no form shows, so removing or reordering computers never moves them to
+another computer, and a computer added without an `id` carries none. A work
+window whose key is not saved is new: it gets a key from its name that no
+saved work window has and no stored computer names, and computers that chose
+it by its placeholder key follow. Hours must be whole hours from 0 to 23.
+
 ## Notifications and the Dock badge
 
 The app reads these facts every 30 seconds while it runs, even with its window

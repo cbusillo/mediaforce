@@ -8,6 +8,8 @@ struct SettingsWindow: View {
         TabView {
             LibrarySettingsTab(client: client)
                 .tabItem { Label(Words.librariesTab, systemImage: "books.vertical") }
+            ComputerSettingsTab(client: client)
+                .tabItem { Label(Words.computersTab, systemImage: "desktopcomputer") }
         }
         .frame(width: 760)
     }
@@ -290,6 +292,407 @@ struct FolderField: View {
         }
         if panel.runModal() == .OK, let url = panel.url {
             path = url.path(percentEncoded: false)
+        }
+    }
+}
+
+@MainActor
+@Observable
+final class ComputerSettingsModel {
+    let client: MediaforceClient
+    private(set) var saved: ComputerSettingsFacts?
+    private(set) var loadFailed = false
+    private(set) var saving = false
+    private(set) var justSaved = false
+    var draft: ComputerSettingsDraft?
+    var notice: ActionNotice?
+    var pendingComputerRemoval: ComputerSettingsDraft.ComputerRow?
+    var pendingScheduleRemoval: ComputerSettingsDraft.ScheduleRow?
+
+    init(client: MediaforceClient) {
+        self.client = client
+    }
+
+    var hasChanges: Bool {
+        guard let draft, let saved else { return false }
+        return draft.saveBody != ComputerSettingsDraft(saved).saveBody
+    }
+
+    func load() async {
+        do {
+            let facts = try await client.computerSettings()
+            show(facts)
+        } catch {
+            loadFailed = true
+        }
+    }
+
+    func revert() {
+        if let saved { show(saved) }
+    }
+
+    func confirmRemoval(_ row: ComputerSettingsDraft.ComputerRow) {
+        pendingComputerRemoval = nil
+        guard !saving else { return }
+        draft?.removeComputer(row.id)
+    }
+
+    func confirmRemoval(_ row: ComputerSettingsDraft.ScheduleRow) {
+        pendingScheduleRemoval = nil
+        guard !saving else { return }
+        draft?.removeSchedule(row.id)
+    }
+
+    func save() async {
+        guard let draft, !saving else { return }
+        discardPendingEdits()
+        saving = true
+        defer { saving = false }
+        do {
+            let result = try await client.saveComputerSettings(draft.saveBody)
+            if result.ok {
+                if let settings = result.settings { show(settings) } else { await load() }
+                justSaved = true
+            } else if result.code == "settings_changed" {
+                notice = .settingsChangedElsewhere
+                await load()
+            } else {
+                notice = .computerSettingsNotSaved(result.code)
+            }
+        } catch {
+            notice = .unanswered
+        }
+    }
+
+    func edited() {
+        if hasChanges { justSaved = false }
+    }
+
+    private func discardPendingEdits() {
+        pendingComputerRemoval = nil
+        pendingScheduleRemoval = nil
+    }
+
+    private func show(_ facts: ComputerSettingsFacts) {
+        discardPendingEdits()
+        saved = facts
+        draft = ComputerSettingsDraft(facts)
+        loadFailed = false
+    }
+}
+
+struct ComputerSettingsTab: View {
+    @State private var model: ComputerSettingsModel
+
+    init(client: MediaforceClient) {
+        _model = State(initialValue: ComputerSettingsModel(client: client))
+    }
+
+    var body: some View {
+        Group {
+            if let saved = model.saved, model.draft != nil {
+                ComputerSettingsForm(model: model, facts: saved)
+            } else if model.loadFailed {
+                ServerStatusView(state: .unreachable) {
+                    Task { await model.load() }
+                }
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 240)
+            }
+        }
+        .task { await model.load() }
+        .alert(item: $model.notice) { notice in
+            Alert(title: Text(notice.title), message: Text(notice.message))
+        }
+    }
+}
+
+struct ComputerSettingsForm: View {
+    @Bindable var model: ComputerSettingsModel
+    let facts: ComputerSettingsFacts
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Form {
+                if model.draft?.computers.isEmpty ?? true {
+                    Section(Words.computersSection) {
+                        Text(Words.noComputers)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                ForEach(computers) { $row in
+                    Section(row.computer.name.isEmpty ? Words.unnamedComputer : row.computer.name) {
+                        ComputerEditor(
+                            computer: $row.computer,
+                            facts: facts,
+                            schedules: model.draft?.schedules.map(\.schedule) ?? []
+                        )
+                        Button(Words.removeComputer, systemImage: "minus.circle", role: .destructive) {
+                            model.pendingComputerRemoval = row
+                        }
+                    }
+                }
+                Section {
+                    Button(Words.addComputer, systemImage: "plus") {
+                        model.draft?.addComputer(abilities: facts.abilities, mediaAccess: facts.mediaAccessOptions.first ?? "mounted")
+                    }
+                }
+                Section(Words.workWindowsSection) {
+                    if model.draft?.schedules.isEmpty ?? true {
+                        Text(Words.noWorkWindows)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(schedules) { $row in
+                        WorkWindowEditor(schedule: $row.schedule, days: facts.days) {
+                            model.pendingScheduleRemoval = row
+                        }
+                    }
+                    Button(Words.addWorkWindow, systemImage: "plus") {
+                        model.draft?.addSchedule(days: facts.days)
+                    }
+                    Text(Words.workWindowHelp)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            .disabled(model.saving)
+            .onChange(of: model.draft) { model.edited() }
+            HStack {
+                if model.justSaved {
+                    Text(Words.settingsSaved)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(Words.revertSettings) { model.revert() }
+                    .disabled(!model.hasChanges || model.saving)
+                Button(Words.saveSettings) { Task { await model.save() } }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!model.hasChanges || model.saving)
+            }
+            .padding(16)
+        }
+        .frame(minHeight: 560)
+        .confirmationDialog(
+            Words.removeComputerTitle(model.pendingComputerRemoval?.computer.name ?? ""),
+            isPresented: Binding(
+                get: { model.pendingComputerRemoval != nil },
+                set: { if !$0 { model.pendingComputerRemoval = nil } }
+            ),
+            presenting: model.pendingComputerRemoval
+        ) { row in
+            Button(Words.removeFromMediaforce, role: .destructive) { model.confirmRemoval(row) }
+            Button(Words.keepComputer, role: .cancel) { model.pendingComputerRemoval = nil }
+        } message: { _ in
+            Text(Words.removeComputerMessage)
+        }
+        .confirmationDialog(
+            Words.removeWorkWindowTitle(model.pendingScheduleRemoval?.schedule.name ?? ""),
+            isPresented: Binding(
+                get: { model.pendingScheduleRemoval != nil },
+                set: { if !$0 { model.pendingScheduleRemoval = nil } }
+            ),
+            presenting: model.pendingScheduleRemoval
+        ) { row in
+            Button(Words.removeWorkWindow, role: .destructive) { model.confirmRemoval(row) }
+            Button(Words.keepWorkWindow, role: .cancel) { model.pendingScheduleRemoval = nil }
+        } message: { row in
+            Text(Words.removeWorkWindowMessage(usedBy: model.draft?.computersUsing(row.schedule) ?? 0))
+        }
+    }
+
+    private var computers: Binding<[ComputerSettingsDraft.ComputerRow]> {
+        Binding(get: { model.draft?.computers ?? [] }, set: { model.draft?.computers = $0 })
+    }
+
+    private var schedules: Binding<[ComputerSettingsDraft.ScheduleRow]> {
+        Binding(get: { model.draft?.schedules ?? [] }, set: { model.draft?.schedules = $0 })
+    }
+}
+
+struct ComputerEditor: View {
+    @Binding var computer: ComputerSettingsFacts.Computer
+    let facts: ComputerSettingsFacts
+    let schedules: [ComputerSettingsFacts.Schedule]
+
+    var body: some View {
+        TextField(Words.computerName, text: $computer.name)
+        VStack(alignment: .leading, spacing: 4) {
+            TextField(Words.computerAddress, text: $computer.address)
+                .font(.body.monospaced())
+            Text(Words.computerAddressHelp)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        LabeledContent(Words.computerCanDo) {
+            VStack(alignment: .leading) {
+                ForEach(facts.abilities, id: \.self) { ability in
+                    Toggle(Words.computerAbility(ability), isOn: abilityBinding(ability))
+                        .disabled(computer.abilities == [ability])
+                }
+            }
+        }
+        Picker(Words.workWindow, selection: $computer.schedule) {
+            ForEach(facts.builtInSchedules, id: \.self) { key in
+                Text(Words.builtInWorkWindow(key)).tag(key)
+            }
+            ForEach(schedules, id: \.key) { schedule in
+                Text(schedule.name.isEmpty ? Words.unnamedWorkWindow : schedule.name).tag(schedule.key)
+            }
+        }
+        LabeledContent(Words.computerLibraries) {
+            VStack(alignment: .leading) {
+                ForEach(facts.libraries, id: \.key) { library in
+                    Toggle(library.name, isOn: libraryBinding(library.key))
+                        .disabled(libraryLocked(library.key))
+                }
+                Text(Words.computerLibrariesHelp)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        Stepper(Words.atOnce(computer.atOnce), value: $computer.atOnce, in: 1...16)
+        VStack(alignment: .leading, spacing: 4) {
+            Stepper("\(Words.computerPriority): \(computer.priority.formatted())", value: $computer.priority, in: -100...100)
+            Text(Words.computerPriorityHelp)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        VStack(alignment: .leading, spacing: 4) {
+            TextField(Words.wakeAddress, text: $computer.wakeAddress, prompt: Text(Words.wakeAddressPrompt))
+                .font(.body.monospaced())
+            Text(Words.wakeAddressHelp)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        DisclosureGroup(Words.connectionDetails) {
+            Picker(Words.mediaAccess, selection: $computer.mediaAccess) {
+                ForEach(facts.mediaAccessOptions, id: \.self) { code in
+                    Text(Words.mediaAccessChoice(code)).tag(code)
+                }
+            }
+            TextField(Words.mediaforceFolder, text: $computer.mediaforceFolder, prompt: Text(Words.optionalField))
+                .font(.body.monospaced())
+            TextField(Words.computerWorkingFolder, text: $computer.workingFolder, prompt: Text(Words.computerWorkingFolderPrompt))
+                .font(.body.monospaced())
+            VStack(alignment: .leading, spacing: 4) {
+                TextField(Words.scratchFolder, text: $computer.scratchFolder, prompt: Text(Words.scratchFolderPrompt))
+                    .font(.body.monospaced())
+                Text(Words.scratchFolderHelp)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(facts.libraries, id: \.key) { library in
+                TextField(
+                    Words.libraryFolderOnComputer(library.name),
+                    text: libraryFolderBinding(library.key),
+                    prompt: Text(Words.optionalField)
+                )
+                .font(.body.monospaced())
+            }
+            ForEach(removedLibraryFolders, id: \.library) { folder in
+                LabeledContent(Words.removedLibraryFolder) {
+                    HStack {
+                        Text(folder.folder)
+                            .font(.body.monospaced())
+                        Button(Words.clearFolder) {
+                            computer.libraryFolders.removeAll { $0.library == folder.library }
+                        }
+                    }
+                }
+            }
+            TextField(Words.startCommand, text: $computer.startCommand, prompt: Text(Words.optionalField))
+                .font(.body.monospaced())
+            TextField(Words.stopCommand, text: $computer.stopCommand, prompt: Text(Words.optionalField))
+                .font(.body.monospaced())
+            HStack {
+                TextField(Words.startWait, value: $computer.startWaitSeconds, format: .number)
+                    .multilineTextAlignment(.trailing)
+                    .frame(maxWidth: 260)
+                Text(Words.seconds)
+            }
+        }
+    }
+
+    private var removedLibraryFolders: [ComputerSettingsFacts.LibraryFolder] {
+        let known = Set(facts.libraries.map(\.key))
+        return computer.libraryFolders.filter { !known.contains($0.library) }
+    }
+
+    private func abilityBinding(_ ability: String) -> Binding<Bool> {
+        Binding(get: { computer.abilities.contains(ability) }, set: { on in
+            if on, !computer.abilities.contains(ability) {
+                computer.abilities.append(ability)
+            } else if !on, computer.abilities.count > 1 {
+                computer.abilities.removeAll { $0 == ability }
+            }
+        })
+    }
+
+    private func libraryLocked(_ key: String) -> Bool {
+        let all = facts.libraries.map(\.key)
+        return ComputerSettingsDraft.togglingLibrary(key, in: computer.libraries, all: all) == computer.libraries
+    }
+
+    private func libraryBinding(_ key: String) -> Binding<Bool> {
+        let all = facts.libraries.map(\.key)
+        return Binding(get: { ComputerSettingsDraft.allows(computer, library: key) }, set: { _ in
+            computer.libraries = ComputerSettingsDraft.togglingLibrary(key, in: computer.libraries, all: all)
+        })
+    }
+
+    private func libraryFolderBinding(_ key: String) -> Binding<String> {
+        Binding(get: { computer.libraryFolders.first { $0.library == key }?.folder ?? "" }, set: { folder in
+            computer.libraryFolders.removeAll { $0.library == key }
+            if !folder.isEmpty {
+                computer.libraryFolders.append(.init(library: key, folder: folder))
+            }
+        })
+    }
+}
+
+struct WorkWindowEditor: View {
+    @Binding var schedule: ComputerSettingsFacts.Schedule
+    let days: [String]
+    let remove: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                TextField(Words.workWindowName, text: $schedule.name)
+                Button(Words.removeWorkWindow, systemImage: "minus.circle", action: remove)
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .help(Words.removeWorkWindow)
+            }
+            dayRow(Words.worksOn, allDay: false)
+            dayRow(Words.allDayOn, allDay: true)
+            HStack {
+                Picker(Words.startsAt, selection: $schedule.startHour) {
+                    ForEach(0..<24, id: \.self) { hour in Text(Words.hour(hour)).tag(hour) }
+                }
+                Picker(Words.endsAt, selection: $schedule.endHour) {
+                    ForEach(0..<24, id: \.self) { hour in Text(Words.hour(hour)).tag(hour) }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func dayRow(_ title: String, allDay: Bool) -> some View {
+        HStack {
+            Text(title)
+                .frame(width: 60, alignment: .leading)
+            ForEach(days, id: \.self) { day in
+                Toggle(Words.day(day), isOn: Binding(
+                    get: { (allDay ? schedule.allDayDays : schedule.days).contains(day) },
+                    set: { _ in
+                        schedule = ComputerSettingsDraft.togglingDay(day, allDay: allDay, in: schedule, order: days)
+                    }
+                ))
+                .toggleStyle(.button)
+            }
         }
     }
 }

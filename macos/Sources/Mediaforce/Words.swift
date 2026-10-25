@@ -526,3 +526,143 @@ extension ActionNotice {
         ActionNotice(title: "Settings not saved", message: Words.librarySaveRefused(code))
     }
 }
+
+extension Words {
+    static let computersTab = "Computers"
+    static let computersSection = "Computers"
+    static let noComputers = "No computers yet. Mediaforce works on this Mac only."
+    static let addComputer = "Add Computer"
+    static let removeComputer = "Remove"
+    static let unnamedComputer = "New computer"
+    static let computerName = "Name"
+    static let computerAddress = "Address"
+    static let computerAddressHelp = "How Mediaforce reaches this computer, such as studio.local or name@studio.local."
+    static let computerCanDo = "Can"
+    static let computerLibraries = "Works on"
+    static let computerLibrariesHelp = "Turn every library on to include libraries you add later."
+    static let computerPriority = "Priority"
+    static let computerPriorityHelp = "When more than one computer is free, the higher number gets work first."
+    static let wakeAddress = "Wake address"
+    static let wakeAddressPrompt = "Optional, such as 00:11:22:33:44:55"
+    static let wakeAddressHelp = "This computer's network hardware address. With it, Mediaforce wakes the computer when work is waiting."
+    static let connectionDetails = "Connection details"
+    static let mediaAccess = "Gets files by"
+    static let mediaforceFolder = "Mediaforce folder on that computer"
+    static let computerWorkingFolder = "Working folder"
+    static let computerWorkingFolderPrompt = "Same as the main working folder"
+    static let scratchFolder = "Scratch folder on that computer"
+    static let scratchFolderPrompt = "None"
+    static let scratchFolderHelp = "For a computer without the shared media folders. Mediaforce copies each file here, compresses it there, then deletes the copy."
+    static let removedLibraryFolder = "Folder for a library Mediaforce no longer has"
+    static let clearFolder = "Clear"
+    static let startCommand = "Start command"
+    static let stopCommand = "Stop command"
+    static let optionalField = "Optional"
+    static let startWait = "Wait for it to start"
+    static let seconds = "seconds"
+    static let workWindow = "Work window"
+    static let workWindowsSection = "Work windows"
+    static let noWorkWindows = "No work windows of your own yet. Computers can still work any time or never."
+    static let addWorkWindow = "Add Work Window"
+    static let removeWorkWindow = "Remove"
+    static let unnamedWorkWindow = "New work window"
+    static let workWindowName = "Name"
+    static let worksOn = "Works"
+    static let allDayOn = "All day"
+    static let startsAt = "From"
+    static let endsAt = "Until"
+    static let workWindowHelp = "When Until is earlier than From, the window runs overnight. Times are each computer's own."
+    static let keepComputer = "Keep computer"
+    static let keepWorkWindow = "Keep work window"
+
+    static func computerAbility(_ code: String) -> String {
+        switch code {
+        case "encode_queue": "Compress files"
+        case "sample_calibration": "Make samples"
+        default: "Other work"
+        }
+    }
+
+    static func builtInWorkWindow(_ key: String) -> String {
+        switch key {
+        case "always": "Any time"
+        case "never": "Never"
+        default: "Unknown"
+        }
+    }
+
+    static func mediaAccessChoice(_ code: String) -> String {
+        switch code {
+        case "mounted": "Opening the shared media folders"
+        case "stream": "Having files sent to it"
+        default: "Unknown"
+        }
+    }
+
+    static func atOnce(_ count: Int) -> String {
+        "Works on \(count.formatted()) at once"
+    }
+
+    static func day(_ code: String) -> String {
+        switch code {
+        case "mon": "Mon"
+        case "tue": "Tue"
+        case "wed": "Wed"
+        case "thu": "Thu"
+        case "fri": "Fri"
+        case "sat": "Sat"
+        case "sun": "Sun"
+        default: code
+        }
+    }
+
+    static func hour(_ hour: Int) -> String {
+        let shown = hour % 12 == 0 ? 12 : hour % 12
+        return "\(shown) \(hour < 12 ? "AM" : "PM")"
+    }
+
+    static func libraryFolderOnComputer(_ name: String) -> String {
+        "\(name) folder on that computer"
+    }
+
+    static func removeComputerTitle(_ name: String) -> String {
+        "Remove \(name.isEmpty ? "this computer" : name)?"
+    }
+
+    static let removeComputerMessage = "Mediaforce stops giving this computer work after you save. Nothing on the computer is deleted."
+
+    static func removeWorkWindowTitle(_ name: String) -> String {
+        "Remove \(name.isEmpty ? "this work window" : name)?"
+    }
+
+    static func removeWorkWindowMessage(usedBy computers: Int) -> String {
+        computers == 0
+            ? "No computer uses it."
+            : "\(count(computers, "computer")) use\(computers == 1 ? "s" : "") it. Choose another work window for \(computers == 1 ? "it" : "them") before you save."
+    }
+
+    static func computerSaveRefused(_ code: String?) -> String {
+        switch code {
+        case "computer_address_missing": "Each computer needs an address."
+        case "computer_address_duplicate": "Two computers have the same address. Each computer needs its own."
+        case "computer_abilities_missing": "Each computer needs something it can do: compress files, make samples, or both."
+        case "computer_priority_invalid": "Priority must be a whole number."
+        case "computer_at_once_invalid": "How many files a computer works on at once must be a whole number."
+        case "computer_start_wait_invalid": "How long to wait for a computer to start must be a whole number of seconds."
+        case "computer_scratch_folder_not_absolute": "A scratch folder must be a full path on that computer, starting with /."
+        case "computer_library_folders_invalid": "A computer's library folders couldn't be read. Check them under Connection details."
+        case "computer_library_folder_unknown": "A computer has a folder for a library Mediaforce no longer has. Clear it under Connection details."
+        case "schedule_key_missing", "schedule_key_reserved", "schedule_duplicate": "Two work windows got mixed up. Revert and make your changes again."
+        case "schedule_days_missing": "Each work window needs at least one day."
+        case "schedule_hours_invalid": "Each work window needs a start and end hour."
+        case "schedule_unknown": "A computer uses a work window that was removed. Choose another work window for it."
+        default: "Mediaforce couldn't save these settings. Check the computers and work windows."
+        }
+    }
+}
+
+extension ActionNotice {
+    static func computerSettingsNotSaved(_ code: String?) -> ActionNotice {
+        ActionNotice(title: "Settings not saved", message: Words.computerSaveRefused(code))
+    }
+}
