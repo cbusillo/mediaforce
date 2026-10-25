@@ -16,9 +16,12 @@ enum BackgroundService {
 
     private static var domain: String { "gui/\(getuid())" }
 
-    /// Starts the service: loads it when it isn't loaded, otherwise asks launchd to run it now.
+    /// Starts the service as `mediaforce service enable` does: enables it, since `service disable` leaves it disabled,
+    /// loads it when it isn't loaded, then asks launchd to run it now.
     /// Returns what launchctl said when it refused, or nil when it accepted.
     static func start() async -> String? {
+        let enabled = await launchctl(["enable", "\(domain)/\(label)"])
+        if enabled.status != 0 { return enabled.output }
         if await launchctl(["print", "\(domain)/\(label)"]).status != 0 {
             let loaded = await launchctl(["bootstrap", domain, plist.path])
             if loaded.status != 0 { return loaded.output }

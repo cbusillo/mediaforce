@@ -31,7 +31,6 @@ struct ServerStatusView: View {
     @State private var working = false
     @State private var serviceRefusal: String?
     @State private var confirmingRestart = false
-    @State private var showingSetUp = false
 
     var body: some View {
         let situation = ServerSituation(state, serviceInstalled: serviceInstalled)
@@ -47,13 +46,11 @@ struct ServerStatusView: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: 440)
-            if situation != .checking {
+            // Not set up has no button: there is no way yet to set Mediaforce up from here.
+            if situation == .notRunning || situation == .inTrouble {
                 actions(situation)
                     .controlSize(.large)
                     .padding(.top, 6)
-            }
-            if showingSetUp, situation == .notSetUp {
-                SetUpSteps()
             }
             Text(Words.serverLastHeard(situation, lastHeard))
                 .font(.callout)
@@ -86,21 +83,16 @@ struct ServerStatusView: View {
     private func actions(_ situation: ServerSituation) -> some View {
         HStack(spacing: 10) {
             switch situation {
-            case .notSetUp:
-                Button(Words.howToSetUp) { showingSetUp.toggle() }
-                    .buttonStyle(.borderedProminent)
             case .notRunning:
                 Button(Words.startMediaforce) { Task { await run(BackgroundService.start) } }
                     .buttonStyle(.borderedProminent)
             case .inTrouble:
                 Button(Words.restartMediaforce) { confirmingRestart = true }
                     .buttonStyle(.borderedProminent)
-            case .checking:
+            case .checking, .notSetUp:
                 EmptyView()
             }
-            if situation != .notSetUp {
-                Button(Words.checkAgain, action: retry)
-            }
+            Button(Words.checkAgain, action: retry)
             if working { ProgressView().controlSize(.small) }
         }
         .disabled(working)
@@ -115,28 +107,5 @@ struct ServerStatusView: View {
             retry()
         }
         working = false
-    }
-}
-
-/// How to set Mediaforce up on a Mac, shown under the card when asked for.
-struct SetUpSteps: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(Words.setUpStepsIntro)
-            ForEach(Words.setUpCommands, id: \.self) { command in
-                Text(command)
-                    .font(.body.monospaced())
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            }
-            Text(Words.setUpStepsAfter)
-                .foregroundStyle(.secondary)
-        }
-        .font(.callout)
-        .frame(maxWidth: 440, alignment: .leading)
-        .padding(.top, 4)
     }
 }

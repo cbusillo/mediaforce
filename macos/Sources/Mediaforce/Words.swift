@@ -41,12 +41,9 @@ enum Words {
     static let checkAgain = "Check Again"
     static let startMediaforce = "Start Mediaforce"
     static let restartMediaforce = "Restart Mediaforce"
-    static let howToSetUp = "How to Set Up Mediaforce"
     static let restartQuestion = "Restart Mediaforce?"
     static let restartMessage = "Anything being compressed or sampled right now is interrupted."
-    static let setUpStepsIntro = "On the Mac that holds your library, open Terminal in the Mediaforce folder and run:"
-    static let setUpCommands = ["uv run mediaforce service install", "uv run mediaforce service enable"]
-    static let setUpStepsAfter = "Mediaforce then starts by itself whenever you log in, and this window fills in."
+    static let settingsDidNotLoad = "Mediaforce is running, but these settings didn't load."
 
     static func serverSymbol(_ situation: ServerSituation) -> String {
         switch situation {
@@ -69,7 +66,7 @@ enum Words {
     static func serverSentence(_ situation: ServerSituation) -> String {
         switch situation {
         case .checking: "This only takes a moment."
-        case .notSetUp: "Mediaforce itself runs in the background on the Mac that holds your library. Set it up there, or open this app on that Mac."
+        case .notSetUp: "Mediaforce itself runs in the background on the Mac that holds your library. Open this app on that Mac."
         case .notRunning: "It usually starts when you log in. Start it now, and this window fills in as soon as it answers."
         case .inTrouble: "It answered, but not properly, so this window can't show your library. It often clears by itself; if not, restarting it usually helps."
         }
