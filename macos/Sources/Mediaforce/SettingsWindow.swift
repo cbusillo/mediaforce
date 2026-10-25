@@ -398,6 +398,8 @@ final class ComputerSettingsModel {
             let result = try await client.saveComputerSettings(draft.saveBody)
             if result.ok {
                 if let settings = result.settings { show(settings) } else { await load() }
+                // A new or readdressed computer has its own setup facts.
+                await loadHosts()
                 justSaved = true
             } else if result.code == "settings_changed" {
                 notice = .settingsChangedElsewhere
@@ -450,6 +452,13 @@ struct ComputerSettingsTab: View {
             }
         }
         .task { await model.load() }
+        // Recovery runs by itself in the background, so the fixes on offer can change while the tab is open.
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: MainWindowModel.refreshInterval)
+                await model.loadHosts()
+            }
+        }
         .alert(item: $model.notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
@@ -468,8 +477,9 @@ struct ComputerSettingsForm: View {
     let facts: ComputerSettingsFacts
     let main: MainWindowModel
     @State private var selection: Pane?
-    // The chosen computer's address, so a reload that rebuilds the rows keeps it chosen.
-    @State private var chosenAddress: String?
+    // The chosen computer's place in the list, so a load or save that rebuilds the rows keeps it chosen, even when
+    // its address was edited.
+    @State private var chosenIndex: Int?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -518,13 +528,13 @@ struct ComputerSettingsForm: View {
         .onChange(of: computers.wrappedValue.map(\.id), initial: true) { keepSelection() }
         .onChange(of: selection) { _, chosen in
             if case .computer(let id) = chosen {
-                chosenAddress = computers.wrappedValue.first { $0.id == id }?.computer.address
+                chosenIndex = computers.wrappedValue.firstIndex { $0.id == id }
             }
         }
         // A notification or the menu bar asked for one computer.
         .onChange(of: main.requestedComputer, initial: true) { _, requested in
             guard let requested else { return }
-            if let row = computers.wrappedValue.first(where: { $0.computer.address == requested }) {
+            if let row = computers.wrappedValue.first(where: { savedAddress($0) == requested }) {
                 selection = .computer(row.id)
             }
             main.requestedComputer = nil
@@ -567,9 +577,9 @@ struct ComputerSettingsForm: View {
                         ComputerStatus(
                             name: row.wrappedValue.computer.name,
                             state: state(row.wrappedValue),
-                            host: model.hosts[row.wrappedValue.computer.address]
+                            host: model.hosts[savedAddress(row.wrappedValue)]
                         ) { action, password in
-                            await model.act(action, row.wrappedValue.computer.address, password: password, main: main)
+                            await model.act(action, savedAddress(row.wrappedValue), password: password, main: main)
                         }
                         // A different computer starts with no password typed and no earlier result.
                         .id(row.wrappedValue.id)
@@ -615,9 +625,15 @@ struct ComputerSettingsForm: View {
         }
     }
 
-    /// The state the main window's facts give this computer, matched by its address.
+    /// The address the server knows this computer by: the saved one, while an edit to it is unsaved.
+    private func savedAddress(_ row: ComputerSettingsDraft.ComputerRow) -> String {
+        guard !row.computer.id.isEmpty else { return row.computer.address }
+        return facts.computers.first { $0.id == row.computer.id }?.address ?? row.computer.address
+    }
+
+    /// The state the main window's facts give this computer, matched by the address the server knows.
     private func state(_ row: ComputerSettingsDraft.ComputerRow) -> String? {
-        main.facts?.computers.first { $0.key == row.computer.address }?.state
+        main.facts?.computers.first { $0.key == savedAddress(row) }?.state
     }
 
     /// Keeps the chosen computer chosen when a load or save rebuilds the rows, else chooses the first.
@@ -625,7 +641,7 @@ struct ComputerSettingsForm: View {
         let rows = computers.wrappedValue
         if case .computer(let id) = selection, rows.contains(where: { $0.id == id }) { return }
         if selection == .workWindows { return }
-        let kept = rows.first { $0.computer.address == chosenAddress } ?? rows.first
+        let kept = chosenIndex.flatMap { rows.indices.contains($0) ? rows[$0] : nil } ?? rows.first
         selection = kept.map { .computer($0.id) } ?? .workWindows
     }
 
