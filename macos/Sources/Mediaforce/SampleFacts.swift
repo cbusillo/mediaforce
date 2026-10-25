@@ -60,7 +60,9 @@ struct SampleFacts: Decodable, Sendable {
         case "choose_size": return sizeChoices.isEmpty ? [] : [.chooseSize]
         case "queue_encode": return [.startCompressing]
         case "retry_encode": return [.retryUnfinished]
-        case "review_files", "validate_outputs": return [.checkFiles]
+        case "validate_outputs": return [.checkFiles]
+        // A blocked file (a failed check or a missing copy) has no step that settles it yet (#1083).
+        case "review_files": return [.openInBrowser]
         case "promote_outputs": return [.replaceOriginals]
         case "decide_motion": return [.decideMotion]
         default: return state.map(Self.browserStates.contains) == true ? [.openInBrowser] : []

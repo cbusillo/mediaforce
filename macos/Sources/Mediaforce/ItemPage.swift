@@ -13,6 +13,7 @@ struct ItemPage: View {
     @State private var selected: ItemFacts.File.ID?
     @State private var notice: ActionNotice?
     @State private var confirming: WorkAction?
+    @State private var browserNotice: ActionNotice?
     @State private var working = false
     @Environment(\.openURL) private var openURL
 
@@ -69,6 +70,16 @@ struct ItemPage: View {
         .alert(item: $notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
+        .alert(
+            browserNotice?.title ?? "",
+            isPresented: Binding(get: { browserNotice != nil }, set: { if !$0 { browserNotice = nil } }),
+            presenting: browserNotice
+        ) { _ in
+            Button(Words.openInBrowser) { openURL(model.client.seasonPage(prefix)) }
+            Button(Words.cancel, role: .cancel) {}
+        } message: { notice in
+            Text(notice.message)
+        }
         .confirmationDialog(
             confirming.map(Words.workQuestion) ?? "",
             isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
@@ -97,25 +108,33 @@ struct ItemPage: View {
         working = true
         defer { working = false }
         do {
-            let client = model.client
-            let result: ItemActionResult = switch action {
-            case .startCompressing:
-                // Started only when it says it is compressing; a reason means it needs a choice first.
-                (try await client.compressSeason(prefix)).compressing == true
-                    ? ItemActionResult.done : ItemActionResult.refused(ActionNotice.approvedNotCompressing.message)
-            case .checkFiles: try await client.checkFiles(prefix)
-            case .replaceOriginals: try await client.replaceOriginals(prefix)
-            case .retryUnfinished: try await client.retryUnfinished(prefix)
-            case .keepMotionOriginals:
-                try await client.keepMotionOriginals(prefix, facts?.files.filter { $0.heldReason == "motion_pattern" }.map(\.libraryItemId) ?? [])
-            }
-            if !result.ok {
+            if let result = try await send(action, facts), !result.ok {
                 notice = ActionNotice(title: Words.workRefused(action), message: result.message ?? ActionNotice.sampleRefused.message)
             }
         } catch {
             notice = .unanswered
         }
         await refresh()
+    }
+
+    /// The server's answer, or nil when the step needs a choice made on the web page first.
+    private func send(_ action: WorkAction, _ facts: ItemFacts?) async throws -> ItemActionResult? {
+        let client = model.client
+        switch action {
+        case .startCompressing:
+            // Started only when it says it is compressing; some reasons need a choice made on the web page.
+            let started = try await client.compressSeason(prefix)
+            if started.needsBrowser {
+                browserNotice = .finishInBrowser
+                return nil
+            }
+            return started.compressing == true ? .done : .refused(ActionNotice.approvedNotCompressing.message)
+        case .checkFiles: return try await client.checkFiles(prefix)
+        case .replaceOriginals: return try await client.replaceOriginals(prefix)
+        case .retryUnfinished: return try await client.retryUnfinished(prefix)
+        case .keepMotionOriginals:
+            return try await client.keepMotionOriginals(prefix, facts?.files.filter { $0.heldReason == "motion_pattern" }.map(\.libraryItemId) ?? [])
+        }
     }
 
     private func selectedFile(_ facts: ItemFacts) -> ItemFacts.File? {

@@ -37,7 +37,7 @@ final class SampleTests: XCTestCase {
         XCTAssertFalse(try decode(Self.facts(state: "finished", action: nil)).isInProgress)
         XCTAssertEqual(try decode(Self.facts(state: "ready_to_make", action: "queue_encode")).actions, [.startCompressing])
         let laterStages: [(String, String?, SampleFacts.Action)] = [
-            ("needs_help", "retry_encode", .retryUnfinished), ("needs_help", "review_files", .checkFiles),
+            ("needs_help", "retry_encode", .retryUnfinished), ("needs_help", "review_files", .openInBrowser),
             ("ready_to_check", "validate_outputs", .checkFiles), ("ready_to_finish", "promote_outputs", .replaceOriginals),
             ("motion_held", "decide_motion", .decideMotion), ("finish_blocked", nil, .openInBrowser),
             ("ready_to_check", nil, .openInBrowser), ("ready_to_finish", nil, .openInBrowser),
