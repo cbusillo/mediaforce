@@ -9,29 +9,27 @@ struct SpaceSavedPage: View {
     let model: MainWindowModel
 
     var body: some View {
-        RefreshingPage(title: Words.spaceSaved, load: { try await SpaceSavedFacts.load(model.client) }) { (saved: SpaceSavedFacts) in
-            ScrollViewReader { proxy in
-                // The page's own spacing, as PageFrame sets it for its content.
-                VStack(alignment: .leading, spacing: 18) {
-                    Text(Words.savedSoFar(facts.spaceSaved.bytes))
-                        .font(.title3)
+        // Around the page, so it reaches the page's own scroll view.
+        ScrollViewReader { proxy in
+            RefreshingPage(title: Words.spaceSaved, load: { try await SpaceSavedFacts.load(model.client) }) { (saved: SpaceSavedFacts) in
+                Text(Words.savedSoFar(facts.spaceSaved.bytes))
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                if saved.shows.isEmpty {
+                    Text(Words.noBackupsToCheck)
                         .foregroundStyle(.secondary)
-                    if saved.shows.isEmpty {
-                        Text(Words.noBackupsToCheck)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        SpotCheck(shows: saved.shows, model: model)
-                            .id(Self.spotCheckID)
-                    }
-                    SpaceSavedBar(
-                        library: facts.library, savedBytes: facts.spaceSaved.bytes, backupBytes: saved.cleanup.totalSizeBytes,
-                        // The backups' slice opens the spot-check of what they hold.
-                        openBackups: saved.shows.isEmpty ? nil : { withAnimation { proxy.scrollTo(Self.spotCheckID, anchor: .top) } }
-                    )
-                    .padding(.top, 8)
-                    if saved.cleanup.fileCount > 0 {
-                        DeleteBackups(count: saved.cleanup.fileCount, bytes: saved.cleanup.totalSizeBytes, model: model)
-                    }
+                } else {
+                    SpotCheck(shows: saved.shows, model: model)
+                        .id(Self.spotCheckID)
+                }
+                SpaceSavedBar(
+                    library: facts.library, savedBytes: facts.spaceSaved.bytes, backupBytes: saved.cleanup.totalSizeBytes,
+                    // The backups' slice opens the spot-check of what they hold.
+                    openBackups: saved.shows.isEmpty ? nil : { withAnimation { proxy.scrollTo(Self.spotCheckID, anchor: .top) } }
+                )
+                .padding(.top, 8)
+                if saved.cleanup.fileCount > 0 {
+                    DeleteBackups(count: saved.cleanup.fileCount, bytes: saved.cleanup.totalSizeBytes, model: model)
                 }
             }
         }
