@@ -35,6 +35,14 @@ def config(tmp_path: Path) -> Iterator[MediaforceConfig]:
     reset_engine_cache()
 
 
+@pytest.fixture(autouse=True)
+def plenty_of_room() -> Iterator[None]:
+    """The host's own free space never decides a test; the no-room test sets its own."""
+    room = SimpleNamespace(total=0, used=0, free=10 ** 15)
+    with patch.object(app_item.shutil, "disk_usage", return_value=room):
+        yield
+
+
 def _episode(connection: DBClient, root: Path, number: int, *, size: int, status: str = "discovered") -> int:
     rel_path = f"{SEASON}/Show.S01E{number:02d}.mkv"
     path = root / rel_path
