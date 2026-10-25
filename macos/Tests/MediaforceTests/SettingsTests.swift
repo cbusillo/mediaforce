@@ -93,4 +93,107 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(Set(words).count, codes.count)
         XCTAssertFalse(words.contains(Words.librarySaveRefused("invalid_settings")))
     }
+
+    private let computerFacts = """
+    {"computers": [{"id": "0", "name": "Studio", "address": "studio.local", "abilities": ["encode_queue"],
+                    "schedule": "nights", "libraries": [], "at_once": 2, "wake_address": "00:11:22:33:44:55",
+                    "priority": 40, "media_access": "stream", "mediaforce_folder": "/Users/me/mediaforce",
+                    "working_folder": "", "scratch_folder": "/var/tmp/mf",
+                    "library_folders": [{"library": "movies_4k", "folder": "/Volumes/remote/movies"}],
+                    "start_command": "", "stop_command": "", "start_wait_seconds": 300}],
+     "schedules": [{"key": "nights", "name": "Nights", "days": ["mon", "tue"], "all_day_days": ["sun"],
+                    "start_hour": 22, "end_hour": 6}],
+     "built_in_schedules": ["always", "never"], "abilities": ["encode_queue", "sample_calibration"],
+     "media_access_options": ["mounted", "stream"], "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+     "libraries": [{"key": "movies_4k", "name": "Movies"}, {"key": "tv", "name": "TV"}], "revision": "c1"}
+    """
+
+    private func computers() throws -> ComputerSettingsFacts {
+        try JSONDecoder.mediaforce.decode(ComputerSettingsFacts.self, from: Data(computerFacts.utf8))
+    }
+
+    private func json(_ save: ComputerSettingsSave) throws -> NSDictionary {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder.mediaforce.encode(save)) as? NSDictionary)
+    }
+
+    func testComputerSettingsDecodeFromServerShape() throws {
+        let decoded = try computers()
+        let studio = try XCTUnwrap(decoded.computers.first)
+        XCTAssertEqual(studio.address, "studio.local")
+        XCTAssertEqual(studio.atOnce, 2)
+        XCTAssertEqual(studio.wakeAddress, "00:11:22:33:44:55")
+        XCTAssertEqual(studio.mediaAccess, "stream")
+        XCTAssertEqual(studio.libraryFolders, [ComputerSettingsFacts.LibraryFolder(library: "movies_4k", folder: "/Volumes/remote/movies")])
+        XCTAssertEqual(studio.startWaitSeconds, 300)
+        XCTAssertEqual(decoded.schedules.first?.allDayDays, ["sun"])
+        XCTAssertEqual(decoded.builtInSchedules, ["always", "never"])
+        XCTAssertEqual(decoded.mediaAccessOptions, ["mounted", "stream"])
+        XCTAssertEqual(decoded.libraries.map(\.key), ["movies_4k", "tv"])
+        XCTAssertEqual(decoded.revision, "c1")
+    }
+
+    func testComputerSaveBodyIsTheSectionTheServerReads() throws {
+        let saved = try computers()
+        var draft = ComputerSettingsDraft(saved)
+        draft.computers[0].computer.name = "Studio Mac"
+        draft.addSchedule(days: ["sat"])
+        let newKey = draft.schedules[1].schedule.key
+        draft.schedules[1].schedule.name = "Weekends"
+        draft.addComputer(abilities: saved.abilities, mediaAccess: "mounted")
+        draft.computers[1].computer.address = "laptop.local"
+        draft.computers[1].computer.schedule = newKey
+
+        let body = try json(draft.saveBody)
+        let sentComputers = try XCTUnwrap(body["computers"] as? [NSDictionary])
+        XCTAssertEqual(sentComputers[0], [
+            "id": "0", "name": "Studio Mac", "address": "studio.local", "abilities": ["encode_queue"],
+            "schedule": "nights", "libraries": [String](), "at_once": 2, "wake_address": "00:11:22:33:44:55",
+            "priority": 40, "media_access": "stream", "mediaforce_folder": "/Users/me/mediaforce",
+            "working_folder": "", "scratch_folder": "/var/tmp/mf",
+            "library_folders": [["library": "movies_4k", "folder": "/Volumes/remote/movies"]],
+            "start_command": "", "stop_command": "", "start_wait_seconds": 300,
+        ] as NSDictionary)
+        XCTAssertEqual(sentComputers[1]["id"] as? String, "")
+        XCTAssertEqual(sentComputers[1]["schedule"] as? String, newKey)
+        let sentSchedules = try XCTUnwrap(body["schedules"] as? [NSDictionary])
+        XCTAssertEqual(sentSchedules[0], [
+            "key": "nights", "name": "Nights", "days": ["mon", "tue"], "all_day_days": ["sun"],
+            "start_hour": 22, "end_hour": 6,
+        ] as NSDictionary)
+        XCTAssertEqual(sentSchedules[1]["key"] as? String, newKey)
+        XCTAssertEqual(body["revision"] as? String, "c1")
+    }
+
+    func testChoosingEveryLibraryMeansAllLibraries() {
+        let all = ["movies", "tv", "other"]
+        XCTAssertEqual(ComputerSettingsDraft.togglingLibrary("tv", in: [], all: all), ["movies", "other"])
+        XCTAssertEqual(ComputerSettingsDraft.togglingLibrary("tv", in: ["movies", "other"], all: all), [])
+        XCTAssertEqual(ComputerSettingsDraft.togglingLibrary("movies", in: ["movies"], all: all), ["movies"])
+    }
+
+    func testADayRunsInTheWindowOrAllDayNeverBoth() throws {
+        let days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        let nights = try XCTUnwrap(try computers().schedules.first)
+
+        let allDayMonday = ComputerSettingsDraft.togglingDay("mon", allDay: true, in: nights, order: days)
+        XCTAssertEqual(allDayMonday.days, ["tue"])
+        XCTAssertEqual(allDayMonday.allDayDays, ["mon", "sun"])
+
+        let windowSunday = ComputerSettingsDraft.togglingDay("sun", allDay: false, in: nights, order: days)
+        XCTAssertEqual(windowSunday.days, ["mon", "tue", "sun"])
+        XCTAssertEqual(windowSunday.allDayDays, [])
+    }
+
+    func testEveryComputerRefusalCodeHasItsOwnWords() {
+        let codes = [
+            "computer_address_missing", "computer_address_duplicate", "computer_abilities_missing",
+            "computer_priority_invalid", "computer_at_once_invalid", "computer_start_wait_invalid",
+            "computer_scratch_folder_not_absolute", "computer_library_folders_invalid",
+            "computer_library_folder_unknown", "schedule_duplicate", "schedule_days_missing",
+            "schedule_hours_invalid", "schedule_unknown",
+        ]
+        let words = codes.map { Words.computerSaveRefused($0) }
+        XCTAssertEqual(Set(words).count, codes.count)
+        XCTAssertFalse(words.contains(Words.computerSaveRefused("invalid_settings")))
+    }
 }

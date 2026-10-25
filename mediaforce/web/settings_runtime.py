@@ -858,10 +858,32 @@ def build_runtime_media_settings(
     return media, plex_library_roots
 
 
-def library_settings_revision(runtime_settings: dict[str, Any]) -> str:
-    """Names the stored library section, so a save built from it is refused once anything else has changed it."""
-    media = runtime_settings.get("media")
-    return hashlib.sha256(json.dumps(media, sort_keys=True, default=str).encode()).hexdigest()
+SETTINGS_SECTION_KEYS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "library": (("media",),),
+    "computers": (
+        ("remote_hosts",),
+        ("encode_queue", "scheduler"),
+        ("encode_queue", "schedule_profiles"),
+        ("heavy_queue",),
+    ),
+}
+
+
+def settings_section_revision(runtime_settings: dict[str, Any], section: str) -> str:
+    """Names one stored Settings section, so a save built from it is refused once anything else has changed it.
+
+    Each section hashes only the runtime settings keys it saves (see `SETTINGS_SECTION_KEYS`), so saving one
+    section never makes another section's open form stale.
+    """
+    def _stored(path: tuple[str, ...]) -> Any:
+        value: Any = runtime_settings
+        for name in path:
+            value = value.get(name) if isinstance(value, dict) else None
+        return value
+
+    values = [_stored(path) for path in SETTINGS_SECTION_KEYS[section]]
+    stored = values[0] if len(values) == 1 else values
+    return hashlib.sha256(json.dumps(stored, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def library_settings_facts(
@@ -965,6 +987,191 @@ def _new_library_key(name: str, used_keys: set[str]) -> str:
     return key
 
 
+def computer_settings_facts(
+        *,
+        remote_rows: list[dict[str, Any]],
+        schedule_rows: list[dict[str, Any]],
+        libraries: list[dict[str, Any]],
+        revision: str,
+) -> dict[str, Any]:
+    """The Mac app's Computers tab: each computer, the custom work schedules and what a computer can be given.
+
+    A computer's `id` is its place in the stored list when loaded; the save uses it only to carry over stored
+    fields the tab does not show, and the revision guarantees the list has not changed since.
+    """
+    def _whole(value: Any, default: int) -> int:
+        try:
+            return int(str(value))
+        except (TypeError, ValueError):
+            return default
+
+    def _library_folders(text: str) -> list[dict[str, str]]:
+        folders = json.loads(text) if text.strip() else {}
+        return [{"library": str(key), "folder": str(path)} for key, path in folders.items()]
+
+    return {
+        "computers": [
+            {
+                "id": str(row["index"]),
+                "name": str(row.get("label") or ""),
+                "address": str(row.get("host") or ""),
+                "abilities": list(row.get("capabilities") or []),
+                "schedule": str(row.get("schedule_profile") or DEFAULT_HOST_SCHEDULE_PROFILE),
+                "libraries": list(row.get("allowed_libraries") or []),
+                "at_once": _whole(row.get("max_parallel_encodes"), DEFAULT_HOST_MAX_PARALLEL_ENCODES),
+                "wake_address": str(row.get("wake_mac") or ""),
+                "priority": _whole(row.get("priority"), 0),
+                "media_access": str(row.get("media_access") or DEFAULT_HOST_MEDIA_ACCESS),
+                "mediaforce_folder": str(row.get("repo_path") or ""),
+                "working_folder": str(row.get("staging_root") or ""),
+                "scratch_folder": str(row.get("scratch_root") or ""),
+                "library_folders": _library_folders(str(row.get("source_roots_json") or "")),
+                "start_command": str(row.get("start_command") or ""),
+                "stop_command": str(row.get("stop_command") or ""),
+                "start_wait_seconds": _whole(row.get("start_timeout_seconds"), 180),
+            }
+            for row in remote_rows
+        ],
+        "schedules": [
+            {
+                "key": str(row["key"]),
+                "name": str(row.get("label") or ""),
+                "days": list(row.get("days_of_week") or []),
+                "all_day_days": list(row.get("all_day_days_of_week") or []),
+                "start_hour": _whole(row.get("start_hour"), int(str(DEFAULT_SCHEDULER_POLICY["start_hour"]))),
+                "end_hour": _whole(row.get("end_hour"), int(str(DEFAULT_SCHEDULER_POLICY["end_hour"]))),
+            }
+            for row in schedule_rows
+        ],
+        "built_in_schedules": [ALWAYS_SCHEDULE_PROFILE, NEVER_SCHEDULE_PROFILE],
+        "abilities": [option["key"] for option in HOST_CAPABILITY_OPTIONS],
+        "media_access_options": [DEFAULT_HOST_MEDIA_ACCESS, "stream"],
+        "days": list(SCHEDULE_DAY_ORDER),
+        "libraries": [{"key": str(item["key"]), "name": str(item.get("label") or "")} for item in libraries],
+        "revision": revision,
+    }
+
+
+# Stored computer fields the Computers tab sends back; any other stored field is carried over unchanged.
+_COMPUTER_FIELDS = frozenset({
+    "host", "label", "repo_path", "wake_mac", "wol_mac", "start_command", "stop_command", "start_timeout_seconds",
+    "media_access", "priority", "max_parallel_encodes", "schedule_profile", "capabilities", "allowed_libraries",
+    "source_roots", "staging_root", "scratch_root",
+})
+
+
+def computer_section_settings(
+        *,
+        computers: list[dict[str, Any]],
+        schedules: list[dict[str, Any]],
+        saved_hosts: list[dict[str, Any]],
+        saved_schedule_keys: Collection[str],
+        encode_queue_scheduler: dict[str, Any] | None,
+        known_library_keys: set[str],
+) -> dict[str, Any]:
+    """Turn the Computers tab into the `remote_hosts` and `encode_queue` runtime settings.
+
+    A computer is known by its address, as everywhere else in Mediaforce. Its `id` from the facts names the
+    stored computer it was loaded from, whose fields the tab does not show carry over; a computer without one is
+    new and carries nothing. A schedule whose key is not saved is new: it gets a key from its name that no saved
+    schedule has and no stored computer still names, and computers choosing it by its submitted key follow.
+    The overall work schedule, which no tab edits, is written back normalized, as the website's save does.
+    """
+    used_keys = {canonical_schedule_profile_key(key) for key in saved_schedule_keys}
+    used_keys |= {host_schedule_profile_key(host) for host in saved_hosts}
+    used_keys |= {ALWAYS_SCHEDULE_PROFILE, NEVER_SCHEDULE_PROFILE}
+    saved_keys = set(used_keys)
+    renamed: dict[str, str] = {}
+    schedule_rows: list[dict[str, Any]] = []
+    for item in schedules:
+        key = _text(item.get("key"))
+        start_hour, end_hour = item.get("start_hour"), item.get("end_hour")
+        if not all(isinstance(hour, int) and not isinstance(hour, bool) and 0 <= hour <= 23
+                   for hour in (start_hour, end_hour)):
+            raise SettingsValidationError("Work schedule hours must be whole hours from 0 to 23.",
+                                          "schedule_hours_invalid")
+        if key not in saved_keys:
+            new_key = _new_schedule_key(_text(item.get("name")), used_keys)
+            used_keys.add(new_key)
+            if key:
+                renamed[key] = new_key
+            key = new_key
+        schedule_rows.append({
+            "key": key,
+            "label": _text(item.get("name")),
+            "days_of_week": _strings(item.get("days")),
+            "all_day_days_of_week": _strings(item.get("all_day_days")),
+            "start_hour": start_hour,
+            "end_hour": end_hour,
+        })
+
+    remote_rows: list[dict[str, Any]] = []
+    carried: list[dict[str, Any]] = []
+    addresses: set[str] = set()
+    for item in computers:
+        address = _text(item.get("address"))
+        if not address:
+            raise SettingsValidationError("Each computer needs an address.", "computer_address_missing")
+        if address in addresses:
+            raise SettingsValidationError("Two computers use the same address.", "computer_address_duplicate")
+        addresses.add(address)
+        abilities = [value for value in _strings(item.get("abilities")) if value.strip()]
+        if not abilities:
+            raise SettingsValidationError("Each computer needs something it can do.", "computer_abilities_missing")
+        saved_id = _text(item.get("id"))
+        saved = saved_hosts[int(saved_id)] if saved_id.isdigit() and int(saved_id) < len(saved_hosts) else {}
+        carried.append({name: value for name, value in saved.items() if name not in _COMPUTER_FIELDS})
+        schedule = _text(item.get("schedule"))
+        remote_rows.append({
+            "label": _text(item.get("name")),
+            "host": address,
+            "repo_path": _text(item.get("mediaforce_folder")),
+            "wake_mac": _text(item.get("wake_address")),
+            "start_command": _text(item.get("start_command")),
+            "stop_command": _text(item.get("stop_command")),
+            "start_timeout_seconds": item.get("start_wait_seconds"),
+            "media_access": _text(item.get("media_access")),
+            "priority": item.get("priority"),
+            "max_parallel_encodes": item.get("at_once"),
+            "schedule_profile": renamed.get(schedule, schedule),
+            "capabilities": abilities,
+            "allowed_libraries": _strings(item.get("libraries")),
+            "source_roots": {
+                _text(folder.get("library")): _text(folder.get("folder"))
+                for folder in _items(item.get("library_folders"))
+            },
+            "staging_root": _text(item.get("working_folder")),
+            "scratch_root": _text(item.get("scratch_folder")),
+        })
+
+    built = build_runtime_computer_settings(
+        remote_hosts=remote_rows,
+        encode_queue_scheduler=encode_queue_scheduler or {},
+        schedule_profiles=schedule_rows,
+        known_library_keys=known_library_keys,
+    )
+    built["remote_hosts"] = [{**extra, **host} for extra, host in zip(carried, built["remote_hosts"], strict=True)]
+    return built
+
+
+def _strings(value: Any) -> list[str]:
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _items(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _new_schedule_key(name: str, used_keys: set[str]) -> str:
+    base = normalize_schedule_profile_key(name)[:56].strip("_-") or "schedule"
+    key = base
+    suffix = 2
+    while key in used_keys or canonical_schedule_profile_key(key) != key:
+        key = f"{base}_{suffix}"
+        suffix += 1
+    return key
+
+
 def build_runtime_settings_payload(
         *,
         libraries: list[dict[str, Any]],
@@ -989,7 +1196,34 @@ def build_runtime_settings_payload(
         existing_library_paths=existing_library_paths,
     )
     known_library_keys = set(media["source_roots"])
+    computers = build_runtime_computer_settings(
+        remote_hosts=remote_hosts,
+        encode_queue_scheduler=encode_queue_scheduler,
+        schedule_profiles=schedule_profiles,
+        known_library_keys=known_library_keys,
+    )
+    normalized_video_defaults = normalize_video_defaults(video_defaults)
+    metadata_payload = dict(metadata) if isinstance(metadata, dict) else {}
+    plex_payload = dict(metadata_payload.get("plex")) if isinstance(metadata_payload.get("plex"), dict) else {}
+    plex_payload["library_roots"] = plex_library_roots
+    metadata_payload["plex"] = plex_payload
+    normalized_metadata = normalize_metadata_settings(metadata_payload, known_library_keys=known_library_keys)
+    return {
+        "media": media,
+        "video": normalized_video_defaults,
+        **computers,
+        "metadata": normalized_metadata,
+    }
 
+
+def build_runtime_computer_settings(
+        *,
+        remote_hosts: list[dict[str, Any]],
+        encode_queue_scheduler: dict[str, Any],
+        schedule_profiles: list[dict[str, Any]],
+        known_library_keys: set[str],
+) -> dict[str, Any]:
+    """Build the `remote_hosts` and `encode_queue` runtime settings from the computers and work schedules."""
     normalized_remotes: list[dict[str, Any]] = []
     for row in remote_hosts:
         label = _text(row.get("label", ""))
@@ -1003,12 +1237,14 @@ def build_runtime_settings_payload(
         if not label and not host and not repo_path and not wake_mac and not start_command and not stop_command:
             continue
         if not host:
-            raise SettingsValidationError("Each remote host row needs an SSH host value.")
+            raise SettingsValidationError("Each remote host row needs an SSH host value.", "computer_address_missing")
         priority_text = _text(row.get("priority", "0"), "0") or "0"
         try:
             priority = int(priority_text)
         except ValueError as exc:
-            raise SettingsValidationError(f"Host priority must be a whole number for {label or host}.") from exc
+            raise SettingsValidationError(
+                f"Host priority must be a whole number for {label or host}.", "computer_priority_invalid"
+            ) from exc
         max_parallel_text = _text(
             row.get("max_parallel_encodes", str(DEFAULT_HOST_MAX_PARALLEL_ENCODES)),
             str(DEFAULT_HOST_MAX_PARALLEL_ENCODES),
@@ -1016,11 +1252,15 @@ def build_runtime_settings_payload(
         try:
             max_parallel_encodes = max(1, int(max_parallel_text or str(DEFAULT_HOST_MAX_PARALLEL_ENCODES)))
         except ValueError as exc:
-            raise SettingsValidationError(f"Parallel encodes must be a whole number for {label or host}.") from exc
+            raise SettingsValidationError(
+                f"Parallel encodes must be a whole number for {label or host}.", "computer_at_once_invalid"
+            ) from exc
         try:
             start_timeout_seconds = max(1, int(start_timeout_text))
         except ValueError as exc:
-            raise SettingsValidationError(f"Start timeout must be a whole number for {label or host}.") from exc
+            raise SettingsValidationError(
+                f"Start timeout must be a whole number for {label or host}.", "computer_start_wait_invalid"
+            ) from exc
         schedule_profile = canonical_schedule_profile_key(row.get("schedule_profile", DEFAULT_HOST_SCHEDULE_PROFILE))
         payload: dict[str, Any] = {"host": host}
         if label:
@@ -1057,7 +1297,8 @@ def build_runtime_settings_payload(
             # The path lives on the encode host, so it is kept verbatim and never expanded here.
             if not scratch_root.startswith("/") or not scratch_root.strip("/"):
                 raise SettingsValidationError(
-                    f"Scratch folder for {label or host} must be an absolute folder path on that computer."
+                    f"Scratch folder for {label or host} must be an absolute folder path on that computer.",
+                    "computer_scratch_folder_not_absolute",
                 )
             payload["scratch_root"] = scratch_root.rstrip("/")
         normalized_remotes.append(payload)
@@ -1089,13 +1330,15 @@ def build_runtime_settings_payload(
         if not any((key_text, label_text, start_hour_text, end_hour_text)):
             continue
         if not key_text:
-            raise SettingsValidationError("Each schedule profile needs a key.")
+            raise SettingsValidationError("Each schedule profile needs a key.", "schedule_key_missing")
         if key_text in {ALWAYS_SCHEDULE_PROFILE, NEVER_SCHEDULE_PROFILE}:
-            raise SettingsValidationError(f"Schedule profile key '{key_text}' is reserved.")
+            raise SettingsValidationError(f"Schedule profile key '{key_text}' is reserved.", "schedule_key_reserved")
         if key_text in seen_profile_keys:
-            raise SettingsValidationError(f"Duplicate schedule profile key: {key_text}")
+            raise SettingsValidationError(f"Duplicate schedule profile key: {key_text}", "schedule_duplicate")
         if not days_of_week and not all_day_days_of_week:
-            raise SettingsValidationError(f"Select at least one day for schedule profile '{key_text}'.")
+            raise SettingsValidationError(
+                f"Select at least one day for schedule profile '{key_text}'.", "schedule_days_missing"
+            )
         normalized = normalize_encode_queue_scheduler(
             {
                 "mode": "night",
@@ -1129,24 +1372,15 @@ def build_runtime_settings_payload(
     )
     if invalid_host_profiles:
         raise SettingsValidationError(
-            "Unknown schedule profile for host assignment: " + ", ".join(invalid_host_profiles)
+            "Unknown schedule profile for host assignment: " + ", ".join(invalid_host_profiles), "schedule_unknown"
         )
 
-    normalized_video_defaults = normalize_video_defaults(video_defaults)
-    metadata_payload = dict(metadata) if isinstance(metadata, dict) else {}
-    plex_payload = dict(metadata_payload.get("plex")) if isinstance(metadata_payload.get("plex"), dict) else {}
-    plex_payload["library_roots"] = plex_library_roots
-    metadata_payload["plex"] = plex_payload
-    normalized_metadata = normalize_metadata_settings(metadata_payload, known_library_keys=known_library_keys)
     return {
-        "media": media,
-        "video": normalized_video_defaults,
         "remote_hosts": normalized_remotes,
         "encode_queue": {
             "scheduler": normalize_encode_queue_scheduler(encode_queue_scheduler),
             "schedule_profiles": normalized_profiles,
         },
-        "metadata": normalized_metadata,
     }
 
 
@@ -1419,9 +1653,13 @@ def normalize_host_source_root_overrides(
         try:
             raw_value = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise SettingsValidationError(f"Library path overrides must be valid JSON for {host_label}.") from exc
+            raise SettingsValidationError(
+                f"Library path overrides must be valid JSON for {host_label}.", "computer_library_folders_invalid"
+            ) from exc
     if not isinstance(raw_value, dict):
-        raise SettingsValidationError(f"Library path overrides must be a JSON object for {host_label}.")
+        raise SettingsValidationError(
+            f"Library path overrides must be a JSON object for {host_label}.", "computer_library_folders_invalid"
+        )
 
     normalized: dict[str, str] = {}
     for key, path in raw_value.items():
@@ -1429,7 +1667,9 @@ def normalize_host_source_root_overrides(
         if not key_text:
             continue
         if key_text not in known_library_keys:
-            raise SettingsValidationError(f"Unknown library override '{key_text}' for {host_label}.")
+            raise SettingsValidationError(
+                f"Unknown library override '{key_text}' for {host_label}.", "computer_library_folder_unknown"
+            )
         path_text = str(path or "").strip()
         if not path_text:
             continue

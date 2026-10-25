@@ -100,3 +100,40 @@ def register_library_settings_routes(
         except ValueError:
             return JSONResponse({"ok": False, "code": "invalid_settings"}, status_code=400)
         return JSONResponse(result)
+
+
+def register_computer_settings_routes(
+        app: FastAPI,
+        *,
+        computer_settings_facts: Callable[[], dict[str, Any]],
+        save_computer_settings_action: Callable[..., dict[str, Any]],
+) -> None:
+    """The Mac app's Computers settings tab. Refusals carry a code the app words; never a sentence."""
+
+    @app.get("/api/app/settings/computers")
+    def api_app_computer_settings() -> JSONResponse:
+        try:
+            return JSONResponse(computer_settings_facts())
+        except SettingsValidationError as exc:
+            return JSONResponse({"ok": False, "code": exc.code}, status_code=409)
+
+    @app.post("/api/app/settings/computers")
+    async def api_app_computer_settings_save(request: Request) -> JSONResponse:
+        body = await request_body(request)
+
+        def _rows(name: str) -> list[dict[str, Any]]:
+            value = body.get(name)
+            return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+        try:
+            result = await run_in_threadpool(
+                save_computer_settings_action,
+                computers=_rows("computers"),
+                schedules=_rows("schedules"),
+                revision=str(body.get("revision") or ""),
+            )
+        except SettingsValidationError as exc:
+            return JSONResponse({"ok": False, "code": exc.code}, status_code=400)
+        except ValueError:
+            return JSONResponse({"ok": False, "code": "invalid_settings"}, status_code=400)
+        return JSONResponse(result)
