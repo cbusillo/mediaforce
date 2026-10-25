@@ -9,20 +9,18 @@ struct SettingsWindow: View {
     let model: MainWindowModel
     @State private var tab = Tab.libraries
 
-    private var client: MediaforceClient { model.client }
-
     var body: some View {
         TabView(selection: $tab) {
-            LibrarySettingsTab(client: client)
+            LibrarySettingsTab(main: model)
                 .tabItem { Label(Words.librariesTab, systemImage: "books.vertical") }
                 .tag(Tab.libraries)
-            CompressionSettingsTab(client: client)
+            CompressionSettingsTab(main: model)
                 .tabItem { Label(Words.compressionTab, systemImage: "arrow.down.right.and.arrow.up.left") }
                 .tag(Tab.compression)
             ComputerSettingsTab(main: model)
                 .tabItem { Label(Words.computersTab, systemImage: "desktopcomputer") }
                 .tag(Tab.computers)
-            MetadataSettingsTab(client: client)
+            MetadataSettingsTab(main: model)
                 .tabItem { Label(Words.metadataTab, systemImage: "network") }
                 .tag(Tab.metadata)
         }
@@ -145,10 +143,12 @@ final class LibrarySettingsModel {
 }
 
 struct LibrarySettingsTab: View {
+    let main: MainWindowModel
     @State private var model: LibrarySettingsModel
 
-    init(client: MediaforceClient) {
-        _model = State(initialValue: LibrarySettingsModel(client: client))
+    init(main: MainWindowModel) {
+        self.main = main
+        _model = State(initialValue: LibrarySettingsModel(client: main.client))
     }
 
     var body: some View {
@@ -156,7 +156,7 @@ struct LibrarySettingsTab: View {
             if let saved = model.saved, model.draft != nil {
                 LibrarySettingsForm(model: model, kinds: saved.types)
             } else if model.loadFailed {
-                ServerStatusView(state: .unreachable) {
+                SettingsLoadFailure(main: main) {
                     Task { await model.load() }
                 }
             } else {
@@ -444,7 +444,7 @@ struct ComputerSettingsTab: View {
             if let saved = model.saved, model.draft != nil {
                 ComputerSettingsForm(model: model, facts: saved, main: main)
             } else if model.loadFailed {
-                ServerStatusView(state: .unreachable) {
+                SettingsLoadFailure(main: main) {
                     Task { await model.load() }
                 }
             } else {
@@ -930,10 +930,12 @@ final class MetadataSettingsModel {
 }
 
 struct MetadataSettingsTab: View {
+    let main: MainWindowModel
     @State private var model: MetadataSettingsModel
 
-    init(client: MediaforceClient) {
-        _model = State(initialValue: MetadataSettingsModel(client: client))
+    init(main: MainWindowModel) {
+        self.main = main
+        _model = State(initialValue: MetadataSettingsModel(client: main.client))
     }
 
     var body: some View {
@@ -941,7 +943,7 @@ struct MetadataSettingsTab: View {
             if let saved = model.saved, model.draft != nil {
                 MetadataSettingsForm(model: model, facts: saved)
             } else if model.loadFailed {
-                ServerStatusView(state: .unreachable) {
+                SettingsLoadFailure(main: main) {
                     Task { await model.load() }
                 }
             } else {
@@ -1087,10 +1089,12 @@ final class CompressionSettingsModel {
 }
 
 struct CompressionSettingsTab: View {
+    let main: MainWindowModel
     @State private var model: CompressionSettingsModel
 
-    init(client: MediaforceClient) {
-        _model = State(initialValue: CompressionSettingsModel(client: client))
+    init(main: MainWindowModel) {
+        self.main = main
+        _model = State(initialValue: CompressionSettingsModel(client: main.client))
     }
 
     var body: some View {
@@ -1098,7 +1102,7 @@ struct CompressionSettingsTab: View {
             if let saved = model.saved, model.draft != nil {
                 CompressionSettingsForm(model: model, facts: saved)
             } else if model.loadFailed {
-                ServerStatusView(state: .unreachable) {
+                SettingsLoadFailure(main: main) {
                     Task { await model.load() }
                 }
             } else {
@@ -1252,6 +1256,39 @@ struct AccessKeyStatus: View {
             Text(Words.accessKeyHelp)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// What a Settings tab shows when its settings didn't load. When Mediaforce itself isn't answering, it is the main
+/// window's card, from the main window's own checks; when Mediaforce answers but this tab's settings didn't load,
+/// it says so with Try Again. Either way the tab loads again by itself once Mediaforce answers.
+struct SettingsLoadFailure: View {
+    let main: MainWindowModel
+    let retry: () -> Void
+
+    var body: some View {
+        Group {
+            if main.connection == .reachable {
+                VStack(spacing: 12) {
+                    Text(Words.settingsDidNotLoad)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Button(Words.tryAgain, action: retry)
+                }
+                .padding(40)
+                .frame(maxWidth: .infinity, minHeight: 240)
+            } else {
+                ServerStatusView(state: main.connection, lastHeard: main.lastHeard, problem: main.problem) {
+                    Task { await main.refresh() }
+                }
+                .frame(minHeight: 420)
+            }
+        }
+        // The tab's load just failed; check Mediaforce now rather than at the next 30-second check.
+        .task { await main.refresh() }
+        .onChange(of: main.connection) { _, now in
+            if now == .reachable { retry() }
         }
     }
 }
