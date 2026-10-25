@@ -6,10 +6,14 @@ import SwiftUI
 struct ItemPage: View {
     let prefix: String
     let model: MainWindowModel
+    let openSample: (String) -> Void
     @State private var facts: ItemFacts?
+    @State private var work: SampleFacts?
     @State private var refreshFailed = false
     @State private var selected: ItemFacts.File.ID?
     @State private var notice: ActionNotice?
+    @State private var confirming: WorkAction?
+    @State private var working = false
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -20,11 +24,14 @@ struct ItemPage: View {
                         VStack(alignment: .leading, spacing: 18) {
                             HStack(alignment: .top) {
                                 ItemHeader(facts: facts, poster: facts.showPrefix.flatMap(model.posters.image(for:)))
-                                // Starting work and some decisions have no control in the app yet (#1079).
-                                Button(Words.openInBrowser) { openURL(model.client.seasonPage(prefix)) }
+                                if let work {
+                                    WorkActions(actions: work.actions, working: working) { action in
+                                        perform(action, facts)
+                                    }
+                                }
                             }
                             if !facts.waiting.isEmpty {
-                                WaitingBox(files: facts.waiting, prefix: prefix, client: model.client) { file, action in
+                                WaitingBox(files: facts.waiting) { file, action in
                                     Task { await act(action, file) }
                                 }
                             }
@@ -62,6 +69,53 @@ struct ItemPage: View {
         .alert(item: $notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
+        .confirmationDialog(
+            confirming.map(Words.workQuestion) ?? "",
+            isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
+            presenting: confirming
+        ) { action in
+            Button(Words.workButton(action)) { Task { await run(action, facts) } }
+            Button(Words.cancel, role: .cancel) {}
+        } message: { action in
+            Text(Words.workDetail(action))
+        }
+    }
+
+    private func perform(_ action: SampleFacts.Action, _ facts: ItemFacts) {
+        switch action {
+        case .approve, .makeAgain, .makeSample, .chooseSize, .tryAnotherSize: openSample(prefix)
+        case .openInBrowser: openURL(model.client.seasonPage(prefix))
+        case .replaceOriginals: confirming = .replaceOriginals
+        case .decideMotion: confirming = .keepMotionOriginals
+        case .startCompressing: Task { await run(.startCompressing, facts) }
+        case .checkFiles: Task { await run(.checkFiles, facts) }
+        case .retryUnfinished: Task { await run(.retryUnfinished, facts) }
+        }
+    }
+
+    private func run(_ action: WorkAction, _ facts: ItemFacts?) async {
+        working = true
+        defer { working = false }
+        do {
+            let client = model.client
+            let result: ItemActionResult = switch action {
+            case .startCompressing:
+                // Started only when it says it is compressing; a reason means it needs a choice first.
+                (try await client.compressSeason(prefix)).compressing == true
+                    ? ItemActionResult.done : ItemActionResult.refused(ActionNotice.approvedNotCompressing.message)
+            case .checkFiles: try await client.checkFiles(prefix)
+            case .replaceOriginals: try await client.replaceOriginals(prefix)
+            case .retryUnfinished: try await client.retryUnfinished(prefix)
+            case .keepMotionOriginals:
+                try await client.keepMotionOriginals(prefix, facts?.files.filter { $0.heldReason == "motion_pattern" }.map(\.libraryItemId) ?? [])
+            }
+            if !result.ok {
+                notice = ActionNotice(title: Words.workRefused(action), message: result.message ?? ActionNotice.sampleRefused.message)
+            }
+        } catch {
+            notice = .unanswered
+        }
+        await refresh()
     }
 
     private func selectedFile(_ facts: ItemFacts) -> ItemFacts.File? {
@@ -85,6 +139,8 @@ struct ItemPage: View {
         } catch {
             refreshFailed = true
         }
+        // The season's own next step, read the same way the sample page reads it; none for a plain folder.
+        work = try? await model.client.sample(prefix)
     }
 
     private func act(_ action: ItemAction, _ file: ItemFacts.File) async {
@@ -122,6 +178,28 @@ struct ItemPage: View {
 
 enum ItemAction {
     case makeAgain, keepThisCopy, putOriginalBack, allowLarger, keepOriginal
+}
+
+/// A step on the whole season or title, as its page state offers it.
+enum WorkAction: Identifiable {
+    case startCompressing, checkFiles, replaceOriginals, retryUnfinished, keepMotionOriginals
+    var id: Self { self }
+}
+
+struct WorkActions: View {
+    let actions: [SampleFacts.Action]
+    let working: Bool
+    let perform: (SampleFacts.Action) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(actions.filter { $0 != .tryAnotherSize && $0 != .makeAgain }, id: \.self) { action in
+                Button(Words.workAction(action)) { perform(action) }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .disabled(working)
+    }
 }
 
 enum ShowChoice {
@@ -173,10 +251,7 @@ struct WaitingMark: View {
 
 struct WaitingBox: View {
     let files: [ItemFacts.File]
-    let prefix: String
-    let client: MediaforceClient
     let act: (ItemFacts.File, ItemAction) -> Void
-    @Environment(\.openURL) private var openURL
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -198,9 +273,6 @@ struct WaitingBox: View {
                     } else if file.validation == "size_held" {
                         Button(Words.keepThisCopy) { act(file, .keepThisCopy) }
                         Button(Words.makeItAgain) { act(file, .makeAgain) }
-                    } else {
-                        // Not every decision has a control in the app yet; the web page still has it.
-                        Button(Words.openInBrowser) { openURL(client.seasonPage(prefix)) }
                     }
                 }
             }
