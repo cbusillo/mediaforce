@@ -6,10 +6,14 @@ player reads one file at a time as MP4, remuxed once and cached, since the app's
 """
 
 import re
+import shutil
 import subprocess
+import threading
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import select
 
@@ -29,8 +33,14 @@ from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
 
 PLAYER_SIDES = ("compressed", "original")
-# Each remuxed file is about the size of the one it plays, so only the last few stay.
+# Each remuxed file is about the size of the one it plays, so only the last few stay, within a byte budget.
 PLAYER_CACHE_KEEP = 6
+PLAYER_CACHE_BYTES = 40 * 1000 ** 3
+PLAYER_FREE_MARGIN_BYTES = 20 * 1000 ** 3
+PLAYER_REMUX_TIMEOUT_SECONDS = 30 * 60
+PARTIAL_SUFFIX = ".partial"
+_PLAYER_LOCKS: dict[Path, threading.Lock] = {}
+_PLAYER_LOCKS_GUARD = threading.Lock()
 _EPISODE_NUMBER = re.compile(r"[sS]\d+[eE](\d+)")
 
 
@@ -141,8 +151,16 @@ def _still_airing(lifecycle: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+class PlayerUnavailable(RuntimeError):
+    """The file cannot be prepared for playing now; ``code`` says why for the app to word."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def player_file(config: MediaforceConfig, library_item_id: int, side: str) -> Path | None:
-    """The episode as MP4 for the Mac player, remuxed on first request; None when that side is not available."""
+    """The episode as MP4 for the app's player, remuxed on first request; None when that side is not available."""
     if side not in PLAYER_SIDES:
         return None
     with open_readonly_db(config.paths.db_path) as connection:
@@ -168,27 +186,40 @@ def player_file(config: MediaforceConfig, library_item_id: int, side: str) -> Pa
     stat = source.stat()
     cache = config.paths.web_state_dir / "player"
     target = cache / f"{library_item_id}-{side}-{stat.st_size}-{stat.st_mtime_ns}.mp4"
-    if not target.is_file():
-        cache.mkdir(parents=True, exist_ok=True)
-        _remux(source, target)
-        _trim_cache(cache, keep=target)
+    # One preparation per file at a time: a second request for it waits and then reads the cache.
+    with _player_lock(target):
+        if not target.is_file():
+            cache.mkdir(parents=True, exist_ok=True)
+            _trim_cache(cache, keep=target, incoming_bytes=stat.st_size)
+            if shutil.disk_usage(cache).free < stat.st_size + PLAYER_FREE_MARGIN_BYTES:
+                raise PlayerUnavailable("no_room", f"Not enough free space to prepare {source.name} for playing.")
+            _remux(source, target)
     return target
+
+
+def _player_lock(target: Path) -> threading.Lock:
+    with _PLAYER_LOCKS_GUARD:
+        return _PLAYER_LOCKS.setdefault(target, threading.Lock())
 
 
 def _remux(source: Path, target: Path) -> None:
     """Copy the picture as it is and make the sound stereo AAC, which every Mac plays."""
-    partial = target.with_suffix(".partial.mp4")
-    # The Mac player takes HEVC only under its hvc1 tag.
+    partial = target.with_name(f".{target.stem}.{uuid4().hex}{PARTIAL_SUFFIX}")
+    # The app's player takes HEVC only under its hvc1 tag.
     tag = ["-tag:v", "hvc1"] if _video_codec(source) == "hevc" else []
     command = [
-        ffmpeg_binary(), "-nostdin", "-loglevel", "error", "-y", "-i", str(source),
+        ffmpeg_binary(), "-nostdin", "-loglevel", "error", "-i", str(source),
         "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", *tag, "-c:a", "aac", "-ac", "2", "-b:a", "192k",
-        "-movflags", "+faststart", str(partial),
+        "-movflags", "+faststart", "-f", "mp4", str(partial),
     ]
-    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=PLAYER_REMUX_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        partial.unlink(missing_ok=True)
+        raise PlayerUnavailable("too_slow", f"Preparing {source.name} for playing took too long.") from error
     if result.returncode != 0 or not partial.is_file():
         partial.unlink(missing_ok=True)
-        raise RuntimeError(f"Could not prepare {source.name} for playing: {result.stderr.strip()[:300]}")
+        raise PlayerUnavailable("unreadable", f"Could not prepare {source.name} for playing: {result.stderr.strip()[:300]}")
     partial.replace(target)
 
 
@@ -196,13 +227,22 @@ def _video_codec(source: Path) -> str:
     result = subprocess.run(
         [ffprobe_binary(), "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name",
          "-of", "default=noprint_wrappers=1:nokey=1", str(source)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=60,
     )
     return result.stdout.strip()
 
 
-def _trim_cache(cache: Path, *, keep: Path) -> None:
-    files = sorted((path for path in cache.glob("*.mp4") if path != keep and not path.name.endswith(".partial.mp4")),
+def _trim_cache(cache: Path, *, keep: Path, incoming_bytes: int) -> None:
+    """Keep the newest few files within the byte budget, leaving room for the one about to be made."""
+    now = time.time()
+    for partial in cache.glob(f"*{PARTIAL_SUFFIX}"):
+        # A preparation still running is younger than its timeout; anything older was interrupted.
+        if now - partial.stat().st_mtime > PLAYER_REMUX_TIMEOUT_SECONDS:
+            partial.unlink(missing_ok=True)
+    files = sorted((path for path in cache.glob("*.mp4") if path != keep),
                    key=lambda path: path.stat().st_mtime, reverse=True)
-    for path in files[PLAYER_CACHE_KEEP - 1:]:
-        path.unlink(missing_ok=True)
+    total = incoming_bytes
+    for index, path in enumerate(files):
+        total += path.stat().st_size
+        if index >= PLAYER_CACHE_KEEP - 1 or total > PLAYER_CACHE_BYTES:
+            path.unlink(missing_ok=True)

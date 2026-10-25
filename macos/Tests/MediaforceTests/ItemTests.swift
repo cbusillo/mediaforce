@@ -14,12 +14,12 @@ final class ItemTests: XCTestCase {
     }
 
     private func file(_ id: Int, stage: String, bytes: Int64, original: Int64? = nil, backup: Bool = false,
-                      validation: String? = nil, kept: String? = nil) -> String {
+                      validation: String? = nil, kept: String? = nil, question: String = "null") -> String {
         let quoted = { (value: String?) in value.map { #""\#($0)""# } ?? "null" }
         return #"""
         {"library_item_id": \#(id), "rel_path": "tv/Futurama/Season 2/Futurama.S02E0\#(id).mkv",
          "name": "Futurama.S02E0\#(id).mkv", "episode": \#(id), "stage": "\#(stage)", "validation": \#(quoted(validation)),
-         "kept_reason": \#(quoted(kept)), "held_reason": null, "percent_complete": null, "size_question": null,
+         "kept_reason": \#(quoted(kept)), "held_reason": null, "percent_complete": null, "size_question": \#(question),
          "bytes": \#(bytes), "original_bytes": \#(original.map(String.init) ?? "null"), "original_backup": \#(backup)}
         """#
     }
@@ -47,6 +47,17 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(Words.fileState(season.files[0]), "Kept original: you put the original back")
         XCTAssertEqual(Words.fileState(season.files[1]), "Didn't pass its check")
         XCTAssertTrue(Words.waitingReason(season.files[1]).hasPrefix("The compressed copy didn't pass its check."))
+    }
+
+    func testASizeQuestionNamesBothSizes() throws {
+        let question = #"{"job_id": "job-7", "rel_path": "x", "goal_bytes": 300000000, "smallest_quality_safe_bytes": 420000000, "reason": "quality_needs_more"}"#
+        let season = try facts([file(7, stage: "needs_you", bytes: 900, question: question)])
+        let waiting = try XCTUnwrap(season.waiting.first)
+
+        XCTAssertEqual(waiting.sizeQuestion?.jobId, "job-7")
+        XCTAssertEqual(Words.fileState(waiting), "Needs more than its size goal")
+        XCTAssertEqual(Words.waitingReason(waiting), "To look right it needs 420 MB, more than its 300 MB goal.")
+        XCTAssertEqual(Words.allowLarger(try XCTUnwrap(waiting.sizeQuestion)), "Allow 420 MB")
     }
 
     func testTheShowChoicesDecodeForTheSettingsSection() throws {

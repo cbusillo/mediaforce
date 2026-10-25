@@ -52,6 +52,10 @@ struct MediaforceClient: Sendable {
         return NSImage(data: data)
     }
 
+    func seasonPage(_ prefix: String) -> URL {
+        baseURL.appending(path: "folders").appending(path: prefix)
+    }
+
     func sample(_ prefix: String) async throws -> SampleFacts {
         var request = URLRequest(url: samplePath(prefix))
         request.timeoutInterval = Self.factsTimeout

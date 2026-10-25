@@ -1,5 +1,8 @@
+import os
+import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -131,3 +134,38 @@ def test_the_player_cache_keeps_only_the_last_few_files(config: MediaforceConfig
     cached = sorted((config.paths.web_state_dir / "player").glob("*.mp4"))
     assert len(cached) == app_item.PLAYER_CACHE_KEEP
     assert played[-1] in cached
+
+
+def test_the_player_refuses_when_there_is_no_room(config: MediaforceConfig, tmp_path: Path) -> None:
+    with open_db(config.paths.db_path) as connection:
+        item_id = _episode(connection, tmp_path, 1, size=100)
+        connection.commit()
+
+    room = SimpleNamespace(total=0, used=0, free=app_item.PLAYER_FREE_MARGIN_BYTES)
+    with patch.object(app_item.shutil, "disk_usage", return_value=room), \
+            patch.object(app_item, "_remux", side_effect=_remux_by_copy) as remux:
+        with pytest.raises(app_item.PlayerUnavailable) as unavailable:
+            player_file(config, item_id, "original")
+
+    assert unavailable.value.code == "no_room"
+    remux.assert_not_called()
+
+
+def test_an_interrupted_preparation_is_cleaned_up_later(config: MediaforceConfig, tmp_path: Path) -> None:
+    with open_db(config.paths.db_path) as connection:
+        item_id = _episode(connection, tmp_path, 1, size=100)
+        connection.commit()
+    cache = config.paths.web_state_dir / "player"
+    cache.mkdir(parents=True)
+    stale = cache / f".old{app_item.PARTIAL_SUFFIX}"
+    stale.write_bytes(b"half")
+    old = time.time() - app_item.PLAYER_REMUX_TIMEOUT_SECONDS - 60
+    os.utime(stale, (old, old))
+    running = cache / f".running{app_item.PARTIAL_SUFFIX}"
+    running.write_bytes(b"half")
+
+    with patch.object(app_item, "_remux", side_effect=_remux_by_copy):
+        assert player_file(config, item_id, "original") is not None
+
+    assert not stale.exists()
+    assert running.exists()

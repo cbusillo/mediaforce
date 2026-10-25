@@ -19,7 +19,7 @@ struct ItemPage: View {
                         VStack(alignment: .leading, spacing: 18) {
                             ItemHeader(facts: facts, poster: facts.showPrefix.flatMap(model.posters.image(for:)))
                             if !facts.waiting.isEmpty {
-                                WaitingBox(files: facts.waiting) { file, action in
+                                WaitingBox(files: facts.waiting, prefix: prefix, client: model.client) { file, action in
                                     Task { await act(action, file) }
                                 }
                             }
@@ -27,7 +27,8 @@ struct ItemPage: View {
                                 ItemPlayer(file: file, client: model.client) {
                                     Task { await act(.putOriginalBack, file) }
                                 }
-                                .id(file.id)
+                                // A file that is published, put back or loses its backup plays again from the start.
+                                .id("\(file.id) \(file.stage) \(file.bytes) \(file.originalBackup)")
                             }
                             if facts.sound != nil || facts.stillAiring != nil {
                                 ShowChoices(facts: facts) { change in Task { await save(change) } }
@@ -88,6 +89,8 @@ struct ItemPage: View {
             case .makeAgain: try await client.makeAgain(prefix, file.libraryItemId)
             case .keepThisCopy: try await client.keepThisCopy(prefix, file.libraryItemId)
             case .putOriginalBack: try await client.putOriginalBack(prefix, file.libraryItemId)
+            case .allowLarger: try await client.decideSize(file.sizeQuestion?.jobId ?? "", allow: true)
+            case .keepOriginal: try await client.decideSize(file.sizeQuestion?.jobId ?? "", allow: false)
             }
             if !result.ok {
                 notice = ActionNotice(title: Words.actionRefused(action), message: Words.actionRefusal(result.code, result.message))
@@ -113,7 +116,7 @@ struct ItemPage: View {
 }
 
 enum ItemAction {
-    case makeAgain, keepThisCopy, putOriginalBack
+    case makeAgain, keepThisCopy, putOriginalBack, allowLarger, keepOriginal
 }
 
 enum ShowChoice {
@@ -165,7 +168,10 @@ struct WaitingMark: View {
 
 struct WaitingBox: View {
     let files: [ItemFacts.File]
+    let prefix: String
+    let client: MediaforceClient
     let act: (ItemFacts.File, ItemAction) -> Void
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -181,11 +187,15 @@ struct WaitingBox: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
-                    if file.validation == "size_held" {
+                    if let question = file.sizeQuestion {
+                        Button(Words.keepTheOriginal) { act(file, .keepOriginal) }
+                        Button(Words.allowLarger(question)) { act(file, .allowLarger) }
+                    } else if file.validation == "size_held" {
                         Button(Words.keepThisCopy) { act(file, .keepThisCopy) }
-                    }
-                    if file.validation != nil {
                         Button(Words.makeItAgain) { act(file, .makeAgain) }
+                    } else {
+                        // Not every decision has a control in the app yet; the web page still has it.
+                        Button(Words.openInBrowser) { openURL(client.seasonPage(prefix)) }
                     }
                 }
             }
@@ -256,7 +266,11 @@ struct ItemPlayer: View {
                         .padding(10)
                         .frame(maxHeight: .infinity, alignment: .top)
                     }
-                    if players.preparing {
+                    if players.failed {
+                        Text(Words.couldNotPlay(file))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                    } else if players.preparing {
                         ProgressView(Words.gettingReady(file))
                             .padding(12)
                             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
@@ -323,10 +337,12 @@ final class ItemPlayers {
     private(set) var comparing = false
     private(set) var playing = false
     private(set) var preparing = true
+    private(set) var failed = false
     private(set) var position: Double = 0
     private(set) var duration: Double = 0
     private var observer: Any?
-    private var readiness: NSKeyValueObservation?
+    private var readiness: [NSKeyValueObservation] = []
+    private var ready: Set<ObjectIdentifier> = []
 
     init() {
         original.isMuted = true
@@ -337,15 +353,14 @@ final class ItemPlayers {
         // The compressed file plays when there is one; a file not compressed yet plays as it is.
         main.replaceCurrentItem(with: AVPlayerItem(url: client.player(file.libraryItemId, file.compressed ? .compressed : .original)))
         original.replaceCurrentItem(with: comparing ? AVPlayerItem(url: client.player(file.libraryItemId, .original)) : nil)
-        readiness = main.currentItem?.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
-            let duration = item.duration.seconds
-            let ready = item.status == .readyToPlay
-            Task { @MainActor in
-                guard let self, ready, self.preparing else { return }
-                self.preparing = false
-                self.duration = duration.isFinite ? duration : 0
-                // Open on a moment a quarter of the way in, so there is a picture to compare before playing.
-                self.seek(to: self.duration / 4)
+        ready = []
+        // Both sides must be ready before either plays, so the two pictures show the same moment.
+        readiness = [main, original].compactMap { player in
+            player.currentItem?.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+                let status = item.status
+                let duration = item.duration.seconds
+                let side = ObjectIdentifier(player)
+                Task { @MainActor in self?.itemChanged(side, status: status, duration: duration) }
             }
         }
         if observer == nil {
@@ -360,10 +375,39 @@ final class ItemPlayers {
             pause()
             return
         }
-        original.seek(to: main.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero)
-        main.play()
-        if comparing { original.play() }
+        guard !preparing else { return }
         playing = true
+        Task { await playTogether() }
+    }
+
+    private func playTogether() async {
+        if comparing {
+            await original.seek(to: main.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero)
+            guard playing else { return }
+            // Start both at the same host time so neither runs ahead of the other.
+            let start = CMClockGetTime(CMClockGetHostTimeClock()) + CMTime(seconds: 0.2, preferredTimescale: 600)
+            main.automaticallyWaitsToMinimizeStalling = false
+            original.automaticallyWaitsToMinimizeStalling = false
+            main.setRate(1, time: main.currentTime(), atHostTime: start)
+            original.setRate(1, time: main.currentTime(), atHostTime: start)
+        } else {
+            main.play()
+        }
+    }
+
+    private func itemChanged(_ side: ObjectIdentifier, status: AVPlayerItem.Status, duration: Double) {
+        if status == .failed {
+            failed = true
+            preparing = false
+            return
+        }
+        guard status == .readyToPlay, preparing else { return }
+        if side == ObjectIdentifier(main) { self.duration = duration.isFinite ? duration : 0 }
+        ready.insert(side)
+        guard ready.count == (comparing ? 2 : 1) else { return }
+        preparing = false
+        // Open on a moment a quarter of the way in, so there is a picture to compare before playing.
+        seek(to: self.duration / 4)
     }
 
     func pause() {
@@ -373,10 +417,16 @@ final class ItemPlayers {
     }
 
     func seek(to seconds: Double) {
+        let wasPlaying = playing
+        pause()
         let time = CMTime(seconds: seconds, preferredTimescale: 600)
         main.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
         if comparing { original.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) }
         position = seconds
+        if wasPlaying {
+            playing = true
+            Task { await playTogether() }
+        }
     }
 
     private func tick(_ time: CMTime) {

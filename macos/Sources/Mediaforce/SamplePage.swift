@@ -7,7 +7,6 @@ struct SamplePage: View {
 
     let prefix: String
     let model: MainWindowModel
-    let openItem: (String) -> Void
     @State private var facts: SampleFacts?
     @State private var unreadable = false
     @State private var working = false
@@ -15,6 +14,7 @@ struct SamplePage: View {
     @State private var approval: SampleApproval?
     @State private var confirming: String?
     @State private var browserNotice: ActionNotice?
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         PageFrame(title: title) {
@@ -35,7 +35,7 @@ struct SamplePage: View {
                 SampleFactsGrid(facts: facts)
                 SampleActions(
                     facts: facts, working: working, approve: startApproval, make: { make(size: $0) }, compress: compress,
-                    openItem: { openItem(prefix) }
+                    openInBrowser: { openURL(model.client.seasonPage(prefix)) }
                 )
             } else if unreadable {
                 Text(Words.staleNotice(.failing, lastHeard: nil))
@@ -63,7 +63,7 @@ struct SamplePage: View {
             isPresented: Binding(get: { browserNotice != nil }, set: { if !$0 { browserNotice = nil } }),
             presenting: browserNotice
         ) { _ in
-            Button(Words.openItem) { openItem(prefix) }
+            Button(Words.openInBrowser) { openURL(model.client.seasonPage(prefix)) }
             Button(Words.cancel, role: .cancel) {}
         } message: { notice in
             Text(notice.message)
@@ -191,7 +191,7 @@ struct SampleActions: View {
     let approve: () -> Void
     let make: (String?) -> Void
     let compress: () -> Void
-    let openItem: () -> Void
+    let openInBrowser: () -> Void
 
     var body: some View {
         let actions = facts.actions
@@ -214,8 +214,8 @@ struct SampleActions: View {
                     Button(Words.startCompressing, action: compress)
                         .buttonStyle(.borderedProminent)
                 }
-                if actions.contains(.openItem) {
-                    Button(Words.openItem, action: openItem)
+                if actions.contains(.openInBrowser) {
+                    Button(Words.openInBrowser, action: openInBrowser)
                         .buttonStyle(.borderedProminent)
                 }
                 if actions.contains(.makeSample) {

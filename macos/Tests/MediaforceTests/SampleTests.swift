@@ -41,7 +41,7 @@ final class SampleTests: XCTestCase {
                            ("ready_to_check", nil), ("ready_to_finish", nil)]
         for (state, action) in laterStages {
             let facts = try decode(Self.facts(state: state, action: action))
-            XCTAssertEqual(facts.actions, [.openItem], state)
+            XCTAssertEqual(facts.actions, [.openInBrowser], state)
             XCTAssertNotEqual(Words.sampleHeadline(facts), Words.sampleHeadline(try decode(Self.facts(state: "needs_help", action: "make_sample"))), state)
         }
     }

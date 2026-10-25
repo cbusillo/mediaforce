@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from mediaforce.web.routes.folders import request_body
+from mediaforce.web.runtime.app_item import PlayerUnavailable
 
 
 def register_app_window_routes(
@@ -52,7 +53,10 @@ def register_app_window_routes(
 
         @app.get("/api/app/player/{library_item_id}/{side}")
         def api_app_player(library_item_id: int, side: str) -> Response:
-            path = playable(library_item_id, side)
+            try:
+                path = playable(library_item_id, side)
+            except PlayerUnavailable as unavailable:
+                return JSONResponse({"code": unavailable.code}, status_code=503)
             if path is None:
                 return JSONResponse({}, status_code=404)
             return FileResponse(path, media_type="video/mp4")

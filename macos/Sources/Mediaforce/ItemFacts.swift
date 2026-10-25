@@ -24,6 +24,7 @@ struct ItemFacts: Decodable, Sendable {
         let keptReason: String?
         let heldReason: String?
         let percentComplete: Int?
+        let sizeQuestion: SizeQuestion?
         let bytes: Int64
         let originalBytes: Int64?
         let originalBackup: Bool
@@ -31,6 +32,13 @@ struct ItemFacts: Decodable, Sendable {
 
         var compressed: Bool { stage == "published" }
         var needsYou: Bool { stage == "needs_you" }
+    }
+
+    /// The file needs more than its size goal to keep the picture right.
+    struct SizeQuestion: Decodable, Sendable, Equatable {
+        let jobId: String
+        let goalBytes: Int64
+        let smallestQualitySafeBytes: Int64
     }
 
     struct Sound: Decodable, Sendable {
@@ -85,6 +93,18 @@ extension MediaforceClient {
 
     func keepThisCopy(_ prefix: String, _ libraryItemId: Int) async throws -> ItemActionResult {
         try await folderAction(prefix, "size-held-decision", body: ["library_item_id": libraryItemId, "keep": true])
+    }
+
+    func decideSize(_ jobId: String, allow: Bool) async throws -> ItemActionResult {
+        var request = URLRequest(url: baseURL.appending(path: "api/encode-queue/size-decision"))
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["job_id": jobId, "allow": allow])
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await session.data(for: request)
+        guard [200, 409].contains((response as? HTTPURLResponse)?.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        return try JSONDecoder.mediaforce.decode(ItemActionResult.self, from: data)
     }
 
     func setSound(_ showPrefix: String, _ preset: String) async throws -> ItemActionResult {

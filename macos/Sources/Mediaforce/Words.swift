@@ -262,6 +262,7 @@ extension Words {
     static let tryAnotherSize = "Try another size"
     static let chooseSizeHeadline = "Choose a size"
     static let openItem = "Open"
+    static let openInBrowser = "Open in browser"
     static let cancel = "Cancel"
     static let original = "Original"
     static let sample = "Sample"
@@ -878,7 +879,11 @@ extension Words {
 
     static func fileState(_ file: ItemFacts.File) -> String {
         switch file.stage {
-        case "needs_you": file.validation == "size_held" ? "Much smaller than its sample" : "Didn't pass its check"
+        case "needs_you":
+            if file.sizeQuestion != nil { "Needs more than its size goal" }
+            else if file.validation == "size_held" { "Much smaller than its sample" }
+            else if file.validation == "failed" { "Didn't pass its check" }
+            else { "Needs a decision" }
         case "kept_original": "\(keptOriginal): \(keptReason("motion_\(file.keptReason ?? "")"))"
         case "held": file.heldReason == "motion_pattern" ? "Kept original: Mediaforce can't convert its motion safely" : "Waiting to start"
         case "compressing": file.percentComplete.map { "Compressing, \($0)%" } ?? "Compressing"
@@ -891,11 +896,24 @@ extension Words {
     }
 
     static func waitingReason(_ file: ItemFacts.File) -> String {
-        switch file.validation {
-        case "failed": "The compressed copy didn't pass its check. Make it again, or leave the original as it is."
-        case "size_held": "It came out much smaller than its sample. Keep this copy, or make it again."
-        default: "It needs a decision from you."
+        if let question = file.sizeQuestion {
+            return "To look right it needs \(size(question.smallestQualitySafeBytes)), more than its \(size(question.goalBytes)) goal."
         }
+        return switch file.validation {
+        case "failed": "The compressed copy didn't pass its check. The original stays in the library until you decide."
+        case "size_held": "It came out much smaller than its sample. Keep this copy, or make it again."
+        default: "It needs a decision the app can't make yet. The web page has it."
+        }
+    }
+
+    static let keepTheOriginal = "Keep the original"
+
+    static func allowLarger(_ question: ItemFacts.SizeQuestion) -> String {
+        "Allow \(size(question.smallestQualitySafeBytes))"
+    }
+
+    static func couldNotPlay(_ file: ItemFacts.File) -> String {
+        "\(fileName(file)) couldn't be made ready to play."
     }
 
     static func actionRefused(_ action: ItemAction) -> String {
@@ -903,6 +921,8 @@ extension Words {
         case .makeAgain: "Not made again"
         case .keepThisCopy: "Not kept"
         case .putOriginalBack: "The original was not put back"
+        case .allowLarger: "The larger size was not allowed"
+        case .keepOriginal: "Not kept original"
         }
     }
 
