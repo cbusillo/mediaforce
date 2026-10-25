@@ -10,6 +10,8 @@ struct SettingsWindow: View {
                 .tabItem { Label(Words.librariesTab, systemImage: "books.vertical") }
             ComputerSettingsTab(client: client)
                 .tabItem { Label(Words.computersTab, systemImage: "desktopcomputer") }
+            MetadataSettingsTab(client: client)
+                .tabItem { Label(Words.metadataTab, systemImage: "network") }
         }
         .frame(width: 760)
     }
@@ -693,6 +695,191 @@ struct WorkWindowEditor: View {
                 ))
                 .toggleStyle(.button)
             }
+        }
+    }
+}
+
+@MainActor
+@Observable
+final class MetadataSettingsModel {
+    let client: MediaforceClient
+    private(set) var saved: MetadataSettingsFacts?
+    private(set) var loadFailed = false
+    private(set) var saving = false
+    private(set) var justSaved = false
+    var draft: MetadataSettingsDraft?
+    var notice: ActionNotice?
+
+    init(client: MediaforceClient) {
+        self.client = client
+    }
+
+    var hasChanges: Bool {
+        guard let draft, let saved else { return false }
+        return draft.saveBody != MetadataSettingsDraft(saved).saveBody
+    }
+
+    func load() async {
+        do {
+            let facts = try await client.metadataSettings()
+            show(facts)
+        } catch {
+            loadFailed = true
+        }
+    }
+
+    func revert() {
+        if let saved { show(saved) }
+    }
+
+    func save() async {
+        guard let draft, !saving else { return }
+        saving = true
+        defer { saving = false }
+        do {
+            let result = try await client.saveMetadataSettings(draft.saveBody)
+            if result.ok {
+                if let settings = result.settings { show(settings) } else { await load() }
+                justSaved = true
+            } else if result.code == "settings_changed" {
+                notice = .settingsChangedElsewhere
+                await load()
+            } else {
+                notice = .metadataSettingsNotSaved(result.code)
+            }
+        } catch {
+            notice = .unanswered
+        }
+    }
+
+    func edited() {
+        if hasChanges { justSaved = false }
+    }
+
+    private func show(_ facts: MetadataSettingsFacts) {
+        saved = facts
+        draft = MetadataSettingsDraft(facts)
+        loadFailed = false
+    }
+}
+
+struct MetadataSettingsTab: View {
+    @State private var model: MetadataSettingsModel
+
+    init(client: MediaforceClient) {
+        _model = State(initialValue: MetadataSettingsModel(client: client))
+    }
+
+    var body: some View {
+        Group {
+            if let saved = model.saved, model.draft != nil {
+                MetadataSettingsForm(model: model, facts: saved)
+            } else if model.loadFailed {
+                ServerStatusView(state: .unreachable) {
+                    Task { await model.load() }
+                }
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 240)
+            }
+        }
+        .task { await model.load() }
+        .alert(item: $model.notice) { notice in
+            Alert(title: Text(notice.title), message: Text(notice.message))
+        }
+    }
+}
+
+struct MetadataSettingsForm: View {
+    @Bindable var model: MetadataSettingsModel
+    let facts: MetadataSettingsFacts
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Form {
+                Section(Words.plexSection) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(Words.usePlex, isOn: plexEnabled)
+                        Text(Words.usePlexHelp)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    TextField(Words.plexAddress, text: plexAddress, prompt: Text(Words.plexAddressPrompt))
+                        .font(.body.monospaced())
+                    AccessKeyStatus(name: facts.plex.keyName, found: facts.plex.keyFound)
+                }
+                Section(Words.tmdbSection) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(Words.useTMDB, isOn: tmdbEnabled)
+                        Text(Words.useTMDBHelp)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    AccessKeyStatus(name: facts.tmdb.keyName, found: facts.tmdb.keyFound)
+                }
+                Section {
+                    Text(Words.metadataHelp)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            .disabled(model.saving)
+            .onChange(of: model.draft) { model.edited() }
+            HStack {
+                if model.justSaved {
+                    Text(Words.settingsSaved)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(Words.revertSettings) { model.revert() }
+                    .disabled(!model.hasChanges || model.saving)
+                Button(Words.saveSettings) { Task { await model.save() } }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!model.hasChanges || model.saving)
+            }
+            .padding(16)
+        }
+        .frame(minHeight: 460)
+    }
+
+    private var plexEnabled: Binding<Bool> {
+        Binding(get: { model.draft?.plex.enabled ?? false }, set: { model.draft?.plex.enabled = $0 })
+    }
+
+    private var plexAddress: Binding<String> {
+        Binding(get: { model.draft?.plex.address ?? "" }, set: { model.draft?.plex.address = $0 })
+    }
+
+    private var tmdbEnabled: Binding<Bool> {
+        Binding(get: { model.draft?.tmdb.enabled ?? false }, set: { model.draft?.tmdb.enabled = $0 })
+    }
+}
+
+/// Says only whether the key is set and where it is read from; the key itself never reaches the app.
+struct AccessKeyStatus: View {
+    let name: String
+    let found: Bool
+
+    var body: some View {
+        LabeledContent(Words.accessKey) {
+            if found {
+                Label(Words.accessKeyFound, systemImage: "checkmark.circle")
+                    .foregroundStyle(.green)
+            } else {
+                Text(Words.accessKeyNeeded(name))
+                    .foregroundStyle(.orange)
+            }
+        }
+        DisclosureGroup(Words.accessKeyDetails) {
+            LabeledContent(Words.accessKeyReadFrom) {
+                Text(name)
+                    .font(.body.monospaced())
+                    .textSelection(.enabled)
+            }
+            Text(Words.accessKeyHelp)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }

@@ -666,3 +666,39 @@ extension ActionNotice {
         ActionNotice(title: "Settings not saved", message: Words.computerSaveRefused(code))
     }
 }
+
+extension Words {
+    static let metadataTab = "Plex and TMDB"
+    static let plexSection = "Plex"
+    static let tmdbSection = "TMDB"
+    static let usePlex = "Use Plex"
+    static let usePlexHelp = "Plex tells Mediaforce when each show first arrived, so a compressed copy keeps that date."
+    static let plexAddress = "Plex server address"
+    static let plexAddressPrompt = "http://plex.local:32400"
+    static let useTMDB = "Use TMDB"
+    static let useTMDBHelp = "TMDB tells Mediaforce whether a show is still airing."
+    static let accessKey = "Access key"
+    static let accessKeyFound = "Found"
+    static let accessKeyDetails = "Key details"
+    static let accessKeyReadFrom = "Read from"
+    static let accessKeyHelp = "Mediaforce reads the key from this setting on the Mac that runs it, and sees a change after it restarts. Settings never show or store the key itself."
+    static let metadataHelp = "A full library scan refreshes what Plex and TMDB know. What Mediaforce already learned stays available while either can't be reached."
+
+    static func accessKeyNeeded(_ name: String) -> String {
+        "Needed. Set \(name) on the Mac that runs Mediaforce."
+    }
+
+    static func metadataSaveRefused(_ code: String?) -> String {
+        switch code {
+        case "plex_address_invalid": "The Plex server address must start with http:// or https://, such as http://plex.local:32400, with no name, password or ? part."
+        case "tmdb_address_invalid": "The saved TMDB address isn't a valid https:// address. Fix it in the configuration file, then try again."
+        default: "Mediaforce couldn't save these settings. Check the Plex server address."
+        }
+    }
+}
+
+extension ActionNotice {
+    static func metadataSettingsNotSaved(_ code: String?) -> ActionNotice {
+        ActionNotice(title: "Settings not saved", message: Words.metadataSaveRefused(code))
+    }
+}

@@ -258,6 +258,67 @@ struct ComputerSettingsDraft: Equatable {
     }
 }
 
+/// Settings hold only where each key is read from and whether it is set, never a key itself.
+struct MetadataSettingsFacts: Decodable, Sendable, Equatable {
+    let plex: Plex
+    let tmdb: TMDB
+    let revision: String
+
+    struct Plex: Decodable, Sendable, Equatable {
+        let enabled: Bool
+        let address: String
+        let keyName: String
+        let keyFound: Bool
+    }
+
+    struct TMDB: Decodable, Sendable, Equatable {
+        let enabled: Bool
+        let keyName: String
+        let keyFound: Bool
+    }
+}
+
+struct MetadataSettingsSave: Encodable, Sendable, Equatable {
+    struct Plex: Encodable, Sendable, Equatable {
+        var enabled: Bool
+        var address: String
+    }
+
+    struct TMDB: Encodable, Sendable, Equatable {
+        var enabled: Bool
+    }
+
+    let plex: Plex
+    let tmdb: TMDB
+    let revision: String
+}
+
+struct MetadataSettingsSaveResult: Decodable, Sendable {
+    let ok: Bool
+    let code: String?
+    let settings: MetadataSettingsFacts?
+}
+
+struct MetadataSettingsDraft: Equatable {
+    var plex: MetadataSettingsSave.Plex
+    var tmdb: MetadataSettingsSave.TMDB
+    let revision: String
+
+    init(_ facts: MetadataSettingsFacts) {
+        plex = .init(enabled: facts.plex.enabled, address: facts.plex.address)
+        tmdb = .init(enabled: facts.tmdb.enabled)
+        revision = facts.revision
+    }
+
+    var saveBody: MetadataSettingsSave {
+        MetadataSettingsSave(
+            plex: .init(enabled: plex.enabled, address: plex.address.trimmingCharacters(in: .whitespaces)),
+            tmdb: tmdb,
+            revision: revision
+        )
+    }
+}
+
 extension JSONEncoder {
     static let mediaforce: JSONEncoder = {
         let encoder = JSONEncoder()

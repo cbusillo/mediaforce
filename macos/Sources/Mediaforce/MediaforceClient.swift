@@ -117,6 +117,16 @@ struct MediaforceClient: Sendable {
         try await saveSettings("api/app/settings/computers", save, as: ComputerSettingsSaveResult.self)
     }
 
+    func metadataSettings() async throws -> MetadataSettingsFacts {
+        var request = URLRequest(url: baseURL.appending(path: "api/app/settings/metadata"))
+        request.timeoutInterval = Self.factsTimeout
+        return try await decode(MetadataSettingsFacts.self, from: request)
+    }
+
+    func saveMetadataSettings(_ save: MetadataSettingsSave) async throws -> MetadataSettingsSaveResult {
+        try await saveSettings("api/app/settings/metadata", save, as: MetadataSettingsSaveResult.self)
+    }
+
     func libraryTypePreview(key: String, type: String) async throws -> LibraryTypePreview {
         let body = try JSONSerialization.data(withJSONObject: ["key": key, "library_type": type])
         let data = try await post("api/settings/library-type-preview", body: body)

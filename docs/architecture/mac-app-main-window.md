@@ -193,6 +193,21 @@ window whose key is not saved is new: it gets a key from its name that no
 saved work window has and no stored computer names, and computers that chose
 it by its placeholder key follow. Hours must be whole hours from 0 to 23.
 
+The Plex and TMDB tab is the web page's metadata panel: Plex on or off and its
+server address, TMDB on or off, and for each whether its access key is set.
+`GET /api/app/settings/metadata` gives `plex` (`enabled`, `address`,
+`key_name`, `key_found`), `tmdb` (`enabled`, `key_name`, `key_found`) and
+`revision`, a hash of the stored `metadata` section. Settings never hold a
+key: `key_name` is the environment variable the server reads it from and
+`key_found` only says whether it is set, so no key can reach the app, and
+neither field is accepted back. `POST /api/app/settings/metadata` takes `plex`
+(`enabled`, `address`), `tmdb` (`enabled`) and `revision`, works as the other
+tabs do, and saves only the runtime settings `metadata` key, normalized as the
+web save does. Key variable names, refresh intervals and the TMDB address carry
+over, and every stored Plex path carries over unchanged, including one kept for
+a removed library; each library's Plex path is a library setting, edited with
+the library on the web.
+
 ## Notifications and the Dock badge
 
 The app reads these facts every 30 seconds while it runs, even with its window
