@@ -150,6 +150,7 @@ from mediaforce.web.routes import register_app_window_routes, register_completed
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_show_poster
+from mediaforce.web.runtime.app_samples import approve_sample, make_sample, sample_facts
 from mediaforce.web.runtime.app_window import app_window_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
 from mediaforce.web.runtime.show_settings_runtime import prefixes_with_samples, use_show_settings
@@ -1169,7 +1170,6 @@ def create_app(
                 observed_at=datetime.now(UTC),
             )
 
-    register_app_window_routes(app, main_window_payload=_main_window_payload)
     register_dashboard_routes(
         app,
         dashboard_payload=_dashboard_api_payload,
@@ -2484,6 +2484,34 @@ def create_app(
         decide_size_held_action=_decide_size_held_action,
         save_profile_action=_save_profile_action,
         use_show_settings_action=_use_show_settings_action,
+    )
+
+    def _season_payloads(normalized_prefix: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        folder, status_code = _folder_content_payload(normalized_prefix)
+        if status_code != 200 or folder.get("pending"):
+            return None
+        return folder, _folder_status_payload(normalized_prefix)
+
+    def _app_sample_payload(normalized_prefix: str) -> dict[str, Any] | None:
+        payloads = _season_payloads(normalized_prefix)
+        return sample_facts(*payloads) if payloads else None
+
+    def _make_app_sample_action(normalized_prefix: str, size: str | None) -> dict[str, Any]:
+        payloads = _season_payloads(normalized_prefix)
+        if payloads is None:
+            return {"ok": False, "code": "refused"}
+        return make_sample(
+            *payloads, size, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action,
+        )
+
+    register_app_window_routes(
+        app,
+        main_window_payload=_main_window_payload,
+        sample_payload=_app_sample_payload,
+        approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
+            prefix, confirm, draft_hash, save_profile=_save_profile_action, queue_encode=_queue_folder_encode_action,
+        ),
+        make_sample_action=_make_app_sample_action,
     )
     register_child_recovery_routes(app, recover_children_action=_recover_children_action)
     register_size_decision_routes(app, decide_size_exception_action=_decide_size_exception_action)

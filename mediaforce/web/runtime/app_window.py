@@ -166,7 +166,7 @@ def _seasons(items: list[_Item]) -> dict[str, _Season]:
     return seasons
 
 
-def _season_identity(prefix: str) -> dict[str, Any]:
+def season_identity(prefix: str) -> dict[str, Any]:
     parts = PurePosixPath(prefix).parts
     match = SEASON_PATTERN.match(parts[2]) if len(parts) >= 3 else None
     return {
@@ -224,7 +224,7 @@ def _finished_seasons(
         if not replaced or not all(_is_settled(item_id, items_by_id, kept) for item_id in season.item_ids):
             continue
         finished.append({
-            **_season_identity(season.prefix),
+            **season_identity(season.prefix),
             "episode_count": len(replaced),
             "kept_original_count": sum(1 for item_id in season.item_ids if item_id in kept),
             "bytes_saved": sum(promotion.bytes_saved for promotion in replaced),
@@ -283,7 +283,7 @@ def _samples(cards: list[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
         state = card.get("page_state") or {}
         key = state.get("key")
         entry = {
-            **_season_identity(str(card["prefix"])),
+            **season_identity(str(card["prefix"])),
             "state": key,
             "action": state.get("primary_action"),
             "failure": state.get("failure"),
@@ -398,7 +398,7 @@ def _event(row: Mapping[str, Any]) -> dict[str, Any]:
         "kind": row["event_type"],
         "at": row["created_at"],
         "rel_path": row["rel_path"],
-        "season": _season_identity(season_prefix) if season_prefix else None,
+        "season": season_identity(season_prefix) if season_prefix else None,
         "bytes_saved": int(row["bytes_saved"]) if row["event_type"] == "promotion_completed" and row["bytes_saved"] else None,
     }
 
@@ -420,10 +420,10 @@ def _kept_original(kept: Mapping[int, Mapping[str, Any]], cards: list[Mapping[st
         if state.get("key") == "motion_held":
             reasons.append("motion_pattern")
         if reasons:
-            held.append({**_season_identity(str(card["prefix"])), "reasons": reasons})
+            held.append({**season_identity(str(card["prefix"])), "reasons": reasons})
     return {
         "kept": [
-            {**_season_identity(prefix), "reason": f"motion_{reason}", "item_count": count}
+            {**season_identity(prefix), "reason": f"motion_{reason}", "item_count": count}
             for (prefix, reason), count in sorted(kept_by_season.items())
         ],
         "kept_item_count": len(kept),

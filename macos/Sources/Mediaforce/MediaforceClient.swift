@@ -42,6 +42,24 @@ struct MediaforceClient: Sendable {
         baseURL.appending(path: "folders").appending(path: prefix)
     }
 
+    func sample(_ prefix: String) async throws -> SampleFacts {
+        var request = URLRequest(url: samplePath(prefix))
+        request.timeoutInterval = Self.factsTimeout
+        return try await decode(SampleFacts.self, from: request)
+    }
+
+    func approveSample(_ prefix: String, confirm: [String], draftHash: String) async throws -> SampleActionResult {
+        try await sampleAction(prefix, "approve", body: ["confirm": confirm, "reviewed_draft_hash": draftHash])
+    }
+
+    func makeSample(_ prefix: String, size: String?) async throws -> SampleActionResult {
+        try await sampleAction(prefix, "make", body: ["size": size ?? NSNull()])
+    }
+
+    func reviewMedia(_ path: String) -> URL {
+        baseURL.appending(path: path)
+    }
+
     func pause() async throws {
         _ = try await post("api/encode-queue/pause")
     }
@@ -59,6 +77,22 @@ struct MediaforceClient: Sendable {
     func deleteCleanupFolder() async throws -> CleanupResult {
         let data = try await post("api/archive-cleanup/clear", body: Data("{}".utf8))
         return try JSONDecoder.mediaforce.decode(CleanupResult.self, from: data)
+    }
+
+    private func samplePath(_ prefix: String) -> URL {
+        baseURL.appending(path: "api/app/samples").appending(path: prefix)
+    }
+
+    private func sampleAction(_ prefix: String, _ action: String, body: [String: Any]) async throws -> SampleActionResult {
+        var request = URLRequest(url: samplePath(prefix).appending(path: action))
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await session.data(for: request)
+        guard [200, 409].contains((response as? HTTPURLResponse)?.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        return try JSONDecoder.mediaforce.decode(SampleActionResult.self, from: data)
     }
 
     private func post(_ path: String, body: Data? = nil) async throws -> Data {

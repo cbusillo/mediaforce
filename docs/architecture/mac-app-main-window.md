@@ -64,6 +64,30 @@ the token, into `state.poster_dir`
 (`~/Library/Caches/mediaforce/posters` by default). The GET only reads that
 cache. A failed download is retried on the next sync.
 
+## One season's sample
+
+Every sample button in the main window opens the season's sample page in the
+app. `GET /api/app/samples/{prefix}` gives its facts, read from the same
+payloads as the season web page: the page state codes, the playable
+`moments` (each with the `original` and `sample` clip URL and size, only once
+the clips play in a browser), `episode_bytes` (the sampled episode now),
+`estimated_episode_bytes`, `season_bytes` and `season_episode_count` (what
+compressing would take), `goal_bytes`, `size_status`, `draft_hash`, and the
+`size_choices` keys with their per-episode `target_bytes`.
+
+`POST .../approve` with `confirm` (`high_impact`, `size_tradeoff`) and
+`reviewed_draft_hash` approves the sample and starts compressing the season,
+like the web page's approval. It answers `{"ok": true, "compressing": bool}`,
+or `409` with `code` `confirm_high_impact` or `confirm_size_tradeoff` when the
+approval check wants the Director to confirm again, or `refused`.
+
+`POST .../make` with `size` (a choice key, or null) makes the sample again: it
+retries the saved request when the sample failed for a reason a retry fixes,
+remakes a reviewed sample at its measured goal, or asks for a new sample at
+the chosen or recommended size. It answers `409` with `choose_size` when a
+size must be chosen, `choose_balance` when the season has no size and detail
+balance chosen yet (the app then offers the web page), or `refused`.
+
 ## Notifications and the Dock badge
 
 The app reads these facts every 30 seconds while it runs, even with its window

@@ -209,3 +209,100 @@ extension Words {
         }
     }
 }
+
+extension Words {
+    static let approveSample = "Approve and compress the season"
+    static let makeSampleAgain = "Make sample again"
+    static let makeSample = "Make sample"
+    static let tryAnotherSize = "Try another size"
+    static let chooseSizeHeadline = "Choose a size"
+    static let openInBrowser = "Open in browser"
+    static let cancel = "Cancel"
+    static let original = "Original"
+    static let sample = "Sample"
+    static let play = "Play"
+    static let pause = "Pause"
+    static let startOver = "Start over"
+    static let hear = "Hear"
+    static let momentChoice = "Moment"
+
+    static func sampleHeadline(_ facts: SampleFacts) -> String {
+        switch (facts.state, facts.action) {
+        case ("making_test", _): "Making the sample now."
+        case ("sample_waiting", _): "The sample waits for a free computer."
+        case ("ready_to_compare", _): "The sample is ready. Watch it next to the original."
+        case ("needs_help", "choose_size"): "The sample can't reach the size goal at good quality. Choose another size."
+        case ("needs_help", _): "The sample needs making again."
+        case ("needs_test", _): "This season has no sample yet."
+        case ("ready_to_make", _): "Approved. The season waits to be compressed."
+        case ("making_season", _): "Compressing the season."
+        case ("finished", _): "This season is finished."
+        default: "Nothing needs you here right now."
+        }
+    }
+
+    static func sizeChoice(_ choice: SampleFacts.SizeChoice) -> String {
+        let name = switch choice.key {
+        case "recommended": "Recommended"
+        case "smaller": "Save more space"
+        case "roomier": "Keep more detail"
+        case "confirm_normalized": "Scale with runtime"
+        case "confirm_absolute": "Keep this size"
+        default: "Size goal"
+        }
+        return "\(name), \(size(choice.targetBytes)) an episode"
+    }
+
+    static func clipSize(_ clip: SampleFacts.Clip) -> String {
+        "\(size(clip.sizeBytes)) clip"
+    }
+
+    static func momentTime(_ seconds: Double) -> String {
+        Duration.seconds(seconds).formatted(.time(pattern: seconds >= 3600 ? .hourMinuteSecond : .minuteSecond))
+    }
+
+    static func sampleFacts(_ facts: SampleFacts) -> [(label: String, value: String)] {
+        [
+            ("This episode now", facts.episodeBytes > 0 ? size(facts.episodeBytes) : "Not known"),
+            ("Estimated after", facts.estimatedEpisodeBytes > 0 ? "About \(size(facts.estimatedEpisodeBytes))" : "No estimate yet"),
+            ("Season space saved", facts.estimatedSavedBytes.map { "About \(size($0)) from \(count(facts.seasonEpisodeCount, "episode"))" } ?? "No estimate yet"),
+            ("Size goal", facts.goalBytes > 0 ? "\(size(facts.goalBytes)) an episode" : "Not set"),
+        ]
+    }
+
+    static func sampleConfirmation(_ code: String) -> (title: String, message: String)? {
+        switch code {
+        case "confirm_high_impact": (
+            "This sample changed important picture settings.",
+            "The sample you watched shows those changes. Approve it only if the picture and sound still feel right."
+        )
+        case "confirm_size_tradeoff": (
+            "This sample missed your size goal.",
+            "The season may come out larger or smaller than the goal. The estimate on this page is the size you would accept."
+        )
+        default: nil
+        }
+    }
+}
+
+extension ActionNotice {
+    static let sampleRefused = ActionNotice(
+        title: "Mediaforce didn't do that",
+        message: "It refused the request. The page shows what Mediaforce reports now."
+    )
+
+    static let approvedNotCompressing = ActionNotice(
+        title: "Approved, but compressing didn't start",
+        message: "The season waits under Samples, with the reason it waits."
+    )
+
+    static let chooseBalance = ActionNotice(
+        title: "Choose this season's balance first",
+        message: "This season needs its balance of size and detail chosen before a new sample. Choose it in the browser."
+    )
+
+    static let chooseSize = ActionNotice(
+        title: "Choose a size first",
+        message: "This season's sample needs a size chosen before it can be made again."
+    )
+}
