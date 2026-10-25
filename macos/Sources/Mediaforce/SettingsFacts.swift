@@ -319,6 +319,74 @@ struct MetadataSettingsDraft: Equatable {
     }
 }
 
+/// The compression defaults the website edits, under the Compression tab's own names.
+struct CompressionSettingsFacts: Decodable, Sendable, Equatable {
+    let aim: String
+    let sizeGoalMb: Double
+    let sizeGoalMinutes: Double
+    let sizeLimitPercent: Double
+    let largestPercent: Double
+    let tallestPicture: Int
+    let grain: Int
+    let measurement: String
+    let appearanceTarget: Double
+    let appearanceMinimum: Double
+    let detailTarget: Double
+    let detailMinimum: Double
+    let sampleMethod: String
+    let sizeGoalMode: String
+    let aims: [String]
+    let measurements: [String]
+    let sampleMethods: [String]
+    let revision: String
+}
+
+struct CompressionSettingsSave: Encodable, Sendable, Equatable {
+    var aim: String
+    var sizeGoalMb: Double
+    var sizeGoalMinutes: Double
+    var sizeLimitPercent: Double
+    var largestPercent: Double
+    var tallestPicture: Int
+    var grain: Int
+    var measurement: String
+    var appearanceTarget: Double
+    var appearanceMinimum: Double
+    var detailTarget: Double
+    var detailMinimum: Double
+    var sampleMethod: String
+    let revision: String
+}
+
+struct CompressionSettingsSaveResult: Decodable, Sendable {
+    let ok: Bool
+    let code: String?
+    let settings: CompressionSettingsFacts?
+}
+
+struct CompressionSettingsDraft: Equatable {
+    var saveBody: CompressionSettingsSave
+
+    init(_ facts: CompressionSettingsFacts) {
+        saveBody = CompressionSettingsSave(
+            aim: facts.aim,
+            sizeGoalMb: facts.sizeGoalMb,
+            sizeGoalMinutes: facts.sizeGoalMinutes,
+            sizeLimitPercent: facts.sizeLimitPercent,
+            largestPercent: facts.largestPercent,
+            tallestPicture: facts.tallestPicture,
+            grain: facts.grain,
+            measurement: facts.measurement,
+            appearanceTarget: facts.appearanceTarget,
+            appearanceMinimum: facts.appearanceMinimum,
+            detailTarget: facts.detailTarget,
+            detailMinimum: facts.detailMinimum,
+            sampleMethod: facts.sampleMethod,
+            revision: facts.revision
+        )
+    }
+}
+
 extension JSONEncoder {
     static let mediaforce: JSONEncoder = {
         let encoder = JSONEncoder()

@@ -8,6 +8,8 @@ struct SettingsWindow: View {
         TabView {
             LibrarySettingsTab(client: client)
                 .tabItem { Label(Words.librariesTab, systemImage: "books.vertical") }
+            CompressionSettingsTab(client: client)
+                .tabItem { Label(Words.compressionTab, systemImage: "arrow.down.right.and.arrow.up.left") }
             ComputerSettingsTab(client: client)
                 .tabItem { Label(Words.computersTab, systemImage: "desktopcomputer") }
             MetadataSettingsTab(client: client)
@@ -853,6 +855,212 @@ struct MetadataSettingsForm: View {
 
     private var tmdbEnabled: Binding<Bool> {
         Binding(get: { model.draft?.tmdb.enabled ?? false }, set: { model.draft?.tmdb.enabled = $0 })
+    }
+}
+
+@MainActor
+@Observable
+final class CompressionSettingsModel {
+    let client: MediaforceClient
+    private(set) var saved: CompressionSettingsFacts?
+    private(set) var loadFailed = false
+    private(set) var saving = false
+    private(set) var justSaved = false
+    var draft: CompressionSettingsDraft?
+    var notice: ActionNotice?
+
+    init(client: MediaforceClient) {
+        self.client = client
+    }
+
+    var hasChanges: Bool {
+        guard let draft, let saved else { return false }
+        return draft.saveBody != CompressionSettingsDraft(saved).saveBody
+    }
+
+    func load() async {
+        do {
+            let facts = try await client.compressionSettings()
+            show(facts)
+        } catch {
+            loadFailed = true
+        }
+    }
+
+    func revert() {
+        if let saved { show(saved) }
+    }
+
+    func save() async {
+        guard let draft, !saving else { return }
+        saving = true
+        defer { saving = false }
+        do {
+            let result = try await client.saveCompressionSettings(draft.saveBody)
+            if result.ok {
+                if let settings = result.settings { show(settings) } else { await load() }
+                justSaved = true
+            } else if result.code == "settings_changed" {
+                notice = .settingsChangedElsewhere
+                await load()
+            } else {
+                notice = .compressionSettingsNotSaved(result.code)
+            }
+        } catch {
+            notice = .unanswered
+        }
+    }
+
+    func edited() {
+        if hasChanges { justSaved = false }
+    }
+
+    private func show(_ facts: CompressionSettingsFacts) {
+        saved = facts
+        draft = CompressionSettingsDraft(facts)
+        loadFailed = false
+    }
+}
+
+struct CompressionSettingsTab: View {
+    @State private var model: CompressionSettingsModel
+
+    init(client: MediaforceClient) {
+        _model = State(initialValue: CompressionSettingsModel(client: client))
+    }
+
+    var body: some View {
+        Group {
+            if let saved = model.saved, model.draft != nil {
+                CompressionSettingsForm(model: model, facts: saved)
+            } else if model.loadFailed {
+                ServerStatusView(state: .unreachable) {
+                    Task { await model.load() }
+                }
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 240)
+            }
+        }
+        .task { await model.load() }
+        .alert(item: $model.notice) { notice in
+            Alert(title: Text(notice.title), message: Text(notice.message))
+        }
+    }
+}
+
+/// Plain settings first; how picture quality is measured stays under Advanced, as on the website.
+struct CompressionSettingsForm: View {
+    @Bindable var model: CompressionSettingsModel
+    let facts: CompressionSettingsFacts
+    @State private var showsAdvanced = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let draft = Binding($model.draft) {
+                fields(draft.saveBody)
+                    .formStyle(.grouped)
+                    .disabled(model.saving)
+            }
+            HStack {
+                if model.justSaved {
+                    Text(Words.settingsSaved)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(Words.revertSettings) { model.revert() }
+                    .disabled(!model.hasChanges || model.saving)
+                Button(Words.saveSettings) { Task { await model.save() } }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!model.hasChanges || model.saving)
+            }
+            .padding(16)
+        }
+        .onChange(of: model.draft) { model.edited() }
+        .frame(minHeight: 460)
+    }
+
+    private func fields(_ values: Binding<CompressionSettingsSave>) -> some View {
+        Form {
+            Section(Words.aimSection) {
+                Picker(Words.aimPicker, selection: values.aim) {
+                    ForEach(choices(facts.aims, current: values.wrappedValue.aim), id: \.self) { code in
+                        Text(Words.compressionAim(code)).tag(code)
+                    }
+                }
+            }
+            Section(Words.sizeSection) {
+                HStack {
+                    TextField(Words.sizeGoal, value: values.sizeGoalMb, format: .number)
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: 220)
+                    Text(Words.megabytes)
+                    Text(Words.forAnEpisodeOf)
+                    TextField(Words.minutes, value: values.sizeGoalMinutes, format: .number)
+                        .labelsHidden()
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: 60)
+                    Text(Words.minutes)
+                }
+                caption(Words.sizeGoalScaling(facts.sizeGoalMode))
+                numberRow(Words.sizeLimit, value: values.sizeLimitPercent, unit: Words.percent)
+                caption(Words.sizeLimitHelp)
+                numberRow(Words.largestSize, value: values.largestPercent, unit: Words.percentOfOriginal)
+                caption(Words.largestSizeHelp)
+            }
+            Section(Words.pictureSection) {
+                HStack {
+                    TextField(Words.tallestPicture, value: values.tallestPicture, format: .number)
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: 260)
+                    Text(Words.pixelsTall)
+                }
+                caption("\(Words.tallestPictureSummary(values.wrappedValue.tallestPicture)). \(Words.tallestPictureHelp)")
+                TextField(Words.grain, value: values.grain, format: .number)
+                    .multilineTextAlignment(.trailing)
+                    .frame(maxWidth: 260)
+                caption(Words.grainHelp)
+            }
+            Section {
+                DisclosureGroup(Words.advancedCompression, isExpanded: $showsAdvanced) {
+                    Picker(Words.measurementPicker, selection: values.measurement) {
+                        ForEach(choices(facts.measurements, current: values.wrappedValue.measurement), id: \.self) { code in
+                            Text(Words.qualityMeasurement(code)).tag(code)
+                        }
+                    }
+                    numberRow(Words.appearanceTarget, value: values.appearanceTarget, unit: nil)
+                    numberRow(Words.appearanceMinimum, value: values.appearanceMinimum, unit: nil)
+                    numberRow(Words.detailTarget, value: values.detailTarget, unit: nil)
+                    numberRow(Words.detailMinimum, value: values.detailMinimum, unit: nil)
+                    caption(Words.scoresHelp)
+                    Picker(Words.samplePicker, selection: values.sampleMethod) {
+                        ForEach(choices(facts.sampleMethods, current: values.wrappedValue.sampleMethod), id: \.self) { code in
+                            Text(Words.sampleMethod(code)).tag(code)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func numberRow(_ title: String, value: Binding<Double>, unit: String?) -> some View {
+        HStack {
+            TextField(title, value: value, format: .number)
+                .multilineTextAlignment(.trailing)
+                .frame(maxWidth: 260)
+            if let unit { Text(unit) }
+        }
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    /// A saved choice the server no longer offers stays shown, so the picker never appears empty.
+    private func choices(_ offered: [String], current: String) -> [String] {
+        offered.contains(current) ? offered : offered + [current]
     }
 }
 

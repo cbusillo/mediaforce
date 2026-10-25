@@ -702,3 +702,97 @@ extension ActionNotice {
         ActionNotice(title: "Settings not saved", message: Words.metadataSaveRefused(code))
     }
 }
+
+extension Words {
+    static let compressionTab = "Compression"
+    static let aimSection = "What to aim for"
+    static let aimPicker = "Mediaforce aims for"
+    static let sizeSection = "Size"
+    static let sizeGoal = "Size goal"
+    static let megabytes = "MB"
+    static let forAnEpisodeOf = "for an episode of"
+    static let minutes = "minutes"
+    static let sizeLimit = "Allowed over the goal"
+    static let sizeLimitHelp = "A finished file may be this much over its size goal. Samples are held to the same limit. Smaller is never a failure by itself."
+    static let largestSize = "Largest allowed size"
+    static let percentOfOriginal = "% of the original"
+    static let largestSizeHelp = "A compressed file bigger than this share of its original is not used."
+    static let percent = "%"
+    static let pictureSection = "Picture"
+    static let tallestPicture = "Tallest picture"
+    static let pixelsTall = "pixels tall"
+    static let tallestPictureHelp = "Taller pictures are scaled down to this height. 0 keeps each picture as tall as the original."
+    static let grain = "Film grain"
+    static let grainHelp = "How much film grain Mediaforce adds back after compressing, from 0 to 50. 0 adds none."
+    static let advancedCompression = "Advanced: how picture quality is measured"
+    static let measurementPicker = "Measure picture quality by"
+    static let appearanceTarget = "Picture appearance score to aim for"
+    static let appearanceMinimum = "Lowest picture appearance score allowed"
+    static let detailTarget = "Picture detail score to aim for"
+    static let detailMinimum = "Lowest picture detail score allowed"
+    static let scoresHelp = "Scores run from 1 to 100; higher means closer to the original."
+    static let samplePicker = "How samples are made"
+
+    static func compressionAim(_ code: String) -> String {
+        switch code {
+        case "size_first_review": "The size goal"
+        case "quality_first_sample": "The picture quality"
+        default: "Unknown"
+        }
+    }
+
+    static func qualityMeasurement(_ code: String) -> String {
+        switch code {
+        case "auto": "Automatic"
+        case "vmaf": "Picture appearance"
+        case "xpsnr": "Picture detail"
+        default: "Unknown"
+        }
+    }
+
+    static func sampleMethod(_ code: String) -> String {
+        switch code {
+        case "ab_av1_fast_sample": "Fast sample (the only way for now)"
+        default: "Unknown"
+        }
+    }
+
+    static func sizeGoalScaling(_ code: String) -> String {
+        switch code {
+        case "normalized": "Scaled to each episode's length, so a longer episode gets more room."
+        default: "Unknown"
+        }
+    }
+
+    static func tallestPictureSummary(_ height: Int) -> String {
+        height > 0 ? "Up to \(height.formatted()) pixels tall" : "As tall as the original"
+    }
+
+    static func compressionSaveRefused(_ code: String?) -> String {
+        switch code {
+        case "size_goal_invalid": "The size goal must be between 1 and 100,000 MB."
+        case "size_goal_minutes_invalid": "The episode length for the size goal must be between 1 and 1,440 minutes."
+        case "size_limit_invalid": "How far over the goal a file may be must be between 0.1% and 100%."
+        case "sample_size_limit_invalid": "The saved size limit for samples isn't between 0.1% and 100%. Change how far over the goal a file may be, then save."
+        case "largest_size_invalid": "The largest allowed size must be between 1% and 100% of the original."
+        case "tallest_picture_invalid": "The tallest picture must be a whole number of pixels from 0 to 4,320."
+        case "grain_invalid": "Film grain must be a whole number from 0 to 50."
+        case "appearance_target_invalid": "The picture appearance score to aim for must be between 1 and 100."
+        case "appearance_minimum_invalid": "The lowest picture appearance score must be between 1 and 100."
+        case "detail_target_invalid": "The picture detail score to aim for must be between 1 and 100."
+        case "detail_minimum_invalid": "The lowest picture detail score must be between 1 and 100."
+        case "appearance_minimum_above_target": "The lowest picture appearance score can't be above the score to aim for."
+        case "detail_minimum_above_target": "The lowest picture detail score can't be above the score to aim for."
+        case "unknown_aim": "Choose what Mediaforce aims for."
+        case "unknown_measurement": "Choose how picture quality is measured."
+        case "unknown_sample_method": "Choose how samples are made."
+        default: "Mediaforce couldn't save these settings. Check the compression settings."
+        }
+    }
+}
+
+extension ActionNotice {
+    static func compressionSettingsNotSaved(_ code: String?) -> ActionNotice {
+        ActionNotice(title: "Settings not saved", message: Words.compressionSaveRefused(code))
+    }
+}

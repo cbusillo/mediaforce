@@ -59,8 +59,23 @@ DEFAULT_VIDEO_DEFAULTS = {
     "default_grain": "8",
     "max_encoded_percent": "80",
 }
-SUPPORTED_DECISION_MODELS = {"size_first_review", "quality_first_sample"}
-SUPPORTED_QUALITY_ENGINES = {"ab_av1_fast_sample"}
+SUPPORTED_DECISION_MODELS = ("size_first_review", "quality_first_sample")
+SUPPORTED_QUALITY_ENGINES = ("ab_av1_fast_sample",)
+SUPPORTED_QUALITY_METRICS = ("auto", "vmaf", "xpsnr")
+SUPPORTED_SIZE_GOAL_MODES = ("normalized",)
+VIDEO_DEFAULT_REFUSAL_CODES = {
+    "target_vmaf": "appearance_target_invalid",
+    "min_target_vmaf": "appearance_minimum_invalid",
+    "target_xpsnr": "detail_target_invalid",
+    "min_target_xpsnr": "detail_minimum_invalid",
+    "target_size_mb": "size_goal_invalid",
+    "target_runtime_minutes": "size_goal_minutes_invalid",
+    "sample_projection_tolerance_percent": "sample_size_limit_invalid",
+    "final_output_tolerance_percent": "size_limit_invalid",
+    "max_height": "tallest_picture_invalid",
+    "default_grain": "grain_invalid",
+    "max_encoded_percent": "largest_size_invalid",
+}
 HOST_CAPABILITY_OPTIONS = (
     {"key": "encode_queue", "label": "Queue encodes", "help": "Allow this host to run queued folder encodes."},
     {
@@ -525,7 +540,7 @@ def _settings_number_text(value: JSONValue, default: str) -> str:
     return f"{parsed:g}"
 
 
-def _settings_choice_text(value: JSONValue, *, default: str, supported: set[str]) -> str:
+def _settings_choice_text(value: JSONValue, *, default: str, supported: Collection[str]) -> str:
     text = str(value or "").strip().lower()
     return text if text in supported else default
 
@@ -867,6 +882,7 @@ SETTINGS_SECTION_KEYS: dict[str, tuple[tuple[str, ...], ...]] = {
         ("heavy_queue",),
     ),
     "metadata": (("metadata",),),
+    "compression": (("video",),),
 }
 
 
@@ -963,6 +979,80 @@ def build_runtime_metadata_settings(
     )
     normalized["plex"]["library_roots"] = dict(library_roots)
     return {"metadata": normalized}
+
+
+COMPRESSION_FIELDS = {
+    "aim": "decision_model",
+    "size_goal_mb": "target_size_mb",
+    "size_goal_minutes": "target_runtime_minutes",
+    "size_limit_percent": "final_output_tolerance_percent",
+    "largest_percent": "max_encoded_percent",
+    "tallest_picture": "max_height",
+    "grain": "default_grain",
+    "measurement": "quality_metric",
+    "appearance_target": "target_vmaf",
+    "appearance_minimum": "min_target_vmaf",
+    "detail_target": "target_xpsnr",
+    "detail_minimum": "min_target_xpsnr",
+    "sample_method": "quality_engine",
+}
+COMPRESSION_CHOICES = {
+    "aim": ("unknown_aim", SUPPORTED_DECISION_MODELS),
+    "measurement": ("unknown_measurement", SUPPORTED_QUALITY_METRICS),
+    "sample_method": ("unknown_sample_method", SUPPORTED_QUALITY_ENGINES),
+}
+COMPRESSION_WHOLE_FIELDS = {"tallest_picture", "grain"}
+
+
+def compression_settings_facts(*, video_defaults: dict[str, str], revision: str) -> dict[str, Any]:
+    """The Mac app's Compression tab: the compression defaults the website edits, under the tab's own names.
+
+    `video_defaults` is `settings_video_defaults_for_config`, the values the website's form starts from.
+    """
+    facts: dict[str, Any] = {}
+    for name, key in COMPRESSION_FIELDS.items():
+        value = video_defaults[key]
+        if name in COMPRESSION_CHOICES:
+            facts[name] = value
+        elif name in COMPRESSION_WHOLE_FIELDS:
+            facts[name] = int(float(value))
+        else:
+            facts[name] = float(value)
+    return {
+        **facts,
+        "size_goal_mode": video_defaults["size_goal_mode"],
+        "aims": list(COMPRESSION_CHOICES["aim"][1]),
+        "measurements": list(COMPRESSION_CHOICES["measurement"][1]),
+        "sample_methods": list(COMPRESSION_CHOICES["sample_method"][1]),
+        "revision": revision,
+    }
+
+
+def build_runtime_video_settings(*, edits: dict[str, Any], saved: dict[str, str]) -> dict[str, Any]:
+    """Build the `video` runtime settings from the Compression tab's fields, validated as the website save is.
+
+    `saved` is `settings_video_defaults_for_config`, so defaults the tab does not show carry over as the website
+    form would send them. As on the website, changing the size limit holds samples to the same new limit; an
+    unchanged limit leaves the saved sample limit alone. Every field is required, and a choice the website does
+    not offer is refused instead of quietly replaced.
+    """
+    video_defaults: dict[str, Any] = dict(saved)
+    for name, key in COMPRESSION_FIELDS.items():
+        if name not in edits or isinstance(edits[name], bool):
+            raise SettingsValidationError("Every compression setting is required.")
+        value = edits[name]
+        if name in COMPRESSION_CHOICES:
+            code, choices = COMPRESSION_CHOICES[name]
+            if value not in choices:
+                raise SettingsValidationError("Choose one of the offered options.", code)
+        video_defaults[key] = value
+    try:
+        size_limit_changed = float(str(edits["size_limit_percent"])) != float(saved["final_output_tolerance_percent"])
+    except (TypeError, ValueError):
+        size_limit_changed = True
+    if size_limit_changed:
+        video_defaults["sample_projection_tolerance_percent"] = edits["size_limit_percent"]
+    return {"video": normalize_video_defaults(video_defaults)}
 
 
 def library_key_references(raw: dict[str, Any]) -> set[str]:
@@ -1525,7 +1615,7 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
     if isinstance(raw, dict):
         payload.update(raw)
     metric = str(payload.get("quality_metric") or DEFAULT_VIDEO_DEFAULTS["quality_metric"]).strip().lower()
-    if metric not in {"auto", "vmaf", "xpsnr"}:
+    if metric not in SUPPORTED_QUALITY_METRICS:
         metric = DEFAULT_VIDEO_DEFAULTS["quality_metric"]
     decision_model = str(payload.get("decision_model") or DEFAULT_VIDEO_DEFAULTS["decision_model"]).strip().lower()
     if decision_model not in SUPPORTED_DECISION_MODELS:
@@ -1535,30 +1625,36 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
         quality_engine = DEFAULT_VIDEO_DEFAULTS["quality_engine"]
 
     def _float_field(key: str, *, minimum: float, maximum: float) -> float:
+        code = VIDEO_DEFAULT_REFUSAL_CODES[key]
         try:
             value = float(str(payload.get(key, DEFAULT_VIDEO_DEFAULTS[key])))
         except (TypeError, ValueError) as exc:
-            raise SettingsValidationError(f"Video default {key} must be a number.") from exc
-        if value < minimum or value > maximum:
-            raise SettingsValidationError(f"Video default {key} must be between {minimum:g} and {maximum:g}.")
+            raise SettingsValidationError(f"Video default {key} must be a number.", code) from exc
+        if not math.isfinite(value) or value < minimum or value > maximum:
+            raise SettingsValidationError(f"Video default {key} must be between {minimum:g} and {maximum:g}.", code)
         return value
 
     def _int_field(key: str, *, minimum: int, maximum: int) -> int:
         value = _float_field(key, minimum=minimum, maximum=maximum)
         if not value.is_integer():
-            raise SettingsValidationError(f"Video default {key} must be a whole number.")
+            raise SettingsValidationError(f"Video default {key} must be a whole number.", VIDEO_DEFAULT_REFUSAL_CODES[key])
         return int(value)
 
     target_vmaf = _float_field("target_vmaf", minimum=1, maximum=100)
     min_target_vmaf = _float_field("min_target_vmaf", minimum=1, maximum=100)
     if min_target_vmaf > target_vmaf:
-        raise SettingsValidationError("Video default min_target_vmaf must be less than or equal to target_vmaf.")
+        raise SettingsValidationError(
+            "Video default min_target_vmaf must be less than or equal to target_vmaf.", "appearance_minimum_above_target"
+        )
     target_xpsnr = _float_field("target_xpsnr", minimum=1, maximum=100)
     min_target_xpsnr = _float_field("min_target_xpsnr", minimum=1, maximum=100)
     if min_target_xpsnr > target_xpsnr:
-        raise SettingsValidationError("Video default min_target_xpsnr must be less than or equal to target_xpsnr.")
+        raise SettingsValidationError(
+            "Video default min_target_xpsnr must be less than or equal to target_xpsnr.", "detail_minimum_above_target"
+        )
     target_size_mb = _float_field("target_size_mb", minimum=1, maximum=100_000)
     max_height = _int_field("max_height", minimum=0, maximum=4320)
+    final_output_tolerance_percent = _float_field("final_output_tolerance_percent", minimum=0.1, maximum=100)
 
     return {
         "quality_metric": metric,
@@ -1575,9 +1671,7 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
         "sample_projection_tolerance_percent": _float_field(
             "sample_projection_tolerance_percent", minimum=0.1, maximum=100
         ),
-        "final_output_tolerance_percent": _float_field(
-            "final_output_tolerance_percent", minimum=0.1, maximum=100
-        ),
+        "final_output_tolerance_percent": final_output_tolerance_percent,
         "decision_model": decision_model,
         "quality_engine": quality_engine,
         "max_height": max_height,

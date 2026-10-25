@@ -208,6 +208,24 @@ over, and every stored Plex path carries over unchanged, including one kept for
 a removed library; each library's Plex path is a library setting, edited with
 the library on the web.
 
+The Compression tab is the web page's default episode size: what Mediaforce
+aims for, the size goal for an episode of a given length, how far over the
+goal a file may be, the largest allowed size as a share of the original, the
+tallest picture and film grain, with how picture quality is measured (the
+picture appearance and picture detail scores) and how samples are made under
+Advanced. `GET /api/app/settings/compression` gives `aim`, `size_goal_mb`,
+`size_goal_minutes`, `size_limit_percent`, `largest_percent`,
+`tallest_picture`, `grain`, `measurement`, `appearance_target`,
+`appearance_minimum`, `detail_target`, `detail_minimum`, `sample_method`, the
+read-only `size_goal_mode`, the choices `aims`, `measurements` and
+`sample_methods`, and `revision`, a hash of the stored `video` section.
+`POST /api/app/settings/compression` takes every one of those editable fields
+and `revision`, works as the other tabs do, and saves only the runtime
+settings `video` key through the web save's validation; a choice the web does
+not offer is refused rather than replaced. As on the web, changing the size
+limit holds samples to the same limit; video defaults the tab does not show
+carry over.
+
 ## Notifications and the Dock badge
 
 The app reads these facts every 30 seconds while it runs, even with its window
