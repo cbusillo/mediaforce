@@ -537,18 +537,23 @@ class ExternalMetadataTests(unittest.TestCase):
             show = cached_poster(connection, config.paths.poster_dir, "tv/Show")
             movie = cached_poster(connection, config.paths.poster_dir, "movies/Heat (1995)")
             single_file_movie = cached_poster(connection, config.paths.poster_dir, "movies/Up (2009).mkv")
+            extras_only_movie = cached_poster(connection, config.paths.poster_dir, "movies/Rebirth (2025)")
+            unmatched_feature = cached_poster(connection, config.paths.poster_dir, "movies/Ronin (1998)")
             missing = cached_poster(connection, config.paths.poster_dir, "tv/Unknown Show")
 
         self.assertEqual(sorted(url for url, _ in requests), [
             "http://plex.local:32400/library/metadata/11/thumb/1700000000",
             "http://plex.local:32400/library/metadata/7/thumb/1700000001",
             "http://plex.local:32400/library/metadata/8/thumb/1700000002",
+            "http://plex.local:32400/library/metadata/9/thumb/1700000003",
         ])
         # The token goes in a header, never in the poster's URL.
         self.assertTrue(all(headers.get("X-Plex-Token") == "plex-secret" and "plex-secret" not in url for url, headers in requests))
-        self.assertEqual((first.posters.refreshed, second.posters.cached), (3, 3))
+        self.assertEqual((first.posters.refreshed, second.posters.cached), (4, 4))
         assert show is not None and movie is not None and config.paths.poster_dir is not None
         self.assertIsNotNone(single_file_movie)
+        self.assertIsNotNone(extras_only_movie)
+        self.assertIsNone(unmatched_feature)
         self.assertEqual(show.read_bytes(), b"poster-bytes")
         self.assertTrue(show.is_relative_to(config.paths.poster_dir))
         self.assertNotEqual(show, movie)
@@ -590,7 +595,7 @@ class ExternalMetadataTests(unittest.TestCase):
             poster = cached_poster(connection, config.paths.poster_dir, "tv/Show")
 
         self.assertEqual(stats.tmdb.status, "not_configured")
-        self.assertEqual(stats.posters.refreshed, 3)
+        self.assertEqual(stats.posters.refreshed, 4)
         self.assertIsNotNone(poster)
 
     def test_failed_poster_download_keeps_metadata_and_retries_next_sync(self) -> None:
@@ -605,11 +610,11 @@ class ExternalMetadataTests(unittest.TestCase):
             status = connection.execute(select(series_metadata.c.tmdb_status)).scalar_one()
             retried = self._sync_show(connection, config, minutes=30, fetch_image_fn=self._poster_fetch(requests))
 
-        self.assertEqual((failed.posters.status, failed.posters.failed), ("completed_with_warnings", 3))
+        self.assertEqual((failed.posters.status, failed.posters.failed), ("completed_with_warnings", 4))
         self.assertEqual((failed.status, retried.status), ("completed_with_warnings", "completed"))
         self.assertEqual(status, "Returning Series")
-        self.assertEqual(retried.posters.refreshed, 3)
-        self.assertEqual(len(requests), 3)
+        self.assertEqual(retried.posters.refreshed, 4)
+        self.assertEqual(len(requests), 4)
 
     def test_unwritable_poster_cache_is_a_warning_not_a_failed_sync(self) -> None:
         config = self._config(keep_posters=True)
@@ -620,7 +625,7 @@ class ExternalMetadataTests(unittest.TestCase):
             stats = self._sync_show(connection, config, minutes=0, fetch_image_fn=self._poster_fetch([]))
             status = connection.execute(select(series_metadata.c.tmdb_status)).scalar_one()
 
-        self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 3))
+        self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 4))
         self.assertEqual(status, "Returning Series")
 
     @unittest.skipIf(os.geteuid() == 0, "root can search any folder")
@@ -637,7 +642,7 @@ class ExternalMetadataTests(unittest.TestCase):
             finally:
                 poster_dir.chmod(0o755)
 
-        self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 3))
+        self.assertEqual((stats.status, stats.posters.failed), ("completed_with_warnings", 4))
         self.assertIsNone(poster)
 
     def _sync_show(
@@ -651,7 +656,12 @@ class ExternalMetadataTests(unittest.TestCase):
             tmdb: bool = True,
     ) -> MetadataSyncStats:
         if minutes == 0:
-            for rel_path in ("tv/Show/Season 1/Episode 01.mkv", "movies/Heat (1995)/Heat.mkv", "movies/Up (2009).mkv"):
+            for rel_path in (
+                "tv/Show/Season 1/Episode 01.mkv", "movies/Heat (1995)/Heat.mkv", "movies/Up (2009).mkv",
+                "movies/Heat (1995)/Featurettes/Making Of.mkv", "movies/Rebirth (2025)/Rebirth 2025 Extras.mkv",
+                # A feature Plex hasn't matched, beside an extra it has: the title gets no poster, not the extra's.
+                "movies/Ronin (1998)/Ronin.mkv", "movies/Ronin (1998)/Featurettes/Car Chase.mkv",
+            ):
                 self._insert_item(connection, self.root / "source" / rel_path, rel_path)
         secrets = {"MEDIAFORCE_PLEX_TOKEN": "plex-secret"} | ({"MEDIAFORCE_TMDB_TOKEN": "tmdb-secret"} if tmdb else {})
         with patch.dict(os.environ, secrets, clear=False):
@@ -767,7 +777,7 @@ class ExternalMetadataTests(unittest.TestCase):
             if metadata_type == "1":
                 return {
                     "MediaContainer": {
-                        "totalSize": 2,
+                        "totalSize": 5,
                         "Metadata": [{
                             "ratingKey": "7",
                             "thumb": "/library/metadata/7/thumb/1700000001",
@@ -776,6 +786,20 @@ class ExternalMetadataTests(unittest.TestCase):
                             "ratingKey": "8",
                             "thumb": "/library/metadata/8/thumb/1700000002",
                             "Media": [{"Part": [{"id": "part-8", "file": "/plex/movies/Up (2009).mkv"}]}],
+                        }, {
+                            # An extra Plex matched on its own, beside Heat's feature: Heat keeps its feature's poster.
+                            "ratingKey": "10",
+                            "thumb": "/library/metadata/10/thumb/1700000004",
+                            "Media": [{"Part": [{"id": "part-10", "file": "/plex/movies/Heat (1995)/Featurettes/Making Of.mkv"}]}],
+                        }, {
+                            # A title whose library copy is only an extra takes the extra's poster.
+                            "ratingKey": "9",
+                            "thumb": "/library/metadata/9/thumb/1700000003",
+                            "Media": [{"Part": [{"id": "part-9", "file": "/plex/movies/Rebirth (2025)/Rebirth 2025 Extras.mkv"}]}],
+                        }, {
+                            "ratingKey": "12",
+                            "thumb": "/library/metadata/12/thumb/1700000005",
+                            "Media": [{"Part": [{"id": "part-12", "file": "/plex/movies/Ronin (1998)/Featurettes/Car Chase.mkv"}]}],
                         }],
                     }
                 }, {}

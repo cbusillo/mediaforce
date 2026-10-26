@@ -316,7 +316,10 @@ def _sync_plex(
             series_metadata.delete().where(series_metadata.c.series_prefix.in_(series_prefix_batch))
         )
 
-    _record_posters(connection, config, shows, series_claims, claims.values(), observed_at_text=observed_at_text)
+    _record_posters(
+        connection, config, shows, series_claims, claims.values(),
+        library_rel_paths=[str(row["rel_path"] or "") for row in rows], observed_at_text=observed_at_text,
+    )
     stats.status = "completed" if not stats.conflicts else "completed_with_warnings"
     return refreshed_series
 
@@ -328,24 +331,39 @@ def _record_posters(
         series_claims: Mapping[str, set[str]],
         claims: Any,
         *,
+        library_rel_paths: list[str],
         observed_at_text: str,
 ) -> None:
     """Each show's and movie's Plex poster path, replacing what the last full Plex sync saw.
 
-    A show takes its own poster; a movie takes its item's. A title folder that Plex matched to more than one show
-    or movie gets none, as its poster would be a guess.
+    A show takes its own poster; a movie takes its feature's. A movie whose library copy has no feature at all, only
+    extras, takes their poster instead; a feature Plex didn't match leaves its title without one rather than an
+    extra's. A title that Plex matched to more than one show or movie gets none, as its poster would be a guess.
     """
     thumbs: dict[str, set[str]] = {}
     for series_prefix, rating_keys in series_claims.items():
         show = shows.get(next(iter(rating_keys))) if len(rating_keys) == 1 else None
         if show is not None and show.thumb:
             thumbs.setdefault(series_prefix, set()).add(show.thumb)
+    feature_thumbs: dict[str, set[str]] = {}
+    extra_thumbs: dict[str, set[str]] = {}
     for row, item in claims:
-        movie_prefix = None if item.show_rating_key else _movie_prefix(
+        movie = None if item.show_rating_key else _movie_poster_key(
             str(row["rel_path"] or ""), library_types=config.library_type_map,
         )
-        if movie_prefix and item.thumb:
-            thumbs.setdefault(movie_prefix, set()).add(item.thumb)
+        if movie is not None and item.thumb:
+            prefix, is_feature = movie
+            (feature_thumbs if is_feature else extra_thumbs).setdefault(prefix, set()).add(item.thumb)
+    titles_with_a_feature: set[str] = set()
+    for rel_path in library_rel_paths:
+        movie = _movie_poster_key(rel_path, library_types=config.library_type_map)
+        if movie is not None and movie[1]:
+            titles_with_a_feature.add(movie[0])
+    for prefix, found in feature_thumbs.items():
+        thumbs[prefix] = found
+    for prefix, found in extra_thumbs.items():
+        if prefix not in titles_with_a_feature:
+            thumbs[prefix] = found
     connection.execute(title_posters.delete())
     rows = [
         {"title_prefix": prefix, "plex_thumb": next(iter(found)), "observed_at": observed_at_text}
@@ -569,21 +587,20 @@ def _series_prefix(
     return "/".join(parts[:2])
 
 
-def _movie_prefix(
+def _movie_poster_key(
         rel_path: str,
         *,
         library_types: Mapping[str, str] | None = None,
-) -> str | None:
-    """A movie's title prefix as the Mac app's movie list names it: its title folder ("movies/Title (Year)"), or the
-    file itself for a movie stored straight under the library root. Only the feature gives the title its poster, so
-    an extra Plex matched on its own can't make the poster a guess."""
+) -> tuple[str, bool] | None:
+    """A movie file's title prefix as the Mac app's movie list names it, its title folder ("movies/Title (Year)") or
+    the file itself for a movie stored straight under the library root, and whether the file is the feature."""
     parts = Path(rel_path).parts
     root = parts[0] if parts else ""
     configured_type = str((library_types or {}).get(root) or "").strip().lower()
     if (configured_type or root.lower()) not in {"movie", "movies"}:
         return None
     membership = classify_movie_path(rel_path, root=root)
-    return membership.title_prefix if membership is not None and membership.role == "feature" else None
+    return (membership.title_prefix, membership.role == "feature") if membership is not None else None
 
 
 def _normalized_local_path(value: str | None) -> str:
