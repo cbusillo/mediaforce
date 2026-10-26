@@ -28,7 +28,8 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.library.candidate_selection import season_identity
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
-from mediaforce.library.content_kinds import evidence_stamp, season_evidence, season_grouping, season_stamp
+from mediaforce.library.content_kinds import evidence_stamp, season_evidence, season_grouping, season_kind_report, \
+    season_stamp
 from mediaforce.library.source_evidence import SourceEvidenceContext
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
     effective_production_approval, holds_approval, production_approval_contract
@@ -274,3 +275,69 @@ def next_kind_season(
             continue
         return chosen
     return None
+
+
+KINDS_IN_ORDER = ("darker_live_action", "bright_live_action", "cartoon", "4k")
+NO_FOLDER_APPROVAL_CODE = "no_folder_approval"
+
+
+def _approval_facts(calibration: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not holds_approval(calibration):
+        return None
+    payload = object_dict(calibration)
+    contract = object_dict(production_approval_contract(payload))
+    size_goal = object_dict(object_dict(contract.get("operator_intent")).get("size_goal"))
+    return {"from_prefix": payload.get("from_prefix"), "approved_at": payload.get("kind_approved_at"),
+            "size_goal_mode": size_goal.get("mode"), "size_goal_mb": size_goal.get("value_mb")}
+
+
+def kinds_payload(
+        connection: DBClient,
+        config: MediaforceConfig,
+        *,
+        load_calibration_state: LoadCalibrationState,
+) -> dict[str, Any]:
+    """Facts for the page where each kind of content's approval is decided; the app words every one."""
+
+    def folder_approved(prefix: str) -> bool:
+        approval = effective_production_approval(config, prefix, load_calibration_state)
+        return approval is not None and approval.kind is None and approval.current
+
+    report = season_kind_report(connection, library_types=config.library_type_map, folder_approved=folder_approved)
+    shows: dict[str, dict[str, dict[str, int]]] = {kind: {} for kind in KINDS_IN_ORDER}
+    for row in report["seasons"]:
+        if row["kind"] not in shows:
+            continue
+        show = shows[row["kind"]].setdefault("/".join(str(row["season"]).split("/")[:2]), {"seasons": 0, "waiting_bytes": 0})
+        show["seasons"] += 1
+        show["waiting_bytes"] += int(row["waiting_bytes"])
+    totals = report["totals"]
+    return {
+        "kinds": [{
+            "kind": kind,
+            "one_time": kind not in APPROVABLE_KINDS,
+            "seasons": int(object_dict(totals.get(kind)).get("seasons") or 0),
+            "waiting_bytes": int(object_dict(totals.get(kind)).get("waiting_bytes") or 0),
+            "shows": [{"prefix": prefix, **values} for prefix, values in
+                      sorted(shows[kind].items(), key=lambda entry: (-entry[1]["waiting_bytes"], entry[0]))],
+            "approval": _approval_facts(load_kind_approval(config, kind)) if kind in APPROVABLE_KINDS else None,
+        } for kind in KINDS_IN_ORDER],
+        "mixed_seasons": int(object_dict(totals.get("mixed")).get("seasons") or 0),
+        "unmeasured_seasons": int(object_dict(totals.get("unmeasured")).get("seasons") or 0),
+        "folder_approved_seasons": int(object_dict(totals.get("folder_approved")).get("seasons") or 0),
+    }
+
+
+def approve_kind_action(
+        config: MediaforceConfig,
+        kind: str,
+        from_prefix: str,
+        *,
+        load_calibration_state: LoadCalibrationState,
+        approved_at: str,
+) -> dict[str, Any]:
+    """Use the approval governing a folder for every season of this kind; only a folder's own approval extends."""
+    approval = effective_production_approval(config, from_prefix, load_calibration_state)
+    if approval is None or approval.kind is not None:
+        return {"ok": False, "code": NO_FOLDER_APPROVAL_CODE}
+    return approve_kind(config, kind, approval.prefix, approval.calibration, approved_at=approved_at)
