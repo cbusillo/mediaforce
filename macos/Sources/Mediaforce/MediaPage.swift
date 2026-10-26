@@ -4,6 +4,9 @@ import SwiftUI
 /// search, shown as a table or as poster shelves. Each row opens that show's, movie's or folder's page.
 struct MediaPage: View {
     let model: MainWindowModel
+    // Only these seasons, one row each, when the page opens from the seasons no kind of content covers.
+    var onlySeasons: [KindsFacts.LeftOutSeason]?
+    var showEverything: () -> Void = {}
     let openItem: (String) -> Void
     @AppStorage("mediaPageView") private var view = MediaView.table
     @State private var search = ""
@@ -11,7 +14,9 @@ struct MediaPage: View {
     @State private var stateGroup: LibraryStateGroup?
 
     var body: some View {
-        RefreshingPage(title: Words.media, load: { try await MediaRow.load(model.client) }) { (rows: [MediaRow]) in
+        RefreshingPage(title: onlySeasons == nil ? Words.media : Words.seasonsWithoutKindTitle,
+                       load: { try await MediaRow.load(model.client) }) { (loaded: [MediaRow]) in
+            let rows = onlySeasons.map { MediaRow.seasons($0, shows: loaded) } ?? loaded
             let visible = visibleRows(rows)
             HStack(spacing: 12) {
                 Picker(Words.kindLabel, selection: $kind) {
@@ -33,10 +38,15 @@ struct MediaPage: View {
                 .labelsHidden()
                 .fixedSize()
             }
-            Text(Words.shown(visible.count, of: rows.count, "item"))
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+            HStack(spacing: 10) {
+                Text(Words.shown(visible.count, of: rows.count, onlySeasons == nil ? "item" : "season"))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                if onlySeasons != nil {
+                    Button(Words.showEverything, action: showEverything).buttonStyle(.link).font(.callout)
+                }
+            }
             if rows.contains(where: \.listCutShort) && (kind == .everything || kind == .other) {
                 Text(Words.otherMediaTruncated)
                     .font(.callout)
@@ -81,6 +91,19 @@ struct MediaRow: Identifiable, Sendable {
 
     var savedBytes: Int64 { (saved ?? 0) > 0 ? saved ?? 0 : 0 }
     var stateRank: Int { state.rawValue }
+
+    /// One row per season, named with its show, in the show's state, biggest first.
+    static func seasons(_ seasons: [KindsFacts.LeftOutSeason], shows: [MediaRow]) -> [MediaRow] {
+        let byShow = Dictionary(shows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return seasons.map { season in
+            let parts = season.season.split(separator: "/").map(String.init)
+            let show = byShow[parts.prefix(2).joined(separator: "/")]
+            return MediaRow(id: season.season, name: "\(show?.name ?? parts.dropLast().last ?? ""), \(parts.last ?? "")",
+                            kind: .tv, detail: Words.leftOutReason(season.kind), bytes: season.waitingBytes, saved: nil,
+                            state: show?.state ?? .readyToCompress)
+        }
+        .sorted { $0.bytes > $1.bytes }
+    }
 
     @MainActor
     static func load(_ client: MediaforceClient) async throws -> [MediaRow] {

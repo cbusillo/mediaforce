@@ -6,6 +6,10 @@ final class MainWindowModel {
     static let refreshInterval: Duration = .seconds(30)
 
     private(set) var facts: MainWindowFacts?
+    // Each kind of content and how it is decided; nil until Mediaforce first answers.
+    private(set) var kinds: KindsFacts?
+    // The player the full-screen window shows, while it is open.
+    var theater: Theater?
     private(set) var connection: ServerState = .checking
     private(set) var lastHeard: Date?
     // What went wrong at the last failed check, for the window's Details; nil once Mediaforce answers again.
@@ -38,6 +42,7 @@ final class MainWindowModel {
             lastHeard = .now
             problem = nil
             onFacts?(facts)
+            await refreshKinds()
         } catch is DecodingError {
             connection = .failing
             problem = ServerProblem(kind: .unreadableReply, at: .now)
@@ -48,6 +53,11 @@ final class MainWindowModel {
             connection = .unreachable
             problem = ServerProblem(kind: .noAnswer, at: .now)
         }
+    }
+
+    /// Reads the kinds again; a failed read keeps what was last heard, since the window's facts say if Mediaforce is down.
+    func refreshKinds() async {
+        if let kinds = try? await client.kinds() { self.kinds = kinds }
     }
 
     func startWatching() {
@@ -133,6 +143,9 @@ enum Place: Hashable {
     case computer(String?)
     case sample(String)
     case item(String)
+    // A kind of content under "How it should look", and the seasons that fit no kind.
+    case kind(String)
+    case seasonsWithoutKind
 
     static let notificationKey = "opens"
 
@@ -192,6 +205,13 @@ struct MainWindow: View {
                         case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }
                         case .item(let prefix): ItemPage(prefix: prefix, model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
                         case .media: MediaPage(model: model) { place = .item($0) }
+                        case .seasonsWithoutKind:
+                            MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { place = .media }) { place = .item($0) }
+                        case .kind(let code):
+                            if let kind = model.kinds?.kinds.first(where: { $0.kind == code }) {
+                                KindPage(kind: kind, leftOut: model.kinds?.leftOut.count ?? 0, model: model,
+                                         openItem: { place = .item($0) }, openLeftOut: { place = .seasonsWithoutKind })
+                            }
                         default: LibraryPage(facts: facts, posters: model.posters) { go($0) }
                         }
                     }
@@ -216,7 +236,8 @@ struct MainWindow: View {
                         PauseButton(facts: facts, model: model)
                     }
                 }
-                .toolbar(removing: .title)
+                // Only a kind's page names itself in the title bar, as Mail names a mailbox.
+                .toolbar(removing: place.map(Self.showsTitle) == true ? nil : .title)
             } else {
                 ServerStatusView(state: model.connection, lastHeard: model.lastHeard, problem: model.problem) {
                     Task { await model.refresh() }
@@ -237,6 +258,10 @@ struct MainWindow: View {
         .alert(item: Bindable(model).notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
+    }
+
+    private static func showsTitle(_ place: Place) -> Bool {
+        if case .kind = place { true } else { false }
     }
 
     /// Opens a place from a link on a page: a page of this window, or Settings › Computers for a computer.
@@ -322,6 +347,7 @@ struct Sidebar: View {
     @Binding var place: Place?
     let facts: MainWindowFacts
     let model: MainWindowModel
+    @AppStorage("kindsShown") private var kindsShown = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -333,9 +359,35 @@ struct Sidebar: View {
                 // No count: the page counts shows, titles and folders, while the facts count other media by file.
                 Label(Words.media, systemImage: "film.stack")
                     .tag(Place.media)
+                if let kinds = model.kinds {
+                    DisclosureGroup(isExpanded: $kindsShown) {
+                        ForEach(kinds.kinds) { kind in
+                            KindSidebarRow(kind: kind).tag(Place.kind(kind.kind))
+                        }
+                    } label: {
+                        Label(Words.howItShouldLook, systemImage: "slider.horizontal.below.square.and.square.filled")
+                    }
+                }
             }
             .listStyle(.sidebar)
             BackupsRow(backups: facts.originalBackups) { place = .spaceSaved }
+        }
+    }
+}
+
+/// A kind under "How it should look": the space still waiting, or a check once one approval covers it.
+struct KindSidebarRow: View {
+    let kind: KindsFacts.Kind
+
+    var body: some View {
+        HStack {
+            Text(Words.kindName(kind.kind))
+            Spacer()
+            if let approval = kind.approval {
+                Image(systemName: "checkmark").foregroundStyle(.secondary).help(Words.kindDecided(approval))
+            } else if kind.waitingBytes > 0 {
+                Text(Words.size(kind.waitingBytes)).foregroundStyle(.secondary).monospacedDigit()
+            }
         }
     }
 }

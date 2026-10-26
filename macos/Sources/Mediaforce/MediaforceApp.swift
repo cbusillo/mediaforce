@@ -10,6 +10,13 @@ struct MediaforceApp: App {
             MainWindow(model: appDelegate.model)
         }
         .windowResizability(.contentMinSize)
+        // The kind page's player, full screen.
+        Window(Words.fullScreen, id: TheaterWindow.id) {
+            TheaterWindow(model: appDelegate.model)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
         MenuBarExtra {
             MenuBarPanel(model: appDelegate.model)
         } label: {
