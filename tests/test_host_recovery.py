@@ -21,6 +21,10 @@ from mediaforce.web.runtime import host_recovery as recovery, host_status, recov
 NOW = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
 
 
+def patch_attr(target: Any, name: str, *args: Any, **kwargs: Any) -> Any:
+    return patch.object(target, name, *args, **kwargs)
+
+
 @pytest.fixture
 def config(tmp_path: Path) -> MediaforceConfig:
     config = MediaforceConfig(
@@ -45,9 +49,9 @@ def status(*, available: bool = False) -> HostStatus:
 
 
 def test_background_recovery_runs_without_work_and_preserves_backoff_on_restart(config: MediaforceConfig) -> None:
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         recovery, "probe_host_status", return_value=status(),
-    ) as probe, patch.object(recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False)) as mount:
+    ) as probe, patch_attr(recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False)) as mount:
         clock.now.return_value = NOW
         recovery.process_host_recovery_once(config)
         saved = recovery.host_recovery_snapshot(config)
@@ -71,11 +75,11 @@ def test_background_recovery_runs_without_work_and_preserves_backoff_on_restart(
 
 def test_sign_in_failure_asks_once_and_stops_reconnecting_until_storage_returns(config: MediaforceConfig) -> None:
     needs_password = NoUiMountResult(ok=False, action="Worker needs its share password saved.", retry=False)
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         recovery, "probe_host_status", return_value=status(),
-    ) as probe, patch.object(
+    ) as probe, patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=needs_password,
-    ) as mount, patch.object(alerts, "datetime", wraps=datetime) as alert_clock:
+    ) as mount, patch_attr(alerts, "datetime", wraps=datetime) as alert_clock:
         clock.now.return_value = alert_clock.now.return_value = NOW
         recovery.process_host_recovery_once(config)
         record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
@@ -103,9 +107,9 @@ def test_sign_in_failure_asks_once_and_stops_reconnecting_until_storage_returns(
 
 def test_missing_login_asks_but_keeps_reconnecting_on_its_own(config: MediaforceConfig) -> None:
     not_logged_in = NoUiMountResult(ok=False, action="Log in on Worker.")
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         recovery, "probe_host_status", return_value=status(),
-    ) as probe, patch.object(
+    ) as probe, patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=not_logged_in,
     ) as mount:
         clock.now.return_value = NOW
@@ -134,14 +138,14 @@ def empty_host_status_cache() -> Iterator[None]:
 
 
 def _host_cards(config: MediaforceConfig) -> dict[str, dict[str, Any]]:
-    with patch.object(web_app, "load_config", return_value=config):
+    with patch_attr(web_app, "load_config", return_value=config):
         app = web_app.create_app(config.paths.config_path)
     endpoint = next(
         route.endpoint for route in app.router.routes
         if isinstance(route, APIRoute) and route.path == "/api/hosts"
     )
     # Reading the cards must not check anything itself.
-    with patch("subprocess.run", side_effect=AssertionError("read launched a check")), patch.object(
+    with patch("subprocess.run", side_effect=AssertionError("read launched a check")), patch_attr(
         host_status, "_schedule_host_status_refresh",
     ) as schedule:
         response = endpoint(0)
@@ -152,12 +156,12 @@ def _host_cards(config: MediaforceConfig) -> dict[str, dict[str, Any]]:
 def test_idle_background_checks_keep_remote_cards_current(
         config: MediaforceConfig, empty_host_status_cache: None,
 ) -> None:
-    with patch.object(host_status, "collect_host_statuses", return_value=[status(available=True)]):
+    with patch_attr(host_status, "collect_host_statuses", return_value=[status(available=True)]):
         host_status.refresh_host_status_cache(config)
     assert _host_cards(config)["user@worker"]["available"]
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         recovery, "probe_host_status", return_value=status(),
-    ) as probe, patch.object(recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False)):
+    ) as probe, patch_attr(recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False)):
         clock.now.return_value = NOW
         recovery.process_host_recovery_once(config)
         card = _host_cards(config)["user@worker"]
@@ -173,7 +177,7 @@ def test_host_card_says_what_to_do_when_reconnecting_waits_for_someone(
         config: MediaforceConfig, empty_host_status_cache: None,
 ) -> None:
     needs_password = NoUiMountResult(ok=False, action="Worker needs its share password saved.", retry=False)
-    with patch.object(recovery, "probe_host_status", return_value=status()), patch.object(
+    with patch_attr(recovery, "probe_host_status", return_value=status()), patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=needs_password,
     ):
         recovery.process_host_recovery_once(config)
@@ -184,9 +188,9 @@ def test_host_card_says_what_to_do_when_reconnecting_waits_for_someone(
 def test_retrying_host_card_carries_background_recovery_state(
         config: MediaforceConfig, empty_host_status_cache: None,
 ) -> None:
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         recovery, "probe_host_status", return_value=status(),
-    ), patch.object(recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False)):
+    ), patch_attr(recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False)):
         clock.now.return_value = NOW
         recovery.process_host_recovery_once(config)
     record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
@@ -209,9 +213,9 @@ def test_action_required_host_card_carries_recovery_state(
         config: MediaforceConfig, empty_host_status_cache: None,
 ) -> None:
     needs_password = NoUiMountResult(ok=False, action="Worker needs its share password saved.", retry=False)
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         recovery, "probe_host_status", return_value=status(),
-    ), patch.object(recovery, "recover_remote_host_mounts_no_ui", return_value=needs_password):
+    ), patch_attr(recovery, "recover_remote_host_mounts_no_ui", return_value=needs_password):
         clock.now.return_value = NOW
         recovery.process_host_recovery_once(config)
     card = _host_cards(config)["user@worker"]
@@ -239,16 +243,16 @@ def test_controller_card_follows_its_storage_after_a_restart(
         return {"mounts": [{"mount_point": "/Volumes/media", "status": state}], "state_error": None}
 
     # The first check after a reboot ran before Finder reconnected the share.
-    with patch.object(host_status, "collect_host_statuses", return_value=[
+    with patch_attr(host_status, "collect_host_statuses", return_value=[
         controller(available=False), status(available=True),
     ]):
         host_status.refresh_host_status_cache(config)
     assert not _host_cards(config)["user@localhost"]["available"]
-    with patch.object(web_app, "load_config", return_value=config), patch.object(
+    with patch_attr(web_app, "load_config", return_value=config), patch_attr(
         web_app, "process_controller_storage_recovery_once",
-    ), patch.object(
+    ), patch_attr(
         host_status, "controller_storage_recovery_snapshot", return_value=storage("ready"),
-    ) as snapshot, patch.object(
+    ) as snapshot, patch_attr(
         host_status, "probe_host_status", return_value=controller(available=True),
     ) as probe:
         web_app._controller_storage_pass(config.paths.config_path, threading.Event())
@@ -268,9 +272,9 @@ def test_unreachable_host_retries_and_eventually_notifies_without_mounting(confi
     unreachable = status()
     unreachable.platform = "unknown"
     unreachable.missing_mounts = []
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         recovery, "probe_host_status", return_value=unreachable,
-    ), patch.object(recovery, "recover_remote_host_mounts_no_ui") as mount, patch.object(alerts, "datetime", wraps=datetime) as alert_clock:
+    ), patch_attr(recovery, "recover_remote_host_mounts_no_ui") as mount, patch_attr(alerts, "datetime", wraps=datetime) as alert_clock:
         clock.now.return_value = alert_clock.now.return_value = NOW
         recovery.process_host_recovery_once(config)
         assert not [item for item in alerts.recovery_alerts(config) if item["id"].startswith("host:")]
@@ -283,7 +287,7 @@ def test_unreachable_host_retries_and_eventually_notifies_without_mounting(confi
 def test_storage_alert_is_immediate_deduplicated_persistent_and_resolves(config: MediaforceConfig) -> None:
     storage = {"mounts": [{"mount_point": "/Volumes/media", "first_failure_at": NOW.isoformat(),
                            "status": "retrying", "reason": "Share missing"}]}
-    with patch.object(alerts, "controller_storage_recovery_snapshot", return_value=storage), patch.object(alerts.LOGGER, "warning") as warning:
+    with patch_attr(alerts, "controller_storage_recovery_snapshot", return_value=storage), patch_attr(alerts.LOGGER, "warning") as warning:
         alerts.record_recovery_alerts(config)
         alerts.record_recovery_alerts(config)
         assert warning.call_count == 1
@@ -304,19 +308,19 @@ def test_storage_alert_is_immediate_deduplicated_persistent_and_resolves(config:
 ])
 def test_stopped_worker_and_corrupt_state_do_not_mount(config: MediaforceConfig, payload: dict[str, object]) -> None:
     save_runtime_settings(recovery.host_recovery_path(config), payload)
-    with patch.object(recovery, "probe_host_status", return_value=status()), patch.object(recovery, "recover_remote_host_mounts_no_ui") as mount:
+    with patch_attr(recovery, "probe_host_status", return_value=status()), patch_attr(recovery, "recover_remote_host_mounts_no_ui") as mount:
         recovery.process_host_recovery_once(config)
         mount.assert_not_called()
     stop = threading.Event()
     stop.set()
-    with patch.object(recovery, "probe_host_status") as probe:
+    with patch_attr(recovery, "probe_host_status") as probe:
         recovery.process_host_recovery_once(config, stop)
         probe.assert_not_called()
 
 
 def test_corrupt_state_warning_clears_after_manual_recovery_is_verified(config: MediaforceConfig) -> None:
     save_runtime_settings(recovery.host_recovery_path(config), {"schema_version": 999})
-    with patch.object(recovery, "probe_host_status", return_value=status(available=True)), patch.object(
+    with patch_attr(recovery, "probe_host_status", return_value=status(available=True)), patch_attr(
         recovery, "recover_remote_host_mounts_no_ui",
     ) as mount:
         recovery.process_host_recovery_once(config)
@@ -328,7 +332,7 @@ def test_prolonged_outage_backoff_is_capped(config: MediaforceConfig) -> None:
     unreachable = status()
     unreachable.platform = "unknown"
     unreachable.missing_mounts = []
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         recovery, "probe_host_status", return_value=unreachable,
     ):
         clock.now.return_value = NOW
@@ -354,9 +358,9 @@ def test_slow_remote_probe_does_not_hold_controller_readiness(config: Mediaforce
 
     ready = ControllerMountProbe(True, True, Path("/Volumes/media"), "//user@nas/media", "smbfs", True)
     worker = threading.Thread(target=recovery.process_host_recovery_once, args=(config,))
-    with patch.object(recovery, "probe_host_status", side_effect=slow_probe), patch.object(
+    with patch_attr(recovery, "probe_host_status", side_effect=slow_probe), patch_attr(
         controller.sys, "platform", "darwin",
-    ), patch.object(controller, "probe_controller_mount", return_value=ready):
+    ), patch_attr(controller, "probe_controller_mount", return_value=ready):
         worker.start()
         try:
             assert started.wait(5)
@@ -407,7 +411,7 @@ def test_host_alert_says_how_many_other_computers_are_still_working(
     def probe(_config: MediaforceConfig, host: dict[str, Any]) -> HostStatus:
         return status() if host["host"] == "user@worker" else _other(host["host"], available=True)
 
-    with patch.object(recovery, "probe_host_status", side_effect=probe), patch.object(
+    with patch_attr(recovery, "probe_host_status", side_effect=probe), patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=needs_password,
     ):
         recovery.process_host_recovery_once(config)
@@ -415,7 +419,7 @@ def test_host_alert_says_how_many_other_computers_are_still_working(
     assert _host_alert(config)["detail"].endswith("2 other computers are still working.")
 
     def cards(*, den: bool, attic: bool) -> None:
-        with patch.object(host_status, "collect_host_statuses", return_value=[
+        with patch_attr(host_status, "collect_host_statuses", return_value=[
             status(), _other("user@den", available=den), _other("user@attic", available=attic),
         ]):
             host_status.refresh_host_status_cache(config)
@@ -443,7 +447,7 @@ def test_host_alert_does_not_say_none_are_working_before_they_are_checked(
 
 
 def test_only_computer_alert_says_work_waits_for_it(config: MediaforceConfig, empty_host_status_cache: None) -> None:
-    with patch.object(recovery, "probe_host_status", return_value=status()), patch.object(
+    with patch_attr(recovery, "probe_host_status", return_value=status()), patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False, action="Storage needs checking.", retry=False),
     ):
         recovery.process_host_recovery_once(config)
@@ -451,9 +455,9 @@ def test_only_computer_alert_says_work_waits_for_it(config: MediaforceConfig, em
 
 
 def test_retry_connection_runs_one_no_dialog_pass_now(config: MediaforceConfig, empty_host_status_cache: None) -> None:
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         recovery, "probe_host_status", return_value=status(),
-    ) as probe, patch.object(
+    ) as probe, patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False),
     ) as mount, patch("mediaforce.remote.recover_remote_host_mounts", side_effect=AssertionError("Finder dialog")):
         clock.now.return_value = NOW
@@ -473,7 +477,7 @@ def test_retry_connection_runs_one_no_dialog_pass_now(config: MediaforceConfig, 
 
 def test_retry_connection_tries_again_after_waiting_for_someone_at_the_computer(config: MediaforceConfig) -> None:
     needs_password = NoUiMountResult(ok=False, action="Worker needs its share password saved", retry=False)
-    with patch.object(recovery, "probe_host_status", return_value=status()), patch.object(
+    with patch_attr(recovery, "probe_host_status", return_value=status()), patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=needs_password,
     ) as mount:
         recovery.process_host_recovery_once(config)
@@ -485,7 +489,7 @@ def test_retry_connection_tries_again_after_waiting_for_someone_at_the_computer(
 
 
 def test_retry_connection_rechecks_an_unconfirmed_request_with_the_safe_helper(config: MediaforceConfig) -> None:
-    with patch.object(recovery, "probe_host_status", return_value=status()), patch.object(
+    with patch_attr(recovery, "probe_host_status", return_value=status()), patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False, uncertain=True),
     ) as mount:
         recovery.process_host_recovery_once(config)
@@ -497,7 +501,7 @@ def test_retry_connection_rechecks_an_unconfirmed_request_with_the_safe_helper(c
 def test_retry_connection_refuses_while_an_attempt_is_running(config: MediaforceConfig) -> None:
     from mediaforce.hosts.controller_mount import controller_mount_lock
 
-    with patch.object(recovery, "probe_host_status") as probe, controller_mount_lock(
+    with patch_attr(recovery, "probe_host_status") as probe, controller_mount_lock(
         config.paths.runtime_settings_path, host_key="user@worker",
     ) as held:
         assert held
@@ -523,7 +527,7 @@ def test_background_pass_keeps_a_retry_that_finished_while_it_ran(config: Mediaf
             retried.append(recovery.retry_host_connection(config, "user@worker"))
         return status() if host["host"] == "user@worker" else _other(host["host"], available=True)
 
-    with patch.object(recovery, "probe_host_status", side_effect=probe), patch.object(
+    with patch_attr(recovery, "probe_host_status", side_effect=probe), patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False),
     ) as mount:
         recovery.process_host_recovery_once(config)
@@ -539,7 +543,7 @@ def test_retry_connection_route_posts_and_reads_stay_check_free(
 ) -> None:
     import asyncio
 
-    with patch.object(web_app, "load_config", return_value=config):
+    with patch_attr(web_app, "load_config", return_value=config):
         app = web_app.create_app(config.paths.config_path)
     routes = {
         (route.path, method): route.endpoint for route in app.router.routes
@@ -552,13 +556,13 @@ def test_retry_connection_route_posts_and_reads_stay_check_free(
         async def json() -> dict[str, str]:
             return {"host_key": "user@worker"}
 
-    with patch.object(recovery, "probe_host_status", side_effect=[status(), status(available=True)]), patch.object(
+    with patch_attr(recovery, "probe_host_status", side_effect=[status(), status(available=True)]), patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=True),
-    ), patch.object(web_app, "release_host_cooldowns", return_value=0) as release:
+    ), patch_attr(web_app, "release_host_cooldowns", return_value=0) as release:
         response = asyncio.run(routes[("/api/hosts/retry-connection", "POST")](Request()))
     assert json.loads(response.body) == {"ok": True, "message": "Worker is connected.", "kind": "success"}
     release.assert_called_once()
-    with patch("subprocess.run", side_effect=AssertionError("read launched a check")), patch.object(
+    with patch("subprocess.run", side_effect=AssertionError("read launched a check")), patch_attr(
         recovery, "probe_host_status", side_effect=AssertionError("read launched a check"),
     ):
         routes[("/api/recovery-alerts", "GET")]()
@@ -625,7 +629,7 @@ def _computer_action_messages(config: MediaforceConfig) -> list[str]:
     for code, stdout in [(46, ""), (48, ""), (47, 'MEDIAFORCE_MOUNT_NETFS={"status": 80}')]:
         result = mount_runtime.mount_smb_shares_no_ui(host, mounts, run_mount_script=helper(code, stdout))
         messages.append(result.action or "")
-    with patch.object(recovery, "probe_host_status", return_value=status()), patch.object(
+    with patch_attr(recovery, "probe_host_status", return_value=status()), patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False, uncertain=True),
     ):
         recovery.process_host_recovery_once(config)
@@ -651,7 +655,7 @@ def _motion_pattern_messages() -> list[str]:
     messages: list[str] = []
     for count in (1, 2):
         for preparation in [{"terminal_failure_count": count}, *({"work": work} for work in work_states)]:
-            with patch.object(decision_evidence, "_queue_cadence_evidence_work", return_value=[
+            with patch_attr(decision_evidence, "_queue_cadence_evidence_work", return_value=[
                 {"required_count": count, **preparation},
             ]):
                 blocker = decision_evidence.cadence_evidence_blocker(
@@ -680,7 +684,7 @@ def test_host_alert_reads_as_sentences(config: MediaforceConfig, empty_host_stat
     unreachable.platform = "unknown"
     unreachable.missing_mounts = []
     unreachable.message = "Fix hostname or DNS first"
-    with patch.object(recovery, "probe_host_status", return_value=unreachable), patch.object(
+    with patch_attr(recovery, "probe_host_status", return_value=unreachable), patch_attr(
         alerts, "datetime", wraps=datetime,
     ) as alert_clock:
         recovery.process_host_recovery_once(config)
@@ -723,11 +727,11 @@ def test_two_computer_outage_keeps_work_on_the_other_and_readmits_after_a_fresh_
             created_at=NOW.isoformat(), updated_at=NOW.isoformat(),
         ))
     ready = ControllerMountProbe(True, True, Path("/Volumes/media"), "//user@nas/media", "smbfs", True)
-    with patch.object(controller.sys, "platform", "darwin"), patch.object(
+    with patch_attr(controller.sys, "platform", "darwin"), patch_attr(
         controller, "probe_controller_mount", return_value=ready,
     ):
         controller.process_controller_storage_recovery_once(config)
-    with patch.object(host_status, "collect_host_statuses", side_effect=lambda cfg: [
+    with patch_attr(host_status, "collect_host_statuses", side_effect=lambda cfg: [
         probe(cfg, host) for host in cfg.remote_hosts
     ]):
         host_status.refresh_host_status_cache(config)
@@ -752,15 +756,15 @@ def test_two_computer_outage_keeps_work_on_the_other_and_readmits_after_a_fresh_
         recovery.process_host_recovery_once(config)
         alerts.record_recovery_alerts(config)
 
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         alerts, "datetime", wraps=datetime,
-    ) as alert_clock, patch.object(recovery, "probe_host_status", side_effect=probe), patch.object(
+    ) as alert_clock, patch_attr(recovery, "probe_host_status", side_effect=probe), patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", side_effect=no_ui_mount,
     ), patch("mediaforce.remote.recover_remote_host_mounts", side_effect=AssertionError("Finder dialog")), patch(
         "mediaforce.hosts.mount_runtime.mount_smb_shares", side_effect=AssertionError("Finder dialog"),
-    ), patch("subprocess.run", side_effect=AssertionError("real command")), patch.object(
+    ), patch("subprocess.run", side_effect=AssertionError("real command")), patch_attr(
         host_status, "_schedule_host_status_refresh", side_effect=AssertionError("unstubbed full check"),
-    ), patch.object(alerts.LOGGER, "warning") as warning, patch.object(alerts.LOGGER, "info") as recovered:
+    ), patch_attr(alerts.LOGGER, "warning") as warning, patch_attr(alerts.LOGGER, "info") as recovered:
         run_pass(NOW)
         assert chosen() == "user@worker"
         assert not alerts.recovery_alerts(config)
@@ -887,7 +891,7 @@ def test_a_check_that_never_finishes_does_not_prove_a_computer_is_away(config: M
 config, host,
         )
     assert checked.check_failure == "check_failed"
-    with patch.object(recovery, "probe_host_status", return_value=checked):
+    with patch_attr(recovery, "probe_host_status", return_value=checked):
         recovery.process_host_recovery_once(config)
     assert not recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["network_absent"]
 
@@ -907,7 +911,7 @@ def test_storage_warning_keeps_the_mount_point_behind_details(config: Mediaforce
         "mount_point": "/Volumes/media", "status": "retrying", "reason": "The required SMB share is not mounted.",
         "first_failure_at": NOW.isoformat(),
     }], "state_error": "Controller storage recovery state at /tmp/state.json is unreadable."}
-    with patch.object(alerts, "controller_storage_recovery_snapshot", return_value=storage), patch.object(
+    with patch_attr(alerts, "controller_storage_recovery_snapshot", return_value=storage), patch_attr(
             alerts, "host_recovery_snapshot", return_value={"hosts": {}},
     ):
         warnings = alerts.recovery_alerts(config)
@@ -920,9 +924,9 @@ def test_storage_warning_keeps_the_mount_point_behind_details(config: Mediaforce
 
 
 def test_uncertain_mount_disappears_and_reachable_computer_recovers_automatically(config: MediaforceConfig) -> None:
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         recovery, "probe_host_status", return_value=status(),
-    ) as probe, patch.object(
+    ) as probe, patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False, uncertain=True),
     ) as mount:
         clock.now.return_value = NOW
@@ -951,11 +955,11 @@ def test_absent_computer_uses_last_seen_model_and_desktop_grace(
     absent.check_failure = "unreachable"
     absent.probe_available = False
     absent.missing_mounts = []
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         alerts, "datetime", wraps=datetime,
-    ) as alert_clock, patch.object(recovery, "probe_host_status", return_value=ready) as probe, patch.object(
+    ) as alert_clock, patch_attr(recovery, "probe_host_status", return_value=ready) as probe, patch_attr(
         recovery, "recover_remote_host_mounts_no_ui",
-    ) as mount, patch.object(alerts.LOGGER, "warning") as warning:
+    ) as mount, patch_attr(alerts.LOGGER, "warning") as warning:
         clock.now.return_value = alert_clock.now.return_value = NOW
         recovery.process_host_recovery_once(config)
         probe.return_value = absent
@@ -982,11 +986,11 @@ def test_absent_computer_uses_last_seen_model_and_desktop_grace(
 
 
 def test_unknown_result_retries_before_asking_and_keeps_the_warning_during_attempts(config: MediaforceConfig) -> None:
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         alerts, "datetime", wraps=datetime,
-    ) as alert_clock, patch.object(recovery, "probe_host_status", return_value=status()), patch.object(
+    ) as alert_clock, patch_attr(recovery, "probe_host_status", return_value=status()), patch_attr(
         recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False, uncertain=True),
-    ) as mount, patch.object(alerts.LOGGER, "warning") as warning:
+    ) as mount, patch_attr(alerts.LOGGER, "warning") as warning:
         clock.now.return_value = alert_clock.now.return_value = NOW
         recovery.process_host_recovery_once(config)
         assert not alerts.recovery_alerts(config)
@@ -1017,9 +1021,9 @@ def test_post_connection_failures_do_not_prove_network_absence(config: Mediaforc
 
 
 def test_a_standing_storage_question_survives_a_failed_check(config: MediaforceConfig) -> None:
-    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+    with patch_attr(recovery, "datetime", wraps=datetime) as clock, patch_attr(
         recovery, "probe_host_status", return_value=status(),
-    ) as probe, patch.object(recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(
+    ) as probe, patch_attr(recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(
         ok=False, uncertain=True, action="The computer could not read its mounted-storage list.",
     )):
         clock.now.return_value = NOW
