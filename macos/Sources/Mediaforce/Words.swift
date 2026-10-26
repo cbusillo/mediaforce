@@ -1246,3 +1246,108 @@ extension Words {
         }
     }
 }
+
+// The page for how each kind of content should look.
+extension Words {
+    static let howItShouldLook = "How it should look"
+    static let showsOfThisKind = "Shows of this kind"
+    static let approvedShow = "Approved"
+    // Stopping removes the shared setting, so each show of the kind goes back to its own sample.
+    static let stopUsingKind = "Decide Show by Show"
+    static let kindRefusedTitle = "Mediaforce didn't use that setting"
+    static let ok = "OK"
+    static let backOneFrame = "Back one frame"
+    static let backOneFrameHelp = "Back one frame (,)"
+    static let forwardOneFrame = "Forward one frame"
+    static let forwardOneFrameHelp = "Forward one frame (.)"
+    static let fullScreen = "Full screen"
+    static let fullScreenHelp = "Full screen (F). Press Escape to come back."
+    static let exitFullScreen = "Exit full screen"
+    static let actualSize = "Actual size"
+    static let actualSizeHelp = "Show every pixel. Both sides pan together."
+    static let oneAtATimeHelp = "Click the picture to switch between the original and the compressed episode"
+    static let couldNotPlayEpisode = "Couldn't play this episode."
+    static let gettingEpisodeReady = "Getting the episode ready to play"
+    static let seasonsWithoutKindTitle = "Seasons that don't fit a kind"
+    static let showEverything = "Show Everything"
+
+    static func kindName(_ code: String) -> String {
+        switch code {
+        case "darker_live_action": "Darker live action"
+        case "bright_live_action": "Bright live action"
+        case "cartoon": "Cartoons"
+        case "4k": "4K"
+        default: code.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    static func kindSubtitle(_ kind: KindsFacts.Kind) -> String {
+        "\(count(kind.shows.count, "show")) · \(size(kind.waitingBytes))"
+    }
+
+    static func useForKind(_ code: String) -> String {
+        let name = switch code {
+        case "darker_live_action": "Darker Live Action"
+        case "bright_live_action": "Bright Live Action"
+        default: kindName(code)
+        }
+        return "Use for All \(name)"
+    }
+
+    static func sizeSetting(_ setting: KindsFacts.Setting) -> String {
+        guard let megabytes = setting.sizeGoalMb else { return "its approved size" }
+        let amount = "\(Int(megabytes.rounded())) MB"
+        return setting.sizeGoalMode == "normalized" ? "\(amount) per 45-minute episode" : "\(amount) per episode"
+    }
+
+    static func showSetting(_ show: String, _ setting: KindsFacts.Setting) -> String {
+        "\(show)'s setting: \(sizeSetting(setting))"
+    }
+
+    static func kindDecided(_ approval: KindsFacts.Approval) -> String {
+        let show = String(approval.showPrefix.split(separator: "/").last ?? "")
+        let decided = day(approval.approvedAt)
+        return "Decided \(decided.isEmpty ? "" : "\(decided). ")\(showSetting(show, approval.setting))"
+    }
+
+    static func decidedShowByShow(_ code: String) -> String {
+        code == "cartoon" ? "Each cartoon is decided on its own." : "Each \(kindName(code)) show is decided on its own."
+    }
+
+    static func kindEmpty(_ code: String) -> String {
+        "No seasons measure as \(kindName(code).lowercased()) yet."
+    }
+
+    static let kindNothingToWatch = "No episode made with this setting is kept to compare yet."
+    static let kindNoSetting = "No show of this kind has an approved sample yet. Approve one show's sample to use it here."
+
+    static func kindRefusal(_ code: String?) -> String {
+        switch code {
+        case "approval_not_current": "That show's sample approval has changed. Approve its sample again first."
+        case "size_goal_not_scalable": "That setting is a size per episode, so it can't carry to other shows."
+        case "source_kind_differs": "That show's sample was made on a season of another kind."
+        case "no_folder_approval": "That show has no approved sample of its own."
+        case "kind_is_one_time": "Each of these shows is decided on its own sample."
+        default: "Mediaforce didn't say why."
+        }
+    }
+
+    static func watchShow(_ show: String) -> String { "Play \(show)" }
+    static func openShow(_ show: String) -> String { "Open \(show)" }
+
+    static func seasonsWithoutKind(_ seasons: Int) -> String {
+        seasons == 1 ? "1 season doesn't fit a kind" : "\(seasons.formatted()) seasons don't fit a kind"
+    }
+
+    static func leftOutReason(_ code: String) -> String {
+        code == "mixed" ? "mixed kinds" : "not measured yet"
+    }
+
+    static func playerLayout(_ layout: KindPlayerLayout) -> String {
+        switch layout {
+        case .sideBySide: "Side by side"
+        case .wipe: "Wipe"
+        case .oneAtATime: "One at a time"
+        }
+    }
+}

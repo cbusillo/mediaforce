@@ -16,7 +16,7 @@ from test_content_kinds import _admit_historical_original, _item as _content_ite
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, upsert_runtime_folder_policy_override
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import encode_jobs, library_items, metadata, series_metadata, source_admissions, source_generations, \
-    source_transitions
+    source_transitions, staged_artifacts
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
 from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
@@ -347,7 +347,8 @@ def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_pat
         approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="2026-10-26T01:00:00+00:00")
 
         asked: list[str] = []
-        facts = kinds_payload(connection, config, load_calibration_state=_loader({}, {"tv/Fresh/Season 1": DARKER}, asked))
+        facts = kinds_payload(connection, config, load_calibration_state=_loader({}, {"tv/Fresh/Season 1": DARKER}, asked),
+                              kind_of=lambda _config, season: asked.append(season))
     engine.dispose()
 
     # Only folder approvals are counted, so the page never works out a season's kind just to skip it.
@@ -355,10 +356,64 @@ def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_pat
     kinds = {kind["kind"]: kind for kind in facts["kinds"]}
     assert [kind["kind"] for kind in facts["kinds"]] == ["darker_live_action", "bright_live_action", "cartoon", "4k"]
     assert kinds[DARKER]["shows"] == [{"prefix": "tv/Drama", "seasons": 1, "waiting_bytes": 1000}]
+    assert kinds[DARKER]["settings"] == []
     assert kinds[DARKER]["approval"] == {"from_prefix": APPROVED_SEASON, "approved_at": "2026-10-26T01:00:00+00:00",
-                                         "size_goal_mode": "normalized", "size_goal_mb": 300.0}
+                                         "size_goal_mode": "normalized", "size_goal_mb": 300.0, "library_item_id": None}
     assert kinds["bright_live_action"]["approval"] is None and kinds["cartoon"]["one_time"]
     assert facts["unmeasured_seasons"] == 1
+    assert facts["left_out"] == [{"season": "tv/Fresh/Season 1", "kind": "unmeasured", "waiting_bytes": 1000}]
+
+
+def _keep_original_backup(connection: Any, item_id: int) -> None:
+    connection.execute(staged_artifacts.insert().values(
+        library_item_id=item_id, staging_path=f"/staging/{item_id}.mkv", promoted_at="2026-10-25T00:00:00+00:00",
+        archived_source_path=f"/archive/{item_id}.mkv", updated_at="2026-10-25T00:00:00+00:00"))
+
+
+def test_an_approved_show_of_the_kind_lends_its_setting_with_an_episode_to_watch_it_on(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    engine = create_engine("sqlite://")
+    with engine.connect() as connection:
+        metadata.create_all(connection)
+        # Drama's Season 1 was sampled, approved and published; Thriller has its own approval but no backup kept.
+        published = _content_item(connection, f"{APPROVED_SEASON}/e01.mkv", status="promoted", codec="av1", current_dark=0.5)
+        _keep_original_backup(connection, published)
+        _content_item(connection, EPISODE, status="promoted", codec="av1", current_dark=0.5)
+        # Thriller's show approval was sampled on a darker season; its Season 3 has its own bright approval and the
+        # only kept episode, which never stands for the show's setting.
+        own_season = "tv/Thriller/Season 3"
+        kept = _content_item(connection, f"{own_season}/e01.mkv", status="promoted", codec="av1", current_dark=0.5)
+        _keep_original_backup(connection, kept)
+        approved = {APPROVED_SEASON: _approved_on(config, f"{APPROVED_SEASON}/e01.mkv"),
+                    "tv/Thriller": _approved_on(config, EPISODE), own_season: _approved_on(config, f"{own_season}/e01.mkv")}
+        kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER, own_season: "bright_live_action"}
+
+        def facts_with(folders: dict[str, dict[str, Any]]) -> dict[str, Any]:
+            facts = kinds_payload(connection, config, load_calibration_state=_loader(folders, kinds),
+                                  kind_of=lambda _config, season: kinds.get(season))
+            return {kind["kind"]: kind for kind in facts["kinds"]}
+
+        lent = facts_with(approved)
+        per_episode = {prefix: _approved_on(config, f"{prefix}/e01.mkv") for prefix in approved}
+        for calibration in per_episode.values():
+            calibration["sample_item"]["resolved_operator_intent"]["request"]["size_goal"]["mode"] = "absolute"
+            calibration["accepted_policy_hash"] = calibration_policy_hash(calibration)
+        not_lent = facts_with(per_episode)
+    engine.dispose()
+
+    # The show with an episode to watch comes first.
+    assert lent[DARKER]["settings"] == [
+        {"show": "tv/Drama", "from_prefix": APPROVED_SEASON, "size_goal_mode": "normalized", "size_goal_mb": 300.0,
+         "library_item_id": published},
+        {"show": "tv/Thriller", "from_prefix": "tv/Thriller", "size_goal_mode": "normalized", "size_goal_mb": 300.0,
+         "library_item_id": None},
+    ]
+    assert lent["bright_live_action"]["settings"] == [
+        {"show": "tv/Thriller", "from_prefix": own_season, "size_goal_mode": "normalized", "size_goal_mb": 300.0,
+         "library_item_id": kept},
+    ]
+    # A size per episode cannot cover a kind, so the page never offers it.
+    assert not_lent[DARKER]["settings"] == []
 
 
 def _approved_on(config: MediaforceConfig, sample_path: str | None) -> dict[str, Any]:
