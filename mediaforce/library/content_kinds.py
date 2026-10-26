@@ -214,13 +214,17 @@ def season_evidence(connection: DBClient) -> tuple[set[int], SourceEvidenceConte
 def evidence_stamp(connection: DBClient) -> tuple[Any, ...]:
     """Changes whenever an admission, a measurement, a publish or a finished encode could change a season's kind.
 
-    The source evidence tables only ever gain rows, corrections included, so their newest row stands for them.
+    Admissions, measurements, versions and production receipts only ever gain rows, corrections included, so
+    their newest row stands for them. A publish settles its transition in place, so transitions count by outcome.
     """
     stamp: list[Any] = [
         connection.execute(select(func.max(literal_column("rowid"))).select_from(table)).scalar()
-        for table in (source_admissions, source_measurements, source_transitions, source_versions,
-                      target_production_outcomes)
+        for table in (source_admissions, source_measurements, source_versions, target_production_outcomes)
     ]
+    stamp.append(tuple(tuple(row) for row in connection.execute(
+        select(source_transitions.c.outcome, func.count(), func.max(literal_column("rowid")))
+        .group_by(source_transitions.c.outcome).order_by(source_transitions.c.outcome)
+    )))
     stamp.append(connection.execute(select(func.max(staged_artifacts.c.encode_completed_at))).scalar())
     return tuple(stamp)
 

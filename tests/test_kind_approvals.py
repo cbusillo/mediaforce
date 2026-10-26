@@ -10,7 +10,8 @@ from fastapi import HTTPException
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
-from mediaforce.core.db_tables import library_items, series_metadata, source_admissions, source_generations
+from mediaforce.core.db_tables import library_items, series_metadata, source_admissions, source_generations, \
+    source_transitions
 from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
@@ -144,6 +145,16 @@ def test_a_seasons_kind_is_read_again_only_when_its_evidence_changes(tmp_path: P
                     checks_json="{}", recorded_at="now"))
             kinds(config, SEASON)
             assert (grouping.call_count, evidence.call_count) == (4, 2)
+            # A publish settled in place, as a rollback does, adds no row but still changes what a season reads.
+            with open_db(config.paths.db_path) as connection:
+                connection.execute(source_transitions.insert().values(
+                    operation_id="publish", library_item_id=None, before_version_id=version, after_version_id=version,
+                    expected_revision=0, kind="publish", outcome="prepared", evidence_json="{}", recorded_at="now"))
+            kinds(config, SEASON)
+            with open_db(config.paths.db_path) as connection:
+                connection.execute(source_transitions.update().values(outcome="rolled_back"))
+            kinds(config, SEASON)
+            assert (grouping.call_count, evidence.call_count) == (6, 4)
     finally:
         reset_engine_cache()
 
