@@ -11,6 +11,7 @@ from mediaforce.core.db_tables import library_items, series_metadata, source_adm
     source_transitions, source_versions, staged_artifacts, target_production_outcomes
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.library.candidate_selection import season_identity
+from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.source_evidence import SourceEvidenceContext, load_source_evidence, load_source_evidence_context
 
 # Kinds of content group seasons by number ranges of their originals' measured traits, so that one
@@ -271,12 +272,15 @@ def season_kind_report(
     admitted = _admitted_item_ids(connection)
     context = load_source_evidence_context(connection)
     animation = _series_animation(connection)
-    seasons, series_of = _seasons(_present_items(connection), library_types)
+    items = _present_items(connection)
+    seasons, series_of = _seasons(items, library_types)
+    # A file kept original is finished; it still measures as an original but no longer waits.
+    kept = library_item_ids_kept_original(connection, [int(item["id"]) for item in items])
     rows = []
     totals: dict[str, Counter[str]] = defaultdict(Counter)
     for prefix in sorted(seasons):
         episodes = seasons[prefix]
-        waiting = [item for item in episodes if _waiting(item)]
+        waiting = [item for item in episodes if _waiting(item) and int(item["id"]) not in kept]
         if not waiting:
             continue
         if folder_approved(prefix):

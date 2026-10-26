@@ -162,8 +162,8 @@ from mediaforce.web.checked_output_preview import (
 )
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
-from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, background_queue_blocker, \
-    next_kind_season, record_kind_attempt
+from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, approve_kind_action, \
+    background_queue_blocker, kinds_payload, next_kind_season, record_kind_attempt, stop_kind_approval
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_folders_payload, \
     dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
@@ -2242,6 +2242,10 @@ def create_app(
         ):
             LOGGER.info("Held files joining production: %s", result.get("message") or result.get("code"))
 
+    def _kinds_payload() -> dict[str, Any]:
+        with open_readonly_db(config.paths.db_path) as connection:
+            return kinds_payload(connection, config, load_calibration_state=_load_calibration_state)
+
     def _queue_next_kind_season() -> None:
         # The season is chosen and its connection closed before queueing opens its own write transaction.
         with open_db(config.paths.db_path) as connection:
@@ -2795,6 +2799,12 @@ def create_app(
         compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=_queue_folder_encode_action),
         item_payload=lambda prefix: item_payload(config, prefix, sound=_show_audio_preset_payload),
         player_file=lambda library_item_id, side: player_file(config, library_item_id, side),
+        kinds_payload=_kinds_payload,
+        approve_kind_action=lambda kind, from_prefix: approve_kind_action(
+            config, kind, from_prefix, load_calibration_state=_load_calibration_state, kind_of=_season_kinds,
+            approved_at=_now_iso(),
+        ),
+        stop_kind_action=lambda kind: {"ok": True, "stopped": stop_kind_approval(config, kind)},
     )
     register_child_recovery_routes(app, recover_children_action=_recover_children_action)
     register_size_decision_routes(app, decide_size_exception_action=_decide_size_exception_action)
@@ -4359,8 +4369,9 @@ def _load_saved_calibration_state(config: MediaforceConfig, prefix: str) -> Acti
     return load_calibration_state(_folder_state_deps(), config, prefix, _calibration_file(config, prefix))
 
 
+_season_kinds = SeasonKinds()
 # Reads each folder as saved; the approval resolver also finds kind approvals through it.
-_load_calibration_state = KindAwareLoader(_load_saved_calibration_state, SeasonKinds())
+_load_calibration_state = KindAwareLoader(_load_saved_calibration_state, _season_kinds)
 
 
 def _load_calibration_state_for_boundary(config: MediaforceConfig, prefix: str) -> ActionPayload | None:

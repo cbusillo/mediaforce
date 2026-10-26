@@ -1,29 +1,36 @@
 """One approval covers every season of a kind of content, and a folder's own decision still comes first (#1047)."""
 
+import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from test_web_route_security import _json_request, _route_endpoint
+from sqlalchemy import create_engine
+from test_content_kinds import _admit_historical_original, _item as _content_item
 
-from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.core.config import ConfigPaths, MediaforceConfig, upsert_runtime_folder_policy_override
 from mediaforce.core.db import open_db, reset_engine_cache
-from mediaforce.core.db_tables import encode_jobs, library_items, series_metadata, source_admissions, source_generations, \
+from mediaforce.core.db_tables import encode_jobs, library_items, metadata, series_metadata, source_admissions, source_generations, \
     source_transitions
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
 from mediaforce.encoding.free_space import ReservePreflight
-from mediaforce.web import app as web_app
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 from mediaforce.library.content_kinds import season_evidence, season_grouping
 from mediaforce.library.source_evidence import append_version
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
+from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.kind_approvals import APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
     KIND_QUEUE_WAITS_CODE, KIND_RETRY_SECONDS, SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, KindSeason, SeasonKinds, \
-    approve_kind, background_queue_blocker, load_kind_approval, next_kind_season, record_kind_attempt, stop_kind_approval
+    NO_FOLDER_APPROVAL_CODE, SOURCE_KIND_DIFFERS_CODE, approve_kind, approve_kind_action, background_queue_blocker, kinds_payload, load_kind_approval, \
+    next_kind_season, record_kind_attempt, stop_kind_approval
+from mediaforce.web.runtime.page_state import PageStateFacts, decide_page_state
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_matches, \
     production_calibration
 
@@ -173,17 +180,7 @@ def test_a_kinds_approval_is_never_saved_as_a_folders_own(tmp_path: Path) -> Non
 
 
 def _insert_episode(config: MediaforceConfig) -> int:
-    timestamp = datetime.now(tz=UTC).isoformat(timespec="seconds")
-    with open_db(config.paths.db_path) as connection:
-        result = connection.execute(library_items.insert().values(
-            source_path=f"/media/{EPISODE}", rel_path=EPISODE, media_root="tv", parent_dir=SEASON,
-            file_name=Path(EPISODE).name, container="mkv", size_bytes=1_000_000_000, mtime_ns=1,
-            fingerprint=EPISODE, duration_seconds=2_700.0, video_codec="h264", width=1920, height=1080,
-            audio_summary_json="[]", subtitle_summary_json="[]", status="discovered", priority_score=50,
-            recommendation="priority_encode", recommendation_reason="fixture", last_scan_id="scan",
-            discovered_at=timestamp, last_seen_at=timestamp, updated_at=timestamp,
-        ))
-    return int(result.inserted_primary_key[0])
+    return _waiting_episode(config, EPISODE, 1_000_000_000)
 
 
 def _queue(config: MediaforceConfig, prefix: str, load: KindAwareLoader) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -206,7 +203,7 @@ def _queue(config: MediaforceConfig, prefix: str, load: KindAwareLoader) -> tupl
             result = queue_folder_encode_action(
                 config, prefix, "", False, now_iso=lambda: "2026-10-26T00:00:00+00:00",
                 load_job_state=lambda *_args: None, load_calibration_state=load, review_gate=review_gate,
-                upsert_override=web_app._upsert_override, load_active_encode_job_for_prefix_fn=lambda *_args: None,
+                upsert_override=upsert_runtime_folder_policy_override, load_active_encode_job_for_prefix_fn=lambda *_args: None,
                 clear_terminal_encode_jobs_for_prefix_fn=lambda *_args: None,
                 prepare_terminal_encode_job_for_requeue_fn=lambda *_args: None, save_encode_job=lambda *_args: None,
                 load_advice_state=lambda *_args: {}, reserve_preflight=lambda *_args: ReservePreflight(True, None, {}),
@@ -239,10 +236,10 @@ def test_a_season_outside_every_approved_kind_is_not_queued(tmp_path: Path) -> N
         _queue(config, SEASON, _loader({}, {SEASON: "bright_live_action"}))
 
 
-def _waiting_episode(config: MediaforceConfig, rel_path: str, size_bytes: int, *, status: str = "discovered") -> None:
+def _waiting_episode(config: MediaforceConfig, rel_path: str, size_bytes: int, *, status: str = "discovered") -> int:
     timestamp = datetime.now(tz=UTC).isoformat(timespec="seconds")
     with open_db(config.paths.db_path) as connection:
-        connection.execute(library_items.insert().values(
+        result = connection.execute(library_items.insert().values(
             source_path=f"/media/{rel_path}", rel_path=rel_path, media_root="tv", parent_dir=rel_path.rsplit("/", 1)[0],
             file_name=Path(rel_path).name, container="mkv", size_bytes=size_bytes, mtime_ns=1, fingerprint=rel_path,
             duration_seconds=2_700.0, video_codec="h264", width=1920, height=1080, audio_summary_json="[]",
@@ -250,6 +247,7 @@ def _waiting_episode(config: MediaforceConfig, rel_path: str, size_bytes: int, *
             recommendation_reason="fixture", last_scan_id="scan", discovered_at=timestamp, last_seen_at=timestamp,
             updated_at=timestamp,
         ))
+    return int(result.inserted_primary_key[0])
 
 
 def _encode_job(config: MediaforceConfig, prefix: str, status: str) -> None:
@@ -333,3 +331,104 @@ def test_no_season_is_offered_while_work_is_paused_running_or_left_with_the_dire
     offered = _next(config, load)
     assert offered is not None and offered.season == SEASON
     reset_engine_cache()
+
+
+def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    engine = create_engine("sqlite://")
+    with engine.connect() as connection:
+        metadata.create_all(connection)
+        published = _content_item(connection, "tv/Drama/Season 1/e01.mkv", status="promoted", codec="av1", current_dark=0.0)
+        _admit_historical_original(connection, published, dark=0.5)
+        _content_item(connection, "tv/Drama/Season 1/e02.mkv", status="discovered", codec="h264", current_dark=0.0)
+        _content_item(connection, "tv/Fresh/Season 1/e01.mkv", status="discovered", codec="h264", current_dark=0.5)
+        connection.execute(series_metadata.insert().values(series_prefix="tv/Drama", tmdb_genres_json='["Drama"]',
+                                                           updated_at="now"))
+        approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="2026-10-26T01:00:00+00:00")
+
+        asked: list[str] = []
+        facts = kinds_payload(connection, config, load_calibration_state=_loader({}, {"tv/Fresh/Season 1": DARKER}, asked))
+    engine.dispose()
+
+    # Only folder approvals are counted, so the page never works out a season's kind just to skip it.
+    assert asked == []
+    kinds = {kind["kind"]: kind for kind in facts["kinds"]}
+    assert [kind["kind"] for kind in facts["kinds"]] == ["darker_live_action", "bright_live_action", "cartoon", "4k"]
+    assert kinds[DARKER]["shows"] == [{"prefix": "tv/Drama", "seasons": 1, "waiting_bytes": 1000}]
+    assert kinds[DARKER]["approval"] == {"from_prefix": APPROVED_SEASON, "approved_at": "2026-10-26T01:00:00+00:00",
+                                         "size_goal_mode": "normalized", "size_goal_mb": 300.0}
+    assert kinds["bright_live_action"]["approval"] is None and kinds["cartoon"]["one_time"]
+    assert facts["unmeasured_seasons"] == 1
+
+
+def _approved_on(config: MediaforceConfig, sample_path: str | None) -> dict[str, Any]:
+    calibration = _approved(config)
+    if sample_path is not None:
+        calibration["sample_item"]["rel_path"] = sample_path
+    return calibration
+
+
+def test_only_a_folders_own_approval_sampled_on_that_kind_extends_to_it(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    bright_season, darker_season = "tv/Show/Season 1", "tv/Show/Season 2"
+    kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER, OTHER_SEASON: "cartoon", bright_season: "bright_live_action",
+             darker_season: DARKER}
+
+    def extend(kind: str, prefix: str, approved: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        return approve_kind_action(config, kind, prefix, load_calibration_state=_loader(approved, kinds),
+                                   kind_of=lambda _config, season: kinds.get(season), approved_at="now")
+
+    darker_sample = {APPROVED_SEASON: _approved_on(config, f"{APPROVED_SEASON}/e01.mkv")}
+    toon_sample = {OTHER_SEASON: _approved_on(config, f"{OTHER_SEASON}/e01.mkv")}
+    # A show approved on its bright season does not become the darker kind's, whichever season is named.
+    show_on_bright = {"tv/Show": _approved_on(config, f"{bright_season}/e01.mkv")}
+    assert extend(DARKER, darker_season, show_on_bright)["code"] == SOURCE_KIND_DIFFERS_CODE
+    assert extend("bright_live_action", APPROVED_SEASON, darker_sample)["code"] == SOURCE_KIND_DIFFERS_CODE
+    assert extend(DARKER, OTHER_SEASON, toon_sample)["code"] == SOURCE_KIND_DIFFERS_CODE
+    assert extend("cartoon", OTHER_SEASON, toon_sample)["code"] == KIND_IS_ONE_TIME_CODE
+    assert extend(DARKER, APPROVED_SEASON, {APPROVED_SEASON: _approved_on(config, None)})["code"] == SOURCE_KIND_DIFFERS_CODE
+    assert load_kind_approval(config, DARKER) is None
+    assert extend("bright_live_action", darker_season, show_on_bright)["ok"]
+    assert extend(DARKER, f"{APPROVED_SEASON}/e01.mkv", darker_sample)["ok"]
+    assert extend(DARKER, SEASON, darker_sample)["code"] == NO_FOLDER_APPROVAL_CODE
+    assert extend(DARKER, OTHER_SEASON, {})["code"] == NO_FOLDER_APPROVAL_CODE
+
+
+def test_stopping_touches_only_a_kinds_approval(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    attempts = config.paths.web_state_dir / "kinds" / "attempts.json"
+    attempts.parent.mkdir(parents=True)
+    attempts.write_text("{}")
+
+    assert not stop_kind_approval(config, "attempts")
+    assert attempts.exists()
+
+
+def test_a_seasons_page_state_says_which_approval_governs_it(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    approval = effective_production_approval(config, SEASON, _loader({}, {SEASON: DARKER}))
+
+    state = decide_page_state(PageStateFacts(prefix=SEASON, workflow=None, encode_job=None, sample_job=None,
+                                             calibration=None, approval=approval)).to_payload()
+
+    assert (state["approval_source"], state["approval_kind"]) == ("kind", DARKER)
+
+
+def test_the_kind_routes_report_refusals_as_conflicts() -> None:
+    app = FastAPI()
+    calls: list[tuple[str, ...]] = []
+    register_app_window_routes(
+        app, main_window_payload=dict, tv_shows_payload=dict, movies_payload=dict, other_media_payload=dict,
+        sample_payload=lambda _prefix: None, approve_sample_action=lambda *_args: {}, make_sample_action=lambda *_args: {},
+        compress_season_action=lambda _prefix: {}, kinds_payload=lambda: {"kinds": []},
+        approve_kind_action=lambda kind, prefix: calls.append((kind, prefix)) or {"ok": kind == DARKER, "code": "x"},
+        stop_kind_action=lambda kind: calls.append((kind,)) or {"ok": True},
+    )
+    approve = _route_endpoint(app, "/api/app/kinds/{kind}/approve", "POST")
+
+    assert json.loads(_route_endpoint(app, "/api/app/kinds", "GET")().body) == {"kinds": []}
+    assert asyncio.run(approve(DARKER, _json_request({"from_prefix": "/tv/Drama/"}))).status_code == 200
+    assert asyncio.run(approve("cartoon", _json_request({"from_prefix": "tv/Toon"}))).status_code == 409
+    assert _route_endpoint(app, "/api/app/kinds/{kind}/stop", "POST")(DARKER).status_code == 200
+    assert calls == [(DARKER, "tv/Drama"), ("cartoon", "tv/Toon"), (DARKER,)]

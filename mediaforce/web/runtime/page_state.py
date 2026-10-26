@@ -35,7 +35,7 @@ of one episode inside a season, or of the show around it, never sets the season'
 """
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -130,6 +130,9 @@ class PageState:
     primary_action: PageAction | None = None
     failure: FailureKind | None = None
     source_job: SourceJob | None = None
+    # Which approval governs the folder: its own or a parent folder's ("folder"), or its kind of content's ("kind").
+    approval_source: str | None = None
+    approval_kind: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -139,6 +142,8 @@ class PageState:
             "primary_action": self.primary_action,
             "failure": self.failure,
             "source_job": self.source_job.to_payload() if self.source_job is not None else None,
+            "approval_source": self.approval_source,
+            "approval_kind": self.approval_kind,
         }
 
 
@@ -171,6 +176,14 @@ class PageStateSources:
 
 
 def decide_page_state(facts: PageStateFacts) -> PageState:
+    state = _decide_page_state(facts)
+    approval = facts.approval
+    if approval is None:
+        return state
+    return replace(state, approval_source=approval.source, approval_kind=approval.kind)
+
+
+def _decide_page_state(facts: PageStateFacts) -> PageState:
     workflow = object_dict(facts.workflow)
     lane = str(workflow.get("primary_lane") or "none")
     encode_job = object_dict(facts.encode_job)

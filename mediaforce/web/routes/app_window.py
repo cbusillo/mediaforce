@@ -23,6 +23,9 @@ def register_app_window_routes(
         compress_season_action: Callable[[str], dict[str, Any]],
         item_payload: Callable[[str], dict[str, Any] | None] | None = None,
         player_file: Callable[[int, str], Path | None] | None = None,
+        kinds_payload: Callable[[], dict[str, Any]] | None = None,
+        approve_kind_action: Callable[[str, str], dict[str, Any]] | None = None,
+        stop_kind_action: Callable[[str], dict[str, Any]] | None = None,
 ) -> None:
     @app.get("/api/app/main-window")
     def api_app_main_window() -> JSONResponse:
@@ -60,6 +63,23 @@ def register_app_window_routes(
             if path is None:
                 return JSONResponse({}, status_code=404)
             return FileResponse(path, media_type="video/mp4")
+
+    if kinds_payload is not None and approve_kind_action is not None and stop_kind_action is not None:
+        kinds_facts, approve_kind, stop_kind = kinds_payload, approve_kind_action, stop_kind_action
+
+        @app.get("/api/app/kinds")
+        def api_app_kinds() -> JSONResponse:
+            return JSONResponse(kinds_facts())
+
+        @app.post("/api/app/kinds/{kind}/approve")
+        async def api_app_kind_approve(kind: str, request: Request) -> JSONResponse:
+            body = await request_body(request)
+            result = await run_in_threadpool(approve_kind, kind, str(body.get("from_prefix") or "").strip("/"))
+            return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+        @app.post("/api/app/kinds/{kind}/stop")
+        def api_app_kind_stop(kind: str) -> JSONResponse:
+            return JSONResponse(stop_kind(kind))
 
     @app.get("/api/app/samples/{prefix:path}")
     def api_app_sample(prefix: str) -> JSONResponse:
