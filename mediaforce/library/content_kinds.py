@@ -36,8 +36,10 @@ ANIMATION_GENRE = "animation"
 
 @dataclass(frozen=True, slots=True)
 class EpisodeTraits:
-    dark_frame_fraction: float
-    repeated_frame_fraction: float
+    """An original's traits; darkness and repeated frames are None when its fingerprint is unmeasured."""
+
+    dark_frame_fraction: float | None
+    repeated_frame_fraction: float | None
     height: int | None
     width: int | None
 
@@ -55,23 +57,24 @@ class SeasonGrouping:
                 "sides": dict(sorted(self.sides.items())), "reason": self.reason}
 
 
-def episode_traits(fingerprint_summary: Mapping[str, Any] | None, profile: Mapping[str, Any]) -> EpisodeTraits | None:
-    """Traits from an original's media fingerprint summary and its stream profile, or None if unmeasured."""
-    analysis = object_dict(object_dict(fingerprint_summary).get("analysis"))
-    aggregate = object_dict(analysis.get("aggregate"))
-    if "dark_frame_fraction" not in aggregate or "duplicate_like_frame_fraction" not in aggregate:
-        return None
+def episode_traits(fingerprint_summary: Mapping[str, Any] | None, profile: Mapping[str, Any]) -> EpisodeTraits:
+    """Traits from an original's media fingerprint summary, if measured, and its stream profile."""
+    aggregate = object_dict(object_dict(object_dict(fingerprint_summary).get("analysis")).get("aggregate"))
+    measured = "dark_frame_fraction" in aggregate and "duplicate_like_frame_fraction" in aggregate
     return EpisodeTraits(
-        dark_frame_fraction=float_value(aggregate["dark_frame_fraction"]),
-        repeated_frame_fraction=float_value(aggregate["duplicate_like_frame_fraction"]),
+        dark_frame_fraction=float_value(aggregate["dark_frame_fraction"]) if measured else None,
+        repeated_frame_fraction=float_value(aggregate["duplicate_like_frame_fraction"]) if measured else None,
         height=int_value(profile.get("height")) or None,
         width=int_value(profile.get("width")) or None,
     )
 
 
-def episode_side(traits: EpisodeTraits) -> EpisodeSide:
+def episode_side(traits: EpisodeTraits) -> EpisodeSide | None:
+    """Where one episode falls; None when only its resolution is known and it is not 4K."""
     if (traits.height or 0) >= UHD_MIN_HEIGHT or (traits.width or 0) >= UHD_MIN_WIDTH:
         return "4k"
+    if traits.dark_frame_fraction is None or traits.repeated_frame_fraction is None:
+        return None
     if traits.repeated_frame_fraction >= LIVE_ACTION_MAX_REPEATED_FRAMES:
         return "repeated_frames"
     if traits.dark_frame_fraction >= DARKER_MIN_DARK_FRAMES:
@@ -90,8 +93,8 @@ def is_animated(genres: Sequence[str] | None) -> bool | None:
 
 def season_kind(episodes: Sequence[EpisodeTraits | None], *, animated: bool | None) -> SeasonGrouping:
     """Group one season by its episodes' original traits; unmeasured episodes do not vote."""
-    measured = [traits for traits in episodes if traits is not None]
-    sides: Counter[EpisodeSide] = Counter(episode_side(traits) for traits in measured)
+    measured = [side for side in (episode_side(traits) for traits in episodes if traits is not None) if side is not None]
+    sides: Counter[EpisodeSide] = Counter(measured)
 
     def grouping(kind: SeasonKind, reason: str | None = None) -> SeasonGrouping:
         return SeasonGrouping(kind, len(episodes), len(measured), dict(sides), reason)
@@ -176,14 +179,19 @@ def season_kind_report(
         if folder_approved(prefix):
             totals["folder_approved"]["seasons"] += 1
             continue
-        traits = []
+        traits: list[EpisodeTraits | None] = []
         for item in episodes:
             if int(item["id"]) not in admitted:
                 traits.append(None)
                 continue
             evidence = load_source_evidence(connection, int(item["id"]), context=context)
+            if evidence.original_version_id is None:
+                traits.append(None)
+                continue
             fingerprint = evidence.traits["media_fingerprint"]
-            traits.append(episode_traits(fingerprint.summary, evidence.profile) if fingerprint.tier in {"proven", "probable"} else None)
+            # The admitted original's resolution counts even when its fingerprint does not.
+            trusted = fingerprint.summary if fingerprint.tier in {"proven", "probable"} else None
+            traits.append(episode_traits(trusted, evidence.profile))
         grouping = season_kind(traits, animated=animation.get(series_of[prefix]))
         waiting_bytes = sum(int_value(item["size_bytes"]) for item in waiting)
         totals[grouping.kind]["seasons"] += 1

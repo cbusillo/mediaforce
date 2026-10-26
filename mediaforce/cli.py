@@ -315,9 +315,7 @@ def _main(
             payload = season_kind_report(
                 connection,
                 library_types=config.library_type_map,
-                folder_approved=lambda prefix: effective_production_approval(
-                    config, prefix, _saved_approval,
-                ) is not None,
+                folder_approved=lambda prefix: _current_folder_approval(config, prefix),
             )
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -1031,6 +1029,12 @@ def _run_review(
     )
     for clip in clips:
         print(f"compare {clip.output_path} start={clip.timestamp_seconds:.2f}s duration={clip.duration_seconds:.2f}s")
+
+
+def _current_folder_approval(config: MediaforceConfig, prefix: str) -> bool:
+    """A folder approval production can still run under; a stale one leaves the season waiting."""
+    approval = effective_production_approval(config, prefix, _saved_approval)
+    return approval is not None and approval.current
 
 
 def _saved_approval(config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:

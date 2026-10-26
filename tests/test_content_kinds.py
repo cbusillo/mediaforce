@@ -1,15 +1,21 @@
 import json
 from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import create_engine
 
+from mediaforce import cli
+from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, metadata, series_metadata, source_admissions, source_generations
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.utils import timestamp
 from mediaforce.library.content_kinds import EpisodeTraits, season_kind, season_kind_report
 from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, append_measurement, append_version, json_text
+from mediaforce.web.runtime.folder_state import state_slug
+from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 
 
 @pytest.fixture
@@ -55,6 +61,14 @@ def test_cartoons_and_4k_never_join_a_live_action_kind() -> None:
 def test_unmeasured_episodes_do_not_vote() -> None:
     assert season_kind([None, _episode(0.4), None], animated=False).kind == "darker_live_action"
     assert season_kind([None, None], animated=False).kind == "unmeasured"
+
+
+def test_a_known_4k_original_counts_without_a_fingerprint() -> None:
+    unmeasured_4k = EpisodeTraits(dark_frame_fraction=None, repeated_frame_fraction=None, height=2160, width=3840)
+    unmeasured_hd = EpisodeTraits(dark_frame_fraction=None, repeated_frame_fraction=None, height=1080, width=1920)
+
+    assert season_kind([_episode(0.4), _episode(0.5), unmeasured_4k], animated=False).kind == "mixed"
+    assert season_kind([_episode(0.4), unmeasured_hd], animated=False).kind == "darker_live_action"
 
 
 def _item(connection: DBClient, rel_path: str, *, status: str, codec: str, current_dark: float) -> int:
@@ -115,3 +129,33 @@ def test_report_groups_waiting_seasons_by_original_traits_only(connection: DBCli
     assert seasons["tv/Drama/Season 2"]["kind"] == "unmeasured"
     assert "tv/Drama/Season 3" not in seasons
     assert report["totals"]["folder_approved"]["seasons"] == 1
+
+
+def _config(root: Path) -> MediaforceConfig:
+    return MediaforceConfig(raw={"media": {"source_roots": {"tv": str(root / "tv")}}},
+                            paths=ConfigPaths(project_root=root, config_path=root / "config.toml", db_path=root / "db.sqlite3",
+                                              run_manifest_dir=root / "runs", web_state_dir=root / "web", review_dir=root / "review",
+                                              runtime_settings_path=root / "settings.json"))
+
+
+def _save_approval(config: MediaforceConfig, prefix: str, *, job_id: str) -> None:
+    calibration: dict[str, Any] = {
+        "mode": "sample", "job_id": job_id, "draft_hash": "draft", "review_media_ready": True,
+        "browser_review_ready": True, "policy": {"video": {"preset": 6}},
+        "review_pairs": [{"source_clip": {"path": "/review/source.mp4"}, "preview_clip": {"path": "/review/new.mp4"}}],
+        "accepted_sample_job_id": "sample-approved", "accepted_at": "2026-10-25T12:00:00+00:00",
+        "accepted_draft_hash": "draft",
+    }
+    calibration["accepted_policy_hash"] = calibration_policy_hash(calibration)
+    config.paths.web_state_dir.mkdir(parents=True, exist_ok=True)
+    (config.paths.web_state_dir / f"{state_slug(prefix)}.json").write_text(json.dumps(calibration))
+
+
+def test_only_a_current_folder_approval_takes_a_season_out_of_waiting(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _save_approval(config, "tv/Drama", job_id="sample-approved")
+    _save_approval(config, "tv/Other/Season 1", job_id="sample-resampled")
+
+    assert cli._current_folder_approval(config, "tv/Drama/Season 2")
+    assert not cli._current_folder_approval(config, "tv/Other/Season 1")
+    assert not cli._current_folder_approval(config, "tv/Unknown/Season 1")
