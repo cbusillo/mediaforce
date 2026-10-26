@@ -23,7 +23,7 @@ from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, rec
 from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaHostUnavailableError
 from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, \
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host
-from mediaforce.library.evidence_queue import EvidenceWorkClaim, claim_next_evidence_work, \
+from mediaforce.library.evidence_queue import EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
     current_library_item_source_fingerprint, evidence_queue_summary, heartbeat_evidence_work, \
     load_evidence_queue_state, load_evidence_work_claim, mark_evidence_attempt_started, recover_evidence_queue, \
     transition_evidence_work
@@ -31,7 +31,8 @@ from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, 
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, parse_evidence_summary, \
     sync_library_item_evidence_state
 from mediaforce.library.probe import probe_evidence
-from mediaforce.library.source_evidence import observe_file, pending_source_operation, record_current_measurement
+from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, load_source_evidence, observe_file, pending_source_operation, record_current_measurement
+from mediaforce.core.evidence import stable_json_hash
 
 EVIDENCE_JOB_LEASE_SECONDS = 45
 EVIDENCE_JOB_HEARTBEAT_SECONDS = 5.0
@@ -108,6 +109,7 @@ def run_evidence_queue_until_blocked(
         max_work_items: int = 1,
         max_seconds: float | None = None,
         include_intake: bool = False,
+        stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     if max_work_items <= 0:
         raise ValueError("Evidence worker item budget must be greater than zero.")
@@ -132,14 +134,9 @@ def run_evidence_queue_until_blocked(
         if processed >= max_work_items:
             stop_reason = "item_budget"
     if include_intake and processed == 0:
-        from types import SimpleNamespace
         from mediaforce.library.source_intake import process_source_intake_once
 
-        def intake_target(item: dict[str, Any], controller: ManagedProcessController) -> _AnalysisTarget | None:
-            source = SimpleNamespace(source_path=item["source_path"], media_root=item["media_root"], rel_path=item["rel_path"])
-            return _analysis_target(current_config, source, Path(item["source_path"]), runtime_deps, controller)
-
-        processed += int(process_source_intake_once(current_config, analyze=runtime_deps.analyze_evidence, target=intake_target))
+        processed += int(process_source_intake_once(current_config, stop_event=stop_event))
     with open_db(current_config.paths.db_path) as connection:
         summary = evidence_queue_summary(connection)
     summary["processed_count"] = processed
@@ -158,7 +155,10 @@ def _run_evidence_claim(
     if active_claim is None:
         return
     claim = active_claim
-    if claim.evidence_state == EVIDENCE_STATE_CURRENT:
+    with open_db(config.paths.db_path) as connection:
+        source_measurement_needed = (claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
+                                     and load_source_evidence(connection, claim.library_item_id).traits[claim.evidence_kind].tier == "unknown")
+    if claim.evidence_state == EVIDENCE_STATE_CURRENT and not source_measurement_needed:
         _finish_claim(
             config,
             claim,
@@ -166,7 +166,7 @@ def _run_evidence_claim(
             reset_attempt_state=True,
         )
         return
-    if claim.evidence_state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED:
+    if claim.evidence_state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED and not source_measurement_needed:
         _run_classification_claim(config, claim)
         return
 
@@ -319,9 +319,10 @@ def _run_evidence_claim(
         actual_fingerprint=final_fingerprint,
         classification_only=False,
         observation={"before": measurement_before, "after": measurement_after,
+                     "basis": "readable-source", "codec_rule_hash": stable_json_hash(HISTORICAL_OUTPUT_PROFILES),
                      "worker_id": claim.worker_id, "lease_batch_id": claim.batch_id,
                      "source_revision": claim.source_revision,
-                     "remote_before": remote_before, "remote_after": remote_after, "remote_stat_only": False},
+                     "remote_before": remote_before, "remote_after": remote_after},
     )
 
 
@@ -422,7 +423,7 @@ def _commit_evidence_summary(
             record_current_measurement(
                 connection, item, kind=claim.evidence_kind, summary=summary,
                 provenance=observation or {"reason": "measurement observation unavailable"},
-                binding="observed" if observation and not observation.get("remote_stat_only") else "unbound",
+                binding="observed" if observation else "unbound",
             )
         projection = sync_library_item_evidence_state(
             connection,

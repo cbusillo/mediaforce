@@ -30,6 +30,7 @@ EVIDENCE_WORK_PRIORITY_DECISION = 0
 EVIDENCE_WORK_PRIORITY_RECLASSIFICATION = 10
 EVIDENCE_WORK_PRIORITY_OPERATOR = 50
 EVIDENCE_WORK_PRIORITY_REPRESENTATIVE = 70
+EVIDENCE_WORK_REASON_ORIGINAL_SOURCE = "original_source_measurement"
 
 EVIDENCE_QUEUE_ACTIVE_STATUSES = ("queued", "running", "paused", "cancel_requested")
 EVIDENCE_WORK_CLAIMABLE_STATUSES = ("queued", "retry_wait", "waiting_source", "waiting_host")
@@ -220,6 +221,8 @@ def queue_decision_evidence_work(
         updated_at: str | None = None,
         manage_transaction: bool = True,
         start_new_batch: bool = False,
+        require_measurement: bool = False,
+        priority: int = EVIDENCE_WORK_PRIORITY_DECISION,
 ) -> dict[str, Any]:
     """Queue decision-priority evidence for the selected items.
 
@@ -287,6 +290,7 @@ def queue_decision_evidence_work(
                 library_item_evidence_state.c.state.in_((
                     EVIDENCE_STATE_ANALYSIS_REQUIRED,
                     EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
+                    *(["current"] if require_measurement else []),
                 )),
                 LIBRARY_ITEM_PRESENT,
                 scope_rel_path_filter(library_items.c.rel_path, scope),
@@ -333,7 +337,7 @@ def queue_decision_evidence_work(
                         library_item_evidence_state.c.evidence_kind == selected_kind,
                     )
                     .values(
-                        work_priority=min(current_priority, EVIDENCE_WORK_PRIORITY_DECISION),
+                        work_priority=min(current_priority, priority),
                         work_reason=normalized_reason,
                         updated_at=now_iso,
                     )
@@ -355,7 +359,7 @@ def queue_decision_evidence_work(
                         library_item_evidence_state.c.evidence_kind == selected_kind,
                     )
                     .values(
-                        work_priority=EVIDENCE_WORK_PRIORITY_DECISION,
+                        work_priority=priority,
                         work_reason=normalized_reason,
                         updated_at=now_iso,
                     )
@@ -372,7 +376,7 @@ def queue_decision_evidence_work(
                 .values(
                     work_batch_id=batch_id,
                     work_status=next_status,
-                    work_priority=EVIDENCE_WORK_PRIORITY_DECISION,
+                    work_priority=priority,
                     work_reason=normalized_reason,
                     work_source_fingerprint=current_source_fingerprint,
                     leased_at=None,

@@ -2,21 +2,23 @@ import json
 import logging
 import subprocess
 import time
-from collections.abc import Callable, Mapping
+import threading
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import exists, select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import (
+    evidence_queue_state,
     item_events,
     library_items,
     source_admissions,
-    source_measurements,
     source_transitions,
     source_versions,
     staged_artifacts,
@@ -31,10 +33,10 @@ from mediaforce.library.probe import _probe_payload
 from mediaforce.library.source_evidence import (
     HISTORICAL_OUTPUT_PROFILES,
     SourceEvidenceContext,
-    append_measurement,
     append_version,
     ensure_active_source_version,
     json_text,
+    load_source_evidence,
     load_source_evidence_context,
     normalize_codec,
     observe_file,
@@ -44,6 +46,7 @@ from mediaforce.library.source_evidence import (
 LOGGER = logging.getLogger(__name__)
 INTAKE_RETRY_SECONDS = 900
 INTAKE_HASH_BUDGET_SECONDS = 900
+INTAKE_MAX_RETRY_SECONDS = 24 * 60 * 60
 HISTORICAL_ENCODER_ALIASES = ("libsvtav1", "svt-av1", "svt_av1", "svtav1", "av1_videotoolbox")
 
 
@@ -61,21 +64,17 @@ def _history_present(connection: DBClient, item_id: int) -> bool:
     )
 
 
+def intake_allowed(connection: DBClient) -> bool:
+    queue = connection.execute(select(evidence_queue_state)).mappings().first()
+    return not background_work_is_paused(connection) and not (queue and (queue["is_paused"] or queue["cancel_requested"]))
+
+
 def intake_candidate(connection: DBClient, config: MediaforceConfig) -> dict[str, Any] | None:
-    if background_work_is_paused(connection):
+    if not intake_allowed(connection):
         return None
     recent = (datetime.now(UTC) - timedelta(seconds=INTAKE_RETRY_SECONDS)).isoformat(timespec="seconds")
-    complete = [
-        exists().where(
-            source_measurements.c.version_id == library_items.c.active_source_version_id,
-            source_measurements.c.kind == kind,
-            source_measurements.c.binding == "observed",
-        )
-        for kind in EVIDENCE_KINDS
-    ]
     assessed = exists().where(
-        source_admissions.c.version_id == library_items.c.active_source_version_id,
-        ((source_admissions.c.tier == "probable") & complete[0] & complete[1]) | (source_admissions.c.recorded_at > recent),
+        source_admissions.c.version_id == library_items.c.active_source_version_id, source_admissions.c.recorded_at > recent
     )
     rows = connection.execute(
         select(library_items)
@@ -87,7 +86,33 @@ def intake_candidate(connection: DBClient, config: MediaforceConfig) -> dict[str
         )
         .order_by(library_items.c.id)
     ).mappings()
-    return next((dict(row) for row in rows if not _history_present(connection, int(row["id"]))), None)
+    for row in rows:
+        if _history_present(connection, int(row["id"])):
+            continue
+        previous = (
+            connection.execute(
+                select(source_admissions)
+                .where(source_admissions.c.version_id == row["active_source_version_id"])
+                .order_by(source_admissions.c.recorded_at.desc())
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        checks = json.loads(previous["checks_json"]) if previous else {}
+        if previous:
+            delay = min(INTAKE_MAX_RETRY_SECONDS, INTAKE_RETRY_SECONDS * 2 ** min(max(0, checks.get("attempts", 1) - 1), 7))
+            if datetime.now(UTC) < datetime.fromisoformat(previous["recorded_at"]) + timedelta(seconds=delay):
+                continue
+        if checks.get("reason") in {
+            "mediaforce_stamp",
+            "historical_output_codec_or_unknown",
+            "historical_output_encoder",
+            "known_output_match",
+        }:
+            continue
+        return dict(row)
+    return None
 
 
 def assess_readable_source(
@@ -136,6 +161,8 @@ def commit_readable_source(
 ) -> str:
     connection.commit()
     connection.exec_driver_sql("BEGIN IMMEDIATE")
+    if not intake_allowed(connection):
+        raise ProcessCancelledError("Source intake was paused")
     current = connection.execute(select(library_items).where(library_items.c.id == item["id"])).mappings().one()
     if (
         current["source_revision"] != item["source_revision"]
@@ -181,6 +208,8 @@ def commit_readable_source(
         .mappings()
         .one_or_none()
     )
+    checks["measurement_versions"] = [active, version]
+    checks["attempts"] = (json.loads(prior["checks_json"]).get("attempts", 0) if prior else 0) + 1
     admission_id = uuid4().hex
     connection.execute(
         source_admissions.insert().values(
@@ -197,11 +226,37 @@ def commit_readable_source(
     return version
 
 
+def queue_source_measurements(connection: DBClient, config: MediaforceConfig, item: Mapping[str, Any]) -> None:
+    from mediaforce.library.evidence_queue import (
+        EVIDENCE_WORK_PRIORITY_REPRESENTATIVE,
+        EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
+        queue_decision_evidence_work,
+    )
+    from mediaforce.library.evidence_state import sync_library_item_evidence_state
+
+    evidence = load_source_evidence(connection, int(item["id"]))
+    for kind in EVIDENCE_KINDS:
+        if evidence.traits[kind].tier == "probable":
+            continue
+        sync_library_item_evidence_state(connection, item, kind)
+        queue_decision_evidence_work(
+            connection,
+            config,
+            str(item["rel_path"]),
+            library_item_ids=[int(item["id"])],
+            evidence_kind=kind,
+            work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
+            start_new_batch=True,
+            require_measurement=True,
+            priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE,
+            manage_transaction=False,
+        )
+
+
 def process_source_intake_once(
     config: MediaforceConfig,
     *,
-    analyze: Callable[..., dict[str, object]],
-    target: Callable[[dict[str, Any], ManagedProcessController], Any],
+    stop_event: threading.Event | None = None,
 ) -> bool:
     with open_db(config.paths.db_path) as connection:
         item = intake_candidate(connection, config)
@@ -209,10 +264,27 @@ def process_source_intake_once(
         return False
     controller = ManagedProcessController()
     path = Path(item["source_path"])
+    monitor_stop = threading.Event()
+
+    def monitor() -> None:
+        from mediaforce.library.evidence_queue import runnable_evidence_work_count
+
+        while not monitor_stop.wait(0.5):
+            try:
+                with open_db(config.paths.db_path) as database:
+                    should_stop = not intake_allowed(database) or runnable_evidence_work_count(database) > 0
+                if should_stop or (stop_event is not None and stop_event.is_set()):
+                    controller.cancel()
+                    return
+            except (OSError, RuntimeError, SQLAlchemyError):
+                LOGGER.exception("Intake cancellation check failed")
+                controller.cancel()
+                return
+
+    monitor_thread = threading.Thread(target=monitor, name="intake-cancellation")
+    monitor_thread.start()
+    before = None
     try:
-        analysis_target = target(item, controller)
-        if analysis_target is None:
-            raise RuntimeError("No encode computer can measure this source yet")
         deadline = time.monotonic() + INTAKE_HASH_BUDGET_SECONDS
         last_pause_check = 0.0
 
@@ -220,16 +292,30 @@ def process_source_intake_once(
             nonlocal last_pause_check
             controller.throw_if_cancelled()
             now = time.monotonic()
-            if now > deadline:
-                raise RuntimeError("Intake I/O budget is exhausted")
             if now - last_pause_check < 1:
                 return
             last_pause_check = now
             with open_db(config.paths.db_path) as database:
-                if background_work_is_paused(database):
+                if not intake_allowed(database) or (stop_event is not None and stop_event.is_set()):
                     raise ProcessCancelledError("Background intake was paused")
 
-        before = observe_file(path, full_digest=True, check_cancelled=check_active)
+        def check_hash_budget() -> None:
+            check_active()
+            if time.monotonic() > deadline:
+                raise RuntimeError("Intake I/O budget is exhausted")
+
+        before = observe_file(path)
+        with open_db(config.paths.db_path) as database:
+            previous = database.execute(
+                select(source_versions.c.identity_json).where(source_versions.c.version_id == item["active_source_version_id"])
+            ).scalar_one_or_none()
+        saved = json.loads(previous) if previous else {}
+        if saved.get("sha256") and all(
+            saved.get(key) == before[key] for key in ("path", "stat", "size_bytes", "sample_fingerprint")
+        ):
+            before["sha256"] = saved["sha256"]
+        else:
+            before = observe_file(path, full_digest=True, check_cancelled=check_hash_budget)
         probe = _probe_payload(path, process_controller=controller)
         after = observe_file(path)
         if any(before[key] != after[key] for key in ("stat", "size_bytes", "sample_fingerprint")):
@@ -237,47 +323,11 @@ def process_source_intake_once(
         with open_db(config.paths.db_path) as connection:
             checks = assess_readable_source(connection, before, probe)
             version = commit_readable_source(connection, item, before, probe)
-        if checks.get("reason"):
-            return True
-        runner = analysis_target.command_runner
-        kwargs = {"command_runner": runner} if runner is not None else {}
-        for kind in EVIDENCE_KINDS:
-            try:
-                check_active()
-                local_before = observe_file(path)
-                remote_before = runner.observe_source(analysis_target.source_path, process_controller=controller) if runner else None
-                if remote_before and any(remote_before.get(key) != before[key] for key in ("size_bytes", "sample_fingerprint")):
-                    raise RuntimeError("Encode computer sees different source bytes")
-                summary = analyze(analysis_target.source_path, kind, process_controller=controller, **kwargs)
-                local_after = observe_file(path)
-                remote_after = runner.observe_source(analysis_target.source_path, process_controller=controller) if runner else None
-                if local_before != local_after or local_after != after or remote_before != remote_after:
-                    raise RuntimeError("Source changed during intake measurement")
-                with open_db(config.paths.db_path) as connection:
-                    current = connection.execute(select(library_items).where(library_items.c.id == item["id"])).mappings().one()
-                    if current["active_source_version_id"] != version or pending_source_operation(connection, int(item["id"])):
-                        raise RuntimeError("Source changed before intake measurement commit")
-                    append_measurement(
-                        connection,
-                        version_id=version,
-                        kind=kind,
-                        binding="observed",
-                        summary=summary,
-                        provenance={
-                            "basis": "readable-source",
-                            "before": local_before,
-                            "after": local_after,
-                            "remote_before": remote_before,
-                            "remote_after": remote_after,
-                            "codec_rule_hash": checks["codec_rule_hash"],
-                        },
-                        measured_at=timestamp(),
-                        recorded_at=timestamp(),
-                    )
-            except ProcessCancelledError:
-                raise
-            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
-                LOGGER.exception("Intake measurement failed for item %s (%s)", item["id"], kind)
+            if not checks.get("reason"):
+                current = connection.execute(select(library_items).where(library_items.c.id == item["id"])).mappings().one()
+                if current["active_source_version_id"] != version:
+                    raise RuntimeError("Source changed before queuing its measurements")
+                queue_source_measurements(connection, config, dict(current))
     except ProcessCancelledError:
         return False
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
@@ -285,16 +335,23 @@ def process_source_intake_once(
         with open_db(config.paths.db_path) as database:
             current = database.execute(select(library_items).where(library_items.c.id == item["id"])).mappings().one()
             if current["source_revision"] == item["source_revision"] and not pending_source_operation(database, int(item["id"])):
+                if before is not None and before.get("sha256"):
+                    commit_readable_source(database, item, before, {})
+                    return True
                 active = ensure_active_source_version(database, current)
                 generation = database.execute(
                     select(source_versions.c.generation_id).where(source_versions.c.version_id == active)
                 ).scalar_one()
-                prior = database.execute(
-                    select(source_admissions.c.admission_id)
-                    .where(source_admissions.c.version_id == active)
-                    .order_by(source_admissions.c.recorded_at.desc())
-                    .limit(1)
-                ).scalar_one_or_none()
+                prior = (
+                    database.execute(
+                        select(source_admissions)
+                        .where(source_admissions.c.version_id == active)
+                        .order_by(source_admissions.c.recorded_at.desc())
+                        .limit(1)
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
                 database.execute(
                     source_admissions.insert().values(
                         admission_id=uuid4().hex,
@@ -302,11 +359,18 @@ def process_source_intake_once(
                         version_id=active,
                         tier="unknown",
                         basis="readable-source",
-                        supersedes_id=prior,
-                        checks_json=json_text({"reason": "intake_retry_pending"}),
+                        supersedes_id=prior["admission_id"] if prior else None,
+                        checks_json=json_text(
+                            {
+                                "reason": "intake_retry_pending",
+                                "attempts": (json.loads(prior["checks_json"]).get("attempts", 0) if prior else 0) + 1,
+                            }
+                        ),
                         recorded_at=timestamp(),
                     )
                 )
     finally:
+        monitor_stop.set()
+        monitor_thread.join()
         controller.reset()
     return True

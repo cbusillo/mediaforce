@@ -285,8 +285,10 @@ uv run mediaforce evidence replay "tv/Show/Season 1"
 The bounded background analysis runner also assesses one new, unpublished input
 when queued analysis has no work. Intake streams one cancellable full SHA-256
 outside database transactions and scan/UI reads. It allocates no media copies.
-A failed assessment waits fifteen minutes before retrying, allowing other files
-to continue. Pausing background work stops intake too.
+Failed assessments back off from fifteen minutes to at most one day; stable
+output exclusions wait for the file to change. Unchanged inputs reuse their
+recorded digest, and retries measure only missing traits. Analysis pause/cancel,
+new priority evidence and app shutdown interrupt intake; other files continue.
 
 An identity-bound raw probe must have no Mediaforce stamp in container or stream
 tags. Intake excludes historical output codecs and encoder tags, and compares
@@ -296,9 +298,10 @@ history is conservatively excluded from this new-download path; historical
 recovery remains the separate `restore-source` operation.
 
 Successful intake records a probable original with basis `readable-source`, then
-measures each available trait anew. Legacy catalog summaries are never rebound.
-Each successful measurement is retained immediately; a missing kind can retry
-independently. Revision changes or pending publication discard late results.
+queues missing traits through the existing evidence queue. Fresh queue receipts
+with matching before/after samples, size and stat signatures can already qualify;
+legacy catalog summaries and unbound receipts never qualify. Successful traits
+are retained immediately, and the queue retries each missing kind independently. Revision changes or pending publication discard late results.
 Readers check new output conflicts again before exposing traits.
 
 All intake measurements are observations, including local files without strict

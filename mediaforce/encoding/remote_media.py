@@ -12,8 +12,6 @@ from mediaforce.remote import run_remote_command
 
 REMOTE_FFMPEG_VERSION_TIMEOUT_SECONDS = 20
 REMOTE_STAT_TIMEOUT_SECONDS = 20
-# macOS stat first; GNU stat when the BSD form is not understood. Prints "<size> <modified epoch seconds>".
-_REMOTE_STAT_SCRIPT = 'stat -f "%z %m" "$1" 2>/dev/null || stat -c "%s %Y" "$1"'
 # The SSH connection itself takes time on top of what the measurement is allowed.
 REMOTE_CONNECT_ALLOWANCE_SECONDS = 10
 
@@ -22,7 +20,7 @@ def source_observation_script() -> str:
     from mediaforce.library.source_evidence import observe_file
 
     functions = (utils.descriptor_content_version_fingerprint, utils.descriptor_sha256, utils.file_stat_signature, observe_file)
-    return ("import hashlib, json, os, sys\nfrom pathlib import Path\nfrom typing import Any, Callable\n"
+    return ("from __future__ import annotations\nimport hashlib, json, os, sys\nfrom pathlib import Path\nfrom typing import Any, Callable\n"
             + f"CONTENT_VERSION_SAMPLE_BYTES = {utils.CONTENT_VERSION_SAMPLE_BYTES}\n"
             + f"FILE_DIGEST_CHUNK_BYTES = {utils.FILE_DIGEST_CHUNK_BYTES}\n"
             + "\n".join(inspect.getsource(function) for function in functions)
@@ -84,26 +82,6 @@ class RemoteMediaCommands:
             raise RemoteMediaHostUnavailableError(f"{self.host_label} could not run ffmpeg.")
         self._ffmpeg_version = first_line
         return first_line
-
-    def source_size_and_mtime(
-            self,
-            path: Path,
-            *,
-            process_controller: ManagedProcessController | None,
-    ) -> tuple[int, int] | None:
-        """Size in bytes and whole-second modification time of ``path`` as that computer sees it.
-
-        None when that computer cannot see the file.
-        """
-        result = self.run(
-            ["sh", "-c", _REMOTE_STAT_SCRIPT, "sh", str(path)],
-            timeout_seconds=REMOTE_STAT_TIMEOUT_SECONDS,
-            process_controller=process_controller,
-        )
-        fields = result.stdout.split()
-        if result.returncode != 0 or len(fields) != 2 or not all(field.isdigit() for field in fields):
-            return None
-        return int(fields[0]), int(fields[1])
 
     def observe_source(
             self, path: Path, *, full_digest: bool = False,

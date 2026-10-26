@@ -115,8 +115,6 @@ class FakeEncodeComputers:
             if self.on_version_check is not None:
                 self.on_version_check(process_controller)
             return subprocess.CompletedProcess(command, 0, f"{REMOTE_FFMPEG_VERSION}\nbuilt with clang\n", "")
-        if command[:2] == ["sh", "-c"] and "stat" in command[2]:
-            return subprocess.CompletedProcess(command, 0, self._stat_output(), "")
         if command[:2] == ["python3", "-c"]:
             if self.controller_source is None:
                 return subprocess.CompletedProcess(command, 0, json.dumps({"strength": "observed", "sample_fingerprint": "0" * 40,

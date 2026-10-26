@@ -381,7 +381,7 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
     # Protected owner confirmation and strict binding are owned by #999. Application-DB rows alone confer no authority.
     for kind in EVIDENCE_KINDS:
         rows = connection.execute(select(source_measurements).where(
-            source_measurements.c.version_id == original["version_id"], source_measurements.c.kind == kind,
+            source_measurements.c.version_id.in_(checks.get("measurement_versions", [original["version_id"]]) if readable else [original["version_id"]]), source_measurements.c.kind == kind,
         )).mappings().all()
         eligible = [row for row in rows if not reason and row["binding"] == "historical-plan-sampled"
                     and _historical_measurement_matches(row, checks)]
@@ -409,6 +409,7 @@ def _readable_measurement_matches(row: DBRow, version: Mapping[str, Any], checks
     return (provenance.get("basis") == "readable-source" and before == after
             and before.get("sample_fingerprint") == version["sample_fingerprint"]
             and before.get("size_bytes") == version["size_bytes"]
+            and before.get("stat") == json.loads(version["identity_json"]).get("stat")
             and provenance.get("codec_rule_hash") == checks.get("codec_rule_hash")
             and hashlib.sha256(row["summary_json"].encode()).hexdigest() == row["summary_sha256"]
             and bool(summary) and summary.get("decision", {}).get("status") in {"measured", "resolved"})

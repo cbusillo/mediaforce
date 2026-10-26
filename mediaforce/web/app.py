@@ -598,6 +598,7 @@ def create_app(
     evidence_runner = BoundedEvidenceRunner(
         config.paths.config_path,
         deps=replace(default_evidence_worker_deps(), evidence_host_rows=evidence_host_rows),
+        stop_event=shutdown_event,
     )
     review_dir = config.paths.review_dir
 

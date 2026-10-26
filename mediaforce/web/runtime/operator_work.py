@@ -25,9 +25,10 @@ TERMINAL_EVIDENCE_QUEUE_STATUSES = ("completed", "completed_with_errors", "cance
 
 
 class BoundedEvidenceRunner:
-    def __init__(self, config_path: Path, *, deps: EvidenceWorkerDeps | None = None) -> None:
+    def __init__(self, config_path: Path, *, deps: EvidenceWorkerDeps | None = None, stop_event: threading.Event | None = None) -> None:
         self._config_path = config_path
         self._deps = deps
+        self._stop_event = stop_event
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
@@ -82,6 +83,7 @@ class BoundedEvidenceRunner:
                 deps=self._deps,
                 max_work_items=max_work_items,
                 include_intake=True,
+                stop_event=self._stop_event,
             )
         except Exception:
             LOGGER.exception("Bounded evidence work failed")
