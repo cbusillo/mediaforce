@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from sqlalchemy import exists, inspect, select, update
+from sqlalchemy import exists, inspect, literal_column, or_, select, update
 
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import library_items, source_admissions, source_generations, source_measurements, \
@@ -87,7 +87,7 @@ def observe_file(path: Path, *, full_digest: bool = False,
     with path.open("rb") as handle:
         before = os.fstat(handle.fileno())
         sample = descriptor_content_version_fingerprint(handle.fileno(), size_bytes=before.st_size)
-        digest = descriptor_sha256(handle.fileno(), check_cancelled=check_cancelled) if full_digest else None
+        digest = descriptor_sha256(handle.fileno(), check_cancelled=check_cancelled, size_bytes=before.st_size) if full_digest else None
         after_sample = descriptor_content_version_fingerprint(handle.fileno(), size_bytes=before.st_size)
         if (file_stat_signature(before) != file_stat_signature(os.fstat(handle.fileno()))
                 or file_stat_signature(before) != file_stat_signature(path.stat()) or sample != after_sample):
@@ -381,12 +381,14 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
     # Protected owner confirmation and strict binding are owned by #999. Application-DB rows alone confer no authority.
     for kind in EVIDENCE_KINDS:
         rows = connection.execute(select(source_measurements).where(
-            source_measurements.c.version_id.in_(checks.get("measurement_versions", [original["version_id"]]) if readable else [original["version_id"]]), source_measurements.c.kind == kind,
-        )).mappings().all()
+            or_(source_measurements.c.version_id == original["version_id"],
+                source_measurements.c.measurement_id.in_(checks.get("measurement_ids", []) if readable else [])),
+            source_measurements.c.kind == kind,
+        ).order_by(literal_column("source_measurements.rowid").desc())).mappings().all()
         eligible = [row for row in rows if not reason and row["binding"] == "historical-plan-sampled"
                     and _historical_measurement_matches(row, checks)]
         if readable and not reason:
-            eligible = [row for row in rows if row["binding"] == "observed" and _readable_measurement_matches(row, original, checks)]
+            eligible = [row for row in rows if observed_measurement_matches(row, original)][:1]
         summaries = {row["summary_json"] for row in eligible}
         if len(summaries) == 1:
             selected = eligible[0]
@@ -402,15 +404,15 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
                            "content_version_fingerprint": original["sample_fingerprint"]}, traits)
 
 
-def _readable_measurement_matches(row: DBRow, version: Mapping[str, Any], checks: Mapping[str, Any]) -> bool:
+def observed_measurement_matches(row: DBRow, identity: Mapping[str, Any], *, require_stat: bool = False) -> bool:
     provenance = json.loads(row["provenance_json"])
     before, after = provenance.get("before", {}), provenance.get("after", {})
     summary = parse_evidence_summary(row["summary_json"])
-    return (provenance.get("basis") == "readable-source" and before == after
-            and before.get("sample_fingerprint") == version["sample_fingerprint"]
-            and before.get("size_bytes") == version["size_bytes"]
-            and before.get("stat") == json.loads(version["identity_json"]).get("stat")
-            and provenance.get("codec_rule_hash") == checks.get("codec_rule_hash")
+    return (row["binding"] == "observed" and bool(before) and before == after
+            and before.get("strength") == "observed" and isinstance(before.get("stat"), list)
+            and before.get("sample_fingerprint") == identity["sample_fingerprint"]
+            and before.get("size_bytes") == identity["size_bytes"]
+            and (not require_stat or before.get("stat") == identity.get("stat"))
             and hashlib.sha256(row["summary_json"].encode()).hexdigest() == row["summary_sha256"]
             and bool(summary) and summary.get("decision", {}).get("status") in {"measured", "resolved"})
 

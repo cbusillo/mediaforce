@@ -32,13 +32,13 @@ class BoundedEvidenceRunner:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
-    def intake_available(self) -> bool:
+    def prepare_background_work(self) -> int:
         from mediaforce.core.config import load_config
-        from mediaforce.library.source_intake import intake_candidate
+        from mediaforce.library.source_intake import queue_original_intake
 
         config = self._deps.load_config(self._config_path) if self._deps else load_config(self._config_path)
         with open_db(config.paths.db_path) as connection:
-            return intake_candidate(connection, config) is not None
+            return queue_original_intake(connection, config)
 
     @property
     def active(self) -> bool:
@@ -82,7 +82,6 @@ class BoundedEvidenceRunner:
                 config_path=self._config_path,
                 deps=self._deps,
                 max_work_items=max_work_items,
-                include_intake=True,
                 stop_event=self._stop_event,
             )
         except Exception:
@@ -97,12 +96,11 @@ def start_ready_evidence_work(db_path: Path, runner: BoundedEvidenceRunner) -> b
     """Run evidence work that is queued and unpaused but has no runner, such as checks production waits on."""
     if runner.active:
         return False
+    runner.prepare_background_work()
     with open_db(db_path) as connection:
         runnable = runnable_evidence_work_count(connection)
     if runnable <= 0:
-        if not runner.intake_available():
-            return False
-        runnable = 1
+        return False
     return runner.start(max_work_items=min(runnable, DEFAULT_EVIDENCE_BATCH_LIMIT))
 
 

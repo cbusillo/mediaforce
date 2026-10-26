@@ -92,7 +92,8 @@ class RemoteMediaCommands:
             timeout_seconds=3600 if full_digest else REMOTE_STAT_TIMEOUT_SECONDS,
             process_controller=process_controller,
         )
-        result.check_returncode()
+        if result.returncode != 0:
+            raise RuntimeError(f"{self.host_label} could not read this file for a content check; check its library mount")
         observation = json.loads(result.stdout)
         if (not isinstance(observation, dict) or observation.get("strength") != "observed"
                 or not isinstance(observation.get("sample_fingerprint"), str)

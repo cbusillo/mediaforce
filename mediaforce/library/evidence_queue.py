@@ -18,7 +18,7 @@ from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.evidence_acquisition import DEFAULT_UNCERTAINTY_FRONTIER_LIMIT, \
     FingerprintAcquisitionPlan, load_fingerprint_acquisition_items, plan_fingerprint_acquisition
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
-    EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EvidenceKind
+    EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, EvidenceKind
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.motion_keep_state import kept_original_clause
@@ -150,7 +150,12 @@ def start_evidence_work(
                 "Background catalog and analysis work is paused. Resume background work before preparing evidence."
             )
         current_state = load_evidence_queue_state(connection)
+        active_background = False
         if str(current_state.get("status") or "") in EVIDENCE_QUEUE_ACTIVE_STATUSES:
+            reasons = set(connection.execute(select(library_item_evidence_state.c.work_reason).where(
+                library_item_evidence_state.c.work_batch_id == current_state["batch_id"])).scalars())
+            active_background = reasons == {EVIDENCE_WORK_REASON_ORIGINAL_SOURCE} and not current_state["cancel_requested"]
+        if str(current_state.get("status") or "") in EVIDENCE_QUEUE_ACTIVE_STATUSES and not active_background:
             raise EvidenceQueueConflict(
                 "Evidence work is already active; pause, cancel, or finish it before starting another scope."
             )
@@ -170,6 +175,15 @@ def start_evidence_work(
             selected_kinds,
             limit=normalized_limit,
         )
+        if active_background:
+            for candidate in candidates:
+                queue_decision_evidence_work(connection, config, scope_prefix,
+                    library_item_ids=[candidate["library_item_id"]], evidence_kind=candidate["evidence_kind"],
+                    work_reason="operator_scope", priority=EVIDENCE_WORK_PRIORITY_OPERATOR, manage_transaction=False)
+            connection.execute(update(evidence_queue_state).where(evidence_queue_state.c.queue_name == DEFAULT_EVIDENCE_QUEUE_NAME).values(
+                is_paused=1, status="paused", scope_json=json.dumps(scope.to_payload()), updated_at=now_iso))
+            connection.commit()
+            return evidence_queue_summary(connection)
         batch_id = uuid.uuid4().hex
         _queue_candidate_rows(
             connection,
@@ -290,7 +304,7 @@ def queue_decision_evidence_work(
                 library_item_evidence_state.c.state.in_((
                     EVIDENCE_STATE_ANALYSIS_REQUIRED,
                     EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
-                    *(["current"] if require_measurement else []),
+                    *([EVIDENCE_STATE_CURRENT] if require_measurement else []),
                 )),
                 LIBRARY_ITEM_PRESENT,
                 scope_rel_path_filter(library_items.c.rel_path, scope),
@@ -309,7 +323,7 @@ def queue_decision_evidence_work(
 
         queue_state = load_evidence_queue_state(connection)
         queue_status = str(queue_state.get("status") or "idle")
-        if bool(queue_state.get("cancel_requested")) or queue_status == "cancel_requested":
+        if queue_status in EVIDENCE_QUEUE_ACTIVE_STATUSES and (bool(queue_state.get("cancel_requested")) or queue_status == "cancel_requested"):
             raise EvidenceQueueConflict(
                 "Evidence work is stopping. Wait for cancellation to finish before requesting safety evidence."
             )
@@ -338,7 +352,7 @@ def queue_decision_evidence_work(
                     )
                     .values(
                         work_priority=min(current_priority, priority),
-                        work_reason=normalized_reason,
+                        work_reason=normalized_reason if priority < current_priority or not row.get("work_reason") else row["work_reason"],
                         updated_at=now_iso,
                     )
                 )
@@ -346,7 +360,7 @@ def queue_decision_evidence_work(
                 continue
             current_source_fingerprint = _item_source_fingerprint(row)
             preserve_retry_state = bool(
-                str(row.get("state") or "") == EVIDENCE_STATE_ANALYSIS_REQUIRED
+                (require_measurement or str(row.get("state") or "") == EVIDENCE_STATE_ANALYSIS_REQUIRED)
                 and current_source_fingerprint
                 and str(row.get("work_source_fingerprint") or "") == current_source_fingerprint
                 and row_status in {"retry_wait", "waiting_source", "waiting_host", "failed"}
@@ -507,6 +521,10 @@ def _claimable_batch_id(connection: DBClient) -> str | None:
     return batch_id
 
 
+def _evidence_due_now(now_iso: str) -> Any:
+    return or_(library_item_evidence_state.c.retry_not_before.is_(None), library_item_evidence_state.c.retry_not_before <= now_iso)
+
+
 def runnable_evidence_work_count(connection: DBClient) -> int:
     """Claimable items in the current batch, or zero when anything holds the queue back."""
     batch_id = _claimable_batch_id(connection)
@@ -519,6 +537,7 @@ def runnable_evidence_work_count(connection: DBClient) -> int:
             .where(
                 library_item_evidence_state.c.work_batch_id == batch_id,
                 library_item_evidence_state.c.work_status.in_(EVIDENCE_WORK_CLAIMABLE_STATUSES),
+                _evidence_due_now(timestamp()),
             )
         ).scalar_one()
     )
@@ -669,13 +688,11 @@ def claim_next_evidence_work(
             .where(
                 library_item_evidence_state.c.work_batch_id == batch_id,
                 library_item_evidence_state.c.work_status.in_(EVIDENCE_WORK_CLAIMABLE_STATUSES),
-                or_(
-                    library_item_evidence_state.c.retry_not_before.is_(None),
-                    library_item_evidence_state.c.retry_not_before <= now_iso,
-                ),
+                _evidence_due_now(now_iso),
             )
             .order_by(
                 library_item_evidence_state.c.work_priority,
+                case((library_item_evidence_state.c.work_status == "queued", 0), else_=1),
                 case(
                     (library_item_evidence_state.c.state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED, 0),
                     else_=1,

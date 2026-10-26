@@ -242,6 +242,12 @@ export interface EvidenceWorkReasonView {
 
 export function evidenceWorkReasonView(reason: string | null): EvidenceWorkReasonView | null {
 	if (!reason) return null;
+	if (reason === 'original_source_measurement') {
+		return {
+			label: 'Checking originals',
+			detail: 'Measures originals to group seasons by how they look.'
+		};
+	}
 	if (reason === 'sample_safety') {
 		return { label: 'Needed for sample', detail: 'Complete this before starting the sample.' };
 	}

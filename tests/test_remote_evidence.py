@@ -341,7 +341,7 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
         self.assertIsNone(summary)
         self.assertEqual(state["work_status"], "failed")
         self.assertEqual(state["last_error"], REMOTE_SOURCE_MISMATCH_ERROR)
-        self.assertEqual(state["attempt_count"], 0)
+        self.assertEqual(state["attempt_count"], 1)
 
     def test_a_file_that_changes_on_the_encode_computer_during_measuring_is_discarded(self) -> None:
         config = self._config([self.mini])

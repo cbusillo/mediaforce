@@ -174,7 +174,8 @@ describe('operator work copy', () => {
 			...[
 				'representative_technical_coverage',
 				'representative_uncertainty',
-				'operator_scope'
+				'operator_scope',
+				'original_source_measurement'
 			].flatMap((reason) => {
 				const view = evidenceWorkReasonView(reason);
 				return [view?.label, view?.detail];

@@ -282,33 +282,33 @@ uv run mediaforce evidence replay "tv/Show/Season 1"
 
 ### Automatic original intake
 
-The bounded background analysis runner also assesses one new, unpublished input
-when queued analysis has no work. Intake streams one cancellable full SHA-256
-outside database transactions and scan/UI reads. It allocates no media copies.
-Failed assessments back off from fifteen minutes to at most one day; stable
-output exclusions wait for the file to change. Unchanged inputs reuse their
-recorded digest, and retries measure only missing traits. Analysis pause/cancel,
-new priority evidence and app shutdown interrupt intake; other files continue.
+Bounded discovery adds new unpublished inputs to the existing evidence queue.
+It does no media I/O. Each job checks the raw container and stream stamps,
+streams a cancellable full digest against retained outputs, and applies the
+historical codec and encoder exclusions. Hashing reads at most the observed
+file length and allocates no media copies. The queue's existing lease,
+heartbeat, retry, pause, cancellation and shutdown handling own the whole job.
+Higher priority analysis can defer a hash without consuming a failure attempt.
 
-An identity-bound raw probe must have no Mediaforce stamp in container or stream
-tags. Intake excludes historical output codecs and encoder tags, and compares
-against retained output identities and completed staging records. Missing data
-or a possible output without a digest stays unknown. Existing encode/publication
-history is conservatively excluded from this new-download path; historical
-recovery remains the separate `restore-source` operation.
+An assessment is final for its unchanged input and rule versions. Stable
+negative checks leave the original unknown; transient failures stay in the
+queue's retry state, not in admission history. Unknown or missing checks never
+become passes. Completed cancellation leaves future downloads available.
+Prepare can add requested analysis to a background-only batch without resetting
+its leases or retries; it pauses new starts until the Director presses Start.
 
-Successful intake records a probable original with basis `readable-source`, then
-queues missing traits through the existing evidence queue. Fresh queue receipts
-with matching before/after samples, size and stat signatures can already qualify;
-legacy catalog summaries and unbound receipts never qualify. Successful traits
-are retained immediately, and the queue retries each missing kind independently. Revision changes or pending publication discard late results.
-Readers check new output conflicts again before exposing traits.
+A probable assessment freezes the IDs of qualifying earlier observed receipts,
+including their before/after identity and summary hash. It cannot reuse legacy
+catalog summaries or unbound measurements. Subsequent queue receipts bind to
+the admitted input version; their stat checks bracket the measurement rather
+than requiring an earlier mount's device or inode. The newest successful
+receipt supplies each trait while older evidence remains retained. Missing
+traits use the same normal analyzer and independent per-kind retries.
 
-All intake measurements are observations, including local files without strict
-custody, SMB, and remote/staged-host paths. No result becomes proven. Remote
-workers use Python 3 to execute the same descriptor-sampling code as the
-controller, comparing byte samples and size across hosts and before/after stat
-signatures within each host. A stat-only host cannot qualify and retries later.
-Existing staged-host scratch and free-space/cleanup rules are unchanged.
-Probable traits supply advisory grouping; they grant no deletion or cleanup
-permission and do not transfer an approval.
+All measurements remain observations, including local files without strict
+custody, SMB and remote/staged-host paths. None becomes proven. Remote workers
+use Python 3 to execute the controller's descriptor-sampling code, comparing
+samples and size across hosts and stat signatures within each host. Stat-only
+hosts cannot qualify. Existing staged scratch, capacity and cleanup rules are
+unchanged. Probable traits support advisory grouping and grant no deletion,
+cleanup or approval-transfer authority.

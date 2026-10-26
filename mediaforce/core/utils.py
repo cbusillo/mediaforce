@@ -63,16 +63,22 @@ def descriptor_sha256(
         descriptor: int,
         *,
         check_cancelled: Callable[[], None] | None = None,
+        size_bytes: int | None = None,
 ) -> str:
     digest = hashlib.sha256()
+    remaining = size_bytes
     os.lseek(descriptor, 0, os.SEEK_SET)
-    while True:
+    while remaining is None or remaining > 0:
         if check_cancelled is not None:
             check_cancelled()
-        chunk = os.read(descriptor, FILE_DIGEST_CHUNK_BYTES)
+        chunk = os.read(descriptor, FILE_DIGEST_CHUNK_BYTES if remaining is None else min(FILE_DIGEST_CHUNK_BYTES, remaining))
         if not chunk:
+            if remaining is not None:
+                raise OSError("Source digest was truncated")
             break
         digest.update(chunk)
+        if remaining is not None:
+            remaining -= len(chunk)
     return f"sha256:{digest.hexdigest()}"
 
 
