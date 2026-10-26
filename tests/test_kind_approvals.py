@@ -371,22 +371,36 @@ def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_pat
     assert facts["unmeasured_seasons"] == 1
 
 
-def test_only_a_folders_own_approval_from_a_season_of_that_kind_extends_to_it(tmp_path: Path) -> None:
+def _approved_on(config: MediaforceConfig, sample_path: str | None) -> dict[str, Any]:
+    calibration = _approved(config)
+    if sample_path is not None:
+        calibration["sample_item"]["rel_path"] = sample_path
+    return calibration
+
+
+def test_only_a_folders_own_approval_sampled_on_that_kind_extends_to_it(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    folders = {APPROVED_SEASON: _approved(config)}
-    kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER, OTHER_SEASON: "cartoon"}
+    bright_season, darker_season = "tv/Show/Season 1", "tv/Show/Season 2"
+    kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER, OTHER_SEASON: "cartoon", bright_season: "bright_live_action",
+             darker_season: DARKER}
 
     def extend(kind: str, prefix: str, approved: dict[str, dict[str, Any]]) -> dict[str, Any]:
         return approve_kind_action(config, kind, prefix, load_calibration_state=_loader(approved, kinds),
                                    kind_of=lambda _config, season: kinds.get(season), approved_at="now")
 
-    assert extend("bright_live_action", APPROVED_SEASON, folders)["code"] == SOURCE_KIND_DIFFERS_CODE
-    assert extend(DARKER, OTHER_SEASON, {OTHER_SEASON: _approved(config)})["code"] == SOURCE_KIND_DIFFERS_CODE
-    assert extend("cartoon", OTHER_SEASON, {OTHER_SEASON: _approved(config)})["code"] == KIND_IS_ONE_TIME_CODE
-    assert extend(DARKER, "tv/Drama", {"tv/Drama": _approved(config)})["code"] == SOURCE_KIND_DIFFERS_CODE
+    darker_sample = {APPROVED_SEASON: _approved_on(config, f"{APPROVED_SEASON}/e01.mkv")}
+    toon_sample = {OTHER_SEASON: _approved_on(config, f"{OTHER_SEASON}/e01.mkv")}
+    # A show approved on its bright season does not become the darker kind's, whichever season is named.
+    show_on_bright = {"tv/Show": _approved_on(config, f"{bright_season}/e01.mkv")}
+    assert extend(DARKER, darker_season, show_on_bright)["code"] == SOURCE_KIND_DIFFERS_CODE
+    assert extend("bright_live_action", APPROVED_SEASON, darker_sample)["code"] == SOURCE_KIND_DIFFERS_CODE
+    assert extend(DARKER, OTHER_SEASON, toon_sample)["code"] == SOURCE_KIND_DIFFERS_CODE
+    assert extend("cartoon", OTHER_SEASON, toon_sample)["code"] == KIND_IS_ONE_TIME_CODE
+    assert extend(DARKER, APPROVED_SEASON, {APPROVED_SEASON: _approved_on(config, None)})["code"] == SOURCE_KIND_DIFFERS_CODE
     assert load_kind_approval(config, DARKER) is None
-    assert extend(DARKER, f"{APPROVED_SEASON}/e01.mkv", folders)["ok"]
-    assert extend(DARKER, SEASON, folders)["code"] == NO_FOLDER_APPROVAL_CODE
+    assert extend("bright_live_action", darker_season, show_on_bright)["ok"]
+    assert extend(DARKER, f"{APPROVED_SEASON}/e01.mkv", darker_sample)["ok"]
+    assert extend(DARKER, SEASON, darker_sample)["code"] == NO_FOLDER_APPROVAL_CODE
     assert extend(DARKER, OTHER_SEASON, {})["code"] == NO_FOLDER_APPROVAL_CODE
 
 

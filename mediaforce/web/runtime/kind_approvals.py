@@ -344,17 +344,19 @@ def approve_kind_action(
         kind_of: KindOf,
         approved_at: str,
 ) -> dict[str, Any]:
-    """Use the approval governing a season for every season of this kind.
+    """Use the approval governing a folder for every season of this kind.
 
-    Only a folder's own approval extends, and only from a season that measures as this kind, so the settings
-    chosen for one kind of picture never cover another.
+    Only a folder's own approval extends, and only when the episode its sample was made from belongs to a season
+    that measures as this kind, so the settings chosen for one kind of picture never cover another. A show's
+    approval counts by its sample's season, not by the season named here.
     """
     if kind not in APPROVABLE_KINDS:
         return {"ok": False, "code": KIND_IS_ONE_TIME_CODE}
     approval = effective_production_approval(config, from_prefix, load_calibration_state)
     if approval is None or approval.kind is not None:
         return {"ok": False, "code": NO_FOLDER_APPROVAL_CODE}
-    season = season_prefix_of(config, from_prefix)
-    if season is None or kind_of(config, season) != kind:
+    sample_path = str(object_dict(approval.calibration.get("sample_item")).get("rel_path") or "")
+    sample_season = season_prefix_of(config, sample_path) if sample_path else None
+    if sample_season is None or kind_of(config, sample_season) != kind:
         return {"ok": False, "code": SOURCE_KIND_DIFFERS_CODE}
     return approve_kind(config, kind, approval.prefix, approval.calibration, approved_at=approved_at)
