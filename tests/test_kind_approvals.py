@@ -10,8 +10,9 @@ from fastapi import HTTPException
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
-from mediaforce.core.db_tables import library_items, series_metadata, source_admissions, source_generations, \
+from mediaforce.core.db_tables import encode_jobs, library_items, series_metadata, source_admissions, source_generations, \
     source_transitions
+from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
 from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
@@ -21,7 +22,8 @@ from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.kind_approvals import APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
-    SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, SeasonKinds, approve_kind, load_kind_approval, stop_kind_approval
+    KIND_QUEUE_WAITS_CODE, KIND_RETRY_SECONDS, SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, KindSeason, SeasonKinds, \
+    approve_kind, background_queue_blocker, load_kind_approval, next_kind_season, record_kind_attempt, stop_kind_approval
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_matches, \
     production_calibration
 
@@ -235,3 +237,99 @@ def test_a_season_outside_every_approved_kind_is_not_queued(tmp_path: Path) -> N
 
     with pytest.raises(HTTPException):
         _queue(config, SEASON, _loader({}, {SEASON: "bright_live_action"}))
+
+
+def _waiting_episode(config: MediaforceConfig, rel_path: str, size_bytes: int, *, status: str = "discovered") -> None:
+    timestamp = datetime.now(tz=UTC).isoformat(timespec="seconds")
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(library_items.insert().values(
+            source_path=f"/media/{rel_path}", rel_path=rel_path, media_root="tv", parent_dir=rel_path.rsplit("/", 1)[0],
+            file_name=Path(rel_path).name, container="mkv", size_bytes=size_bytes, mtime_ns=1, fingerprint=rel_path,
+            duration_seconds=2_700.0, video_codec="h264", width=1920, height=1080, audio_summary_json="[]",
+            subtitle_summary_json="[]", status=status, priority_score=50, recommendation="priority_encode",
+            recommendation_reason="fixture", last_scan_id="scan", discovered_at=timestamp, last_seen_at=timestamp,
+            updated_at=timestamp,
+        ))
+
+
+def _encode_job(config: MediaforceConfig, prefix: str, status: str) -> None:
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.insert().values(
+            job_id=f"{prefix}-{status}", prefix=prefix, status=status, manifest_path="run.json", host_json="{}",
+            created_at="2026-10-26T00:00:00+00:00", updated_at="2026-10-26T00:00:00+00:00",
+        ))
+
+
+def _next(config: MediaforceConfig, load: KindAwareLoader, *, now: float = 0.0) -> KindSeason | None:
+    try:
+        with open_db(config.paths.db_path) as connection:
+            return next_kind_season(connection, config, load_calibration_state=load, now=now)
+    finally:
+        reset_engine_cache()
+
+
+def test_seasons_a_kind_covers_are_offered_one_at_a_time_largest_first(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    small, large, own = "tv/Small/Season 1", "tv/Large/Season 1", "tv/Own/Season 1"
+    for season, size in ((small, 1_000), (large, 9_000), (own, 50_000)):
+        _waiting_episode(config, f"{season}/e01.mkv", size)
+    _waiting_episode(config, f"{small}/e02.mkv", 20_000, status="promoted")
+    own_sample = {key: value for key, value in _approved(config).items() if not key.startswith("accepted_")}
+    load = _loader({own: own_sample}, {small: DARKER, large: DARKER, own: DARKER})
+
+    assert _next(config, load) is None
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    first = _next(config, load)
+    assert first is not None and (first.season, first.kind, first.waiting_bytes) == (large, DARKER, 9_000)
+    record_kind_attempt(config, first, {"ok": True}, at=0.0)
+    second = _next(config, load)
+    assert second is not None and second.season == small
+    # A wait for the queue to settle is no attempt, so the season is offered again.
+    record_kind_attempt(config, second, {"ok": False, "code": KIND_QUEUE_WAITS_CODE}, at=0.0)
+    assert _next(config, load) == second
+    record_kind_attempt(config, second, {"ok": True}, at=0.0)
+    # The season with its own sample is never offered, and attempts outlive this process.
+    assert _next(config, load) is None
+
+
+def test_a_refused_season_is_tried_again_later_or_when_its_files_change(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    load = _loader({}, {SEASON: DARKER})
+    chosen = _next(config, load)
+    assert chosen is not None
+
+    record_kind_attempt(config, chosen, {"ok": False, "message": "Not enough free space."}, at=0.0)
+    assert _next(config, load, now=3600.0) is None
+    assert _next(config, load, now=KIND_RETRY_SECONDS + 1) == chosen
+    record_kind_attempt(config, chosen, {"ok": True}, at=0.0)
+    _waiting_episode(config, f"{SEASON}/Thriller.S02E02.mkv", 2_000)
+    again = _next(config, load)
+    assert again is not None and again.season == SEASON and again.files != chosen.files
+
+
+def test_no_season_is_offered_while_work_is_paused_running_or_left_with_the_director(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    load = _loader({}, {SEASON: DARKER})
+
+    with open_db(config.paths.db_path) as connection:
+        save_queue_state(connection, {"queue_name": DEFAULT_QUEUE_NAME, "is_paused": True, "updated_at": "now"})
+        assert background_queue_blocker(connection) == {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
+    assert _next(config, load) is None
+    with open_db(config.paths.db_path) as connection:
+        save_queue_state(connection, {"queue_name": DEFAULT_QUEUE_NAME, "is_paused": False, "updated_at": "now"})
+    _encode_job(config, OTHER_SEASON, "running")
+    assert _next(config, load) is None
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.update().values(status="completed"))
+        assert background_queue_blocker(connection) is None
+    _encode_job(config, SEASON, "needs_attention")
+    assert _next(config, load) is None
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.delete().where(encode_jobs.c.prefix == SEASON))
+    offered = _next(config, load)
+    assert offered is not None and offered.season == SEASON
+    reset_engine_cache()

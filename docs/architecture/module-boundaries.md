@@ -166,6 +166,13 @@ Guidance:
     - one approval per kind of content (darker or bright live action), copied
       from a current folder approval with a size per 45 minutes, and the
       calibration loader that lets the approval resolver find it
+    - the background choice of the next waiting season a kind approval covers,
+      largest first and one at a time: never while work is paused or a run is
+      queued or running (checked again inside the queueing transaction), never
+      a season whose last run ended badly, and not again for a season already
+      tried under the same approval with the same waiting files; attempts are
+      kept beside the kind approvals, and a refused season is retried after
+      six hours
   - `production_approval.py`
     - the one rule for which sample approval governs a file: the nearest folder
       holding an approval (the file, then its season, show and library); when
