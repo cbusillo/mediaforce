@@ -52,7 +52,10 @@ def descriptor_content_version_fingerprint(
     digest.update(str(size).encode())
     for position in sorted(positions):
         digest.update(position.to_bytes(8, "big", signed=False))
-        digest.update(os.pread(descriptor, chunk_size, position))
+        chunk = os.pread(descriptor, chunk_size, position)
+        if len(chunk) != chunk_size:
+            raise OSError("Source sample was truncated")
+        digest.update(chunk)
     return digest.hexdigest()
 
 

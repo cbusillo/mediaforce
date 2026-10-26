@@ -249,6 +249,7 @@ class EvidenceWorkerTests(unittest.TestCase):
     def test_ready_evidence_work_starts_the_runner_only_when_runnable(self) -> None:
         item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
         runner = Mock(active=False)
+        runner.intake_available.return_value = False
         runner.start.return_value = True
 
         self.assertFalse(start_ready_evidence_work(self.config.paths.db_path, runner))

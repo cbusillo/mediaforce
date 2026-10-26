@@ -278,3 +278,34 @@ Compare representative dimensions from stored evidence without opening media:
 ```bash
 uv run mediaforce evidence replay "tv/Show/Season 1"
 ```
+
+
+### Automatic original intake
+
+The bounded background analysis runner also assesses one new, unpublished input
+when queued analysis has no work. Intake streams one cancellable full SHA-256
+outside database transactions and scan/UI reads. It allocates no media copies.
+A failed assessment waits fifteen minutes before retrying, allowing other files
+to continue. Pausing background work stops intake too.
+
+An identity-bound raw probe must have no Mediaforce stamp in container or stream
+tags. Intake excludes historical output codecs and encoder tags, and compares
+against retained output identities and completed staging records. Missing data
+or a possible output without a digest stays unknown. Existing encode/publication
+history is conservatively excluded from this new-download path; historical
+recovery remains the separate `restore-source` operation.
+
+Successful intake records a probable original with basis `readable-source`, then
+measures each available trait anew. Legacy catalog summaries are never rebound.
+Each successful measurement is retained immediately; a missing kind can retry
+independently. Revision changes or pending publication discard late results.
+Readers check new output conflicts again before exposing traits.
+
+All intake measurements are observations, including local files without strict
+custody, SMB, and remote/staged-host paths. No result becomes proven. Remote
+workers use Python 3 to execute the same descriptor-sampling code as the
+controller, comparing byte samples and size across hosts and before/after stat
+signatures within each host. A stat-only host cannot qualify and retries later.
+Existing staged-host scratch and free-space/cleanup rules are unchanged.
+Probable traits supply advisory grouping; they grant no deletion or cleanup
+permission and do not transfer an approval.

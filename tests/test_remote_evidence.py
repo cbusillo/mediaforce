@@ -34,6 +34,7 @@ from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, 
 from mediaforce.library.evidence_worker import REMOTE_SOURCE_MISMATCH_ERROR, EvidenceWorkerDeps, \
     process_evidence_queue_once
 from mediaforce.library.probe import probe_evidence
+from mediaforce.library.source_evidence import observe_file
 
 REMOTE_FFMPEG_VERSION = "ffmpeg version 7.1-encode-computer"
 CONTROLLER_FFMPEG_VERSION = "ffmpeg version 6.0-controller"
@@ -116,6 +117,17 @@ class FakeEncodeComputers:
             return subprocess.CompletedProcess(command, 0, f"{REMOTE_FFMPEG_VERSION}\nbuilt with clang\n", "")
         if command[:2] == ["sh", "-c"] and "stat" in command[2]:
             return subprocess.CompletedProcess(command, 0, self._stat_output(), "")
+        if command[:2] == ["python3", "-c"]:
+            if self.controller_source is None:
+                return subprocess.CompletedProcess(command, 0, json.dumps({"strength": "observed", "sample_fingerprint": "0" * 40,
+                    "stat": [0, 0, 1, 1, 1], "size_bytes": 1}), "")
+            observation = observe_file(self.controller_source)
+            observation["path"] = command[-2]
+            if self.stat_outputs is not None:
+                fields = self._stat_output().split()
+                observation["size_bytes"] = int(fields[0])
+                observation["stat"][3] = int(fields[1]) * 1000000000
+            return subprocess.CompletedProcess(command, 0, json.dumps(observation), "")
         if command[0] == "ffprobe":
             return subprocess.CompletedProcess(command, 0, PROBE_JSON, "")
         if "idet" in command:
@@ -126,7 +138,7 @@ class FakeEncodeComputers:
         return [call for call in self.calls if call["command"][0] in {"ffprobe", "ffmpeg"} and "-version" not in call["command"]]
 
     def stat_calls(self) -> list[dict[str, Any]]:
-        return [call for call in self.calls if call["command"][:2] == ["sh", "-c"]]
+        return [call for call in self.calls if call["command"][:2] == ["python3", "-c"]]
 
     def _stat_output(self) -> str:
         if self.stat_outputs is not None:
@@ -168,7 +180,7 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(measurement_calls[0]["command"][-1], "/Volumes/M1 mini/tv/show/item-1.mkv")
         self.assertEqual(len(measurement_calls), 4)
         self.assertEqual(
-            [call["command"][-1] for call in remote.stat_calls()],
+            [call["command"][-2] for call in remote.stat_calls()],
             ["/Volumes/M1 mini/tv/show/item-1.mkv"] * 2,
         )
         for call in measurement_calls:
@@ -338,6 +350,7 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
         item_id = self._prepare_cadence_item(config)
         stat_result = self._source_path().stat()
         remote = FakeEncodeComputers(
+            controller_source=self._source_path(),
             stat_outputs=[
                 f"{stat_result.st_size} {int(stat_result.st_mtime)}\n",
                 f"{stat_result.st_size + 1} {int(stat_result.st_mtime) + 5}\n",

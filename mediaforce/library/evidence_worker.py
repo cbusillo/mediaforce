@@ -107,6 +107,7 @@ def run_evidence_queue_until_blocked(
         deps: EvidenceWorkerDeps | None = None,
         max_work_items: int = 1,
         max_seconds: float | None = None,
+        include_intake: bool = False,
 ) -> dict[str, Any]:
     if max_work_items <= 0:
         raise ValueError("Evidence worker item budget must be greater than zero.")
@@ -130,6 +131,15 @@ def run_evidence_queue_until_blocked(
         processed += 1
         if processed >= max_work_items:
             stop_reason = "item_budget"
+    if include_intake and processed == 0:
+        from types import SimpleNamespace
+        from mediaforce.library.source_intake import process_source_intake_once
+
+        def intake_target(item: dict[str, Any], controller: ManagedProcessController) -> _AnalysisTarget | None:
+            source = SimpleNamespace(source_path=item["source_path"], media_root=item["media_root"], rel_path=item["rel_path"])
+            return _analysis_target(current_config, source, Path(item["source_path"]), runtime_deps, controller)
+
+        processed += int(process_source_intake_once(current_config, analyze=runtime_deps.analyze_evidence, target=intake_target))
     with open_db(current_config.paths.db_path) as connection:
         summary = evidence_queue_summary(connection)
     summary["processed_count"] = processed
@@ -195,7 +205,10 @@ def _run_evidence_claim(
             heartbeat.stop()
             _defer_for_encode_computer(config, claim, deps, restore_attempt=False)
             return
-        source_matches = _remote_source_matches(analysis_target, source_path, process_controller)
+        remote_before = (analysis_target.command_runner.observe_source(analysis_target.source_path, process_controller=process_controller)
+                         if analysis_target.command_runner else None)
+        local_before = observe_file(source_path)
+        source_matches = remote_before is None or all(local_before[key] == remote_before.get(key) for key in ("size_bytes", "sample_fingerprint"))
         _throw_if_preparation_cancelled(config, claim, process_controller)
         if not source_matches:
             heartbeat.stop()
@@ -228,8 +241,10 @@ def _run_evidence_claim(
             **remote_kwargs,
         )
         process_controller.throw_if_cancelled()
-        remote_source_unchanged = _remote_source_matches(analysis_target, source_path, process_controller)
         measurement_after = observe_file(source_path)
+        remote_after = (analysis_target.command_runner.observe_source(analysis_target.source_path, process_controller=process_controller)
+                        if analysis_target.command_runner else None)
+        remote_source_unchanged = remote_before == remote_after
         if measurement_before != measurement_after:
             raise RuntimeError("Source changed during evidence measurement")
     except ProcessCancelledError:
@@ -306,7 +321,7 @@ def _run_evidence_claim(
         observation={"before": measurement_before, "after": measurement_after,
                      "worker_id": claim.worker_id, "lease_batch_id": claim.batch_id,
                      "source_revision": claim.source_revision,
-                     "remote_stat_only": analysis_target.command_runner is not None},
+                     "remote_before": remote_before, "remote_after": remote_after, "remote_stat_only": False},
     )
 
 
@@ -557,24 +572,6 @@ def _throw_if_preparation_cancelled(
     ):
         raise ProcessCancelledError("Evidence work was cancelled.")
 
-
-def _remote_source_matches(
-        analysis_target: _AnalysisTarget,
-        source_path: Path,
-        process_controller: ManagedProcessController,
-) -> bool:
-    """Whether the encode computer sees the same size and modification time as the controller's copy."""
-    if analysis_target.command_runner is None:
-        return True
-    try:
-        stat_result = source_path.stat()
-    except OSError:
-        return False
-    remote = analysis_target.command_runner.source_size_and_mtime(
-        analysis_target.source_path,
-        process_controller=process_controller,
-    )
-    return remote == (stat_result.st_size, int(stat_result.st_mtime))
 
 
 class _ClaimHeartbeat:

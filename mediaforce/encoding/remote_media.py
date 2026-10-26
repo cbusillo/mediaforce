@@ -1,7 +1,10 @@
+import inspect
+import json
 import math
 import subprocess
 from pathlib import Path
 
+from mediaforce.core import utils
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.hosts.config import ssh_target_for_host
 from mediaforce.hosts.transport import ssh_connection_lost
@@ -13,6 +16,17 @@ REMOTE_STAT_TIMEOUT_SECONDS = 20
 _REMOTE_STAT_SCRIPT = 'stat -f "%z %m" "$1" 2>/dev/null || stat -c "%s %Y" "$1"'
 # The SSH connection itself takes time on top of what the measurement is allowed.
 REMOTE_CONNECT_ALLOWANCE_SECONDS = 10
+
+
+def source_observation_script() -> str:
+    from mediaforce.library.source_evidence import observe_file
+
+    functions = (utils.descriptor_content_version_fingerprint, utils.descriptor_sha256, utils.file_stat_signature, observe_file)
+    return ("import hashlib, json, os, sys\nfrom pathlib import Path\nfrom typing import Any, Callable\n"
+            + f"CONTENT_VERSION_SAMPLE_BYTES = {utils.CONTENT_VERSION_SAMPLE_BYTES}\n"
+            + f"FILE_DIGEST_CHUNK_BYTES = {utils.FILE_DIGEST_CHUNK_BYTES}\n"
+            + "\n".join(inspect.getsource(function) for function in functions)
+            + "\nprint(json.dumps(observe_file(Path(sys.argv[1]), full_digest=sys.argv[2] == '1')))\n")
 
 
 class RemoteMediaHostUnavailableError(RuntimeError):
@@ -90,6 +104,25 @@ class RemoteMediaCommands:
         if result.returncode != 0 or len(fields) != 2 or not all(field.isdigit() for field in fields):
             return None
         return int(fields[0]), int(fields[1])
+
+    def observe_source(
+            self, path: Path, *, full_digest: bool = False,
+            process_controller: ManagedProcessController | None = None,
+    ) -> dict[str, object]:
+        result = self.run(
+            ["python3", "-c", source_observation_script(), str(path), "1" if full_digest else "0"],
+            timeout_seconds=3600 if full_digest else REMOTE_STAT_TIMEOUT_SECONDS,
+            process_controller=process_controller,
+        )
+        result.check_returncode()
+        observation = json.loads(result.stdout)
+        if (not isinstance(observation, dict) or observation.get("strength") != "observed"
+                or not isinstance(observation.get("sample_fingerprint"), str)
+                or len(observation["sample_fingerprint"]) != 40
+                or not isinstance(observation.get("stat"), list)
+                or (full_digest and not observation.get("sha256"))):
+            raise RuntimeError("Encode computer did not return a complete source observation")
+        return observation
 
     def tool_lineage(self) -> dict[str, str]:
         return {

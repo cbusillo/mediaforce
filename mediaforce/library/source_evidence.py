@@ -232,6 +232,7 @@ class SourceEvidenceContext:
     outputs: tuple[Mapping[str, Any], ...]
     sampled_outputs: Mapping[tuple[str, int], tuple[Mapping[str, Any], ...]]
     unresolved_output_rule: bool
+    output_index_hash: str
 
     def rule_conflicts(self, codec: object) -> bool:
         return self.unresolved_output_rule or self.known_rule_conflicts(codec)
@@ -270,9 +271,8 @@ def load_source_evidence_context(connection: DBClient) -> SourceEvidenceContext:
                 library_outputs.add(row["after_version_id"])
         conflicts.update(normalize_codec(row["video_codec"]) for row in outputs
                          if row["version_id"] in library_outputs and row["video_codec"])
-    commands = [row["encode_command_json"] for row in connection.execute(select(
-        staged_artifacts.c.encode_command_json, staged_artifacts.c.encode_origin,
-    ).where(staged_artifacts.c.encode_completed_at.is_not(None))).mappings() if _library_output(row["encode_origin"])]
+    stages = connection.execute(select(staged_artifacts).where(staged_artifacts.c.encode_completed_at.is_not(None))).mappings().all()
+    commands = [row["encode_command_json"] for row in stages if _library_output(row["encode_origin"])]
     for receipt in connection.execute(select(target_production_outcomes.c.payload_json, target_production_outcomes.c.payload_sha256)).mappings():
         try:
             payload = json.loads(receipt["payload_json"])
@@ -290,13 +290,25 @@ def load_source_evidence_context(connection: DBClient) -> SourceEvidenceContext:
             continue
         conflicts.update(normalize_codec(command[index + 1]) for index, argument in enumerate(command[:-1])
                          if str(argument) in {"-c:v", "-codec:v", "-vcodec", "-c:v:0"})
+    retained = []
+    for stage in stages:
+        try:
+            command = json.loads(stage["encode_command_json"] or "[]")
+            codec = next((normalize_codec(command[index + 1]) for index, argument in enumerate(command[:-1])
+                          if str(argument) in {"-c:v", "-codec:v", "-vcodec", "-c:v:0"}), "")
+        except (ValueError, TypeError):
+            codec = ""
+        retained.append({"sha256": None, "sample_fingerprint": None, "size_bytes": stage["staging_size_bytes"],
+                         "video_codec": codec, "stage_item_id": stage["library_item_id"]})
+    outputs += tuple(retained)
     known_codecs = set(HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]) | set(HISTORICAL_OUTPUT_PROFILES["codecs"])
     sampled: dict[tuple[str, int], list[Mapping[str, Any]]] = defaultdict(list)
     for output in outputs:
         if output["sample_fingerprint"] and output["size_bytes"] is not None:
             sampled[(output["sample_fingerprint"], output["size_bytes"])].append(output)
     return SourceEvidenceContext(frozenset(conflicts - set(HISTORICAL_OUTPUT_PROFILES["codecs"])), outputs,
-                                 {key: tuple(rows) for key, rows in sampled.items()}, bool(conflicts - known_codecs))
+                                 {key: tuple(rows) for key, rows in sampled.items()}, bool(conflicts - known_codecs),
+                                 stable_json_hash([dict(row) for row in outputs]))
 
 
 def known_output_check(candidate: Mapping[str, Any] | DBRow,
@@ -351,6 +363,15 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
                   and checks.get("codec_rule_hash") == stable_json_hash(HISTORICAL_OUTPUT_PROFILES)
                   and checks.get("encode_link") and checks.get("unavailability"))
     reason = str(checks.get("reason") or "original_not_assessed")
+    readable = admission["tier"] == "probable" and admission["basis"] == "readable-source" and original["role"] == "input"
+    if readable:
+        from mediaforce.library.source_intake import assess_readable_source
+
+        refreshed = assess_readable_source(connection, dict(original), checks.get("raw_probe", {}), context=context)
+        reason = refreshed.get("reason") or ""
+        if (checks.get("codec_rule_hash") != refreshed.get("codec_rule_hash")
+                or checks.get("encoder_rule_hash") != refreshed.get("encoder_rule_hash")):
+            reason = "original_rule_changed"
     if historical:
         context = context or load_source_evidence_context(connection)
         reason = "historical_output_conflict" if context.rule_conflicts(original["video_codec"]) else ""
@@ -364,19 +385,33 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
         )).mappings().all()
         eligible = [row for row in rows if not reason and row["binding"] == "historical-plan-sampled"
                     and _historical_measurement_matches(row, checks)]
+        if readable and not reason:
+            eligible = [row for row in rows if row["binding"] == "observed" and _readable_measurement_matches(row, original, checks)]
         summaries = {row["summary_json"] for row in eligible}
         if len(summaries) == 1:
             selected = eligible[0]
             summary = parse_evidence_summary(selected["summary_json"])
             if summary is not None:
-                traits[kind] = SourceTrait(kind, "probable", "historical-plan", "historical-plan-sampled",
+                traits[kind] = SourceTrait(kind, "probable", admission["basis"], selected["binding"],
                                            tuple(row["measurement_id"] for row in eligible), summary, None)
                 continue
         traits[kind] = SourceTrait(kind, reason=reason or ("conflicting_measurements" if eligible else "missing_source_measurement"))
-    availability = "unavailable" if checks.get("unavailability") else "unknown"
+    availability = "available" if readable and not reason else "unavailable" if checks.get("unavailability") else "unknown"
     return SourceEvidence(generation, active, original["version_id"], availability, version_location(connection, original),
                           {**json.loads(original["profile_json"]), "source_size_bytes": original["size_bytes"],
                            "content_version_fingerprint": original["sample_fingerprint"]}, traits)
+
+
+def _readable_measurement_matches(row: DBRow, version: Mapping[str, Any], checks: Mapping[str, Any]) -> bool:
+    provenance = json.loads(row["provenance_json"])
+    before, after = provenance.get("before", {}), provenance.get("after", {})
+    summary = parse_evidence_summary(row["summary_json"])
+    return (provenance.get("basis") == "readable-source" and before == after
+            and before.get("sample_fingerprint") == version["sample_fingerprint"]
+            and before.get("size_bytes") == version["size_bytes"]
+            and provenance.get("codec_rule_hash") == checks.get("codec_rule_hash")
+            and hashlib.sha256(row["summary_json"].encode()).hexdigest() == row["summary_sha256"]
+            and bool(summary) and summary.get("decision", {}).get("status") in {"measured", "resolved"})
 
 
 def _historical_measurement_matches(row: DBRow, checks: Mapping[str, Any]) -> bool:

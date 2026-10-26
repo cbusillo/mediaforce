@@ -31,6 +31,14 @@ class BoundedEvidenceRunner:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
+    def intake_available(self) -> bool:
+        from mediaforce.core.config import load_config
+        from mediaforce.library.source_intake import intake_candidate
+
+        config = self._deps.load_config(self._config_path) if self._deps else load_config(self._config_path)
+        with open_db(config.paths.db_path) as connection:
+            return intake_candidate(connection, config) is not None
+
     @property
     def active(self) -> bool:
         with self._lock:
@@ -73,6 +81,7 @@ class BoundedEvidenceRunner:
                 config_path=self._config_path,
                 deps=self._deps,
                 max_work_items=max_work_items,
+                include_intake=True,
             )
         except Exception:
             LOGGER.exception("Bounded evidence work failed")
@@ -89,7 +98,9 @@ def start_ready_evidence_work(db_path: Path, runner: BoundedEvidenceRunner) -> b
     with open_db(db_path) as connection:
         runnable = runnable_evidence_work_count(connection)
     if runnable <= 0:
-        return False
+        if not runner.intake_available():
+            return False
+        runnable = 1
     return runner.start(max_work_items=min(runnable, DEFAULT_EVIDENCE_BATCH_LIMIT))
 
 
