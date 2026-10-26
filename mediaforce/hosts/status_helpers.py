@@ -431,7 +431,9 @@ def _classify_ssh_failure(
         kind = "new_name"
     elif "connection refused" in lowered:
         kind = "remote_login_off"
-    elif returncode in {None, 255} and ("operation timed out" in lowered or "no route to host" in lowered):
+    elif returncode in {None, 255} and any(
+            line.strip().lower().startswith("ssh: connect to host ") for line in detail.splitlines()
+    ):
         kind = "unreachable"
     elif (
             "could not resolve hostname" in lowered

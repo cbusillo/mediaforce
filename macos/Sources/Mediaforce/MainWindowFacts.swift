@@ -126,6 +126,7 @@ struct MainWindowFacts: Decodable, Sendable {
         let runningCount: Int
         let scheduleOpensAt: String?
         let attentionReason: String?
+        let attentionSince: String?
         var id: String { key }
     }
 

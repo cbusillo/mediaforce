@@ -40,9 +40,13 @@ struct Attention: Equatable, Sendable {
         return Attention(notices: notices, badgeCount: waitingOnYou(facts), memory: memory)
     }
 
+    private static func computerNeedsAttention(_ computer: MainWindowFacts.Computer) -> Bool {
+        computer.attentionReason != nil || computerStatesNeedingYou.contains(computer.state)
+    }
+
     static func waitingOnYou(_ facts: MainWindowFacts) -> Int {
         facts.samples.waitingOnYou.count
-            + facts.computers.filter { computerStatesNeedingYou.contains($0.state) }.count
+            + facts.computers.filter(computerNeedsAttention).count
             + (facts.originalBackups.count > 0 ? 1 : 0)
     }
 
@@ -73,9 +77,9 @@ struct Attention: Equatable, Sendable {
 
     static func waitingNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {
         let samples = facts.samples.waitingOnYou.map(sampleNotice)
-        let computers = facts.computers.filter { computerStatesNeedingYou.contains($0.state) }.map { computer in
+        let computers = facts.computers.filter(computerNeedsAttention).map { computer in
             AttentionNotice(
-                id: "computer:\(computer.key):\(computer.state)",
+                id: "computer:\(computer.key):\(computer.attentionSince ?? "")",
                 title: "\(computer.name ?? computer.key) needs you",
                 body: computer.attentionReason ?? "\(Words.computerState(computer.state)). Open Mediaforce to check it.",
                 opens: .computer(computer.key)

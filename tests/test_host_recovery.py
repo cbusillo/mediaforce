@@ -823,6 +823,8 @@ _ADDRESS = "chris@m2-mbp.local"
 _CHECK_FAILURES = {
     "asleep_timeout": f"ssh: connect to host {_ADDRESS} port 22: Operation timed out",
     "asleep_no_route": f"ssh: connect to host {_ADDRESS} port 22: No route to host",
+    "asleep_down": f"ssh: connect to host {_ADDRESS} port 22: Host is down",
+    "asleep_network": f"ssh: connect to host {_ADDRESS} port 22: Network is unreachable",
     "asleep_dropped": f"ssh: connect to host {_ADDRESS} port 22: Connection timed out",
     "identity_changed": "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.",
     "remote_login_off": f"ssh: connect to host {_ADDRESS} port 22: Connection refused",
@@ -860,7 +862,7 @@ def test_failed_computer_check_names_the_computer_in_plain_words(config: Mediafo
 
 
 def test_a_computer_that_does_not_answer_may_be_off_or_asleep(config: MediaforceConfig) -> None:
-    asleep = [_checked(config, _CHECK_FAILURES[case]) for case in ("asleep_timeout", "asleep_no_route")]
+    asleep = [_checked(config, _CHECK_FAILURES[case]) for case in ("asleep_timeout", "asleep_no_route", "asleep_dropped", "asleep_down", "asleep_network")]
     remote_login_off = _checked(config, _CHECK_FAILURES["remote_login_off"])
     for checked in asleep:
         assert "asleep" in " ".join(checked.issues)
@@ -885,7 +887,6 @@ def test_a_check_that_never_finishes_does_not_prove_a_computer_is_away(config: M
 config, host,
         )
     assert checked.check_failure == "check_failed"
-    assert "asleep" not in " ".join(checked.issues)
     with patch.object(recovery, "probe_host_status", return_value=checked):
         recovery.process_host_recovery_once(config)
     assert not recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["network_absent"]
@@ -959,12 +960,15 @@ def test_absent_computer_uses_last_seen_model_and_desktop_grace(
         recovery.process_host_recovery_once(config)
         probe.return_value = absent
         grace = recovery.DESKTOP_ABSENCE_GRACE
-        for elapsed in (timedelta(), grace / 2, grace, grace + timedelta(minutes=5), grace * 2):
+        signatures = ("asleep_timeout", "asleep_down", "asleep_dropped", "asleep_network", "asleep_no_route")
+        for elapsed, signature in zip((timedelta(), grace / 2, grace, grace + timedelta(minutes=5), grace * 2), signatures):
+            absent.check_failure = _checked(config, _CHECK_FAILURES[signature]).check_failure
             clock.now.return_value = alert_clock.now.return_value = NOW + timedelta(minutes=5) + elapsed
             recovery.process_host_recovery_once(config)
             record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
             assert record["status"] == "retrying"
             assert record["computer_model"] == model
+            assert record["network_absent"]
             alerts.record_recovery_alerts(config)
             host_alerts = [alert for alert in alerts.recovery_alerts(config) if alert["id"].startswith("host:")]
             assert bool(host_alerts) == (notifies and elapsed >= grace)
@@ -1001,3 +1005,36 @@ def test_unknown_result_retries_before_asking_and_keeps_the_warning_during_attem
         recovery.process_host_recovery_once(config)
         alerts.record_recovery_alerts(config)
         assert warning.call_count == 1
+
+
+@pytest.mark.parametrize("signature", [
+    "kex_exchange_identification: Connection reset by peer",
+    "Connection timed out during banner exchange",
+    "Connection closed by remote host",
+])
+def test_post_connection_failures_do_not_prove_network_absence(config: MediaforceConfig, signature: str) -> None:
+    assert _checked(config, signature).check_failure == "check_failed"
+
+
+def test_a_standing_storage_question_survives_a_failed_check(config: MediaforceConfig) -> None:
+    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+        recovery, "probe_host_status", return_value=status(),
+    ) as probe, patch.object(recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(
+        ok=False, uncertain=True, action="The computer could not read its mounted-storage list.",
+    )):
+        clock.now.return_value = NOW
+        recovery.process_host_recovery_once(config)
+        clock.now.return_value += timedelta(minutes=5)
+        recovery.process_host_recovery_once(config)
+        first = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
+        failed = status()
+        failed.check_failure = "check_failed"
+        failed.message = "The computer could not finish its check."
+        probe.return_value = failed
+        clock.now.return_value += timedelta(minutes=5)
+        recovery.process_host_recovery_once(config)
+        current = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
+        assert current["status"] == "action_required"
+        assert current["first_failure_at"] == first["first_failure_at"]
+        assert current["reason"] == failed.message
+        assert not current["network_absent"]

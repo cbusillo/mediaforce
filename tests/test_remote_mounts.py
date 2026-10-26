@@ -781,14 +781,18 @@ class GeneratedMountScriptTests(unittest.TestCase):
         self.assertEqual(self._osascript_runs(), ["1"])
 
     def test_no_ui_reclaims_an_old_lock_only_after_the_request_is_gone(self) -> None:
-        import hashlib
-
-        lock_hash = hashlib.sha256(b"/Volumes/media").hexdigest()[:24]
-        lock = self.root / "home/Library/Caches/mediaforce" / f"mount-{lock_hash}.lock"
-        lock.mkdir(parents=True)
+        (self.root / "bootstrap-starts-job").touch()
+        self._run()
+        [lock] = self._lock_dirs()
         os.utime(lock, (time.time() - 300, time.time() - 300))
+        waiting = self._recover_without_dialog("0")
+        self.assertTrue(waiting.uncertain)
+        self.assertTrue(lock.exists())
+        (self.root / "job-running").unlink()
+        (self.root / "bootstrap-starts-job").unlink()
         recovered = self._recover_without_dialog("0")
         self.assertTrue(recovered.ok)
+        self.assertFalse(lock.exists())
         self.assertEqual(self._osascript_runs(), ["1"])
 
     def test_no_ui_keeps_uncertainty_when_the_computer_cannot_read_its_mount_table(self) -> None:
@@ -797,6 +801,27 @@ class GeneratedMountScriptTests(unittest.TestCase):
         self.assertTrue(result.uncertain)
         self.assertEqual(self._osascript_runs(), [])
         self.assertEqual(self._launchctl_calls("bootstrap"), [])
+
+    def test_uncertain_requests_name_each_observation(self) -> None:
+        from mediaforce.hosts import mount_runtime
+
+        outcomes = [
+            (mount_runtime._MOUNT_BUSY_EXIT, "MEDIAFORCE_MOUNT=busy-timeout"),
+            (mount_runtime._MOUNT_REQUEST_WAITING_EXIT, "MEDIAFORCE_MOUNT=request-waiting"),
+            (mount_runtime._MOUNT_HELPER_EXIT, "MEDIAFORCE_MOUNT=mount-table-unreadable"),
+            (mount_runtime._SSH_CONNECTION_EXIT, ""),
+        ]
+        observations = []
+        for code, output in outcomes:
+            result = mount_smb_shares_no_ui(
+                {"host": "remote@worker", "label": "Worker"},
+                [RemoteSmbMount(Path("/Volumes/media"), "media", "smb://nas/media")],
+                run_mount_script=Mock(return_value=subprocess.CompletedProcess([], code, stdout=output, stderr="")),
+            )
+            self.assertTrue(result.uncertain)
+            self.assertIn("Worker", result.action or "")
+            observations.append(result.action)
+        self.assertEqual(len(set(observations)), len(outcomes))
 
     def _osascript_runs(self) -> list[str]:
         log = self.root / "osascript.log"

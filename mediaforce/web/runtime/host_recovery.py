@@ -147,6 +147,8 @@ def _recovery_pass(
     state["absent_since"] = (
         previous.get("absent_since") or now.isoformat() if state["network_absent"] else None
     )
+    if previous.get("status") == "action_required" and not status.available and not state["network_absent"]:
+        state.update(status="action_required", reason=previous.get("reason") or status.message)
     if status.available:
         state["mount_uncertain"] = False
     elif state["network_absent"]:
@@ -162,8 +164,6 @@ def _recovery_pass(
             next_retry_at=(now + timedelta(seconds=_INITIAL_RETRY_SECONDS)).isoformat(),
         )
     elif remote_mount_recovery_supported(config, host, status):
-        if previous.get("status") == "action_required":
-            state.update(status="action_required", reason=previous.get("reason"))
         # Persist before SSH: transport loss can leave a remote mount request running.
         state["mount_uncertain"] = True
         state["last_attempt_at"] = now.isoformat()
@@ -172,7 +172,7 @@ def _recovery_pass(
         state["mount_uncertain"] = result.uncertain
         if result.uncertain:
             state["status"] = "action_required" if previous.get("mount_uncertain") else "retrying"
-            state["reason"] = "This computer did not confirm its storage connection. Mediaforce keeps checking before trying again."
+            state["reason"] = result.action or "This computer did not confirm its storage connection. Check its shared storage; Mediaforce keeps trying."
         elif result.action:
             state.update(status="action_required", reason=result.action, retry_paused=not result.retry)
             if not result.retry:
@@ -183,7 +183,10 @@ def _recovery_pass(
             state.update(status="retrying", reason=refreshed.message)
             if refreshed.available:
                 state.update(status="ready", reason=None, first_failure_at=None, failure_count=0)
-    if state["mount_uncertain"] and status.check_failure and not state_error:
+    if status.check_failure and not state_error and (
+        state["mount_uncertain"] or previous.get("status") == "action_required"
+        or (count >= 2 and status.check_failure in {"check_failed", "unreadable_reply"})
+    ):
         state.update(status="action_required", reason=status.message)
     _store_host_state(config, key, state)
     return state

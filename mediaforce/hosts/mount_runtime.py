@@ -312,9 +312,15 @@ def mount_smb_shares_no_ui(
         try:
             result = run_mount_script(script, attempt_seconds + 15)
         except subprocess.TimeoutExpired:
-            return NoUiMountResult(ok=False, uncertain=True)
+            return NoUiMountResult(
+                ok=False, uncertain=True,
+                action=f"The storage request on {label} did not finish in time. Check its shared storage; Mediaforce keeps trying.",
+            )
         except (OSError, subprocess.SubprocessError):
-            return NoUiMountResult(ok=False, uncertain=True)
+            return NoUiMountResult(
+                ok=False, uncertain=True,
+                action=f"Mediaforce could not run the storage request on {label}. Check its connection; Mediaforce keeps trying.",
+            )
         if result.returncode == 0:
             continue
         _log_helper_failure(label, mount, result)
@@ -351,10 +357,23 @@ def _no_ui_failure(
             retry=False,
         )
     if result.returncode in {_MOUNT_BUSY_EXIT, _MOUNT_HELPER_EXIT, _MOUNT_REQUEST_WAITING_EXIT}:
-        return NoUiMountResult(ok=False, uncertain=True)
+        observation = {
+            _MOUNT_BUSY_EXIT: "An earlier storage request still holds its lock",
+            _MOUNT_REQUEST_WAITING_EXIT: "An earlier storage connection is still running",
+            _MOUNT_HELPER_EXIT: "The storage helper could not complete its check",
+        }[result.returncode]
+        if _helper_markers(result).get("MEDIAFORCE_MOUNT") == "mount-table-unreadable":
+            observation = "The computer could not read its mounted-storage list"
+        return NoUiMountResult(
+            ok=False, uncertain=True,
+            action=f"{observation} on {label}. Check its connection window and shared storage; Mediaforce keeps trying.",
+        )
     if result.returncode != _MOUNT_NOT_CONNECTED_EXIT:
-        # A timeout, a lost SSH connection or an unknown exit leaves no confirmed result.
-        return NoUiMountResult(ok=False, uncertain=True)
+        observation = "The connection was lost" if result.returncode == _SSH_CONNECTION_EXIT else "The storage request did not confirm its result"
+        return NoUiMountResult(
+            ok=False, uncertain=True,
+            action=f"{observation} on {label}. Check its shared storage; Mediaforce keeps trying.",
+        )
     status = _netfs_status(_helper_markers(result).get("MEDIAFORCE_MOUNT_NETFS", ""))
     if status is None:
         return NoUiMountResult(ok=False, uncertain=True)
@@ -481,7 +500,10 @@ label={q_label}
 attempt_seconds={int(attempt_seconds)}
 keep_waiting_request={0 if no_ui else 1}
 mount_present() {{
-  mount_output="$(/sbin/mount 2>/dev/null)" || exit {_MOUNT_HELPER_EXIT}
+  if ! mount_output="$(/sbin/mount 2>/dev/null)"; then
+    printf 'MEDIAFORCE_MOUNT=mount-table-unreadable\\n'
+    exit {_MOUNT_HELPER_EXIT}
+  fi
   if printf '%s\\n' "$mount_output" | /usr/bin/grep -F -- " on $expected (smbfs," >/dev/null 2>&1; then
     return 0
   fi
