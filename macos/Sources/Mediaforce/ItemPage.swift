@@ -461,6 +461,14 @@ final class ItemPlayers {
     private(set) var failed = false
     private(set) var position: Double = 0
     private(set) var duration: Double = 0
+    // The picture's own size in pixels, once the compressed side is ready; zero until then.
+    private(set) var videoSize: CGSize = .zero
+    // Where the picture opens, as a share of the episode, so there is a moment to compare before playing.
+    var opensAt = 0.25
+    // Whose sound plays while comparing; the compressed side's unless the original's is chosen.
+    var hearOriginal = false {
+        didSet { applySound() }
+    }
     private var observer: Any?
     private var readiness: [NSKeyValueObservation] = []
     private var ready: Set<ObjectIdentifier> = []
@@ -469,14 +477,24 @@ final class ItemPlayers {
     private var settling: Int?
 
     init() {
-        original.isMuted = true
+        applySound()
     }
 
     func load(_ file: ItemFacts.File, client: MediaforceClient) {
-        comparing = file.compressed && file.originalBackup
+        load(file.libraryItemId, compressed: file.compressed, originalBackup: file.originalBackup, client: client)
+    }
+
+    func load(_ libraryItemId: Int, compressed: Bool, originalBackup: Bool, client: MediaforceClient) {
+        pause()
+        comparing = compressed && originalBackup
+        preparing = true
+        failed = false
+        position = 0
+        duration = 0
+        videoSize = .zero
         // The compressed file plays when there is one; a file not compressed yet plays as it is.
-        main.replaceCurrentItem(with: AVPlayerItem(url: client.player(file.libraryItemId, file.compressed ? .compressed : .original)))
-        original.replaceCurrentItem(with: comparing ? AVPlayerItem(url: client.player(file.libraryItemId, .original)) : nil)
+        main.replaceCurrentItem(with: AVPlayerItem(url: client.player(libraryItemId, compressed ? .compressed : .original)))
+        original.replaceCurrentItem(with: comparing ? AVPlayerItem(url: client.player(libraryItemId, .original)) : nil)
         ready = []
         // Both sides must be ready before either plays, so the two pictures show the same moment.
         readiness = [main, original].compactMap { player in
@@ -484,7 +502,11 @@ final class ItemPlayers {
                 let status = item.status
                 let duration = item.duration.seconds
                 let side = ObjectIdentifier(player)
-                Task { @MainActor in self?.itemChanged(side, status: status, duration: duration) }
+                Task { @MainActor in
+                    // A report from the episode before a switch arrives late; only the current one counts.
+                    guard item === player.currentItem else { return }
+                    self?.itemChanged(side, status: status, duration: duration)
+                }
             }
         }
         if observer == nil {
@@ -535,6 +557,19 @@ final class ItemPlayers {
         }
     }
 
+    /// One frame back or forward on both sides, paused, so the two pictures stay on the same frame.
+    func step(by frames: Int) {
+        let rate = main.currentItem?.tracks.map(\.currentVideoFrameRate).first { $0 > 0 } ?? 24
+        pause()
+        // Both sides go to one exact time, so a drift left from playing never survives a step.
+        seek(to: min(max(main.currentTime().seconds + Double(frames) / Double(rate), 0), duration))
+    }
+
+    private func applySound() {
+        main.isMuted = comparing && hearOriginal
+        original.isMuted = !(comparing && hearOriginal)
+    }
+
     private func play(from time: CMTime, _ request: Int) async {
         async let mainSeek = main.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
         async let originalSeek = comparing ? original.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) : true
@@ -564,12 +599,15 @@ final class ItemPlayers {
             return
         }
         guard status == .readyToPlay, preparing else { return }
-        if side == ObjectIdentifier(main) { self.duration = duration.isFinite ? duration : 0 }
+        if side == ObjectIdentifier(main) {
+            self.duration = duration.isFinite ? duration : 0
+            videoSize = main.currentItem?.presentationSize ?? .zero
+        }
         ready.insert(side)
         guard ready.count == (comparing ? 2 : 1) else { return }
         preparing = false
-        // Open on a moment a quarter of the way in, so there is a picture to compare before playing.
-        seek(to: self.duration / 4)
+        applySound()
+        seek(to: self.duration * opensAt)
     }
 
     private func tick(_ time: CMTime) {

@@ -2245,7 +2245,8 @@ def create_app(
 
     def _kinds_payload() -> dict[str, Any]:
         with open_readonly_db(config.paths.db_path) as connection:
-            return kinds_payload(connection, config, load_calibration_state=_load_calibration_state)
+            return kinds_payload(connection, config, load_calibration_state=_load_calibration_state,
+                                 kind_of=_season_kinds)
 
     def _queue_next_kind_season() -> None:
         # The season is chosen and its connection closed before queueing opens its own write transaction.
