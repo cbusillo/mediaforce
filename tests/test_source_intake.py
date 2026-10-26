@@ -26,7 +26,6 @@ from mediaforce.encoding.remote_media import source_observation_script
 from mediaforce.library.evidence_queue import (
     cancel_evidence_queue,
     claim_next_evidence_work,
-    pause_evidence_queue,
     resume_evidence_queue,
     runnable_evidence_work_count,
     start_evidence_work,

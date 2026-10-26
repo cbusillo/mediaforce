@@ -368,7 +368,7 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
     if readable:
         from mediaforce.library.source_intake import assess_readable_source
 
-        refreshed = assess_readable_source(connection, cast(Mapping[str, Any], original), checks.get("raw_probe", {}), context=context)
+        refreshed = assess_readable_source(connection, cast(dict[str, Any], dict(original)), checks.get("raw_probe", {}), context=context)
         reason = refreshed.get("reason") or ""
         if (checks.get("codec_rule_hash") != refreshed.get("codec_rule_hash")
                 or checks.get("encoder_rule_hash") != refreshed.get("encoder_rule_hash")):
@@ -389,7 +389,7 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
         eligible = [row for row in rows if not reason and row["binding"] == "historical-plan-sampled"
                     and _historical_measurement_matches(row, checks)]
         if readable and not reason:
-            eligible = [row for row in rows if observed_measurement_matches(row, cast(Mapping[str, Any], original))][:1]
+            eligible = [row for row in rows if observed_measurement_matches(row, cast(dict[str, Any], dict(original)))][:1]
         summaries = {row["summary_json"] for row in eligible}
         if len(summaries) == 1:
             selected = eligible[0]

@@ -352,7 +352,7 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
     prepared = 0
     context = load_source_evidence_context(connection)
     for raw_item in rows:
-        item = cast(Mapping[str, Any], raw_item)
+        item = cast(dict[str, Any], dict(raw_item))
         try:
             with connection.begin_nested():
                 evidence = load_source_evidence(connection, int(item["id"]), context=context)

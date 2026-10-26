@@ -5,7 +5,7 @@ import socket
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -128,9 +128,10 @@ def run_evidence_queue_until_blocked(
     started_at = time.monotonic()
     stop_reason = "blocked"
     while processed < max_work_items:
-        if stop_event is not None and stop_event.is_set():
-            stop_reason = "shutdown"
-            break
+        if stop_event is not None:
+            if stop_event.is_set():
+                stop_reason = "shutdown"
+                break
         if max_seconds is not None and time.monotonic() - started_at >= max_seconds:
             stop_reason = "time_budget"
             break
@@ -241,7 +242,7 @@ def _run_evidence_claim(
                     for kind in EVIDENCE_KINDS:
                         if kind == claim.evidence_kind or evidence.traits[kind].tier == "probable":
                             continue
-                        sync_library_item_evidence_state(connection, cast(Mapping[str, Any], item), kind)
+                        sync_library_item_evidence_state(connection, cast(dict[str, Any], dict(item)), kind)
                         queue_decision_evidence_work(connection, config, item["rel_path"], library_item_ids=[claim.library_item_id],
                             evidence_kind=kind, work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, require_measurement=True,
                             priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, start_new_batch=True, manage_transaction=False)
