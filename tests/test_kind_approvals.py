@@ -10,11 +10,14 @@ from fastapi import HTTPException
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
-from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import library_items, series_metadata, source_admissions, source_generations
 from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
+from mediaforce.library.content_kinds import season_evidence, season_grouping
+from mediaforce.library.source_evidence import append_version
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
+from mediaforce.web.runtime.folder_state import save_calibration_state
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.kind_approvals import APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
     SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, SeasonKinds, approve_kind, load_kind_approval, stop_kind_approval
@@ -115,25 +118,45 @@ def test_no_seasons_kind_is_read_until_a_kind_is_approved(tmp_path: Path) -> Non
     assert asked == []
 
 
-def test_a_seasons_kind_is_reused_until_it_is_stale(tmp_path: Path) -> None:
+def test_a_seasons_kind_is_read_again_only_when_its_evidence_changes(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    now = [0.0]
-    kinds = SeasonKinds(seconds=60, clock=lambda: now[0])
-    reads: list[str] = []
+    _insert_episode(config)
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(series_metadata.insert().values(series_prefix="tv/Thriller", tmdb_genres_json='["Drama"]',
+                                                           updated_at="2026-10-26T00:00:00+00:00"))
+    kinds = SeasonKinds()
+    try:
+        with patch("mediaforce.web.runtime.kind_approvals.season_grouping", wraps=season_grouping) as grouping, \
+                patch("mediaforce.web.runtime.kind_approvals.season_evidence", wraps=season_evidence) as evidence:
+            kinds(config, SEASON)
+            kinds(config, SEASON)
+            kinds(config, OTHER_SEASON)
+            assert (grouping.call_count, evidence.call_count) == (2, 1)
+            with open_db(config.paths.db_path) as connection:
+                connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
+            kinds(config, SEASON)
+            assert (grouping.call_count, evidence.call_count) == (3, 1)
+            with open_db(config.paths.db_path) as connection:
+                connection.execute(source_generations.insert().values(generation_id="new", created_at="now"))
+                version = append_version(connection, generation_id="new", role="input", identity={}, profile={}, recorded_at="now")
+                connection.execute(source_admissions.insert().values(
+                    admission_id="new", generation_id="new", version_id=version, tier="probable", basis="readable-source",
+                    checks_json="{}", recorded_at="now"))
+            kinds(config, SEASON)
+            assert (grouping.call_count, evidence.call_count) == (4, 2)
+    finally:
+        reset_engine_cache()
 
-    def grouping(_connection: object, season: str, **_kwargs: object) -> Any:
-        reads.append(season)
-        return type("Grouping", (), {"kind": DARKER})()
 
-    config.paths.db_path.touch()
-    with patch("mediaforce.web.runtime.kind_approvals.open_readonly_db"), \
-            patch("mediaforce.web.runtime.kind_approvals.season_grouping", side_effect=grouping):
-        assert kinds(config, SEASON) == DARKER
-        now[0] = 59
-        kinds(config, SEASON)
-        now[0] = 61
-        kinds(config, SEASON)
-    assert reads == [SEASON, SEASON]
+def test_a_kinds_approval_is_never_saved_as_a_folders_own(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    kind_copy = load_kind_approval(config, DARKER)
+    assert kind_copy is not None
+
+    with pytest.raises(ValueError):
+        save_calibration_state(tmp_path / "season.json", kind_copy, calibration_draft_hash=lambda _payload: "hash")
+    assert not (tmp_path / "season.json").exists()
 
 
 def _insert_episode(config: MediaforceConfig) -> int:

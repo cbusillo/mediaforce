@@ -221,6 +221,9 @@ def _valid_retained_review_pairs(
 
 
 def save_calibration_state(calibration_file: Path, payload: dict[str, Any], *, calibration_draft_hash: Any) -> None:
+    if payload.get("kind"):
+        # A folder saving a kind's approval would keep it after the kind changed or stopped (#1047).
+        raise ValueError("A kind of content's approval is never saved as a folder's own.")
     stored_payload = dict(payload)
     stored_payload["draft_hash"] = calibration_draft_hash(stored_payload)
     calibration_file.write_text(json.dumps(stored_payload, indent=2) + "\n")

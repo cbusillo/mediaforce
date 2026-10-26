@@ -4,10 +4,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, literal_column, select
 
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_items, series_metadata, source_admissions, source_versions
+from mediaforce.core.db_tables import library_items, series_metadata, source_admissions, source_measurements, \
+    source_transitions, source_versions, staged_artifacts, target_production_outcomes
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.library.candidate_selection import season_identity
 from mediaforce.library.source_evidence import SourceEvidenceContext, load_source_evidence, load_source_evidence_context
@@ -159,13 +160,18 @@ def _original_traits(
     return traits
 
 
+def _in_folder(prefix: str) -> tuple[Any, Any]:
+    """Every path under the folder, as a range the rel_path index answers ("0" sorts right after "/")."""
+    return library_items.c.rel_path >= f"{prefix}/", library_items.c.rel_path < f"{prefix}0"
+
+
 def _present_items(connection: DBClient, season_prefix: str | None = None) -> Sequence[Mapping[str, Any]]:
     query = select(
         library_items.c.id, library_items.c.rel_path, library_items.c.status, library_items.c.video_codec,
         library_items.c.size_bytes,
     ).where(library_items.c.missing_since.is_(None))
     if season_prefix is not None:
-        query = query.where(library_items.c.rel_path.startswith(f"{season_prefix}/", autoescape=True))
+        query = query.where(*_in_folder(season_prefix))
     return connection.execute(query).mappings().all()
 
 
@@ -184,14 +190,53 @@ def _seasons(
     return seasons, series_of
 
 
-def season_grouping(connection: DBClient, season_prefix: str, *, library_types: Mapping[str, str]) -> SeasonGrouping:
-    """One season's kind, read the same way as the report."""
+def season_grouping(
+        connection: DBClient,
+        season_prefix: str,
+        *,
+        library_types: Mapping[str, str],
+        evidence: tuple[set[int], SourceEvidenceContext] | None = None,
+) -> SeasonGrouping:
+    """One season's kind, read the same way as the report; pass `evidence` to share one snapshot across seasons."""
     seasons, series_of = _seasons(_present_items(connection, season_prefix), library_types)
-    episodes = seasons.get(season_prefix, [])
-    traits = _original_traits(connection, episodes, _admitted_item_ids(connection), load_source_evidence_context(connection))
+    admitted, context = evidence or season_evidence(connection)
+    traits = _original_traits(connection, seasons.get(season_prefix, []), admitted, context)
     series = series_of.get(season_prefix)
     animated = _series_animation(connection, series).get(series) if series else None
     return season_kind(traits, animated=animated)
+
+
+def season_evidence(connection: DBClient) -> tuple[set[int], SourceEvidenceContext]:
+    """The library-wide evidence every season's kind reads: admitted originals and known outputs."""
+    return _admitted_item_ids(connection), load_source_evidence_context(connection)
+
+
+def evidence_stamp(connection: DBClient) -> tuple[Any, ...]:
+    """Changes whenever an admission, a measurement, a publish or a finished encode could change a season's kind.
+
+    The source evidence tables only ever gain rows, corrections included, so their newest row stands for them.
+    """
+    stamp: list[Any] = [
+        connection.execute(select(func.max(literal_column("rowid"))).select_from(table)).scalar()
+        for table in (source_admissions, source_measurements, source_transitions, source_versions,
+                      target_production_outcomes)
+    ]
+    stamp.append(connection.execute(select(func.max(staged_artifacts.c.encode_completed_at))).scalar())
+    return tuple(stamp)
+
+
+def season_stamp(connection: DBClient, season_prefix: str) -> tuple[Any, ...]:
+    """Changes whenever the season's files, their current versions or its show's genres change."""
+    files = tuple(tuple(row) for row in connection.execute(
+        select(library_items.c.id, library_items.c.active_source_version_id)
+        .where(library_items.c.missing_since.is_(None), *_in_folder(season_prefix))
+        .order_by(library_items.c.id)
+    ))
+    series = "/".join(season_prefix.split("/")[:2])
+    genres = connection.execute(
+        select(series_metadata.c.tmdb_genres_json).where(series_metadata.c.series_prefix == series)
+    ).scalar_one_or_none()
+    return files, genres
 
 
 def _series_animation(connection: DBClient, series_prefix: str | None = None) -> dict[str, bool | None]:
