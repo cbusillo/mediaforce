@@ -316,7 +316,10 @@ def _sync_plex(
             series_metadata.delete().where(series_metadata.c.series_prefix.in_(series_prefix_batch))
         )
 
-    _record_posters(connection, config, shows, series_claims, claims.values(), observed_at_text=observed_at_text)
+    _record_posters(
+        connection, config, shows, series_claims, claims.values(),
+        library_rel_paths=[str(row["rel_path"] or "") for row in rows], observed_at_text=observed_at_text,
+    )
     stats.status = "completed" if not stats.conflicts else "completed_with_warnings"
     return refreshed_series
 
@@ -328,12 +331,14 @@ def _record_posters(
         series_claims: Mapping[str, set[str]],
         claims: Any,
         *,
+        library_rel_paths: list[str],
         observed_at_text: str,
 ) -> None:
     """Each show's and movie's Plex poster path, replacing what the last full Plex sync saw.
 
-    A show takes its own poster; a movie takes its feature's. A movie whose library copy is only extras takes their
-    poster instead. A title that Plex matched to more than one show or movie gets none, as its poster would be a guess.
+    A show takes its own poster; a movie takes its feature's. A movie whose library copy has no feature at all, only
+    extras, takes their poster instead; a feature Plex didn't match leaves its title without one rather than an
+    extra's. A title that Plex matched to more than one show or movie gets none, as its poster would be a guess.
     """
     thumbs: dict[str, set[str]] = {}
     for series_prefix, rating_keys in series_claims.items():
@@ -349,8 +354,17 @@ def _record_posters(
         if movie is not None and item.thumb:
             prefix, is_feature = movie
             (feature_thumbs if is_feature else extra_thumbs).setdefault(prefix, set()).add(item.thumb)
-    for prefix in feature_thumbs.keys() | extra_thumbs.keys():
-        thumbs[prefix] = feature_thumbs.get(prefix) or extra_thumbs[prefix]
+    titles_with_a_feature = {
+        movie[0]
+        for rel_path in library_rel_paths
+        for movie in [_movie_poster_key(rel_path, library_types=config.library_type_map)]
+        if movie is not None and movie[1]
+    }
+    for prefix, found in feature_thumbs.items():
+        thumbs[prefix] = found
+    for prefix, found in extra_thumbs.items():
+        if prefix not in titles_with_a_feature:
+            thumbs[prefix] = found
     connection.execute(title_posters.delete())
     rows = [
         {"title_prefix": prefix, "plex_thumb": next(iter(found)), "observed_at": observed_at_text}
