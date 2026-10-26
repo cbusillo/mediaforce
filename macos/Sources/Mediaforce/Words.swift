@@ -1252,7 +1252,8 @@ extension Words {
     static let howItShouldLook = "How it should look"
     static let showsOfThisKind = "Shows of this kind"
     static let approvedShow = "Approved"
-    static let stopUsingKind = "Stop Using It"
+    // Stopping removes the shared setting, so each show of the kind goes back to its own sample.
+    static let stopUsingKind = "Decide Show by Show"
     static let kindRefusedTitle = "Mediaforce didn't use that setting"
     static let ok = "OK"
     static let backOneFrame = "Back one frame"

@@ -36,6 +36,8 @@ final class KindsTests: XCTestCase {
         XCTAssertEqual(rows.map(\.id), ["tv/Dollhouse/Season 1", "tv/Suits/Season 4"])
         XCTAssertTrue(rows[0].name.contains("Dollhouse") && rows[0].name.contains("Season 1"))
         XCTAssertEqual(rows.map(\.state), [.needsYou, .readyToCompress])
+        // A season shows its show's poster.
+        XCTAssertEqual(rows.map(\.posterPrefix), ["tv/Dollhouse", "tv/Suits"])
     }
 
     func testASettingSaysItsOwnSizeAndWhetherItScalesWithRuntime() throws {

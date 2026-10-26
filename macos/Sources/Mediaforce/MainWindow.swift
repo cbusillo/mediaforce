@@ -242,8 +242,9 @@ struct MainWindow: View {
                         PauseButton(facts: facts, model: model)
                     }
                 }
-                // Only a kind's page names itself in the title bar, as Mail names a mailbox.
-                .toolbar(removing: place.map(Self.showsTitle) == true ? nil : .title)
+                // Only a kind's page names itself in the title bar, as Mail names a mailbox. Every other page keeps an
+                // empty title rather than none, so the toolbar, and Pause in it, sits in the same place on every page.
+                .navigationTitle("")
             } else {
                 ServerStatusView(state: model.connection, lastHeard: model.lastHeard, problem: model.problem) {
                     Task { await model.refresh() }
@@ -264,10 +265,6 @@ struct MainWindow: View {
         .alert(item: Bindable(model).notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
-    }
-
-    private static func showsTitle(_ place: Place) -> Bool {
-        if case .kind = place { true } else { false }
     }
 
     /// Opens a place from a link on a page: a page of this window, or Settings › Computers for a computer.

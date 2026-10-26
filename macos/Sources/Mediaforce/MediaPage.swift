@@ -88,6 +88,8 @@ struct MediaRow: Identifiable, Sendable {
     let state: LibraryStateGroup
     // The server's Other media listing stopped at its cap, so this list is not the whole library.
     var listCutShort = false
+    // Whose poster a row shows when it isn't its own, as a season shows its show's.
+    var posterPrefix: String?
 
     var savedBytes: Int64 { (saved ?? 0) > 0 ? saved ?? 0 : 0 }
     var stateRank: Int { state.rawValue }
@@ -100,7 +102,7 @@ struct MediaRow: Identifiable, Sendable {
             let show = byShow[parts.prefix(2).joined(separator: "/")]
             return MediaRow(id: season.season, name: "\(show?.name ?? parts.dropLast().last ?? ""), \(parts.last ?? "")",
                             kind: .tv, detail: Words.leftOutReason(season.kind), bytes: season.waitingBytes, saved: nil,
-                            state: show?.state ?? .readyToCompress)
+                            state: show?.state ?? .readyToCompress, posterPrefix: parts.prefix(2).joined(separator: "/"))
         }
         .sorted { $0.bytes > $1.bytes }
     }
@@ -133,7 +135,7 @@ struct MediaPoster: View {
 
     var body: some View {
         Group {
-            if row.kind != .other, let image = posters.image(for: row.id) {
+            if row.kind != .other, let image = posters.image(for: row.posterPrefix ?? row.id) {
                 Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
                     .frame(width: width, height: width * 1.5)
             } else if width > 60 {
