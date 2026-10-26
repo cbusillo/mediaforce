@@ -196,8 +196,13 @@ struct MainWindow: View {
                         }
                     }
                     .safeAreaInset(edge: .top, spacing: 0) {
-                        if model.connection != .reachable {
-                            StaleNotice(connection: model.connection, lastHeard: model.lastHeard)
+                        VStack(spacing: 0) {
+                            ForEach(TopNotice.shown(connection: model.connection, facts: facts), id: \.self) { notice in
+                                switch notice {
+                                case .stale: StaleNotice(connection: model.connection, lastHeard: model.lastHeard)
+                                case .paused: PausedBar(model: model)
+                                }
+                            }
                         }
                     }
                 }
@@ -241,6 +246,38 @@ struct MainWindow: View {
     }
 }
 
+/// The bars across the top of every page. A lost connection doesn't hide that Mediaforce was paused: the last facts
+/// heard still say so, so both show.
+enum TopNotice: Hashable {
+    case stale, paused
+
+    static func shown(connection: ServerState, facts: MainWindowFacts) -> [TopNotice] {
+        (connection == .reachable ? [] : [.stale]) + (facts.work.pausedByOwner ? [.paused] : [])
+    }
+}
+
+/// On every page while the Director has paused Mediaforce, so a pause is never only a changed icon.
+struct PausedBar: View {
+    let model: MainWindowModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "pause.circle.fill")
+                .foregroundStyle(Color.accentColor)
+            Text(Words.pausedBar)
+            Spacer(minLength: 0)
+            Button(Words.resume) { Task { await model.setRunning(true) } }
+                .controlSize(.small)
+                // Resuming needs Mediaforce to answer.
+                .disabled(model.switching != nil || model.connection != .reachable)
+        }
+        .font(.callout)
+        .padding(.horizontal, 34)
+        .padding(.vertical, 8)
+        .background(Color.accentColor.opacity(0.12))
+    }
+}
+
 struct StaleNotice: View {
     let connection: ServerState
     let lastHeard: Date?
@@ -267,8 +304,10 @@ struct PauseButton: View {
         Button {
             Task { await model.setRunning(paused) }
         } label: {
-            Label(paused ? "Resume Mediaforce" : "Pause Mediaforce", systemImage: paused ? "play.fill" : "pause.fill")
+            Label(paused ? Words.resume : Words.pause, systemImage: paused ? "play.fill" : "pause.fill")
         }
+        // A toolbar shows only the icon by default; the word says what pressing it does, and that it took effect.
+        .labelStyle(.titleAndIcon)
         .disabled(model.switching != nil)
         .help(paused ? Words.resumeHelp : Words.pauseHelp(facts.work))
     }
