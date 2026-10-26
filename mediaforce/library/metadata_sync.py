@@ -354,12 +354,11 @@ def _record_posters(
         if movie is not None and item.thumb:
             prefix, is_feature = movie
             (feature_thumbs if is_feature else extra_thumbs).setdefault(prefix, set()).add(item.thumb)
-    titles_with_a_feature = {
-        movie[0]
-        for rel_path in library_rel_paths
-        for movie in [_movie_poster_key(rel_path, library_types=config.library_type_map)]
-        if movie is not None and movie[1]
-    }
+    titles_with_a_feature: set[str] = set()
+    for rel_path in library_rel_paths:
+        movie = _movie_poster_key(rel_path, library_types=config.library_type_map)
+        if movie is not None and movie[1]:
+            titles_with_a_feature.add(movie[0])
     for prefix, found in feature_thumbs.items():
         thumbs[prefix] = found
     for prefix, found in extra_thumbs.items():
