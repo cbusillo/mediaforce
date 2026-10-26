@@ -27,6 +27,7 @@ from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABL
 from mediaforce.core.type_defs import object_dict
 from mediaforce.library.candidate_selection import season_identity
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
+from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.content_kinds import evidence_stamp, season_evidence, season_grouping, season_stamp
 from mediaforce.library.source_evidence import SourceEvidenceContext
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
@@ -163,20 +164,40 @@ class KindAwareLoader:
 
 # A run that ended badly leaves its season for the Director; the background queue never retries it.
 _UNSETTLED_RUN_STATUSES = ("failed", "stopped", "needs_attention")
+KIND_QUEUE_WAITS_CODE = "kind_queue_waits"
+# A refused season is tried again after this long, in case what refused it (such as free space) has cleared.
+KIND_RETRY_SECONDS = 6 * 3600.0
 
 
-def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tuple[str, int]]:
-    """Seasons with files still to compress, largest waiting space first."""
-    waiting: dict[str, int] = {}
-    for item in connection.execute(select(
-        library_items.c.rel_path, library_items.c.status, library_items.c.video_codec, library_items.c.size_bytes,
-    ).where(LIBRARY_ITEM_PRESENT, library_items.c.status != "promoted")).mappings():
-        if str(item["video_codec"] or "").casefold() == "av1":
-            continue
+def background_queue_blocker(connection: DBClient) -> dict[str, Any] | None:
+    """Why the background queue waits: the owner paused work, or a production run is queued or running."""
+    active = connection.execute(select(encode_jobs.c.job_id).where(
+        encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES), encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS),
+    ).limit(1)).first()
+    if load_queue_state(connection).get("is_paused") or active is not None:
+        return {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
+    return None
+
+
+def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tuple[str, int, tuple[int, ...]]]:
+    """Seasons with files still to compress, largest waiting space first, with those files' ids.
+
+    Files the owner chose to keep original are finished, so they never bring a season back.
+    """
+    rows = [item for item in connection.execute(select(
+        library_items.c.id, library_items.c.rel_path, library_items.c.video_codec, library_items.c.size_bytes,
+    ).where(LIBRARY_ITEM_PRESENT, library_items.c.status != "promoted")).mappings()
+        if str(item["video_codec"] or "").casefold() != "av1"]
+    kept = library_item_ids_kept_original(connection, [int(item["id"]) for item in rows])
+    waiting: dict[str, tuple[int, list[int]]] = {}
+    for item in rows:
         season = season_prefix_of(config, str(item["rel_path"]))
-        if season is not None and str(item["rel_path"]).startswith(f"{season}/"):
-            waiting[season] = waiting.get(season, 0) + int(item["size_bytes"] or 0)
-    return sorted(waiting.items(), key=lambda entry: (-entry[1], entry[0]))
+        if season is None or int(item["id"]) in kept or not str(item["rel_path"]).startswith(f"{season}/"):
+            continue
+        size, ids = waiting.get(season, (0, []))
+        waiting[season] = (size + int(item["size_bytes"] or 0), [*ids, int(item["id"])])
+    return sorted(((season, size, tuple(sorted(ids))) for season, (size, ids) in waiting.items()),
+                  key=lambda entry: (-entry[1], entry[0]))
 
 
 def _latest_run_unsettled(connection: DBClient, season: str) -> bool:
@@ -186,11 +207,46 @@ def _latest_run_unsettled(connection: DBClient, season: str) -> bool:
     return status in _UNSETTLED_RUN_STATUSES
 
 
+def _attempts_file(config: MediaforceConfig) -> Path:
+    return config.paths.web_state_dir / "kinds" / "attempts.json"
+
+
+def _load_attempts(config: MediaforceConfig) -> dict[str, Any]:
+    try:
+        payload = json.loads(_attempts_file(config).read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 @dataclass(frozen=True, slots=True)
 class KindSeason:
     season: str
     kind: str
     waiting_bytes: int
+    approval: str
+    files: tuple[int, ...]
+
+
+def record_kind_attempt(config: MediaforceConfig, chosen: KindSeason, result: Mapping[str, Any], *, at: float) -> None:
+    """Remember how queueing a season went, across restarts; a wait for the queue to settle is no attempt."""
+    if result.get("code") == KIND_QUEUE_WAITS_CODE:
+        return
+    attempts = _load_attempts(config)
+    attempts[chosen.season] = {"approval": chosen.approval, "files": list(chosen.files), "ok": bool(result.get("ok")), "at": at}
+    path = _attempts_file(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, suffix=".tmp") as handle:
+        json.dump(attempts, handle, indent=2, sort_keys=True)
+    os.replace(handle.name, path)
+
+
+def _attempted(attempt: Any, chosen: KindSeason, now: float) -> bool:
+    """True when this season was already tried under this approval with the same waiting files."""
+    record = object_dict(attempt)
+    if record.get("approval") != chosen.approval or tuple(record.get("files") or ()) != chosen.files:
+        return False
+    return bool(record.get("ok")) or now - float(record.get("at") or 0) < KIND_RETRY_SECONDS
 
 
 def next_kind_season(
@@ -198,27 +254,23 @@ def next_kind_season(
         config: MediaforceConfig,
         *,
         load_calibration_state: LoadCalibrationState,
-        tried: set[tuple[str, str]],
+        now: float,
 ) -> KindSeason | None:
     """The next waiting season a current kind approval covers, to queue on its own, largest first.
 
-    None while the owner has paused work or any production run is queued or running, so seasons go one at a
-    time. A season tried under this approval is not offered again, so a refusal stays with its season, and a
-    season whose last run ended badly waits for the Director.
+    None while the background queue waits (see background_queue_blocker), so seasons go one at a time. A season
+    already tried under the same approval with the same waiting files is skipped, a refused one until it is retried
+    after KIND_RETRY_SECONDS, and a season whose last run ended badly waits for the Director.
     """
-    if not approved_kinds(config) or load_queue_state(connection).get("is_paused"):
+    if not approved_kinds(config) or background_queue_blocker(connection) is not None:
         return None
-    if connection.execute(select(encode_jobs.c.job_id).where(
-        encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES), encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS),
-    ).limit(1)).first() is not None:
-        return None
-    for season, waiting_bytes in _waiting_seasons(connection, config):
+    attempts = _load_attempts(config)
+    for season, waiting_bytes, files in _waiting_seasons(connection, config):
         approval = effective_production_approval(config, season, load_calibration_state)
         if approval is None or approval.kind is None or not approval.current:
             continue
-        attempt = (season, approval_identity(approval.calibration, approval.contract))
-        if attempt in tried or _latest_run_unsettled(connection, season):
+        chosen = KindSeason(season, approval.kind, waiting_bytes, approval_identity(approval.calibration, approval.contract), files)
+        if _attempted(attempts.get(season), chosen, now) or _latest_run_unsettled(connection, season):
             continue
-        tried.add(attempt)
-        return KindSeason(season, approval.kind, waiting_bytes)
+        return chosen
     return None

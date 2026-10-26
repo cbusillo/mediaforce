@@ -22,8 +22,8 @@ from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.kind_approvals import APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
-    SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, SeasonKinds, approve_kind, load_kind_approval, next_kind_season, \
-    stop_kind_approval
+    KIND_QUEUE_WAITS_CODE, KIND_RETRY_SECONDS, SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, KindSeason, SeasonKinds, \
+    approve_kind, background_queue_blocker, load_kind_approval, next_kind_season, record_kind_attempt, stop_kind_approval
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_matches, \
     production_calibration
 
@@ -260,13 +260,12 @@ def _encode_job(config: MediaforceConfig, prefix: str, status: str) -> None:
         ))
 
 
-def _next(config: MediaforceConfig, load: KindAwareLoader, tried: set[tuple[str, str]]) -> str | None:
+def _next(config: MediaforceConfig, load: KindAwareLoader, *, now: float = 0.0) -> KindSeason | None:
     try:
         with open_db(config.paths.db_path) as connection:
-            chosen = next_kind_season(connection, config, load_calibration_state=load, tried=tried)
+            return next_kind_season(connection, config, load_calibration_state=load, now=now)
     finally:
         reset_engine_cache()
-    return chosen.season if chosen is not None else None
 
 
 def test_seasons_a_kind_covers_are_offered_one_at_a_time_largest_first(tmp_path: Path) -> None:
@@ -277,14 +276,37 @@ def test_seasons_a_kind_covers_are_offered_one_at_a_time_largest_first(tmp_path:
     _waiting_episode(config, f"{small}/e02.mkv", 20_000, status="promoted")
     own_sample = {key: value for key, value in _approved(config).items() if not key.startswith("accepted_")}
     load = _loader({own: own_sample}, {small: DARKER, large: DARKER, own: DARKER})
-    tried: set[tuple[str, str]] = set()
 
-    assert _next(config, load, tried) is None
+    assert _next(config, load) is None
     approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
-    assert _next(config, load, tried) == large
-    assert _next(config, load, tried) == small
-    # The season with its own sample, and seasons already tried under this approval, are never offered.
-    assert _next(config, load, tried) is None
+    first = _next(config, load)
+    assert first is not None and (first.season, first.kind, first.waiting_bytes) == (large, DARKER, 9_000)
+    record_kind_attempt(config, first, {"ok": True}, at=0.0)
+    second = _next(config, load)
+    assert second is not None and second.season == small
+    # A wait for the queue to settle is no attempt, so the season is offered again.
+    record_kind_attempt(config, second, {"ok": False, "code": KIND_QUEUE_WAITS_CODE}, at=0.0)
+    assert _next(config, load) == second
+    record_kind_attempt(config, second, {"ok": True}, at=0.0)
+    # The season with its own sample is never offered, and attempts outlive this process.
+    assert _next(config, load) is None
+
+
+def test_a_refused_season_is_tried_again_later_or_when_its_files_change(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    load = _loader({}, {SEASON: DARKER})
+    chosen = _next(config, load)
+    assert chosen is not None
+
+    record_kind_attempt(config, chosen, {"ok": False, "message": "Not enough free space."}, at=0.0)
+    assert _next(config, load, now=3600.0) is None
+    assert _next(config, load, now=KIND_RETRY_SECONDS + 1) == chosen
+    record_kind_attempt(config, chosen, {"ok": True}, at=0.0)
+    _waiting_episode(config, f"{SEASON}/Thriller.S02E02.mkv", 2_000)
+    again = _next(config, load)
+    assert again is not None and again.season == SEASON and again.files != chosen.files
 
 
 def test_no_season_is_offered_while_work_is_paused_running_or_left_with_the_director(tmp_path: Path) -> None:
@@ -295,15 +317,19 @@ def test_no_season_is_offered_while_work_is_paused_running_or_left_with_the_dire
 
     with open_db(config.paths.db_path) as connection:
         save_queue_state(connection, {"queue_name": DEFAULT_QUEUE_NAME, "is_paused": True, "updated_at": "now"})
-    assert _next(config, load, set()) is None
+        assert background_queue_blocker(connection) == {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
+    assert _next(config, load) is None
     with open_db(config.paths.db_path) as connection:
         save_queue_state(connection, {"queue_name": DEFAULT_QUEUE_NAME, "is_paused": False, "updated_at": "now"})
     _encode_job(config, OTHER_SEASON, "running")
-    assert _next(config, load, set()) is None
+    assert _next(config, load) is None
     with open_db(config.paths.db_path) as connection:
         connection.execute(encode_jobs.update().values(status="completed"))
+        assert background_queue_blocker(connection) is None
     _encode_job(config, SEASON, "needs_attention")
-    assert _next(config, load, set()) is None
+    assert _next(config, load) is None
     with open_db(config.paths.db_path) as connection:
         connection.execute(encode_jobs.delete().where(encode_jobs.c.prefix == SEASON))
-    assert _next(config, load, set()) == SEASON
+    offered = _next(config, load)
+    assert offered is not None and offered.season == SEASON
+    reset_engine_cache()
