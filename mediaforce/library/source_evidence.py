@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from sqlalchemy import exists, inspect, literal_column, or_, select, update
@@ -368,7 +368,7 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
     if readable:
         from mediaforce.library.source_intake import assess_readable_source
 
-        refreshed = assess_readable_source(connection, dict(original), checks.get("raw_probe", {}), context=context)
+        refreshed = assess_readable_source(connection, cast(Mapping[str, Any], original), checks.get("raw_probe", {}), context=context)
         reason = refreshed.get("reason") or ""
         if (checks.get("codec_rule_hash") != refreshed.get("codec_rule_hash")
                 or checks.get("encoder_rule_hash") != refreshed.get("encoder_rule_hash")):
@@ -389,7 +389,7 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
         eligible = [row for row in rows if not reason and row["binding"] == "historical-plan-sampled"
                     and _historical_measurement_matches(row, checks)]
         if readable and not reason:
-            eligible = [row for row in rows if observed_measurement_matches(row, original)][:1]
+            eligible = [row for row in rows if observed_measurement_matches(row, cast(Mapping[str, Any], original))][:1]
         summaries = {row["summary_json"] for row in eligible}
         if len(summaries) == 1:
             selected = eligible[0]
@@ -410,13 +410,15 @@ def observed_measurement_matches(row: DBRow, identity: Mapping[str, Any], *, req
     provenance = json.loads(row["provenance_json"])
     before, after = provenance.get("before", {}), provenance.get("after", {})
     summary = parse_evidence_summary(row["summary_json"])
+    if summary is None:
+        return False
     return (row["binding"] == "observed" and bool(before) and before == after
             and before.get("strength") == "observed" and isinstance(before.get("stat"), list)
             and before.get("sample_fingerprint") == identity["sample_fingerprint"]
             and before.get("size_bytes") == identity["size_bytes"]
             and (not require_stat or before.get("stat") == identity.get("stat"))
             and hashlib.sha256(row["summary_json"].encode()).hexdigest() == row["summary_sha256"]
-            and bool(summary) and (summary.get("decision", {}).get("status") in {"measured", "resolved"}
+            and (summary.get("decision", {}).get("status") in {"measured", "resolved"}
                                   or (row["kind"] == "cadence_analysis" and cadence_measurement_complete(summary.get("analysis", {})))))
 
 

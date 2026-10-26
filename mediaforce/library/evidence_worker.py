@@ -5,11 +5,11 @@ import socket
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -241,7 +241,7 @@ def _run_evidence_claim(
                     for kind in EVIDENCE_KINDS:
                         if kind == claim.evidence_kind or evidence.traits[kind].tier == "probable":
                             continue
-                        sync_library_item_evidence_state(connection, item, kind)
+                        sync_library_item_evidence_state(connection, cast(Mapping[str, Any], item), kind)
                         queue_decision_evidence_work(connection, config, item["rel_path"], library_item_ids=[claim.library_item_id],
                             evidence_kind=kind, work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, require_measurement=True,
                             priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, start_new_batch=True, manage_transaction=False)
@@ -514,12 +514,15 @@ def _commit_evidence_summary(
                     work_status="queued",
                 )
         else:
-            should_retry = deps is not None and claim.attempt_count < deps.max_attempts
+            retry_not_before = None
+            if deps is not None:
+                if claim.attempt_count < deps.max_attempts:
+                    retry_not_before = (datetime.now(UTC) + timedelta(seconds=_retry_delay_seconds(claim.attempt_count, deps))).isoformat(timespec="seconds")
             transition_evidence_work(
                 connection,
                 claim,
-                work_status="retry_wait" if should_retry else "failed",
-                retry_not_before=(datetime.now(UTC) + timedelta(seconds=_retry_delay_seconds(claim.attempt_count, deps))).isoformat(timespec="seconds") if should_retry else None,
+                work_status="retry_wait" if retry_not_before else "failed",
+                retry_not_before=retry_not_before,
                 last_error=(
                     f"Evidence analysis completed with non-current result: "
                     f"{projection.reason or projection.state}."

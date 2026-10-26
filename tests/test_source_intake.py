@@ -8,7 +8,7 @@ import typing
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -17,12 +17,10 @@ from sqlalchemy import func, select, update
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import (
-    evidence_queue_state,
     library_item_evidence_state,
     library_items,
     source_admissions,
     source_measurements,
-    source_versions,
 )
 from mediaforce.encoding.remote_media import source_observation_script
 from mediaforce.library.evidence_queue import (
@@ -33,7 +31,7 @@ from mediaforce.library.evidence_queue import (
     runnable_evidence_work_count,
     start_evidence_work,
 )
-from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
+from mediaforce.library.evidence_state import EvidenceKind, rebuild_library_item_evidence_states
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps, process_evidence_queue_once
 from mediaforce.library.source_evidence import load_source_evidence, observe_file
 from mediaforce.library.source_intake import assess_readable_source, commit_readable_source, queue_original_intake
@@ -140,7 +138,9 @@ def test_outputs_never_become_probable(connection: DBClient, tmp_path: Path, pro
     item_id = _insert_item(connection, path)
     identity = observe_file(path, full_digest=True)
     assert assess_readable_source(connection, identity, probe)["reason"]
-    item = dict(connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one())
+    item = cast(
+        dict[str, Any], dict(connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one())
+    )
     commit_readable_source(connection, item, identity, probe)
     assert {trait.tier for trait in load_source_evidence(connection, item_id).traits.values()} == {"unknown"}
 
@@ -295,6 +295,7 @@ def test_newer_measurement_after_stat_change_replaces_old_lineage(tmp_path: Path
     with open_db(config.paths.db_path) as database:
         trait = load_source_evidence(database, item_id).traits["media_fingerprint"]
         assert trait.tier == "probable"
+        assert trait.summary is not None
         assert trait.summary["analysis"]["tool"]["host"] == "new-host"
         assert database.execute(select(func.count()).select_from(source_measurements)).scalar_one() >= 3
 
@@ -326,11 +327,11 @@ def test_assessment_commit_failure_retries_once_without_a_second_admission_attem
     original_commit = intake.commit_readable_source
     attempts = []
 
-    def fail_first(database: DBClient, item: dict[str, Any], identity: dict[str, Any], probe: dict[str, Any]) -> str:
+    def fail_first(db: DBClient, item: dict[str, Any], identity: dict[str, Any], probe: dict[str, Any]) -> str:
         attempts.append(item["id"])
         if item["id"] == first_id:
             raise RuntimeError("file changed before commit")
-        return original_commit(database, item, identity, probe)
+        return original_commit(db, item, identity, probe)
 
     with patch.object(intake, "commit_readable_source", side_effect=fail_first):
         _work(config)
@@ -413,7 +414,7 @@ def test_new_download_is_claimed_before_a_due_host_retry(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("kind", ["media_fingerprint", "cadence_analysis"])
-def test_cancelled_background_checks_retry_after_cooldown(tmp_path: Path, kind: str) -> None:
+def test_cancelled_background_checks_retry_after_cooldown(tmp_path: Path, kind: EvidenceKind) -> None:
     config = _config(tmp_path)
     item_id, _path = _source(config)
     _discover(config)
@@ -456,17 +457,20 @@ def test_failed_probe_reuses_digest_without_admitting_original(tmp_path: Path) -
 
     config = _config(tmp_path)
     item_id, _path = _source(config)
-    observations = Mock(wraps=intake.observe_file)
+    observations = Mock(wraps=observe_file)
     with (
-        patch.object(intake, "observe_file", observations),
-        patch.object(intake, "_probe_payload", side_effect=RuntimeError("probe failed")),
+        patch("mediaforce.library.source_intake.observe_file", observations),
+        patch("mediaforce.library.source_intake._probe_payload", side_effect=RuntimeError("probe failed")),
     ):
         with pytest.raises(RuntimeError, match="probe failed"):
             intake.assess_source_input(config, item_id, ManagedProcessController(), lambda: None)
     with open_db(config.paths.db_path) as database:
         assert database.execute(select(func.count()).select_from(source_admissions)).scalar_one() == 0
     observations.reset_mock()
-    with patch.object(intake, "observe_file", observations), patch.object(intake, "_probe_payload", return_value=_probe()):
+    with (
+        patch("mediaforce.library.source_intake.observe_file", observations),
+        patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()),
+    ):
         intake.assess_source_input(config, item_id, ManagedProcessController(), lambda: None)
     assert not any(call.kwargs.get("full_digest") for call in observations.call_args_list)
 
@@ -554,6 +558,7 @@ def test_fully_measured_ambiguous_cadence_is_retained(tmp_path: Path) -> None:
     with open_db(config.paths.db_path) as database:
         trait = load_source_evidence(database, item_id).traits["cadence_analysis"]
         assert trait.tier == "probable"
+        assert trait.summary is not None
         assert trait.summary["decision"]["status"] == "blocked"
 
 

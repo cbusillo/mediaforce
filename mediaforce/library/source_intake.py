@@ -2,7 +2,7 @@ import json
 import logging
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy import exists, func, or_, select, update
@@ -220,7 +220,9 @@ def assess_source_input(
     config: MediaforceConfig, item_id: int, controller: ManagedProcessController, check_cancelled: Callable[[], None]
 ) -> None:
     with open_db(config.paths.db_path) as connection:
-        item = dict(connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one())
+        item = cast(
+            dict[str, Any], dict(connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one())
+        )
         if _history_present(connection, item_id):
             return
         active = (
@@ -282,7 +284,9 @@ def assess_source_input(
                 .where(library_items.c.id == item_id)
                 .values(active_source_version_id=observed, source_revision=library_items.c.source_revision + 1)
             )
-            item = dict(connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one())
+            item = cast(
+                dict[str, Any], dict(connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one())
+            )
     probe = _probe_payload(path, process_controller=controller)
     after = observe_file(path)
     if any(before[key] != after[key] for key in ("stat", "size_bytes", "sample_fingerprint")):
@@ -347,7 +351,8 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
     )
     prepared = 0
     context = load_source_evidence_context(connection)
-    for item in rows:
+    for raw_item in rows:
+        item = cast(Mapping[str, Any], raw_item)
         try:
             with connection.begin_nested():
                 evidence = load_source_evidence(connection, int(item["id"]), context=context)

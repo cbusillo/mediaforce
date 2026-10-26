@@ -71,7 +71,10 @@ def descriptor_sha256(
     while remaining is None or remaining > 0:
         if check_cancelled is not None:
             check_cancelled()
-        chunk = os.read(descriptor, FILE_DIGEST_CHUNK_BYTES if remaining is None else min(FILE_DIGEST_CHUNK_BYTES, remaining))
+        read_size = FILE_DIGEST_CHUNK_BYTES
+        if isinstance(remaining, int):
+            read_size = min(read_size, remaining)
+        chunk = os.read(descriptor, read_size)
         if not chunk:
             if remaining is not None:
                 raise OSError("Source digest was truncated")
