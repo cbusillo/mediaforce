@@ -941,9 +941,9 @@ def test_uncertain_mount_disappears_and_reachable_computer_recovers_automaticall
         assert not [alert for alert in alerts.recovery_alerts(config) if alert["id"].startswith("host:")]
 
 
-@pytest.mark.parametrize("model,notifies", [("MacBook Pro", False), ("Mac mini", True)])
+@pytest.mark.parametrize("model,notifies", [("MacBook Pro", False), ("Mac mini", True), (None, True)])
 def test_absent_computer_uses_last_seen_model_and_desktop_grace(
-        config: MediaforceConfig, model: str, notifies: bool,
+        config: MediaforceConfig, model: str | None, notifies: bool,
 ) -> None:
     ready = status(available=True)
     ready.computer_model = model
@@ -960,8 +960,8 @@ def test_absent_computer_uses_last_seen_model_and_desktop_grace(
         recovery.process_host_recovery_once(config)
         probe.return_value = absent
         grace = recovery.DESKTOP_ABSENCE_GRACE
-        signatures = ("asleep_timeout", "asleep_down", "asleep_dropped", "asleep_network", "asleep_no_route")
-        for elapsed, signature in zip((timedelta(), grace / 2, grace, grace + timedelta(minutes=5), grace * 2), signatures):
+        signatures = ("not_found", "asleep_timeout", "asleep_down", "asleep_dropped", "asleep_network", "asleep_no_route")
+        for elapsed, signature in zip((timedelta(), grace / 4, grace / 2, grace, grace + timedelta(minutes=5), grace * 2), signatures):
             absent.check_failure = _checked(config, _CHECK_FAILURES[signature]).check_failure
             clock.now.return_value = alert_clock.now.return_value = NOW + timedelta(minutes=5) + elapsed
             recovery.process_host_recovery_once(config)

@@ -141,9 +141,7 @@ def _recovery_pass(
         "retry_paused": False,
     }
     state["computer_model"] = status.computer_model or previous.get("computer_model")
-    state["network_absent"] = status.check_failure == "unreachable" or (
-        status.check_failure == "not_found" and bool(state["computer_model"])
-    )
+    state["network_absent"] = status.check_failure in {"unreachable", "not_found"}
     state["absent_since"] = (
         previous.get("absent_since") or now.isoformat() if state["network_absent"] else None
     )
