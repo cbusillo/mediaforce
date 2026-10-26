@@ -197,6 +197,19 @@ uv run mediaforce quality-memory
 uv run mediaforce quality-memory --prefix "tv/Show/Season 1" --json
 ```
 
+See which kind of content each season still waiting on a sample belongs to:
+
+```bash
+uv run mediaforce content-kinds
+```
+
+This read-only JSON report groups each waiting season by number ranges of its
+originals' measured traits: darker live action, bright live action, cartoon,
+4K, mixed, or unmeasured. It reads only proven or probable original traits, so
+published episodes vote with the original they were made from, and output
+measurements never count. Seasons with a folder approval are only counted.
+Cartoons come from the series' TMDB genres.
+
 Inspect a target-size default proposal using a current visual boundary observation
 ID from the configured database:
 
