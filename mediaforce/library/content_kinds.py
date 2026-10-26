@@ -10,7 +10,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, series_metadata, source_admissions, source_versions
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.library.candidate_selection import season_identity
-from mediaforce.library.source_evidence import load_source_evidence, load_source_evidence_context
+from mediaforce.library.source_evidence import SourceEvidenceContext, load_source_evidence, load_source_evidence_context
 
 # Kinds of content group seasons by number ranges of their originals' measured traits, so that one
 # approval can cover every season that measures the same (Director decision, #517, 2026-10-22).
@@ -137,9 +137,69 @@ def _admitted_item_ids(connection: DBClient) -> set[int]:
     return {int(row.id) for row in rows}
 
 
-def _series_animation(connection: DBClient) -> dict[str, bool | None]:
+def _original_traits(
+        connection: DBClient,
+        episodes: Sequence[Mapping[str, Any]],
+        admitted: set[int],
+        context: SourceEvidenceContext,
+) -> list[EpisodeTraits | None]:
+    traits: list[EpisodeTraits | None] = []
+    for item in episodes:
+        if int(item["id"]) not in admitted:
+            traits.append(None)
+            continue
+        evidence = load_source_evidence(connection, int(item["id"]), context=context)
+        if evidence.original_version_id is None:
+            traits.append(None)
+            continue
+        fingerprint = evidence.traits["media_fingerprint"]
+        # The admitted original's resolution counts even when its fingerprint does not.
+        trusted = fingerprint.summary if fingerprint.tier in {"proven", "probable"} else None
+        traits.append(episode_traits(trusted, evidence.profile))
+    return traits
+
+
+def _present_items(connection: DBClient, season_prefix: str | None = None) -> Sequence[Mapping[str, Any]]:
+    query = select(
+        library_items.c.id, library_items.c.rel_path, library_items.c.status, library_items.c.video_codec,
+        library_items.c.size_bytes,
+    ).where(library_items.c.missing_since.is_(None))
+    if season_prefix is not None:
+        query = query.where(library_items.c.rel_path.startswith(f"{season_prefix}/", autoescape=True))
+    return connection.execute(query).mappings().all()
+
+
+def _seasons(
+        items: Sequence[Mapping[str, Any]], library_types: Mapping[str, str],
+) -> tuple[dict[str, list[Mapping[str, Any]]], dict[str, str]]:
+    """Episodes by season, and each season's show; files sitting directly in a show folder are in no season."""
+    seasons: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    series_of: dict[str, str] = {}
+    for item in items:
+        identity = season_identity(dict(item), library_types=library_types)
+        if identity is None or len(str(item["rel_path"]).split("/")) < 4:
+            continue
+        seasons[identity.season_prefix].append(item)
+        series_of[identity.season_prefix] = identity.series_prefix
+    return seasons, series_of
+
+
+def season_grouping(connection: DBClient, season_prefix: str, *, library_types: Mapping[str, str]) -> SeasonGrouping:
+    """One season's kind, read the same way as the report."""
+    seasons, series_of = _seasons(_present_items(connection, season_prefix), library_types)
+    episodes = seasons.get(season_prefix, [])
+    traits = _original_traits(connection, episodes, _admitted_item_ids(connection), load_source_evidence_context(connection))
+    series = series_of.get(season_prefix)
+    animated = _series_animation(connection, series).get(series) if series else None
+    return season_kind(traits, animated=animated)
+
+
+def _series_animation(connection: DBClient, series_prefix: str | None = None) -> dict[str, bool | None]:
     animation: dict[str, bool | None] = {}
-    for row in connection.execute(select(series_metadata.c.series_prefix, series_metadata.c.tmdb_genres_json)):
+    query = select(series_metadata.c.series_prefix, series_metadata.c.tmdb_genres_json)
+    if series_prefix is not None:
+        query = query.where(series_metadata.c.series_prefix == series_prefix)
+    for row in connection.execute(query):
         try:
             genres = [str(genre) for genre in object_list(json.loads(row.tmdb_genres_json or "[]"))]
         except json.JSONDecodeError:
@@ -159,21 +219,10 @@ def season_kind_report(
     Only original traits from the source evidence reader count, proven or probable, and published
     episodes vote with the original they were made from. Output measurements never do.
     """
-    items = connection.execute(select(
-        library_items.c.id, library_items.c.rel_path, library_items.c.status, library_items.c.video_codec,
-        library_items.c.size_bytes,
-    ).where(library_items.c.missing_since.is_(None))).mappings().all()
     admitted = _admitted_item_ids(connection)
     context = load_source_evidence_context(connection)
     animation = _series_animation(connection)
-    seasons: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
-    series_of: dict[str, str] = {}
-    for item in items:
-        identity = season_identity(dict(item), library_types=library_types)
-        if identity is None or len(str(item["rel_path"]).split("/")) < 4:
-            continue
-        seasons[identity.season_prefix].append(item)
-        series_of[identity.season_prefix] = identity.series_prefix
+    seasons, series_of = _seasons(_present_items(connection), library_types)
     rows = []
     totals: dict[str, Counter[str]] = defaultdict(Counter)
     for prefix in sorted(seasons):
@@ -184,19 +233,7 @@ def season_kind_report(
         if folder_approved(prefix):
             totals["folder_approved"]["seasons"] += 1
             continue
-        traits: list[EpisodeTraits | None] = []
-        for item in episodes:
-            if int(item["id"]) not in admitted:
-                traits.append(None)
-                continue
-            evidence = load_source_evidence(connection, int(item["id"]), context=context)
-            if evidence.original_version_id is None:
-                traits.append(None)
-                continue
-            fingerprint = evidence.traits["media_fingerprint"]
-            # The admitted original's resolution counts even when its fingerprint does not.
-            trusted = fingerprint.summary if fingerprint.tier in {"proven", "probable"} else None
-            traits.append(episode_traits(trusted, evidence.profile))
+        traits = _original_traits(connection, episodes, admitted, context)
         grouping = season_kind(traits, animated=animation.get(series_of[prefix]))
         waiting_bytes = sum(int_value(item["size_bytes"]) for item in waiting)
         totals[grouping.kind]["seasons"] += 1

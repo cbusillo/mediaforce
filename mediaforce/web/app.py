@@ -162,6 +162,7 @@ from mediaforce.web.checked_output_preview import (
 )
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
+from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_folders_payload, \
     dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
@@ -4332,8 +4333,12 @@ def _folder_state_deps() -> FolderStateDeps:
     )
 
 
-def _load_calibration_state(config: MediaforceConfig, prefix: str) -> ActionPayload | None:
+def _load_saved_calibration_state(config: MediaforceConfig, prefix: str) -> ActionPayload | None:
     return load_calibration_state(_folder_state_deps(), config, prefix, _calibration_file(config, prefix))
+
+
+# Reads each folder as saved; the approval resolver also finds kind approvals through it.
+_load_calibration_state = KindAwareLoader(_load_saved_calibration_state, SeasonKinds())
 
 
 def _load_calibration_state_for_boundary(config: MediaforceConfig, prefix: str) -> ActionPayload | None:

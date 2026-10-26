@@ -863,6 +863,8 @@ def promote_one_item(
                 "promoted_path": str(destination_path),
                 "archived_source_path": str(archive_path),
                 "retained_archive_backup_path": str(archive_backup_path) if archive_backup_path is not None else None,
+                # Which approval covered this file: a folder's own, or a kind of content's (#1047).
+                "approval": item.get("production_approval"),
             },
         )
         connection.commit()
