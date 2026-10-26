@@ -52,7 +52,10 @@ def descriptor_content_version_fingerprint(
     digest.update(str(size).encode())
     for position in sorted(positions):
         digest.update(position.to_bytes(8, "big", signed=False))
-        digest.update(os.pread(descriptor, chunk_size, position))
+        chunk = os.pread(descriptor, chunk_size, position)
+        if len(chunk) != chunk_size:
+            raise OSError("Source sample was truncated")
+        digest.update(chunk)
     return digest.hexdigest()
 
 
@@ -60,16 +63,25 @@ def descriptor_sha256(
         descriptor: int,
         *,
         check_cancelled: Callable[[], None] | None = None,
+        size_bytes: int | None = None,
 ) -> str:
     digest = hashlib.sha256()
+    remaining = size_bytes
     os.lseek(descriptor, 0, os.SEEK_SET)
-    while True:
+    while remaining is None or remaining > 0:
         if check_cancelled is not None:
             check_cancelled()
-        chunk = os.read(descriptor, FILE_DIGEST_CHUNK_BYTES)
+        read_size = FILE_DIGEST_CHUNK_BYTES
+        if isinstance(remaining, int):
+            read_size = min(read_size, remaining)
+        chunk = os.read(descriptor, read_size)
         if not chunk:
+            if remaining is not None:
+                raise OSError("Source digest was truncated")
             break
         digest.update(chunk)
+        if remaining is not None:
+            remaining -= len(chunk)
     return f"sha256:{digest.hexdigest()}"
 
 

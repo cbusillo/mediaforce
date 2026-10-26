@@ -249,6 +249,7 @@ class EvidenceWorkerTests(unittest.TestCase):
     def test_ready_evidence_work_starts_the_runner_only_when_runnable(self) -> None:
         item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
         runner = Mock(active=False)
+        runner.prepare_background_work.return_value = 0
         runner.start.return_value = True
 
         self.assertFalse(start_ready_evidence_work(self.config.paths.db_path, runner))
@@ -260,6 +261,7 @@ class EvidenceWorkerTests(unittest.TestCase):
                 library_item_ids=[item_id],
                 work_reason="encode_safety",
             )
+        runner.prepare_background_work.side_effect = RuntimeError("discovery unavailable")
         self.assertTrue(start_ready_evidence_work(self.config.paths.db_path, runner))
         runner.start.assert_called_once_with(max_work_items=1)
 

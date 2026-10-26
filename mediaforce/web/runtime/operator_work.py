@@ -13,7 +13,7 @@ from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.library.background_work import list_evidence_backlog, load_background_work_state, \
     summarize_evidence_inventory
 from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EVIDENCE_QUEUE_ACTIVE_STATUSES, \
-    evidence_queue_summary, runnable_evidence_work_count
+    evidence_queue_summary, runnable_evidence_work_count, evidence_queue_allows_preparation
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps, run_evidence_queue_until_blocked
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.metadata_sync import metadata_configuration_status
@@ -25,11 +25,20 @@ TERMINAL_EVIDENCE_QUEUE_STATUSES = ("completed", "completed_with_errors", "cance
 
 
 class BoundedEvidenceRunner:
-    def __init__(self, config_path: Path, *, deps: EvidenceWorkerDeps | None = None) -> None:
+    def __init__(self, config_path: Path, *, deps: EvidenceWorkerDeps | None = None, stop_event: threading.Event | None = None) -> None:
         self._config_path = config_path
         self._deps = deps
+        self._stop_event = stop_event
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+
+    def prepare_background_work(self) -> int:
+        from mediaforce.core.config import load_config
+        from mediaforce.library.source_intake import queue_original_intake
+
+        config = self._deps.load_config(self._config_path) if self._deps else load_config(self._config_path)
+        with open_db(config.paths.db_path) as connection:
+            return queue_original_intake(connection, config)
 
     @property
     def active(self) -> bool:
@@ -73,6 +82,7 @@ class BoundedEvidenceRunner:
                 config_path=self._config_path,
                 deps=self._deps,
                 max_work_items=max_work_items,
+                stop_event=self._stop_event,
             )
         except Exception:
             LOGGER.exception("Bounded evidence work failed")
@@ -86,6 +96,10 @@ def start_ready_evidence_work(db_path: Path, runner: BoundedEvidenceRunner) -> b
     """Run evidence work that is queued and unpaused but has no runner, such as checks production waits on."""
     if runner.active:
         return False
+    try:
+        runner.prepare_background_work()
+    except Exception:
+        LOGGER.exception("Original discovery failed; queued analysis can still start")
     with open_db(db_path) as connection:
         runnable = runnable_evidence_work_count(connection)
     if runnable <= 0:
@@ -174,7 +188,7 @@ def build_operator_work_payload(
             "progress": progress,
             "inventory": inventory,
             "backlog": backlog,
-            "can_prepare": not background_paused and not queue_active,
+            "can_prepare": not background_paused and evidence_queue_allows_preparation(connection, queue),
             "can_pause": (
                 not background_paused
                 and not bool(queue.get("is_paused"))

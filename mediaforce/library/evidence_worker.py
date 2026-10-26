@@ -6,16 +6,17 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db
-from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import library_item_evidence_state, library_items
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, reclassify_cadence_summary
@@ -23,15 +24,16 @@ from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, rec
 from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaHostUnavailableError
 from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, \
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host
-from mediaforce.library.evidence_queue import EvidenceWorkClaim, claim_next_evidence_work, \
+from mediaforce.library.evidence_queue import EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
     current_library_item_source_fingerprint, evidence_queue_summary, heartbeat_evidence_work, \
     load_evidence_queue_state, load_evidence_work_claim, mark_evidence_attempt_started, recover_evidence_queue, \
     transition_evidence_work
-from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, \
+from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, parse_evidence_summary, \
     sync_library_item_evidence_state
 from mediaforce.library.probe import probe_evidence
-from mediaforce.library.source_evidence import observe_file, pending_source_operation, record_current_measurement
+from mediaforce.library.background_work import background_work_is_paused
+from mediaforce.library.source_evidence import load_source_evidence, observe_file, pending_source_operation, record_current_measurement
 
 EVIDENCE_JOB_LEASE_SECONDS = 45
 EVIDENCE_JOB_HEARTBEAT_SECONDS = 5.0
@@ -46,6 +48,10 @@ REMOTE_SOURCE_MISMATCH_ERROR = (
 )
 
 
+class EvidenceWorkDeferred(ProcessCancelledError):
+    pass
+
+
 @dataclass(slots=True)
 class EvidenceWorkerDeps:
     load_config: Callable[[Path], MediaforceConfig]
@@ -58,6 +64,7 @@ class EvidenceWorkerDeps:
     max_attempts: int = EVIDENCE_JOB_MAX_ATTEMPTS
     source_retry_delay_seconds: int = EVIDENCE_SOURCE_RETRY_DELAY_SECONDS
     evidence_host_rows: Callable[[MediaforceConfig], list[dict[str, Any]]] = collect_evidence_host_rows
+    shutdown_event: threading.Event | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,17 +114,24 @@ def run_evidence_queue_until_blocked(
         deps: EvidenceWorkerDeps | None = None,
         max_work_items: int = 1,
         max_seconds: float | None = None,
+        stop_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     if max_work_items <= 0:
         raise ValueError("Evidence worker item budget must be greater than zero.")
     if max_seconds is not None and max_seconds <= 0:
         raise ValueError("Evidence worker time budget must be greater than zero.")
     runtime_deps = deps or default_evidence_worker_deps()
+    if stop_event is not None:
+        runtime_deps = replace(runtime_deps, shutdown_event=stop_event)
     current_config = config or runtime_deps.load_config(config_path)
     processed = 0
     started_at = time.monotonic()
     stop_reason = "blocked"
     while processed < max_work_items:
+        if stop_event is not None:
+            if stop_event.is_set():
+                stop_reason = "shutdown"
+                break
         if max_seconds is not None and time.monotonic() - started_at >= max_seconds:
             stop_reason = "time_budget"
             break
@@ -148,7 +162,8 @@ def _run_evidence_claim(
     if active_claim is None:
         return
     claim = active_claim
-    if claim.evidence_state == EVIDENCE_STATE_CURRENT:
+    original_work = claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
+    if claim.evidence_state == EVIDENCE_STATE_CURRENT and not original_work:
         _finish_claim(
             config,
             claim,
@@ -156,7 +171,7 @@ def _run_evidence_claim(
             reset_attempt_state=True,
         )
         return
-    if claim.evidence_state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED:
+    if claim.evidence_state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED and not original_work:
         _run_classification_claim(config, claim)
         return
 
@@ -186,6 +201,54 @@ def _run_evidence_claim(
     heartbeat = _ClaimHeartbeat(config=config, claim=claim, process_controller=process_controller, deps=deps)
     attempt_started = False
     try:
+        if original_work:
+            from mediaforce.library.source_intake import assess_source_input
+            from mediaforce.library.evidence_queue import EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, queue_decision_evidence_work
+
+            with open_db(config.paths.db_path) as connection:
+                active_claim = mark_evidence_attempt_started(connection, claim)
+            if active_claim is None:
+                return
+            claim = active_claim
+            attempt_started = True
+            last_guard_check = 0.0
+
+            def guard_intake() -> None:
+                nonlocal last_guard_check
+                if deps.shutdown_event is not None and deps.shutdown_event.is_set():
+                    raise EvidenceWorkDeferred("Original checks will resume after the app restarts")
+                now = time.monotonic()
+                if now - last_guard_check < 1:
+                    return
+                last_guard_check = now
+                with open_db(config.paths.db_path) as database:
+                    state = load_evidence_queue_state(database)
+                    if background_work_is_paused(database) or (state["is_paused"] and state["status"] in {"paused", "running", "queued"}):
+                        raise EvidenceWorkDeferred("Original checks are paused")
+                    priority = database.execute(select(library_item_evidence_state.c.library_item_id).where(
+                        library_item_evidence_state.c.work_batch_id == claim.batch_id,
+                        library_item_evidence_state.c.work_status == "queued",
+                        library_item_evidence_state.c.work_priority < claim.work_priority,
+                    ).limit(1)).first()
+                    if priority:
+                        raise EvidenceWorkDeferred("Waiting for higher priority analysis")
+
+            with process_controller.activity_guard(guard_intake):
+                assess_source_input(config, claim.library_item_id, process_controller, process_controller.throw_if_cancelled)
+            with open_db(config.paths.db_path) as connection:
+                evidence = load_source_evidence(connection, claim.library_item_id)
+                item = connection.execute(select(library_items).where(library_items.c.id == claim.library_item_id)).mappings().one()
+                if evidence.availability == "available":
+                    for kind in EVIDENCE_KINDS:
+                        if kind == claim.evidence_kind or evidence.traits[kind].tier == "probable":
+                            continue
+                        sync_library_item_evidence_state(connection, cast(dict[str, Any], dict(item)), kind)
+                        queue_decision_evidence_work(connection, config, item["rel_path"], library_item_ids=[claim.library_item_id],
+                            evidence_kind=kind, work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, require_measurement=True,
+                            priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, start_new_batch=True, manage_transaction=False)
+            if evidence.availability != "available" or (evidence.traits[claim.evidence_kind].tier == "probable" and claim.evidence_state == EVIDENCE_STATE_CURRENT):
+                _finish_claim(config, claim, work_status="completed", reset_attempt_state=True)
+                return
         try:
             analysis_target = _analysis_target(config, claim, source_path, deps, process_controller)
         except RemoteMediaHostUnavailableError:
@@ -193,9 +256,19 @@ def _run_evidence_claim(
         _throw_if_preparation_cancelled(config, claim, process_controller)
         if analysis_target is None:
             heartbeat.stop()
-            _defer_for_encode_computer(config, claim, deps, restore_attempt=False)
+            _defer_for_encode_computer(config, claim, deps, restore_attempt=attempt_started)
             return
-        source_matches = _remote_source_matches(analysis_target, source_path, process_controller)
+        if not attempt_started:
+            with open_db(config.paths.db_path) as connection:
+                active_claim = mark_evidence_attempt_started(connection, claim)
+            if active_claim is None:
+                return
+            claim = active_claim
+            attempt_started = True
+        remote_before = (analysis_target.command_runner.observe_source(analysis_target.source_path, process_controller=process_controller)
+                         if analysis_target.command_runner else None)
+        local_before = observe_file(source_path)
+        source_matches = remote_before is None or all(local_before[key] == remote_before.get(key) for key in ("size_bytes", "sample_fingerprint"))
         _throw_if_preparation_cancelled(config, claim, process_controller)
         if not source_matches:
             heartbeat.stop()
@@ -207,20 +280,13 @@ def _run_evidence_claim(
             )
             return
 
-        with open_db(config.paths.db_path) as connection:
-            active_claim = mark_evidence_attempt_started(connection, claim)
-        if active_claim is None:
-            return
-        claim = active_claim
-        attempt_started = True
-
         process_controller.throw_if_cancelled()
         remote_kwargs = (
             {"command_runner": analysis_target.command_runner}
             if analysis_target.command_runner is not None
             else {}
         )
-        measurement_before = observe_file(source_path)
+        measurement_before = local_before
         summary = deps.analyze_evidence(
             analysis_target.source_path,
             claim.evidence_kind,
@@ -228,10 +294,16 @@ def _run_evidence_claim(
             **remote_kwargs,
         )
         process_controller.throw_if_cancelled()
-        remote_source_unchanged = _remote_source_matches(analysis_target, source_path, process_controller)
         measurement_after = observe_file(source_path)
+        remote_after = (analysis_target.command_runner.observe_source(analysis_target.source_path, process_controller=process_controller)
+                        if analysis_target.command_runner else None)
+        remote_source_unchanged = remote_before == remote_after
         if measurement_before != measurement_after:
             raise RuntimeError("Source changed during evidence measurement")
+    except EvidenceWorkDeferred as exc:
+        heartbeat.stop()
+        _defer_claim(config, claim, deps, work_status="retry_wait", reason=str(exc), restore_attempt=attempt_started)
+        return
     except ProcessCancelledError:
         heartbeat.stop()
         _finish_claim(
@@ -246,7 +318,7 @@ def _run_evidence_claim(
         heartbeat.stop()
         _defer_for_encode_computer(config, claim, deps, restore_attempt=attempt_started)
         return
-    except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+    except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError, SQLAlchemyError) as exc:
         heartbeat.stop()
         source_availability, _current_fingerprint = _source_fingerprint(config, claim, source_path)
         if source_availability == "root_unavailable":
@@ -303,10 +375,11 @@ def _run_evidence_claim(
         summary,
         actual_fingerprint=final_fingerprint,
         classification_only=False,
+        deps=deps,
         observation={"before": measurement_before, "after": measurement_after,
                      "worker_id": claim.worker_id, "lease_batch_id": claim.batch_id,
                      "source_revision": claim.source_revision,
-                     "remote_stat_only": analysis_target.command_runner is not None},
+                     "remote_before": remote_before, "remote_after": remote_after},
     )
 
 
@@ -346,6 +419,7 @@ def _commit_evidence_summary(
         actual_fingerprint: str | None,
         classification_only: bool,
         observation: dict[str, Any] | None = None,
+        deps: EvidenceWorkerDeps | None = None,
 ) -> None:
     summary_json = json.dumps(summary, separators=(",", ":"), sort_keys=True)
     with open_db(config.paths.db_path) as connection:
@@ -407,7 +481,7 @@ def _commit_evidence_summary(
             record_current_measurement(
                 connection, item, kind=claim.evidence_kind, summary=summary,
                 provenance=observation or {"reason": "measurement observation unavailable"},
-                binding="observed" if observation and not observation.get("remote_stat_only") else "unbound",
+                binding="observed" if observation else "unbound",
             )
         projection = sync_library_item_evidence_state(
             connection,
@@ -441,10 +515,15 @@ def _commit_evidence_summary(
                     work_status="queued",
                 )
         else:
+            retry_not_before = None
+            if deps is not None:
+                if claim.attempt_count < deps.max_attempts:
+                    retry_not_before = (datetime.now(UTC) + timedelta(seconds=_retry_delay_seconds(claim.attempt_count, deps))).isoformat(timespec="seconds")
             transition_evidence_work(
                 connection,
                 claim,
-                work_status="failed",
+                work_status="retry_wait" if retry_not_before else "failed",
+                retry_not_before=retry_not_before,
                 last_error=(
                     f"Evidence analysis completed with non-current result: "
                     f"{projection.reason or projection.state}."
@@ -461,6 +540,9 @@ def _evidence_heartbeat_loop(
         deps: EvidenceWorkerDeps,
 ) -> None:
     while not stop_event.wait(deps.heartbeat_seconds):
+        if deps.shutdown_event is not None and deps.shutdown_event.is_set():
+            process_controller.cancel(EvidenceWorkDeferred("Analysis will resume after the app restarts"))
+            return
         try:
             with open_db(config.paths.db_path) as connection:
                 heartbeat_status = heartbeat_evidence_work(
@@ -557,24 +639,6 @@ def _throw_if_preparation_cancelled(
     ):
         raise ProcessCancelledError("Evidence work was cancelled.")
 
-
-def _remote_source_matches(
-        analysis_target: _AnalysisTarget,
-        source_path: Path,
-        process_controller: ManagedProcessController,
-) -> bool:
-    """Whether the encode computer sees the same size and modification time as the controller's copy."""
-    if analysis_target.command_runner is None:
-        return True
-    try:
-        stat_result = source_path.stat()
-    except OSError:
-        return False
-    remote = analysis_target.command_runner.source_size_and_mtime(
-        analysis_target.source_path,
-        process_controller=process_controller,
-    )
-    return remote == (stat_result.st_size, int(stat_result.st_mtime))
 
 
 class _ClaimHeartbeat:

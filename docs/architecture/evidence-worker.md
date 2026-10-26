@@ -278,3 +278,41 @@ Compare representative dimensions from stored evidence without opening media:
 ```bash
 uv run mediaforce evidence replay "tv/Show/Season 1"
 ```
+
+
+### Automatic original intake
+
+Bounded discovery adds new unpublished inputs to the existing evidence queue.
+It does no media I/O. Each job checks the raw container and stream stamps,
+streams a cancellable full digest against retained outputs, and applies the
+historical codec and encoder exclusions. Hashing reads at most the observed
+file length and allocates no media copies. The queue's existing lease,
+heartbeat, retry, pause, cancellation and shutdown handling own the whole job.
+Higher priority analysis can defer a hash without consuming a failure attempt.
+
+An assessment is final for its unchanged input and rule versions. Stable
+negative checks leave the original unknown; transient failures stay in the
+queue's retry state, not in admission history. Unknown or missing checks never
+become passes. Completed cancellation leaves future downloads available.
+Prepare can add requested analysis to a background-only batch without resetting
+its leases or retries; it pauses new starts until the Director presses Start.
+
+A probable assessment freezes the IDs of qualifying earlier observed receipts,
+including their before/after identity and summary hash. It cannot reuse legacy
+catalog summaries or unbound measurements. Subsequent queue receipts bind to
+the admitted input version; their stat checks bracket the measurement rather
+than requiring an earlier mount's device or inode. The newest successful
+receipt supplies each trait while older evidence remains retained. Missing
+traits use the same normal analyzer and independent per-kind retries.
+
+All measurements remain observations, including local files without strict
+custody, SMB and remote/staged-host paths. None becomes proven. Remote workers
+use Python 3 to execute the controller's descriptor-sampling code, comparing
+samples and size across hosts and stat signatures within each host. Stat-only
+hosts cannot qualify. Existing staged scratch, capacity and cleanup rules are
+unchanged. Probable traits support advisory grouping and grant no deletion,
+cleanup or approval-transfer authority.
+
+Failed automatic original checks remain visible in the maintenance backlog after the existing attempt budget, until Prepare or a changed source retries them. Cancelled automatic checks become eligible again after the queue's cooldown. Discovery can refill either missing trait. A completed full-file hash survives a later probe failure as an observed version, without admitting an original. Prepare can extend a background-only active batch without replacing its leases; completed operator rows do not prevent later preparation.
+
+Prepare preserves background ownership and retry state, but a partial hash restarts after a pause or higher-priority interruption. Unknown analyzer results use the same bounded retry budget as other failures.

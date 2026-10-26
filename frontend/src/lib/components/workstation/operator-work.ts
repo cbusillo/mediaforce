@@ -242,6 +242,12 @@ export interface EvidenceWorkReasonView {
 
 export function evidenceWorkReasonView(reason: string | null): EvidenceWorkReasonView | null {
 	if (!reason) return null;
+	if (reason === 'original_source_measurement') {
+		return {
+			label: 'Checking originals',
+			detail: 'Measures originals to group seasons by how they look.'
+		};
+	}
 	if (reason === 'sample_safety') {
 		return { label: 'Needed for sample', detail: 'Complete this before starting the sample.' };
 	}
@@ -277,6 +283,17 @@ export function evidenceWorkReasonView(reason: string | null): EvidenceWorkReaso
 
 export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): OperatorStateView {
 	const status = row.work_status;
+	if (
+		row.work_reason === 'original_source_measurement' &&
+		row.retry_not_before &&
+		status === 'cancelled'
+	) {
+		return {
+			label: 'Will retry',
+			tone: 'wait',
+			detail: `${friendlyFailureCopy(row.last_error, 'This check was stopped.')} Original checks will retry later.`
+		};
+	}
 	if (!status) {
 		return { label: 'Not prepared', tone: 'idle', detail: 'This item is not in the active batch.' };
 	}
@@ -284,7 +301,10 @@ export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): Operato
 		return {
 			label: libraryCheckLabels.analysisReady,
 			tone: 'wait',
-			detail: 'Waiting for an explicit start.'
+			detail:
+				row.work_reason === 'original_source_measurement'
+					? 'Waiting for its next check.'
+					: 'Waiting for an explicit start.'
 		};
 	}
 	if (status === 'running') {
@@ -294,7 +314,7 @@ export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): Operato
 		return {
 			label: 'Retry scheduled',
 			tone: 'wait',
-			detail: 'A retry delay is protecting the source.'
+			detail: friendlyFailureCopy(row.last_error, 'Waiting before the next attempt.')
 		};
 	}
 	if (status === 'waiting_host') {

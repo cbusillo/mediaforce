@@ -174,7 +174,8 @@ describe('operator work copy', () => {
 			...[
 				'representative_technical_coverage',
 				'representative_uncertainty',
-				'operator_scope'
+				'operator_scope',
+				'original_source_measurement'
 			].flatMap((reason) => {
 				const view = evidenceWorkReasonView(reason);
 				return [view?.label, view?.detail];
@@ -204,6 +205,23 @@ describe('operator work copy', () => {
 			last_error: 'temporary failure'
 		} as OperatorEvidenceBacklogRow;
 		expect(evidenceWorkStatusView(row).label).toBe('Retry scheduled');
+		for (const status of ['cancelled']) {
+			expect(
+				evidenceWorkStatusView({
+					...row,
+					work_status: status,
+					work_reason: 'original_source_measurement',
+					retry_not_before: '2999-01-01T00:00:00Z'
+				}).tone
+			).toBe('wait');
+		}
+		expect(
+			evidenceWorkStatusView({
+				...row,
+				work_status: 'failed',
+				work_reason: 'original_source_measurement'
+			}).tone
+		).toBe('fail');
 		expect(evidenceWorkStatusView({ ...row, work_status: 'waiting_source' }).label).toBe(
 			'Source unavailable'
 		);

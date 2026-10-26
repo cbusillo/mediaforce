@@ -123,6 +123,8 @@ source_admissions = Table(
     UniqueConstraint("supersedes_id"),
 )
 
+Index("idx_source_admissions_version", source_admissions.c.version_id)
+
 source_measurements = Table(
     "source_measurements", metadata,
     Column("measurement_id", Text, primary_key=True),
@@ -152,6 +154,7 @@ source_transitions = Table(
     Column("recorded_at", Text, nullable=False),
     CheckConstraint("outcome IN ('prepared', 'committed', 'rolled_back', 'unresolved')"),
 )
+Index("idx_source_transitions_item", source_transitions.c.library_item_id)
 Index(
     "uq_source_transition_pending", source_transitions.c.library_item_id, unique=True,
     sqlite_where=source_transitions.c.outcome.in_(("prepared", "unresolved")),

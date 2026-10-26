@@ -100,6 +100,8 @@ def summarize_evidence_inventory(connection: DBClient) -> dict[str, Any]:
             library_item_evidence_state.c.state,
             library_item_evidence_state.c.reason,
             library_item_evidence_state.c.decision_status,
+            library_item_evidence_state.c.work_reason,
+            library_item_evidence_state.c.work_status,
             func.count().label("item_count"),
         )
         .select_from(
@@ -114,6 +116,8 @@ def summarize_evidence_inventory(connection: DBClient) -> dict[str, Any]:
             library_item_evidence_state.c.state,
             library_item_evidence_state.c.reason,
             library_item_evidence_state.c.decision_status,
+            library_item_evidence_state.c.work_reason,
+            library_item_evidence_state.c.work_status,
         )
         .order_by(
             library_item_evidence_state.c.evidence_kind,
@@ -137,6 +141,7 @@ def summarize_evidence_inventory(connection: DBClient) -> dict[str, Any]:
                 evidence_kind=evidence_kind,
                 state=state,
                 decision_status=str(row["decision_status"] or ""),
+                original_wait=(row["work_reason"] == "original_source_measurement" and row["work_status"] in {"failed", "cancelled", "retry_wait", "waiting_host", "waiting_source"}),
         ):
             backlog_total += item_count
         kind_payload = by_kind.setdefault(evidence_kind, {"total": 0, "states": {}, "reasons": {}})
@@ -259,6 +264,8 @@ def _optional_choice(value: str | None, choices: tuple[str, ...], label: str) ->
 
 def _evidence_backlog_condition() -> Any:
     return or_(
+        and_(library_item_evidence_state.c.work_reason == "original_source_measurement",
+             library_item_evidence_state.c.work_status.in_(("failed", "cancelled", "retry_wait", "waiting_host", "waiting_source"))),
         library_item_evidence_state.c.state.in_((
             EVIDENCE_STATE_ANALYSIS_REQUIRED,
             EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
@@ -276,9 +283,10 @@ def _evidence_needs_attention(
         evidence_kind: str,
         state: str,
         decision_status: str,
+        original_wait: bool = False,
 ) -> bool:
     return (
-        state in {EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_STATE_CLASSIFICATION_REQUIRED}
+        original_wait or state in {EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_STATE_CLASSIFICATION_REQUIRED}
         or (
             evidence_kind == CADENCE_EVIDENCE_KIND
             and state == EVIDENCE_STATE_CURRENT
