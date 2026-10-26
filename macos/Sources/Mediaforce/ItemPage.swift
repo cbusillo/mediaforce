@@ -26,7 +26,7 @@ struct ItemPage: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 18) {
                             HStack(alignment: .top) {
-                                ItemHeader(facts: facts, poster: facts.showPrefix.flatMap(model.posters.image(for:)))
+                                ItemHeader(facts: facts, poster: facts.showPrefix.flatMap(model.posters.image(for:)), openShow: openItem)
                                 if let work {
                                     WorkActions(actions: work.actions, working: working) { action in
                                         perform(action, facts)
@@ -238,6 +238,13 @@ enum ShowChoice {
 struct ItemHeader: View {
     let facts: ItemFacts
     let poster: NSImage?
+    // Opens the show's own page from a season's page.
+    let openShow: (String) -> Void
+
+    /// The show this page is a season of; nil on the show's own page or for a movie or folder.
+    private var seasonsShow: String? {
+        facts.kind == "tv_series" ? nil : facts.showPrefix
+    }
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 18) {
@@ -248,12 +255,21 @@ struct ItemHeader: View {
                     .frame(width: 84, height: 126)
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .shadow(color: .black.opacity(0.18), radius: 5, y: 2)
+                    // On a season's page the show's poster opens the show, as its name does.
+                    .onTapGesture { if let showPrefix = seasonsShow { openShow(showPrefix) } }
+                    .pointerStyle(seasonsShow == nil ? nil : .link)
             }
             VStack(alignment: .leading, spacing: 5) {
                 if let show = facts.show {
-                    Text(show)
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
+                    if let showPrefix = seasonsShow {
+                        Button(show) { openShow(showPrefix) }
+                            .buttonStyle(QuietLinkStyle())
+                            .font(.title3)
+                    } else {
+                        Text(show)
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Text(Words.itemTitle(facts))
                     .font(.system(size: 30, weight: .bold))

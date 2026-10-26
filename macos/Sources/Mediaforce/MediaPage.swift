@@ -45,7 +45,7 @@ struct MediaPage: View {
             if visible.isEmpty {
                 Text(Words.noMatchingMedia).foregroundStyle(.secondary)
             } else if view == .posters {
-                MediaShelves(rows: visible, posters: model.posters, open: openItem)
+                MediaShelves(rows: visible, posters: model.posters, open: openItem) { stateGroup = $0 }
             } else {
                 MediaTable(rows: visible, posters: model.posters, open: openItem)
             }
@@ -184,6 +184,8 @@ struct MediaShelves: View {
     let rows: [MediaRow]
     let posters: PosterStore
     let open: (String) -> Void
+    // A shelf's heading and count show only that shelf's items.
+    let showOnly: (LibraryStateGroup) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -191,11 +193,16 @@ struct MediaShelves: View {
                 let members = rows.filter { $0.state == group }
                 if !members.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 6) {
-                            if group == .needsYou { WaitingMark() }
-                            Text(Words.libraryState(group)).font(.headline)
-                            Text("\(members.count)").foregroundStyle(.secondary).monospacedDigit()
+                        Button { showOnly(group) } label: {
+                            HStack(spacing: 6) {
+                                if group == .needsYou { WaitingMark() }
+                                Text(Words.libraryState(group)).font(.headline)
+                                Text("\(members.count)").foregroundStyle(.secondary).monospacedDigit()
+                            }
                         }
+                        .buttonStyle(.plain)
+                        .pointerStyle(.link)
+                        .help(Words.showOnly(group))
                         ScrollView(.horizontal) {
                             LazyHStack(alignment: .top, spacing: 14) {
                                 ForEach(members) { row in

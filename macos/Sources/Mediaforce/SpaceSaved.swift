@@ -3,24 +3,34 @@ import SwiftUI
 /// What compressing has given back, spot-check first: the compare player on an episode whose original backup is still
 /// there, one tile per show that still holds backups, then the library as one storage bar with the one Delete.
 struct SpaceSavedPage: View {
+    static let spotCheckID = "spotCheck"
+
     let facts: MainWindowFacts
     let model: MainWindowModel
 
     var body: some View {
-        RefreshingPage(title: Words.spaceSaved, load: { try await SpaceSavedFacts.load(model.client) }) { (saved: SpaceSavedFacts) in
-            Text(Words.savedSoFar(facts.spaceSaved.bytes))
-                .font(.title3)
-                .foregroundStyle(.secondary)
-            if saved.shows.isEmpty {
-                Text(Words.noBackupsToCheck)
+        // Around the page, so it reaches the page's own scroll view.
+        ScrollViewReader { proxy in
+            RefreshingPage(title: Words.spaceSaved, load: { try await SpaceSavedFacts.load(model.client) }) { (saved: SpaceSavedFacts) in
+                Text(Words.savedSoFar(facts.spaceSaved.bytes))
+                    .font(.title3)
                     .foregroundStyle(.secondary)
-            } else {
-                SpotCheck(shows: saved.shows, model: model)
-            }
-            SpaceSavedBar(library: facts.library, savedBytes: facts.spaceSaved.bytes, backupBytes: saved.cleanup.totalSizeBytes)
+                if saved.shows.isEmpty {
+                    Text(Words.noBackupsToCheck)
+                        .foregroundStyle(.secondary)
+                } else {
+                    SpotCheck(shows: saved.shows, model: model)
+                        .id(Self.spotCheckID)
+                }
+                SpaceSavedBar(
+                    library: facts.library, savedBytes: facts.spaceSaved.bytes, backupBytes: saved.cleanup.totalSizeBytes,
+                    // The backups' slice opens the spot-check of what they hold.
+                    openBackups: saved.shows.isEmpty ? nil : { withAnimation { proxy.scrollTo(Self.spotCheckID, anchor: .top) } }
+                )
                 .padding(.top, 8)
-            if saved.cleanup.fileCount > 0 {
-                DeleteBackups(count: saved.cleanup.fileCount, bytes: saved.cleanup.totalSizeBytes, model: model)
+                if saved.cleanup.fileCount > 0 {
+                    DeleteBackups(count: saved.cleanup.fileCount, bytes: saved.cleanup.totalSizeBytes, model: model)
+                }
             }
         }
     }
@@ -252,6 +262,7 @@ struct SpaceSavedBar: View {
     let library: MainWindowFacts.Library
     let savedBytes: Int64
     let backupBytes: Int64
+    var openBackups: (() -> Void)?
 
     private var nowBytes: Int64 { library.tv.totalBytes + library.movies.totalBytes + library.other.totalBytes }
     private var stillOriginalBytes: Int64 { library.tv.originalBytes + library.movies.originalBytes + library.other.originalBytes }
@@ -270,6 +281,10 @@ struct SpaceSavedBar: View {
                         if backupBytes > 0 {
                             Rectangle().fill(Color.orange.opacity(0.85))
                                 .frame(width: max(width * Double(backupBytes) / total, Self.smallestBackupSlice))
+                                .contentShape(Rectangle())
+                                .onTapGesture { openBackups?() }
+                                .pointerStyle(openBackups == nil ? nil : .link)
+                                .help(openBackups == nil ? "" : Words.spotCheckBackups)
                         }
                     }
                 }
