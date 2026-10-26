@@ -74,6 +74,7 @@ class HostStatus:
     trust_reset_supported: bool = False
     probe_available: bool | None = None
     check_failure: str | None = None
+    computer_model: str | None = None
 
 
 @dataclass(slots=True)

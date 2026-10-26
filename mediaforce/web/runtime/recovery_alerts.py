@@ -5,7 +5,7 @@ from typing import Any
 
 from mediaforce.core.config import MediaforceConfig, load_runtime_settings, save_runtime_settings
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_recovery_snapshot
-from mediaforce.web.runtime.host_recovery import host_recovery_snapshot
+from mediaforce.web.runtime.host_recovery import host_absence_state, host_recovery_snapshot
 from mediaforce.web.runtime.host_status import checked_host_statuses
 
 LOGGER = logging.getLogger(__name__)
@@ -50,8 +50,11 @@ def recovery_alerts(config: MediaforceConfig) -> list[dict[str, str]]:
     for key, host in hosts["hosts"].items():
         if host["status"] == "ready":
             continue
+        absence = host_absence_state(host, now)
+        if absence in {"away", "reconnecting"}:
+            continue
         try:
-            first = datetime.fromisoformat(host["first_failure_at"])
+            first = datetime.fromisoformat(host.get("absent_since") or host["first_failure_at"])
             prolonged = first.tzinfo is not None and now - first >= _HOST_OUTAGE_GRACE
         except (TypeError, ValueError):
             prolonged = True

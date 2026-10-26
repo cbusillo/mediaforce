@@ -15,7 +15,7 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
-from mediaforce.web.runtime.host_recovery import host_recovery_snapshot
+from mediaforce.web.runtime.host_recovery import host_absence_state, host_recovery_snapshot
 from mediaforce.remote import HostReadinessError, HostStatus, collect_host_statuses, host_status_targets_current_machine, \
     normalize_host_media_access, recover_remote_host_mounts, remote_mount_recovery_supported, \
     run_host_lifecycle_command
@@ -215,6 +215,7 @@ def host_recovery_row(record: object) -> dict[str, Any] | None:
         return None
     return {
         "status": state.get("status"),
+        "absence_state": host_absence_state(state),
         "reason": state.get("reason"),
         "first_failure_at": state.get("first_failure_at"),
         "last_check_at": state.get("last_check_at"),
