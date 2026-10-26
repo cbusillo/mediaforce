@@ -9,7 +9,7 @@ from mediaforce.core.config import MediaforceConfig, load_runtime_settings, upda
 from mediaforce.hosts.config import host_targets_current_machine
 from mediaforce.hosts.controller_mount import controller_mount_lock
 from mediaforce.remote import (
-    probe_host_status, recover_remote_host_mounts_no_ui,
+    probe_host_status, recover_remote_host_mounts_no_ui, reconcile_remote_host_mounts,
     remote_mount_recovery_supported,
 )
 from mediaforce.web.runtime.host_status import publish_host_status
@@ -139,8 +139,25 @@ def _recovery_pass(
         "mount_uncertain": previous.get("mount_uncertain", False),
         "retry_paused": False,
     }
+    state["computer_model"] = status.computer_model or previous.get("computer_model")
+    state["network_absent"] = status.check_failure == "unreachable" or (
+        status.check_failure == "not_found" and bool(state["computer_model"])
+    )
+    state["absent_since"] = (
+        previous.get("absent_since") or now.isoformat() if state["network_absent"] else None
+    )
+    if state["mount_uncertain"] and not status.available and not state["network_absent"] and not state_error:
+        unresolved = reconcile_remote_host_mounts(config, host, status)
+        if unresolved:
+            state.update(status="action_required", reason=unresolved)
+            _store_host_state(config, key, state)
+            return state
+        state["mount_uncertain"] = False
     if status.available:
         state["mount_uncertain"] = False
+    elif state["network_absent"]:
+        _store_host_state(config, key, state)
+        return state
     elif state["mount_uncertain"] or state_error:
         state["status"] = "action_required"
         state["reason"] = state_error or (
@@ -206,6 +223,17 @@ def _update_snapshot(
         return snapshot
 
     update_runtime_settings(host_recovery_path(config), update)
+
+
+def host_absence_state(record: dict[str, Any], now: datetime | None = None) -> str | None:
+    if not record.get("network_absent"):
+        return None
+    if "macbook" in str(record.get("computer_model") or "").lower():
+        return "away"
+    since = _parse_time(record.get("absent_since"))
+    if since is not None and (now or datetime.now(timezone.utc)) - since >= timedelta(hours=12):
+        return "unreachable_long"
+    return "reconnecting"
 
 
 def _parse_time(value: str | None) -> datetime | None:

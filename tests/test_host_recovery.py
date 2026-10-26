@@ -21,6 +21,12 @@ from mediaforce.web.runtime import host_recovery as recovery, host_status, recov
 NOW = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def no_live_reconciliation() -> Iterator[None]:
+    with patch.object(recovery, "reconcile_remote_host_mounts", return_value="Storage state is not confirmed."):
+        yield
+
+
 @pytest.fixture
 def config(tmp_path: Path) -> MediaforceConfig:
     config = MediaforceConfig(
@@ -209,6 +215,7 @@ def test_retrying_host_card_carries_background_recovery_state(
     card = _host_cards(config)["user@worker"]
     assert card["recovery"] == {
         "status": "retrying",
+        "absence_state": None,
         "reason": status().message,
         "first_failure_at": NOW.isoformat(),
         "last_check_at": NOW.isoformat(),
@@ -927,3 +934,65 @@ def test_storage_warning_keeps_the_mount_point_behind_details(config: Mediaforce
             assert "/" not in text and "smb" not in text.lower() and "controller" not in text.lower()
         assert "/" in warning["technical"]
     _assert_named_buttons_exist([warning["detail"] for warning in warnings])
+
+
+def test_uncertain_mount_disappears_and_reachable_computer_recovers_automatically(config: MediaforceConfig) -> None:
+    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+        recovery, "probe_host_status", return_value=status(),
+    ) as probe, patch.object(
+        recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False, uncertain=True),
+    ) as mount, patch.object(recovery, "reconcile_remote_host_mounts") as reconcile:
+        clock.now.return_value = NOW
+        recovery.process_host_recovery_once(config)
+        assert recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["mount_uncertain"]
+        reconcile.return_value = "An earlier storage connection is still registered on this computer."
+        clock.now.return_value += timedelta(minutes=5)
+        recovery.process_host_recovery_once(config)
+        assert mount.call_count == 1
+        assert recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["reason"] == reconcile.return_value
+        reconcile.return_value = None
+        mount.return_value = NoUiMountResult(ok=True)
+        probe.side_effect = [status(), status(available=True)]
+        clock.now.return_value += timedelta(minutes=5)
+        recovery.process_host_recovery_once(config)
+        record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
+        assert mount.call_count == 2
+        assert record["status"] == "ready"
+        assert not record["mount_uncertain"]
+        assert not [alert for alert in alerts.recovery_alerts(config) if alert["id"].startswith("host:")]
+
+
+@pytest.mark.parametrize("model,alerts_after", [("MacBook Pro", None), ("Mac mini", 12)])
+def test_absent_computer_uses_last_seen_model_and_desktop_grace(
+        config: MediaforceConfig, model: str, alerts_after: int | None,
+) -> None:
+    ready = status(available=True)
+    ready.computer_model = model
+    absent = status()
+    absent.check_failure = "unreachable"
+    absent.probe_available = False
+    absent.missing_mounts = []
+    with patch.object(recovery, "datetime", wraps=datetime) as clock, patch.object(
+        alerts, "datetime", wraps=datetime,
+    ) as alert_clock, patch.object(recovery, "probe_host_status", return_value=ready) as probe, patch.object(
+        recovery, "recover_remote_host_mounts_no_ui",
+    ) as mount, patch.object(alerts.LOGGER, "warning") as warning:
+        clock.now.return_value = alert_clock.now.return_value = NOW
+        recovery.process_host_recovery_once(config)
+        probe.return_value = absent
+        for hours in (1, 6, 12, 13, 14, 48):
+            clock.now.return_value = alert_clock.now.return_value = NOW + timedelta(hours=hours)
+            recovery.process_host_recovery_once(config)
+            record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
+            assert record["status"] == "retrying"
+            assert record["computer_model"] == model
+            alerts.record_recovery_alerts(config)
+            host_alerts = [alert for alert in alerts.recovery_alerts(config) if alert["id"].startswith("host:")]
+            assert bool(host_alerts) == (alerts_after is not None and hours >= 1 + alerts_after)
+        assert warning.call_count == (0 if alerts_after is None else 1)
+        mount.assert_not_called()
+        probe.return_value = ready
+        clock.now.return_value += timedelta(minutes=5)
+        recovery.process_host_recovery_once(config)
+        assert recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["status"] == "ready"
+        assert not [alert for alert in alerts.recovery_alerts(config) if alert["id"].startswith("host:")]

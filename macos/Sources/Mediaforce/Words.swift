@@ -24,6 +24,10 @@ enum Words {
         case "not_encoding": "Makes samples only"
         case "storage_unreachable": "Can't reach shared storage"
         case "password_needed": "Needs its password once"
+        case "away": "Away. Picks up work when it returns"
+        case "reconnecting": "Reconnecting automatically"
+        case "unreachable_long": "Has been off the network for about 12 hours"
+        case "recovery_required": "Needs its storage checked"
         case "unreachable": "Can't reach it. Is it on and awake?"
         case "remote_login_off": "Needs Remote Login turned on"
         case "identity_changed": "Its identity changed"
@@ -100,7 +104,7 @@ enum Words {
     static let workWindowsItem = "Work windows"
 
     /// States where a computer is fine as it is; every other state has something to fix.
-    private static let computerStatesFine: Set<String> = ["ready", "busy", "outside_schedule", "not_encoding", "checking"]
+    private static let computerStatesFine: Set<String> = ["ready", "busy", "outside_schedule", "not_encoding", "checking", "away", "reconnecting", "unreachable"]
 
     static func computerNeedsYou(_ state: String?) -> Bool {
         state.map { !computerStatesFine.contains($0) } ?? false

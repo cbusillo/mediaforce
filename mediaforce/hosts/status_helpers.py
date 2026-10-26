@@ -211,6 +211,7 @@ def _status_from_paths(
         repo_path: str | None,
         ffmpeg_path: str | None = None,
         platform: str = "unknown",
+        computer_model: str | None = None,
         videotoolbox_available: bool | None = None,
         schedule_timezone: str | None = None,
         utc_offset_minutes: int | None = None,
@@ -247,6 +248,7 @@ def _status_from_paths(
         repo_path=repo_path,
         ffmpeg_path=ffmpeg_path,
         platform=platform,
+        computer_model=computer_model,
         videotoolbox_available=videotoolbox_available,
         schedule_timezone=schedule_timezone,
         utc_offset_minutes=utc_offset_minutes,
@@ -501,6 +503,7 @@ def _remote_status_script(
     lines.extend([
         'if [ -n "$AB_AV1_BIN" ]; then printf "tool|ab_av1|1\\n"; else printf "tool|ab_av1|0\\n"; fi',
         'printf "meta|platform|%s\\n" "$PLATFORM_NAME"',
+        'if [ "$PLATFORM_NAME" = macos ]; then COMPUTER_MODEL="$(/usr/sbin/system_profiler SPHardwareDataType 2>/dev/null | /usr/bin/sed -n \'s/^[[:space:]]*Model Name: //p\')"; printf "meta|computer_model|%s\\n" "$COMPUTER_MODEL"; fi',
         'TIMEZONE_NAME=""',
         'if [ -L /etc/localtime ]; then TIMEZONE_PATH="$(readlink /etc/localtime 2>/dev/null || true)"; case "$TIMEZONE_PATH" in */zoneinfo.default/*) TIMEZONE_NAME="${TIMEZONE_PATH#*/zoneinfo.default/}" ;; */zoneinfo/*) TIMEZONE_NAME="${TIMEZONE_PATH#*/zoneinfo/}" ;; esac; fi',
         'if [ -z "$TIMEZONE_NAME" ] && [ -r /etc/timezone ]; then TIMEZONE_NAME="$(head -n 1 /etc/timezone 2>/dev/null | tr -d "[:space:]" || true)"; fi',

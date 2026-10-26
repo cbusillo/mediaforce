@@ -386,6 +386,7 @@ def _remote_host_status(
         repo_path=repo_path,
         ffmpeg_path=str(tool_paths.get("ffmpeg") or "") or None,
         platform=platform_name,
+        computer_model=str(payload.get("computer_model") or "") or None,
         videotoolbox_available=bool(tools.get("ffmpeg_videotoolbox")),
         schedule_timezone=str(payload.get("schedule_timezone") or "") or None,
         utc_offset_minutes=_parse_utc_offset_minutes(payload.get("utc_offset")),

@@ -78,6 +78,23 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(first.badgeCount, 3)
     }
 
+    func testAbsentLaptopStaysQuietAndDesktopNotifiesOnceAfterLongAbsence() throws {
+        let before = Attention.review(try facts(), remembered: nil).memory
+        let away = try facts(computers: [("laptop", "away"), ("desktop", "reconnecting")])
+        let quiet = Attention.review(away, remembered: before)
+        XCTAssertTrue(quiet.notices.isEmpty)
+        XCTAssertEqual(quiet.badgeCount, 0)
+        XCTAssertFalse(Words.computerNeedsYou("away"))
+        XCTAssertFalse(Words.computerNeedsYou("reconnecting"))
+        let prolonged = try facts(computers: [("laptop", "away"), ("desktop", "unreachable_long")])
+        let first = Attention.review(prolonged, remembered: quiet.memory)
+        XCTAssertEqual(first.notices.count, 1)
+        XCTAssertEqual(first.badgeCount, 1)
+        XCTAssertTrue(Attention.review(prolonged, remembered: first.memory).notices.isEmpty)
+        let recovered = Attention.review(try facts(computers: [("desktop", "ready")]), remembered: first.memory)
+        XCTAssertEqual(recovered.badgeCount, 0)
+    }
+
     func testManySeasonsFinishedWhileClosedNotifyOnce() throws {
         let before = Attention.review(try facts(finished: [older]), remembered: nil).memory
         let visible = (1...12).map { Finished(prefix: "tv/F/Season \($0 + 10)", at: "2026-10-23T00:00:\(String(format: "%02d", $0))+00:00") }

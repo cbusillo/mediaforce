@@ -374,3 +374,21 @@ def test_held_seasons_carry_their_reason_codes(connection: DBClient) -> None:
         ("tv/Pitt/Season 2", ["current_season", "recent_acquisition"]),
         ("tv/Expanse/Season 1", ["motion_pattern"]),
     ]
+
+
+@pytest.mark.parametrize("absence,state,expected", [
+    ("away", "retrying", "away"),
+    ("reconnecting", "retrying", "reconnecting"),
+    ("unreachable_long", "retrying", "unreachable_long"),
+    (None, "action_required", "recovery_required"),
+    (None, "retrying", "reconnecting"),
+])
+def test_computer_recovery_state_reaches_native_app(
+        connection: DBClient, absence: str | None, state: str, expected: str,
+) -> None:
+    row = _computer("worker", available=False, recovery={
+        "status": state, "absence_state": absence, "reason": "Storage check needs help",
+    })
+    [computer] = _payload(connection, computers=[row])["computers"]
+    assert computer["state"] == expected
+    assert computer["attention_reason"] == row["recovery"]["reason"]

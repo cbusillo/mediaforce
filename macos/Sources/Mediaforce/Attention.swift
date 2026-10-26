@@ -15,7 +15,7 @@ struct AttentionMemory: Codable, Equatable, Sendable {
 }
 
 struct Attention: Equatable, Sendable {
-    static let computerStatesNeedingYou: Set<String> = ["password_needed", "identity_changed", "new_name", "remote_login_off"]
+    static let computerStatesNeedingYou: Set<String> = ["password_needed", "identity_changed", "new_name", "remote_login_off", "unreachable_long", "recovery_required"]
     static let mostSeasonsNamedSeparately = 3
 
     let notices: [AttentionNotice]
@@ -77,7 +77,7 @@ struct Attention: Equatable, Sendable {
             AttentionNotice(
                 id: "computer:\(computer.key):\(computer.state)",
                 title: "\(computer.name ?? computer.key) needs you",
-                body: "\(Words.computerState(computer.state)). Open Mediaforce to fix it.",
+                body: computer.attentionReason ?? "\(Words.computerState(computer.state)). Open Mediaforce to check it.",
                 opens: .computer(computer.key)
             )
         }

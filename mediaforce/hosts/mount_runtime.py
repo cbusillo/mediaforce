@@ -322,6 +322,44 @@ def mount_smb_shares_no_ui(
     return NoUiMountResult(ok=True)
 
 
+def reconcile_missing_mounts(
+        mounts: list[RemoteSmbMount],
+        *,
+        run_mount_script: Callable[[str, int], subprocess.CompletedProcess[str]],
+) -> str | None:
+    if not mounts:
+        return "No shared-storage location could be identified on this computer."
+    script = [
+        'set -eu',
+        'mounts="$(/sbin/mount)"',
+        'uid="$(/usr/bin/id -u)"',
+        'jobs="$(/bin/launchctl print "gui/$uid")"',
+    ]
+    for mount in mounts:
+        point = str(mount.mount_point)
+        lock_hash = hashlib.sha256(point.encode()).hexdigest()[:24]
+        script.extend([
+            f'point={shlex.quote(point)}',
+            'if [ -e "$point" ] || [ -L "$point" ]; then exit 21; fi',
+            f'if printf "%s\\n" "$mounts" | /usr/bin/grep -F -q -- {shlex.quote(" on " + mount_output_field(point) + " (")}; then exit 22; fi',
+            f'if printf "%s\\n" "$jobs" | /usr/bin/grep -F -q -- com.mediaforce.mount.{lock_hash}; then exit 23; fi',
+            f'if [ -e "$HOME/Library/Caches/mediaforce/mount-{lock_hash}.lock" ]; then exit 24; fi',
+        ])
+    script.append('printf "MEDIAFORCE_MOUNTS_ABSENT\\n"')
+    try:
+        result = run_mount_script("\n".join(script), 10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"The storage check on this computer did not finish ({exc.__class__.__name__})."
+    if result.returncode == 0 and result.stdout.strip() == "MEDIAFORCE_MOUNTS_ABSENT":
+        return None
+    return {
+        21: "The shared-storage location still exists on this computer, but its storage is not healthy.",
+        22: "The computer still lists the shared storage as mounted, but it is not healthy.",
+        23: "An earlier storage connection is still registered on this computer.",
+        24: "An earlier storage connection still holds its lock on this computer.",
+    }.get(result.returncode, "The computer could not confirm its mounted storage and running connection requests.")
+
+
 def _no_ui_failure(
         label: str,
         mount: RemoteSmbMount,

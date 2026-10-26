@@ -536,6 +536,7 @@ def _computer(row: Mapping[str, Any]) -> dict[str, Any]:
         "name": row.get("label"),
         "platform": row.get("platform"),
         "state": _computer_state(row),
+        "attention_reason": (row.get("recovery") or {}).get("reason"),
         "running_count": int(row.get("active_encode_count") or 0),
         "schedule_opens_at": row.get("schedule_next_opens_at"),
         "cooldown_until": row.get("cooldown_until"),
@@ -561,6 +562,13 @@ def _computer_state(row: Mapping[str, Any]) -> str:
 
 
 def _unavailable_computer_state(row: Mapping[str, Any]) -> str:
+    recovery = row.get("recovery") or {}
+    if recovery.get("absence_state"):
+        return str(recovery["absence_state"])
+    if recovery.get("status") == "action_required":
+        return "recovery_required"
+    if recovery.get("status") == "retrying" and not row.get("check_failure"):
+        return "reconnecting"
     if row.get("check_failure"):
         return str(row["check_failure"])
     if row.get("missing_mounts") or row.get("controller_storage_issue"):

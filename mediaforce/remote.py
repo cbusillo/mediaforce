@@ -17,7 +17,7 @@ from mediaforce.hosts.config import execution_mode_for_host, host_media_access_f
 from mediaforce.hosts.mount_runtime import REMOTE_MOUNT_ATTEMPT_SECONDS, ControllerSmbMount, NoUiMountResult, \
     RemoteSmbMount, configured_controller_smb_mounts, controller_smb_mounts_from_output, controller_smb_mounts_path, \
     finder_mount_roots_for_paths, load_controller_smb_mounts, mount_smb_shares, mount_smb_shares_no_ui, \
-    remote_smb_mounts_for_paths, save_controller_smb_mounts
+    remote_smb_mounts_for_paths, save_controller_smb_mounts, reconcile_missing_mounts
 from mediaforce.hosts.status_runtime import _current_machine_host_status as _current_machine_host_status_impl, \
     _remote_host_status as _remote_host_status_impl, _run_remote_status_probe as _run_remote_status_probe_impl
 from mediaforce.hosts.setup_runtime import _finish_remote_host_prepare as _finish_remote_host_prepare_impl, \
@@ -107,6 +107,15 @@ def remote_mount_recovery_supported(
 
 def probe_host_status(config: MediaforceConfig, host: dict[str, Any]) -> HostStatus:
     return _remote_host_status(config, host)
+
+
+def reconcile_remote_host_mounts(config: MediaforceConfig, host: dict[str, Any], status: HostStatus) -> str | None:
+    return reconcile_missing_mounts(
+        _remote_smb_mounts_for_status(config, host, status) or [],
+        run_mount_script=lambda script, timeout: _run_remote_ssh(
+            host, "sh", "-s", input_text=script, timeout=timeout, wake_before_connect=False,
+        ),
+    )
 
 
 def recover_remote_host_mounts_no_ui(
