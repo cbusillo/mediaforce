@@ -43,6 +43,9 @@ struct KindPage: View {
         .navigationTitle(Words.kindName(kind.kind))
         .navigationSubtitle(Words.kindSubtitle(kind))
         .onChange(of: kind.kind) { chosen = nil }
+        // The page stays when another kind opens, so a kind with nothing to watch must not keep the last one playing.
+        .onChange(of: setting?.libraryItemId) { _, episode in if episode == nil { players.pause() } }
+        .task { await model.refreshKinds() }
         .onDisappear { players.pause() }
     }
 }
@@ -236,14 +239,16 @@ struct KindPlayer: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .fixedSize()
-                Picker(Words.momentChoice, selection: Binding(get: { currentMoment }, set: { players.seek(to: players.duration * Self.moments[$0]) })) {
+                // Buttons, not a selection, so the moment the picture is nearest to can be jumped back to.
+                HStack(spacing: 4) {
+                    Text(Words.momentChoice)
                     ForEach(Self.moments.indices, id: \.self) { index in
-                        // Whole seconds, as the clock beside the timeline shows them.
-                        Text(Words.momentTime((players.duration * Self.moments[index]).rounded(.down))).tag(index)
+                        let at = (players.duration * Self.moments[index]).rounded(.down)
+                        Button(Words.momentTime(at)) { players.seek(to: at) }
+                            .buttonStyle(.bordered)
+                            .tint(index == currentMoment ? .accentColor : nil)
                     }
                 }
-                .pickerStyle(.segmented)
-                .fixedSize()
                 Picker(Words.hear, selection: Bindable(players).hearOriginal) {
                     Text(Words.original).tag(true)
                     Text(Words.compressed).tag(false)
@@ -282,6 +287,8 @@ struct KindPicture: View {
     @Binding var view: KindPictureView
     @State private var pan = ScrollPosition()
     @State private var otherPan = ScrollPosition()
+    // Where the picture was last panned to, by either side.
+    @State private var panned = CGPoint.zero
 
     var body: some View {
         Group {
@@ -363,6 +370,9 @@ struct KindPicture: View {
             .scrollPosition(position)
             .defaultScrollAnchor(.center)
             .onScrollGeometryChange(for: CGPoint.self) { $0.contentOffset } action: { _, offset in
+                // The follower reports the spot it was moved to; ignoring that echo keeps a scroll's momentum.
+                guard abs(offset.x - panned.x) > 0.5 || abs(offset.y - panned.y) > 0.5 else { return }
+                panned = offset
                 follows?.wrappedValue.scrollTo(point: offset)
             }
             .scrollIndicators(.never)

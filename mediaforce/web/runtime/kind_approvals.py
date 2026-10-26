@@ -332,32 +332,50 @@ def _episode_under(episodes: list[tuple[str, int]], prefix: str) -> int | None:
     return next((item_id for rel_path, item_id in episodes if item_id and rel_path.startswith(f"{prefix}/")), None)
 
 
+@dataclass(frozen=True, slots=True)
+class _ShowApproval:
+    approval: EffectiveApproval
+    sample_season: str
+    # The show's seasons this approval governs, the sample's own first: where an episode made under it is.
+    seasons: tuple[str, ...]
+
+
 def _show_approvals(
         config: MediaforceConfig,
         show: str,
         episodes: list[tuple[str, int]],
         load_calibration_state: LoadCalibrationState,
-) -> list[tuple[EffectiveApproval, str]]:
-    """The current folder approvals on a show or its seasons, each with the season its sample was made on."""
+) -> list[_ShowApproval]:
+    """The current folder approvals on a show or its seasons, each with its sample's season and the seasons it governs."""
     seasons: set[str] = set()
     for rel_path, _ in episodes:
         if season := season_prefix_of(config, rel_path):
             seasons.add(season)
     found: dict[str, tuple[EffectiveApproval, str]] = {}
+    governed: dict[str, list[str]] = {}
     for folder in [show, *sorted(seasons)]:
         approval = effective_production_approval(config, folder, load_calibration_state)
-        if approval is None or approval.kind is not None or approval.prefix in found or not approval.current:
+        if approval is None or approval.kind is not None or not approval.current:
+            continue
+        if folder != show:
+            governed.setdefault(approval.prefix, []).append(folder)
+        if approval.prefix in found:
             continue
         sample_path = str(object_dict(approval.calibration.get("sample_item")).get("rel_path") or "")
         if sample_season := season_prefix_of(config, sample_path) if sample_path else None:
             found[approval.prefix] = (approval, sample_season)
-    return list(found.values())
+    return [_ShowApproval(approval, sample_season, tuple(sorted(governed.get(prefix, []), key=lambda governed_season: governed_season != sample_season)))
+            for prefix, (approval, sample_season) in found.items()]
+
+
+def _episode_made_under(episodes: list[tuple[str, int]], seasons: tuple[str, ...]) -> int | None:
+    return next((item_id for season in seasons if (item_id := _episode_under(episodes, season)) is not None), None)
 
 
 def _lent_settings(
         config: MediaforceConfig,
         kind: str,
-        approvals: Mapping[str, list[tuple[EffectiveApproval, str]]],
+        approvals: Mapping[str, list[_ShowApproval]],
         episodes: Mapping[str, list[tuple[str, int]]],
         kind_of: KindOf,
 ) -> list[dict[str, Any]]:
@@ -366,11 +384,11 @@ def _lent_settings(
     settings = []
     for show, found in approvals.items():
         candidates = [
-            {"show": show, "from_prefix": approval.prefix, **_size_goal_facts(approval),
-             "library_item_id": _episode_under(episodes[show], approval.prefix)}
-            for approval, sample_season in found
-            if kind_of(config, sample_season) == kind
-            and (kind not in APPROVABLE_KINDS or _extension_refusal(approval) is None)
+            {"show": show, "from_prefix": entry.approval.prefix, **_size_goal_facts(entry.approval),
+             "library_item_id": _episode_made_under(episodes[show], entry.seasons)}
+            for entry in found
+            if kind_of(config, entry.sample_season) == kind
+            and (kind not in APPROVABLE_KINDS or _extension_refusal(entry.approval) is None)
         ]
         if candidates:
             settings.append(max(candidates, key=lambda setting: setting["library_item_id"] is not None))
@@ -416,7 +434,8 @@ def kinds_payload(
     for approval in approvals.values():
         if approval:
             show = "/".join(str(approval["from_prefix"]).split("/")[:2])
-            approval["library_item_id"] = _episode_under(episodes.get(show, []), str(approval["from_prefix"]))
+            lent = next((entry for entry in approvals_by_show.get(show, []) if entry.approval.prefix == approval["from_prefix"]), None)
+            approval["library_item_id"] = _episode_made_under(episodes.get(show, []), lent.seasons) if lent else None
     return {
         "kinds": [{
             "kind": kind,

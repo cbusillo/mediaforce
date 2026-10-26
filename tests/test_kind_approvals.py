@@ -379,8 +379,14 @@ def test_an_approved_show_of_the_kind_lends_its_setting_with_an_episode_to_watch
         published = _content_item(connection, f"{APPROVED_SEASON}/e01.mkv", status="promoted", codec="av1", current_dark=0.5)
         _keep_original_backup(connection, published)
         _content_item(connection, EPISODE, status="promoted", codec="av1", current_dark=0.5)
-        approved = {APPROVED_SEASON: _approved_on(config, f"{APPROVED_SEASON}/e01.mkv"), SEASON: _approved_on(config, EPISODE)}
-        kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER}
+        # Thriller's show approval was sampled on a darker season; its Season 3 has its own bright approval and the
+        # only kept episode, which never stands for the show's setting.
+        own_season = "tv/Thriller/Season 3"
+        kept = _content_item(connection, f"{own_season}/e01.mkv", status="promoted", codec="av1", current_dark=0.5)
+        _keep_original_backup(connection, kept)
+        approved = {APPROVED_SEASON: _approved_on(config, f"{APPROVED_SEASON}/e01.mkv"),
+                    "tv/Thriller": _approved_on(config, EPISODE), own_season: _approved_on(config, f"{own_season}/e01.mkv")}
+        kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER, own_season: "bright_live_action"}
 
         def facts_with(folders: dict[str, dict[str, Any]]) -> dict[str, Any]:
             facts = kinds_payload(connection, config, load_calibration_state=_loader(folders, kinds),
@@ -399,10 +405,13 @@ def test_an_approved_show_of_the_kind_lends_its_setting_with_an_episode_to_watch
     assert lent[DARKER]["settings"] == [
         {"show": "tv/Drama", "from_prefix": APPROVED_SEASON, "size_goal_mode": "normalized", "size_goal_mb": 300.0,
          "library_item_id": published},
-        {"show": "tv/Thriller", "from_prefix": SEASON, "size_goal_mode": "normalized", "size_goal_mb": 300.0,
+        {"show": "tv/Thriller", "from_prefix": "tv/Thriller", "size_goal_mode": "normalized", "size_goal_mb": 300.0,
          "library_item_id": None},
     ]
-    assert lent["bright_live_action"]["settings"] == []
+    assert lent["bright_live_action"]["settings"] == [
+        {"show": "tv/Thriller", "from_prefix": own_season, "size_goal_mode": "normalized", "size_goal_mb": 300.0,
+         "library_item_id": kept},
+    ]
     # A size per episode cannot cover a kind, so the page never offers it.
     assert not_lent[DARKER]["settings"] == []
 

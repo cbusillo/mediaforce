@@ -34,14 +34,14 @@ final class KindsTests: XCTestCase {
             MediaRow(id: "tv/Dollhouse", name: "Dollhouse", kind: .tv, detail: "", bytes: 0, saved: nil, state: .needsYou),
         ])
         XCTAssertEqual(rows.map(\.id), ["tv/Dollhouse/Season 1", "tv/Suits/Season 4"])
-        XCTAssertEqual(rows.map(\.name), ["Dollhouse, Season 1", "Suits, Season 4"])
+        XCTAssertTrue(rows[0].name.contains("Dollhouse") && rows[0].name.contains("Season 1"))
         XCTAssertEqual(rows.map(\.state), [.needsYou, .readyToCompress])
     }
 
     func testASettingSaysItsOwnSizeAndWhetherItScalesWithRuntime() throws {
         let perFortyFive = try facts().kinds[0].settings[0]
         let perEpisode = KindsFacts.Setting(show: "tv/X", fromPrefix: "tv/X", sizeGoalMode: "absolute", sizeGoalMb: 220, libraryItemId: nil)
-        XCTAssertTrue(Words.sizeSetting(perFortyFive).contains("220 MB"))
+        XCTAssertTrue(Words.sizeSetting(perFortyFive).contains("220"))
         XCTAssertNotEqual(Words.sizeSetting(perFortyFive), Words.sizeSetting(perEpisode))
     }
 

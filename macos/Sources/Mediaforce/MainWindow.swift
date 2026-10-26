@@ -4,10 +4,14 @@ import SwiftUI
 @Observable
 final class MainWindowModel {
     static let refreshInterval: Duration = .seconds(30)
+    // Working out the kinds reads the whole TV library, so the sidebar's sizes refresh less often; a kind's page reads
+    // them again when it opens.
+    static let kindsInterval: TimeInterval = 120
 
     private(set) var facts: MainWindowFacts?
     // Each kind of content and how it is decided; nil until Mediaforce first answers.
     private(set) var kinds: KindsFacts?
+    private var kindsHeard: Date?
     // The player the full-screen window shows, while it is open.
     var theater: Theater?
     private(set) var connection: ServerState = .checking
@@ -42,7 +46,7 @@ final class MainWindowModel {
             lastHeard = .now
             problem = nil
             onFacts?(facts)
-            await refreshKinds()
+            if kindsHeard.map({ Date.now.timeIntervalSince($0) >= Self.kindsInterval }) ?? true { await refreshKinds() }
         } catch is DecodingError {
             connection = .failing
             problem = ServerProblem(kind: .unreadableReply, at: .now)
@@ -57,7 +61,9 @@ final class MainWindowModel {
 
     /// Reads the kinds again; a failed read keeps what was last heard, since the window's facts say if Mediaforce is down.
     func refreshKinds() async {
-        if let kinds = try? await client.kinds() { self.kinds = kinds }
+        guard let kinds = try? await client.kinds() else { return }
+        self.kinds = kinds
+        kindsHeard = .now
     }
 
     func startWatching() {

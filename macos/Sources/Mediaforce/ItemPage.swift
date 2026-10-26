@@ -502,7 +502,11 @@ final class ItemPlayers {
                 let status = item.status
                 let duration = item.duration.seconds
                 let side = ObjectIdentifier(player)
-                Task { @MainActor in self?.itemChanged(side, status: status, duration: duration) }
+                Task { @MainActor in
+                    // A report from the episode before a switch arrives late; only the current one counts.
+                    guard item === player.currentItem else { return }
+                    self?.itemChanged(side, status: status, duration: duration)
+                }
             }
         }
         if observer == nil {
@@ -555,10 +559,10 @@ final class ItemPlayers {
 
     /// One frame back or forward on both sides, paused, so the two pictures stay on the same frame.
     func step(by frames: Int) {
+        let rate = main.currentItem?.tracks.map(\.currentVideoFrameRate).first { $0 > 0 } ?? 24
         pause()
-        main.currentItem?.step(byCount: frames)
-        if comparing { original.currentItem?.step(byCount: frames) }
-        position = main.currentTime().seconds
+        // Both sides go to one exact time, so a drift left from playing never survives a step.
+        seek(to: min(max(main.currentTime().seconds + Double(frames) / Double(rate), 0), duration))
     }
 
     private func applySound() {
