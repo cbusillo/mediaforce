@@ -49,7 +49,7 @@ class SeasonGrouping:
     kind: SeasonKind
     episodes: int
     measured: int
-    sides: dict[EpisodeSide, int]
+    sides: Mapping[EpisodeSide, int]
     reason: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
@@ -93,11 +93,16 @@ def is_animated(genres: Sequence[str] | None) -> bool | None:
 
 def season_kind(episodes: Sequence[EpisodeTraits | None], *, animated: bool | None) -> SeasonGrouping:
     """Group one season by its episodes' original traits; unmeasured episodes do not vote."""
-    measured = [side for side in (episode_side(traits) for traits in episodes if traits is not None) if side is not None]
-    sides: Counter[EpisodeSide] = Counter(measured)
+    measured: list[EpisodeSide] = []
+    for traits in episodes:
+        side = episode_side(traits) if traits is not None else None
+        if side is not None:
+            measured.append(side)
+    sides: Counter[EpisodeSide] = Counter()
+    sides.update(measured)
 
     def grouping(kind: SeasonKind, reason: str | None = None) -> SeasonGrouping:
-        return SeasonGrouping(kind, len(episodes), len(measured), dict(sides), reason)
+        return SeasonGrouping(kind, len(episodes), len(measured), sides.copy(), reason)
 
     if not measured:
         return grouping("unmeasured", "no_measured_original")
