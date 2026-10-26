@@ -13,13 +13,12 @@ from test_web_route_security import _json_request, _route_endpoint
 from sqlalchemy import create_engine
 from test_content_kinds import _admit_historical_original, _item as _content_item
 
-from mediaforce.core.config import ConfigPaths, MediaforceConfig
+from mediaforce.core.config import ConfigPaths, MediaforceConfig, upsert_runtime_folder_policy_override
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import encode_jobs, library_items, metadata, series_metadata, source_admissions, source_generations, \
     source_transitions
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
 from mediaforce.encoding.free_space import ReservePreflight
-from mediaforce.web import app as web_app
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 from mediaforce.library.content_kinds import season_evidence, season_grouping
 from mediaforce.library.source_evidence import append_version
@@ -181,17 +180,7 @@ def test_a_kinds_approval_is_never_saved_as_a_folders_own(tmp_path: Path) -> Non
 
 
 def _insert_episode(config: MediaforceConfig) -> int:
-    timestamp = datetime.now(tz=UTC).isoformat(timespec="seconds")
-    with open_db(config.paths.db_path) as connection:
-        result = connection.execute(library_items.insert().values(
-            source_path=f"/media/{EPISODE}", rel_path=EPISODE, media_root="tv", parent_dir=SEASON,
-            file_name=Path(EPISODE).name, container="mkv", size_bytes=1_000_000_000, mtime_ns=1,
-            fingerprint=EPISODE, duration_seconds=2_700.0, video_codec="h264", width=1920, height=1080,
-            audio_summary_json="[]", subtitle_summary_json="[]", status="discovered", priority_score=50,
-            recommendation="priority_encode", recommendation_reason="fixture", last_scan_id="scan",
-            discovered_at=timestamp, last_seen_at=timestamp, updated_at=timestamp,
-        ))
-    return int(result.inserted_primary_key[0])
+    return _waiting_episode(config, EPISODE, 1_000_000_000)
 
 
 def _queue(config: MediaforceConfig, prefix: str, load: KindAwareLoader) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -214,7 +203,7 @@ def _queue(config: MediaforceConfig, prefix: str, load: KindAwareLoader) -> tupl
             result = queue_folder_encode_action(
                 config, prefix, "", False, now_iso=lambda: "2026-10-26T00:00:00+00:00",
                 load_job_state=lambda *_args: None, load_calibration_state=load, review_gate=review_gate,
-                upsert_override=web_app._upsert_override, load_active_encode_job_for_prefix_fn=lambda *_args: None,
+                upsert_override=upsert_runtime_folder_policy_override, load_active_encode_job_for_prefix_fn=lambda *_args: None,
                 clear_terminal_encode_jobs_for_prefix_fn=lambda *_args: None,
                 prepare_terminal_encode_job_for_requeue_fn=lambda *_args: None, save_encode_job=lambda *_args: None,
                 load_advice_state=lambda *_args: {}, reserve_preflight=lambda *_args: ReservePreflight(True, None, {}),
@@ -247,10 +236,10 @@ def test_a_season_outside_every_approved_kind_is_not_queued(tmp_path: Path) -> N
         _queue(config, SEASON, _loader({}, {SEASON: "bright_live_action"}))
 
 
-def _waiting_episode(config: MediaforceConfig, rel_path: str, size_bytes: int, *, status: str = "discovered") -> None:
+def _waiting_episode(config: MediaforceConfig, rel_path: str, size_bytes: int, *, status: str = "discovered") -> int:
     timestamp = datetime.now(tz=UTC).isoformat(timespec="seconds")
     with open_db(config.paths.db_path) as connection:
-        connection.execute(library_items.insert().values(
+        result = connection.execute(library_items.insert().values(
             source_path=f"/media/{rel_path}", rel_path=rel_path, media_root="tv", parent_dir=rel_path.rsplit("/", 1)[0],
             file_name=Path(rel_path).name, container="mkv", size_bytes=size_bytes, mtime_ns=1, fingerprint=rel_path,
             duration_seconds=2_700.0, video_codec="h264", width=1920, height=1080, audio_summary_json="[]",
@@ -258,6 +247,7 @@ def _waiting_episode(config: MediaforceConfig, rel_path: str, size_bytes: int, *
             recommendation_reason="fixture", last_scan_id="scan", discovered_at=timestamp, last_seen_at=timestamp,
             updated_at=timestamp,
         ))
+    return int(result.inserted_primary_key[0])
 
 
 def _encode_job(config: MediaforceConfig, prefix: str, status: str) -> None:
