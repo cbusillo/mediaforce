@@ -91,7 +91,7 @@ def is_animated(genres: Sequence[str] | None) -> bool | None:
 def season_kind(episodes: Sequence[EpisodeTraits | None], *, animated: bool | None) -> SeasonGrouping:
     """Group one season by its episodes' original traits; unmeasured episodes do not vote."""
     measured = [traits for traits in episodes if traits is not None]
-    sides = Counter(episode_side(traits) for traits in measured)
+    sides: Counter[EpisodeSide] = Counter(episode_side(traits) for traits in measured)
 
     def grouping(kind: SeasonKind, reason: str | None = None) -> SeasonGrouping:
         return SeasonGrouping(kind, len(episodes), len(measured), dict(sides), reason)
