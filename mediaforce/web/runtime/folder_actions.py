@@ -119,6 +119,7 @@ class QueueNeedsChoice(HTTPException):
 
 
 _FINAL_SIZE_RECOVERY_BLOCKER_CODE = "final_size_recovery_contract_unchanged"
+KIND_APPROVAL_RECOVERY_CODE = "kind_approval_recovery"
 _FINAL_SIZE_RECOVERY_BLOCKER_MESSAGE = (
     "The latest production encode missed its approved final-size target under the same reviewed settings. "
     "Run and approve a fresh representative sample with a changed size, compression, quality, resolution, "
@@ -1283,6 +1284,12 @@ def queue_folder_encode_action(
             selection["production_approval_contract"] = queued_contract
             # The folder whose approval the run went under: the run's own, or the show's for a season following it.
             selection["production_approval_prefix"] = approval_prefix
+            # A kind's copy of a folder approval has that folder's contract, so the kind is recorded beside it.
+            approval_kind = str(calibration_payload.get("kind") or "") or None
+            selection["production_approval_kind"] = approval_kind
+            covered_by = {"source": "kind" if approval_kind else "folder", "prefix": approval_prefix, "kind": approval_kind}
+            for item in manifest["items"]:
+                item["production_approval"] = covered_by
         manifest["selection"] = selection
         if older_season_selection is not None and older_season_cadence_partition is not None:
             manifest_item_ids = {
@@ -1479,6 +1486,10 @@ def approve_measured_encode_recovery_action(
     calibration_payload = object_dict(calibration)
     if not calibration_payload:
         raise HTTPException(status_code=400, detail="Run and approve a sampled draft first.")
+    if calibration_payload.get("kind"):
+        # Re-approving here would turn the kind's approval into this season's own, so the season samples on its own.
+        return {"ok": False, "code": KIND_APPROVAL_RECOVERY_CODE,
+                "message": "This season follows its kind's approval. Make a sample for this season to change its settings."}
 
     with open_db(config.paths.db_path) as connection:
         latest_encode_job = load_latest_terminal_encode_job_for_prefix(connection, normalized_prefix)

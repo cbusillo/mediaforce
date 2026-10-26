@@ -5,6 +5,9 @@ folder page alike:
 
 - A file is governed by the nearest folder holding an approval: the file itself, then its season,
   then its show, then the library.
+- When no folder on that path holds any saved sample, a TV season's kind of content may govern it: one
+  approval covering every season that measures the same (#1047). A folder's approval or its own sample
+  always comes first.
 - A production run records the contract of the approval it was queued under. Queueing leaves out
   every file whose governing approval has a different contract, such as a season with its own
   sample inside a show run, so each file a run makes is governed by the approval the run recorded.
@@ -26,7 +29,7 @@ import copy
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from mediaforce.core.audio_presets import PRESET_AUDIO_KEYS, owner_sound_keys
 from mediaforce.core.config import MediaforceConfig
@@ -51,6 +54,12 @@ class EffectiveApproval:
     prefix: str
     calibration: dict[str, Any]
     contract: dict[str, Any] | None
+    # The kind of content whose approval this is, or None for a folder's own approval.
+    kind: str | None = None
+
+    @property
+    def source(self) -> str:
+        return "kind" if self.kind else "folder"
 
     @property
     def current(self) -> bool:
@@ -61,6 +70,19 @@ class EffectiveApproval:
             and accepted_hash
             and accepted_hash == calibration_policy_hash(self.calibration)
         )
+
+
+@runtime_checkable
+class KindApprovalSource(Protocol):
+    """A calibration loader that also knows the kind approval covering a TV season, when one does."""
+
+    def __call__(self, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None: ...
+
+    def kind_approval(self, config: MediaforceConfig, rel_path: str) -> EffectiveApproval | None: ...
+
+
+def _kind_approval(config: MediaforceConfig, rel_path: str, load: LoadCalibrationState) -> EffectiveApproval | None:
+    return load.kind_approval(config, rel_path) if isinstance(load, KindApprovalSource) else None
 
 
 def approval_prefixes(rel_path: str) -> list[str]:
@@ -81,13 +103,16 @@ def effective_production_approval(
         rel_path: str,
         load_calibration_state: LoadCalibrationState,
 ) -> EffectiveApproval | None:
-    """The approval governing this file or folder, or None when no folder above it holds one."""
+    """The approval governing this file or folder, or None when nothing above it holds one."""
+    saved_sample = False
     for prefix in approval_prefixes(rel_path):
         calibration = load_calibration_state(config, prefix)
         if holds_approval(calibration):
             payload = object_dict(calibration)
             return EffectiveApproval(prefix, payload, production_approval_contract(payload))
-    return None
+        saved_sample = saved_sample or calibration is not None
+    # A sample saved on the way, approved or not, keeps the folder's own decision ahead of its kind's.
+    return None if saved_sample else _kind_approval(config, rel_path, load_calibration_state)
 
 
 def production_calibration(
@@ -106,19 +131,29 @@ def production_calibration(
         calibration = load_calibration_state(config, candidate)
         if calibration is not None:
             return candidate, calibration
+    kind = _kind_approval(config, prefix, load_calibration_state)
+    if kind is not None:
+        return kind.prefix, kind.calibration
     return prefix, None
 
 
 def cached_calibration_loader(load_calibration_state: LoadCalibrationState) -> LoadCalibrationState:
     """Read each folder's calibration once while one action checks many files."""
-    cache: dict[str, dict[str, Any] | None] = {}
+    return _CachedCalibrationLoader(load_calibration_state)
 
-    def load(config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
-        if prefix not in cache:
-            cache[prefix] = load_calibration_state(config, prefix)
-        return cache[prefix]
 
-    return load
+class _CachedCalibrationLoader:
+    def __init__(self, load_calibration_state: LoadCalibrationState) -> None:
+        self._load = load_calibration_state
+        self._cache: dict[str, dict[str, Any] | None] = {}
+
+    def __call__(self, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+        if prefix not in self._cache:
+            self._cache[prefix] = self._load(config, prefix)
+        return self._cache[prefix]
+
+    def kind_approval(self, config: MediaforceConfig, rel_path: str) -> EffectiveApproval | None:
+        return _kind_approval(config, rel_path, self._load)
 
 
 def production_approval_contract(calibration: Mapping[str, Any]) -> dict[str, Any] | None:

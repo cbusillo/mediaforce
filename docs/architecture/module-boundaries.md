@@ -162,9 +162,15 @@ Guidance:
   - `encode_runtime.py`
   - `folder_state.py`
   - `folder_actions.py`
+  - `kind_approvals.py`
+    - one approval per kind of content (darker or bright live action), copied
+      from a current folder approval with a size per 45 minutes, and the
+      calibration loader that lets the approval resolver find it
   - `production_approval.py`
     - the one rule for which sample approval governs a file: the nearest folder
-      holding an approval (the file, then its season, show and library)
+      holding an approval (the file, then its season, show and library); when
+      no folder on that path holds any saved sample, the approval for the
+      season's kind of content, if the Director approved one
     - a production action runs under the nearest saved sample at or above its
       scope, approved or not, as the folder page shows it: a season following
       its show queues under the show's approval, and a sample still awaiting
