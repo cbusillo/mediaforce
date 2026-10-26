@@ -46,6 +46,8 @@ struct WorkStatus: View {
 
 struct StorageBar: View {
     let facts: MainWindowFacts
+    // The saved part opens Space saved; each show's slice opens that show.
+    let open: (Place) -> Void
     private let barHeight: CGFloat = 40
 
     var body: some View {
@@ -70,12 +72,18 @@ struct StorageBar: View {
                             .padding(.leading, 11)
                     }
                     .frame(width: savedWidth)
+                    .contentShape(Rectangle())
+                    .onTapGesture { open(.spaceSaved) }
+                    .pointerStyle(.link)
                     .help("\(Words.size(facts.spaceSaved.bytes)) saved from \(facts.spaceSaved.episodeCount) episodes in \(facts.spaceSaved.seasonCount) seasons")
 
                     ForEach(facts.biggestNotStarted) { show in
                         Rectangle()
                             .fill(Color.primary.opacity(0.17))
                             .frame(width: max(1, Double(show.bytes) * pointsPerByte - 1))
+                            .contentShape(Rectangle())
+                            .onTapGesture { open(.item(show.showPrefix)) }
+                            .pointerStyle(.link)
                             .help("\(show.show): \(Words.size(show.bytes)), not started")
                     }
 

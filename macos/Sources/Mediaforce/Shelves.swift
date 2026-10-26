@@ -90,6 +90,7 @@ struct PosterView: View {
 struct FinishedShelf: View {
     let seasons: [MainWindowFacts.FinishedSeason]
     let posters: PosterStore
+    let open: (Place) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -101,17 +102,21 @@ struct FinishedShelf: View {
             }
             HStack(alignment: .top, spacing: 10) {
                 ForEach(seasons) { season in
-                    VStack(alignment: .leading, spacing: 5) {
-                        PosterView(
-                            show: season.show,
-                            image: posters.image(for: season.showPrefix),
-                            headline: Words.finishedSaved(season),
-                            detail: season.season.map { "Season \($0)" } ?? season.show
-                        )
-                        Text(Words.day(season.finishedAt))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    Button { open(.item(season.prefix)) } label: {
+                        VStack(alignment: .leading, spacing: 5) {
+                            PosterView(
+                                show: season.show,
+                                image: posters.image(for: season.showPrefix),
+                                headline: Words.finishedSaved(season),
+                                detail: season.season.map { "Season \($0)" } ?? season.show
+                            )
+                            Text(Words.day(season.finishedAt))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    .buttonStyle(.plain)
+                    .pointerStyle(.link)
                     .help(Words.finishedSummary(season))
                 }
             }
@@ -132,12 +137,16 @@ struct SampleShelf: View {
             HStack(alignment: .top, spacing: 10) {
                 ForEach(Array((samples.waitingOnYou + samples.approvedNotStarted).prefix(6).enumerated()), id: \.element.id) { index, sample in
                     VStack(alignment: .leading, spacing: 7) {
-                        PosterView(
-                            show: sample.show,
-                            image: posters.image(for: sample.showPrefix),
-                            headline: sample.season.map { "Season \($0)" } ?? sample.show,
-                            detail: Words.sampleState(sample)
-                        )
+                        Button { openSample(sample.prefix) } label: {
+                            PosterView(
+                                show: sample.show,
+                                image: posters.image(for: sample.showPrefix),
+                                headline: sample.season.map { "Season \($0)" } ?? sample.show,
+                                detail: Words.sampleState(sample)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .pointerStyle(.link)
                         .help([Words.season(sample.show, sample.season), Words.sampleFailure(sample.failure)].compactMap { $0 }.joined(separator: ": "))
                         if let action = Words.sampleAction(sample.action) {
                             let open = { openSample(sample.prefix) }
@@ -186,7 +195,7 @@ struct BiggestTable: View {
 
     let shows: [MainWindowFacts.NotStartedShow]
     let samples: [MainWindowFacts.Sample]
-    let openSample: (String) -> Void
+    let open: (Place) -> Void
 
     var body: some View {
         let largest = Double(shows.map(\.bytes).max() ?? 1)
@@ -196,9 +205,10 @@ struct BiggestTable: View {
             Table(shows) {
                 TableColumn("Show") { (show: MainWindowFacts.NotStartedShow) in
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(show.show)
+                        Button(show.show) { open(.item(show.showPrefix)) }
+                            .buttonStyle(QuietLinkStyle(primary: true))
                         if let note = waitingNote(show), let prefix = show.waitingSamplePrefix {
-                            Button(note) { openSample(prefix) }
+                            Button(note) { open(.sample(prefix)) }
                                 .buttonStyle(.plain)
                                 .font(.caption)
                                 .foregroundStyle(Color.accentColor)
@@ -279,6 +289,7 @@ struct Computers: View {
 
 struct Latest: View {
     let events: [MainWindowFacts.Event]
+    let open: (Place) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -291,8 +302,14 @@ struct Latest: View {
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                             .fixedSize()
-                        Text(Words.eventSentence(event))
-                            .fixedSize(horizontal: false, vertical: true)
+                        if let season = event.season {
+                            Button(Words.eventSentence(event)) { open(.item(season.prefix)) }
+                                .buttonStyle(QuietLinkStyle(primary: true))
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            Text(Words.eventSentence(event))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }

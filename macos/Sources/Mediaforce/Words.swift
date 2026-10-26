@@ -397,6 +397,11 @@ extension Words {
     static let originalBackups = "Original backups"
     static let originalBackupsHelp = "When a season is replaced, its originals wait here until you delete them on Space saved."
     static let spotCheckFirst = "Spot-check before deleting"
+    static let spotCheckBackups = "Spot-check what these backups hold"
+
+    static func showOnly(_ group: LibraryStateGroup) -> String {
+        "Show only \(libraryState(group).lowercased())"
+    }
     static let spotCheckPrompt = "Does it look right? Each show you check gets a tick below."
     static let noBackupsToCheck = "No original backups are waiting, so there is nothing to spot-check."
     static let showChecked = "Checked. Choose it to look again."
