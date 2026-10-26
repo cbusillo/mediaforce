@@ -374,6 +374,7 @@ def _run_evidence_claim(
         summary,
         actual_fingerprint=final_fingerprint,
         classification_only=False,
+        deps=deps,
         observation={"before": measurement_before, "after": measurement_after,
                      "worker_id": claim.worker_id, "lease_batch_id": claim.batch_id,
                      "source_revision": claim.source_revision,
@@ -417,6 +418,7 @@ def _commit_evidence_summary(
         actual_fingerprint: str | None,
         classification_only: bool,
         observation: dict[str, Any] | None = None,
+        deps: EvidenceWorkerDeps | None = None,
 ) -> None:
     summary_json = json.dumps(summary, separators=(",", ":"), sort_keys=True)
     with open_db(config.paths.db_path) as connection:
@@ -512,10 +514,12 @@ def _commit_evidence_summary(
                     work_status="queued",
                 )
         else:
+            should_retry = deps is not None and claim.attempt_count < deps.max_attempts
             transition_evidence_work(
                 connection,
                 claim,
-                work_status="failed",
+                work_status="retry_wait" if should_retry else "failed",
+                retry_not_before=(datetime.now(UTC) + timedelta(seconds=_retry_delay_seconds(claim.attempt_count, deps))).isoformat(timespec="seconds") if should_retry else None,
                 last_error=(
                     f"Evidence analysis completed with non-current result: "
                     f"{projection.reason or projection.state}."

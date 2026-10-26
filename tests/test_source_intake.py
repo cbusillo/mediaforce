@@ -71,7 +71,11 @@ def _summary(kind: str, host: str = "first") -> dict[str, Any]:
 
 
 def _work(
-    config: MediaforceConfig, analyze: Callable[..., dict[str, object]] | None = None, *, stop_event: threading.Event | None = None
+    config: MediaforceConfig,
+    analyze: Callable[..., dict[str, object]] | None = None,
+    *,
+    stop_event: threading.Event | None = None,
+    max_attempts: int | None = None,
 ) -> bool:
     deps = EvidenceWorkerDeps(
         load_config=lambda _path: config,
@@ -80,6 +84,7 @@ def _work(
         heartbeat_seconds=0.01,
         retry_base_delay_seconds=0,
         shutdown_event=stop_event,
+        **({"max_attempts": max_attempts} if max_attempts is not None else {}),
     )
     with (
         patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()),
@@ -408,7 +413,7 @@ def test_new_download_is_claimed_before_a_due_host_retry(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("kind", ["media_fingerprint", "cadence_analysis"])
-def test_terminal_background_checks_retry_after_cooldown(tmp_path: Path, kind: str) -> None:
+def test_cancelled_background_checks_retry_after_cooldown(tmp_path: Path, kind: str) -> None:
     config = _config(tmp_path)
     item_id, _path = _source(config)
     _discover(config)
@@ -424,7 +429,7 @@ def test_terminal_background_checks_retry_after_cooldown(tmp_path: Path, kind: s
         database.execute(
             update(library_item_evidence_state)
             .where(library_item_evidence_state.c.evidence_kind == kind)
-            .values(work_status="failed", retry_not_before="9999-01-01T00:00:00+00:00", attempt_count=3)
+            .values(work_status="cancelled", retry_not_before="9999-01-01T00:00:00+00:00", attempt_count=3)
         )
     assert _discover(config) == 0
     with open_db(config.paths.db_path) as database:
@@ -480,7 +485,7 @@ def test_background_discovery_preserves_higher_priority_reason(tmp_path: Path) -
             library_item_ids=[item_id],
             evidence_kind="media_fingerprint",
             work_reason="sample_safety",
-            priority=10,
+            priority=0,
             require_measurement=True,
         )
         queue_decision_evidence_work(
@@ -494,7 +499,7 @@ def test_background_discovery_preserves_higher_priority_reason(tmp_path: Path) -
             require_measurement=True,
         )
         row = database.execute(select(library_item_evidence_state)).mappings().one()
-        assert row["work_reason"] == "sample_safety" and row["work_priority"] == 10
+        assert row["work_reason"] == "sample_safety" and row["work_priority"] == 0
 
 
 def test_completed_operator_rows_do_not_block_later_prepare(tmp_path: Path) -> None:
@@ -529,6 +534,7 @@ def test_empty_prepare_does_not_pause_background_work(tmp_path: Path) -> None:
     with open_db(config.paths.db_path) as database:
         result = start_evidence_work(database, config, "tv/measured.mkv")
         assert not result["is_paused"]
+        assert result["prepared_count"] == 0
         assert runnable_evidence_work_count(database) > 0
 
 
@@ -549,3 +555,102 @@ def test_fully_measured_ambiguous_cadence_is_retained(tmp_path: Path) -> None:
         trait = load_source_evidence(database, item_id).traits["cadence_analysis"]
         assert trait.tier == "probable"
         assert trait.summary["decision"]["status"] == "blocked"
+
+
+def test_unknown_result_exhausts_existing_budget_then_prepare_retries(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    _discover(config)
+    calls = []
+
+    def analyze(_path: Path, kind: str, **_kwargs: object) -> dict[str, Any]:
+        calls.append(kind)
+        summary = _summary(kind)
+        if kind == "media_fingerprint":
+            summary["decision"]["status"] = "unknown"
+            summary["analysis"]["coverage"] = 0.0
+        return summary
+
+    for _ in range(5):
+        _work(config, analyze, max_attempts=2)
+    assert calls.count("media_fingerprint") == 2
+    assert _discover(config) == 0
+    with open_db(config.paths.db_path) as database:
+        row = (
+            database.execute(
+                select(library_item_evidence_state).where(library_item_evidence_state.c.evidence_kind == "media_fingerprint")
+            )
+            .mappings()
+            .one()
+        )
+        assert row["work_status"] == "failed" and row["retry_not_before"] is None
+    _source(config, "new")
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        result = start_evidence_work(database, config, "tv/source.mkv", evidence_kinds=["media_fingerprint"])
+        row = (
+            database.execute(
+                select(library_item_evidence_state).where(
+                    library_item_evidence_state.c.library_item_id == item_id,
+                    library_item_evidence_state.c.evidence_kind == "media_fingerprint",
+                )
+            )
+            .mappings()
+            .one()
+        )
+        assert row["work_status"] == "queued" and row["attempt_count"] == 0
+        assert result["prepared_count"] == 1 and result["item_count"] > result["prepared_count"]
+        resume_evidence_queue(database)
+    _work(config)
+    with open_db(config.paths.db_path) as database:
+        assert load_source_evidence(database, item_id).traits["media_fingerprint"].tier == "probable"
+
+
+@pytest.mark.parametrize("status", ["failed", "retry_wait", "waiting_host"])
+def test_background_followup_preserves_failed_or_waiting_safety_request(tmp_path: Path, status: str) -> None:
+    from mediaforce.library.evidence_queue import queue_decision_evidence_work
+
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        database.execute(
+            update(library_item_evidence_state).values(work_status=status, work_priority=0, work_reason="sample_safety")
+        )
+        queue_decision_evidence_work(
+            database,
+            config,
+            "tv/source.mkv",
+            library_item_ids=[item_id],
+            evidence_kind="media_fingerprint",
+            work_reason="original_source_measurement",
+            priority=70,
+            require_measurement=True,
+        )
+        row = database.execute(select(library_item_evidence_state)).mappings().one()
+        assert row["work_status"] == status
+        assert row["work_reason"] == "sample_safety" and row["work_priority"] == 0
+
+
+def test_cancelled_kind_with_ineligible_original_does_not_enqueue_another_kind(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    _discover(config)
+    _work(config)
+    _work(config)
+    with open_db(config.paths.db_path) as database:
+        evidence = load_source_evidence(database, item_id)
+        database.execute(
+            update(library_item_evidence_state)
+            .where(library_item_evidence_state.c.evidence_kind == "cadence_analysis")
+            .values(work_status="cancelled", retry_not_before="2000-01-01T00:00:00+00:00")
+        )
+    with patch("mediaforce.library.source_intake.load_source_evidence", return_value=replace(evidence, availability="unavailable")):
+        assert _discover(config) == 0
+    with open_db(config.paths.db_path) as database:
+        statuses = dict(
+            database.execute(select(library_item_evidence_state.c.evidence_kind, library_item_evidence_state.c.work_status)).all()
+        )
+        assert statuses == {"cadence_analysis": "failed", "media_fingerprint": "completed"}

@@ -1,6 +1,5 @@
 import json
 import logging
-from datetime import UTC, datetime, timedelta
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -299,7 +298,6 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
         EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
         EVIDENCE_QUEUE_ACTIVE_STATUSES,
         load_evidence_queue_state,
-        EVIDENCE_BACKGROUND_RETRY_SECONDS,
         queue_decision_evidence_work,
     )
 
@@ -316,7 +314,7 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
     due_terminal = exists().where(
         library_item_evidence_state.c.library_item_id == library_items.c.id,
         library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
-        library_item_evidence_state.c.work_status.in_(("failed", "cancelled")),
+        library_item_evidence_state.c.work_status == "cancelled",
         library_item_evidence_state.c.retry_not_before <= timestamp(),
     )
     already_queued = exists().where(
@@ -326,7 +324,8 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
         == func.coalesce(library_items.c.content_version_fingerprint, library_items.c.fingerprint),
         or_(
             library_item_evidence_state.c.work_status.in_(("queued", "running", "retry_wait", "waiting_source", "waiting_host")),
-            (library_item_evidence_state.c.work_status.in_(("failed", "cancelled")))
+            library_item_evidence_state.c.work_status == "failed",
+            (library_item_evidence_state.c.work_status == "cancelled")
             & (library_item_evidence_state.c.retry_not_before > timestamp()),
         ),
     )
@@ -347,11 +346,44 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
         .all()
     )
     prepared = 0
+    context = load_source_evidence_context(connection)
     for item in rows:
         try:
             with connection.begin_nested():
-                evidence = load_source_evidence(connection, int(item["id"]))
-                kinds = (
+                evidence = load_source_evidence(connection, int(item["id"]), context=context)
+                due_kinds = list(
+                    connection.execute(
+                        select(library_item_evidence_state.c.evidence_kind).where(
+                            library_item_evidence_state.c.library_item_id == item["id"],
+                            library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
+                            library_item_evidence_state.c.work_status == "cancelled",
+                            library_item_evidence_state.c.retry_not_before <= timestamp(),
+                        )
+                    ).scalars()
+                )
+                if (
+                    due_kinds
+                    and evidence.availability != "available"
+                    and connection.execute(
+                        select(source_admissions.c.admission_id).where(
+                            source_admissions.c.version_id == item["active_source_version_id"]
+                        )
+                    ).first()
+                ):
+                    connection.execute(
+                        update(library_item_evidence_state)
+                        .where(
+                            library_item_evidence_state.c.library_item_id == item["id"],
+                            library_item_evidence_state.c.evidence_kind.in_(due_kinds),
+                        )
+                        .values(
+                            work_status="failed",
+                            retry_not_before=None,
+                            last_error="An eligible original could not be confirmed; refresh the library before preparing another check",
+                        )
+                    )
+                    continue
+                kinds = due_kinds or (
                     [kind for kind in EVIDENCE_KINDS if evidence.traits[kind].tier == "unknown"]
                     if evidence.availability == "available"
                     else ["media_fingerprint"]
@@ -367,11 +399,13 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
                         .mappings()
                         .one_or_none()
                     )
-                    if (
-                        existing
-                        and existing["work_status"] in {"failed", "cancelled"}
-                        and existing["retry_not_before"]
-                        and existing["retry_not_before"] > timestamp()
+                    if existing and (
+                        existing["work_status"] == "failed"
+                        or (
+                            existing["work_status"] == "cancelled"
+                            and existing["retry_not_before"]
+                            and existing["retry_not_before"] > timestamp()
+                        )
                     ):
                         continue
                     sync_library_item_evidence_state(connection, item, kind)
@@ -402,9 +436,7 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
                     work_status="failed",
                     work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
                     work_source_fingerprint=item["content_version_fingerprint"] or item["fingerprint"],
-                    retry_not_before=(datetime.now(UTC) + timedelta(seconds=EVIDENCE_BACKGROUND_RETRY_SECONDS)).isoformat(
-                        timespec="seconds"
-                    ),
+                    retry_not_before=None,
                     last_error="The library has conflicting paths for this file; refresh the library before retrying",
                     updated_at=timestamp(),
                 )

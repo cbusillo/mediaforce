@@ -186,11 +186,11 @@ def start_evidence_work(
         if active_background:
             if not candidates:
                 connection.commit()
-                return evidence_queue_summary(connection)
+                return {**evidence_queue_summary(connection), "prepared_count": 0}
             for candidate in candidates:
                 queue_decision_evidence_work(connection, config, scope_prefix,
                     library_item_ids=[candidate["library_item_id"]], evidence_kind=candidate["evidence_kind"],
-                    work_reason=candidate["work_reason"], priority=candidate["work_priority"], manage_transaction=False)
+                    work_reason=candidate["work_reason"], priority=candidate["work_priority"], manage_transaction=False, restart_terminal=True)
             scope_payload = scope.to_payload()
             scope_payload["work_limit"] = normalized_limit
             if fingerprint_plan is not None:
@@ -198,7 +198,7 @@ def start_evidence_work(
             connection.execute(update(evidence_queue_state).where(evidence_queue_state.c.queue_name == DEFAULT_EVIDENCE_QUEUE_NAME).values(
                 is_paused=1, status="paused", scope_json=json.dumps(scope_payload), updated_at=now_iso))
             connection.commit()
-            return evidence_queue_summary(connection)
+            return {**evidence_queue_summary(connection), "prepared_count": len(candidates)}
         batch_id = uuid.uuid4().hex
         _queue_candidate_rows(
             connection,
@@ -236,7 +236,7 @@ def start_evidence_work(
     except BaseException:
         connection.rollback()
         raise
-    return evidence_queue_summary(connection)
+    return {**evidence_queue_summary(connection), "prepared_count": len(candidates)}
 
 
 def queue_decision_evidence_work(
@@ -359,7 +359,7 @@ def queue_decision_evidence_work(
         for row in rows:
             row_batch_id = str(row.get("work_batch_id") or "")
             row_status = str(row.get("work_status") or "")
-            current_priority = int_value(row.get("work_priority")) or EVIDENCE_WORK_PRIORITY_OPERATOR
+            current_priority = int_value(row["work_priority"]) if row.get("work_priority") is not None else EVIDENCE_WORK_PRIORITY_OPERATOR
             if row_batch_id == batch_id and row_status in EVIDENCE_WORK_ACTIVE_STATUSES:
                 connection.execute(
                     update(library_item_evidence_state)
@@ -391,8 +391,8 @@ def queue_decision_evidence_work(
                         library_item_evidence_state.c.evidence_kind == selected_kind,
                     )
                     .values(
-                        work_priority=priority,
-                        work_reason=normalized_reason,
+                        work_priority=min(current_priority, priority),
+                        work_reason=normalized_reason if priority < current_priority or not row.get("work_reason") else row["work_reason"],
                         updated_at=now_iso,
                     )
                 )
@@ -408,8 +408,8 @@ def queue_decision_evidence_work(
                 .values(
                     work_batch_id=batch_id,
                     work_status=next_status,
-                    work_priority=priority,
-                    work_reason=normalized_reason,
+                    work_priority=min(current_priority, priority) if preserve_retry_state else priority,
+                    work_reason=(row["work_reason"] if preserve_retry_state and current_priority <= priority and row.get("work_reason") else normalized_reason),
                     work_source_fingerprint=current_source_fingerprint,
                     leased_at=None,
                     lease_expires_at=None,
@@ -933,7 +933,7 @@ def transition_evidence_work(
         "process_pid": None,
         "updated_at": now_iso,
     }
-    if work_status in {"failed", "cancelled"} and claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE:
+    if work_status == "cancelled" and claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE:
         values["retry_not_before"] = (datetime.fromisoformat(now_iso) + timedelta(seconds=EVIDENCE_BACKGROUND_RETRY_SECONDS)).isoformat(timespec="seconds")
     if restore_attempt:
         values["attempt_count"] = func.max(library_item_evidence_state.c.attempt_count - 1, 0)

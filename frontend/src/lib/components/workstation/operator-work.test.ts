@@ -205,7 +205,7 @@ describe('operator work copy', () => {
 			last_error: 'temporary failure'
 		} as OperatorEvidenceBacklogRow;
 		expect(evidenceWorkStatusView(row).label).toBe('Retry scheduled');
-		for (const status of ['failed', 'cancelled']) {
+		for (const status of ['cancelled']) {
 			expect(
 				evidenceWorkStatusView({
 					...row,
@@ -215,6 +215,13 @@ describe('operator work copy', () => {
 				}).tone
 			).toBe('wait');
 		}
+		expect(
+			evidenceWorkStatusView({
+				...row,
+				work_status: 'failed',
+				work_reason: 'original_source_measurement'
+			}).tone
+		).toBe('fail');
 		expect(evidenceWorkStatusView({ ...row, work_status: 'waiting_source' }).label).toBe(
 			'Source unavailable'
 		);

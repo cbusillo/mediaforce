@@ -1531,7 +1531,7 @@ def create_app(
                 evidence_kinds=evidence_kinds,
                 limit=limit,
             )
-        item_count = int(summary.get("item_count") or 0)
+        item_count = int(summary.get("prepared_count", summary.get("item_count")) or 0)
         return {
             "ok": True,
             "message": (

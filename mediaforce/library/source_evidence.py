@@ -300,7 +300,7 @@ def load_source_evidence_context(connection: DBClient) -> SourceEvidenceContext:
         except (ValueError, TypeError):
             codec = ""
         retained.append({"sha256": None, "sample_fingerprint": None, "size_bytes": stage["staging_size_bytes"],
-                         "video_codec": codec, "stage_item_id": stage["library_item_id"]})
+                         "video_codec": codec})
     outputs += tuple(retained)
     known_codecs = set(HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]) | set(HISTORICAL_OUTPUT_PROFILES["codecs"])
     sampled: dict[tuple[str, int], list[Mapping[str, Any]]] = defaultdict(list)

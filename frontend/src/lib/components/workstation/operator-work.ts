@@ -286,7 +286,7 @@ export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): Operato
 	if (
 		row.work_reason === 'original_source_measurement' &&
 		row.retry_not_before &&
-		(status === 'failed' || status === 'cancelled')
+		status === 'cancelled'
 	) {
 		return {
 			label: 'Will retry',
@@ -314,7 +314,7 @@ export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): Operato
 		return {
 			label: 'Retry scheduled',
 			tone: 'wait',
-			detail: 'A retry delay is protecting the source.'
+			detail: friendlyFailureCopy(row.last_error, 'Waiting before the next attempt.')
 		};
 	}
 	if (status === 'waiting_host') {
