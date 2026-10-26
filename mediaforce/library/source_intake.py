@@ -1,4 +1,6 @@
 import json
+import logging
+from datetime import UTC, datetime, timedelta
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,7 @@ from mediaforce.core.utils import timestamp
 from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, sync_library_item_evidence_state
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
+from mediaforce.library.media_scopes import MediaScopeConflict
 from mediaforce.library.probe import _probe_payload
 from mediaforce.library.source_evidence import (
     HISTORICAL_OUTPUT_PROFILES,
@@ -39,6 +42,9 @@ from mediaforce.library.source_evidence import (
     observed_measurement_matches,
     pending_source_operation,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def encoder_rule_hash() -> str:
@@ -169,7 +175,19 @@ def commit_readable_source(
             recorded_at=timestamp(),
         )
     )
-    receipts = connection.execute(select(source_measurements).where(source_measurements.c.version_id == active)).mappings().all()
+    receipts = (
+        connection.execute(
+            select(source_measurements)
+            .join(source_versions)
+            .where(
+                source_versions.c.generation_id == generation,
+                source_versions.c.role != "output",
+                or_(source_versions.c.sha256.is_(None), source_versions.c.sha256 == identity.get("sha256")),
+            )
+        )
+        .mappings()
+        .all()
+    )
     frozen = {
         row["measurement_id"]
         for row in receipts
@@ -237,6 +255,35 @@ def assess_source_input(
         before["sha256"] = saved["sha256"]
     else:
         before = observe_file(path, full_digest=True, check_cancelled=check_cancelled)
+    if not saved.get("sha256") or saved.get("stat") != before["stat"]:
+        with open_db(config.paths.db_path) as connection:
+            connection.commit()
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            current = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
+            if current["source_revision"] != item["source_revision"] or pending_source_operation(connection, item_id):
+                raise RuntimeError("The file changed before its content check could be recorded")
+            active_id = ensure_active_source_version(connection, current)
+            version = connection.execute(select(source_versions).where(source_versions.c.version_id == active_id)).mappings().one()
+            if version["role"] == "output":
+                raise RuntimeError("The current file is a known Mediaforce output")
+            generation = version["generation_id"]
+            if version["sha256"] and version["sha256"] != before["sha256"]:
+                generation = uuid4().hex
+                connection.execute(source_generations.insert().values(generation_id=generation, created_at=timestamp()))
+            observed = append_version(
+                connection,
+                generation_id=generation,
+                role="unknown",
+                identity=before,
+                profile=json.loads(version["profile_json"]),
+                recorded_at=timestamp(),
+            )
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_id)
+                .values(active_source_version_id=observed, source_revision=library_items.c.source_revision + 1)
+            )
+            item = dict(connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one())
     probe = _probe_payload(path, process_controller=controller)
     after = observe_file(path)
     if any(before[key] != after[key] for key in ("stat", "size_bytes", "sample_fingerprint")):
@@ -252,6 +299,7 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
         EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
         EVIDENCE_QUEUE_ACTIVE_STATUSES,
         load_evidence_queue_state,
+        EVIDENCE_BACKGROUND_RETRY_SECONDS,
         queue_decision_evidence_work,
     )
 
@@ -265,13 +313,21 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
         func.json_extract(source_admissions.c.checks_json, "$.codec_rule_hash") == stable_json_hash(HISTORICAL_OUTPUT_PROFILES),
         func.json_extract(source_admissions.c.checks_json, "$.encoder_rule_hash") == encoder_rule_hash(),
     )
+    due_terminal = exists().where(
+        library_item_evidence_state.c.library_item_id == library_items.c.id,
+        library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
+        library_item_evidence_state.c.work_status.in_(("failed", "cancelled")),
+        library_item_evidence_state.c.retry_not_before <= timestamp(),
+    )
     already_queued = exists().where(
         library_item_evidence_state.c.library_item_id == library_items.c.id,
         library_item_evidence_state.c.evidence_kind == "media_fingerprint",
         library_item_evidence_state.c.work_source_fingerprint
         == func.coalesce(library_items.c.content_version_fingerprint, library_items.c.fingerprint),
-        library_item_evidence_state.c.work_status.in_(
-            ("queued", "running", "retry_wait", "waiting_source", "waiting_host", "failed", "cancelled")
+        or_(
+            library_item_evidence_state.c.work_status.in_(("queued", "running", "retry_wait", "waiting_source", "waiting_host")),
+            (library_item_evidence_state.c.work_status.in_(("failed", "cancelled")))
+            & (library_item_evidence_state.c.retry_not_before > timestamp()),
         ),
     )
     rows = (
@@ -281,8 +337,7 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
                 LIBRARY_ITEM_PRESENT,
                 library_items.c.media_root.in_(tuple(config.source_root_map)),
                 library_items.c.video_codec.in_(HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]),
-                ~assessed,
-                ~already_queued,
+                or_((~assessed) & (~already_queued), due_terminal),
                 ~or_(*(exists().where(condition) for condition in _history_conditions(library_items.c.id))),
             )
             .order_by(library_items.c.id)
@@ -291,18 +346,67 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
         .mappings()
         .all()
     )
+    prepared = 0
     for item in rows:
-        sync_library_item_evidence_state(connection, item, "media_fingerprint")
-        queue_decision_evidence_work(
-            connection,
-            config,
-            item["rel_path"],
-            library_item_ids=[item["id"]],
-            evidence_kind="media_fingerprint",
-            work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
-            require_measurement=True,
-            priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE,
-            start_new_batch=True,
-            manage_transaction=False,
-        )
-    return len(rows)
+        try:
+            with connection.begin_nested():
+                evidence = load_source_evidence(connection, int(item["id"]))
+                kinds = (
+                    [kind for kind in EVIDENCE_KINDS if evidence.traits[kind].tier == "unknown"]
+                    if evidence.availability == "available"
+                    else ["media_fingerprint"]
+                )
+                for kind in kinds:
+                    existing = (
+                        connection.execute(
+                            select(library_item_evidence_state).where(
+                                library_item_evidence_state.c.library_item_id == item["id"],
+                                library_item_evidence_state.c.evidence_kind == kind,
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
+                    )
+                    if (
+                        existing
+                        and existing["work_status"] in {"failed", "cancelled"}
+                        and existing["retry_not_before"]
+                        and existing["retry_not_before"] > timestamp()
+                    ):
+                        continue
+                    sync_library_item_evidence_state(connection, item, kind)
+                    queued = queue_decision_evidence_work(
+                        connection,
+                        config,
+                        item["rel_path"],
+                        library_item_ids=[item["id"]],
+                        evidence_kind=kind,
+                        work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
+                        require_measurement=True,
+                        priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE,
+                        start_new_batch=True,
+                        manage_transaction=False,
+                        restart_terminal=True,
+                    )
+                    prepared += queued["prepared_count"]
+        except MediaScopeConflict:
+            LOGGER.exception("Original discovery could not resolve item %s", item["id"])
+            sync_library_item_evidence_state(connection, item, "media_fingerprint")
+            connection.execute(
+                update(library_item_evidence_state)
+                .where(
+                    library_item_evidence_state.c.library_item_id == item["id"],
+                    library_item_evidence_state.c.evidence_kind == "media_fingerprint",
+                )
+                .values(
+                    work_status="failed",
+                    work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
+                    work_source_fingerprint=item["content_version_fingerprint"] or item["fingerprint"],
+                    retry_not_before=(datetime.now(UTC) + timedelta(seconds=EVIDENCE_BACKGROUND_RETRY_SECONDS)).isoformat(
+                        timespec="seconds"
+                    ),
+                    last_error="The library has conflicting paths for this file; refresh the library before retrying",
+                    updated_at=timestamp(),
+                )
+            )
+    return prepared

@@ -32,6 +32,7 @@ from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANA
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, parse_evidence_summary, \
     sync_library_item_evidence_state
 from mediaforce.library.probe import probe_evidence
+from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.source_evidence import load_source_evidence, observe_file, pending_source_operation, record_current_measurement
 
 EVIDENCE_JOB_LEASE_SECONDS = 45
@@ -160,11 +161,8 @@ def _run_evidence_claim(
     if active_claim is None:
         return
     claim = active_claim
-    with open_db(config.paths.db_path) as connection:
-        source_measurement_needed = (claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
-                                     and load_source_evidence(connection, claim.library_item_id).traits[claim.evidence_kind].tier == "unknown")
     original_work = claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
-    if claim.evidence_state == EVIDENCE_STATE_CURRENT and not source_measurement_needed and not original_work:
+    if claim.evidence_state == EVIDENCE_STATE_CURRENT and not original_work:
         _finish_claim(
             config,
             claim,
@@ -172,7 +170,7 @@ def _run_evidence_claim(
             reset_attempt_state=True,
         )
         return
-    if claim.evidence_state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED and not source_measurement_needed and not original_work:
+    if claim.evidence_state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED and not original_work:
         _run_classification_claim(config, claim)
         return
 
@@ -224,7 +222,7 @@ def _run_evidence_claim(
                 last_guard_check = now
                 with open_db(config.paths.db_path) as database:
                     state = load_evidence_queue_state(database)
-                    if state["is_paused"] and state["status"] in {"paused", "running", "queued"}:
+                    if background_work_is_paused(database) or (state["is_paused"] and state["status"] in {"paused", "running", "queued"}):
                         raise EvidenceWorkDeferred("Original checks are paused")
                     priority = database.execute(select(library_item_evidence_state.c.library_item_id).where(
                         library_item_evidence_state.c.work_batch_id == claim.batch_id,
@@ -287,7 +285,7 @@ def _run_evidence_claim(
             if analysis_target.command_runner is not None
             else {}
         )
-        measurement_before = observe_file(source_path)
+        measurement_before = local_before
         summary = deps.analyze_evidence(
             analysis_target.source_path,
             claim.evidence_kind,

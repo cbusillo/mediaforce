@@ -31,6 +31,7 @@ EVIDENCE_WORK_PRIORITY_RECLASSIFICATION = 10
 EVIDENCE_WORK_PRIORITY_OPERATOR = 50
 EVIDENCE_WORK_PRIORITY_REPRESENTATIVE = 70
 EVIDENCE_WORK_REASON_ORIGINAL_SOURCE = "original_source_measurement"
+EVIDENCE_BACKGROUND_RETRY_SECONDS = 15 * 60
 
 EVIDENCE_QUEUE_ACTIVE_STATUSES = ("queued", "running", "paused", "cancel_requested")
 EVIDENCE_WORK_CLAIMABLE_STATUSES = ("queued", "retry_wait", "waiting_source", "waiting_host")
@@ -123,6 +124,15 @@ def load_evidence_queue_state(
     return _hydrate_queue_state(row)
 
 
+def evidence_queue_allows_preparation(connection: DBClient, state: dict[str, Any]) -> bool:
+    if str(state.get("status") or "") not in EVIDENCE_QUEUE_ACTIVE_STATUSES:
+        return True
+    reasons = set(connection.execute(select(library_item_evidence_state.c.work_reason).where(
+        library_item_evidence_state.c.work_batch_id == state["batch_id"],
+        library_item_evidence_state.c.work_status.in_(EVIDENCE_WORK_ACTIVE_STATUSES))).scalars())
+    return reasons == {EVIDENCE_WORK_REASON_ORIGINAL_SOURCE} and not state["cancel_requested"]
+
+
 def start_evidence_work(
         connection: DBClient,
         config: MediaforceConfig,
@@ -152,9 +162,7 @@ def start_evidence_work(
         current_state = load_evidence_queue_state(connection)
         active_background = False
         if str(current_state.get("status") or "") in EVIDENCE_QUEUE_ACTIVE_STATUSES:
-            reasons = set(connection.execute(select(library_item_evidence_state.c.work_reason).where(
-                library_item_evidence_state.c.work_batch_id == current_state["batch_id"])).scalars())
-            active_background = reasons == {EVIDENCE_WORK_REASON_ORIGINAL_SOURCE} and not current_state["cancel_requested"]
+            active_background = evidence_queue_allows_preparation(connection, current_state)
         if str(current_state.get("status") or "") in EVIDENCE_QUEUE_ACTIVE_STATUSES and not active_background:
             raise EvidenceQueueConflict(
                 "Evidence work is already active; pause, cancel, or finish it before starting another scope."
@@ -176,12 +184,19 @@ def start_evidence_work(
             limit=normalized_limit,
         )
         if active_background:
+            if not candidates:
+                connection.commit()
+                return evidence_queue_summary(connection)
             for candidate in candidates:
                 queue_decision_evidence_work(connection, config, scope_prefix,
                     library_item_ids=[candidate["library_item_id"]], evidence_kind=candidate["evidence_kind"],
-                    work_reason="operator_scope", priority=EVIDENCE_WORK_PRIORITY_OPERATOR, manage_transaction=False)
+                    work_reason=candidate["work_reason"], priority=candidate["work_priority"], manage_transaction=False)
+            scope_payload = scope.to_payload()
+            scope_payload["work_limit"] = normalized_limit
+            if fingerprint_plan is not None:
+                scope_payload["fingerprint_acquisition"] = _fingerprint_plan_summary(fingerprint_plan)
             connection.execute(update(evidence_queue_state).where(evidence_queue_state.c.queue_name == DEFAULT_EVIDENCE_QUEUE_NAME).values(
-                is_paused=1, status="paused", scope_json=json.dumps(scope.to_payload()), updated_at=now_iso))
+                is_paused=1, status="paused", scope_json=json.dumps(scope_payload), updated_at=now_iso))
             connection.commit()
             return evidence_queue_summary(connection)
         batch_id = uuid.uuid4().hex
@@ -237,6 +252,7 @@ def queue_decision_evidence_work(
         start_new_batch: bool = False,
         require_measurement: bool = False,
         priority: int = EVIDENCE_WORK_PRIORITY_DECISION,
+        restart_terminal: bool = False,
 ) -> dict[str, Any]:
     """Queue decision-priority evidence for the selected items.
 
@@ -284,6 +300,7 @@ def queue_decision_evidence_work(
                 library_item_evidence_state.c.work_batch_id,
                 library_item_evidence_state.c.work_status,
                 library_item_evidence_state.c.work_priority,
+                library_item_evidence_state.c.work_reason,
                 library_item_evidence_state.c.work_source_fingerprint,
                 library_item_evidence_state.c.retry_not_before,
                 library_item_evidence_state.c.attempt_count,
@@ -360,7 +377,8 @@ def queue_decision_evidence_work(
                 continue
             current_source_fingerprint = _item_source_fingerprint(row)
             preserve_retry_state = bool(
-                (require_measurement or str(row.get("state") or "") == EVIDENCE_STATE_ANALYSIS_REQUIRED)
+                not (restart_terminal and row_status in EVIDENCE_WORK_TERMINAL_STATUSES)
+                and (require_measurement or str(row.get("state") or "") == EVIDENCE_STATE_ANALYSIS_REQUIRED)
                 and current_source_fingerprint
                 and str(row.get("work_source_fingerprint") or "") == current_source_fingerprint
                 and row_status in {"retry_wait", "waiting_source", "waiting_host", "failed"}
@@ -622,7 +640,8 @@ def cancel_evidence_queue(connection: DBClient, *, updated_at: str | None = None
             )
             .values(
                 work_status="cancelled",
-                retry_not_before=None,
+                retry_not_before=case((library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
+                    (datetime.fromisoformat(now_iso) + timedelta(seconds=EVIDENCE_BACKGROUND_RETRY_SECONDS)).isoformat(timespec="seconds")), else_=None),
                 leased_at=None,
                 lease_expires_at=None,
                 heartbeat_at=None,
@@ -914,6 +933,8 @@ def transition_evidence_work(
         "process_pid": None,
         "updated_at": now_iso,
     }
+    if work_status in {"failed", "cancelled"} and claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE:
+        values["retry_not_before"] = (datetime.fromisoformat(now_iso) + timedelta(seconds=EVIDENCE_BACKGROUND_RETRY_SECONDS)).isoformat(timespec="seconds")
     if restore_attempt:
         values["attempt_count"] = func.max(library_item_evidence_state.c.attempt_count - 1, 0)
     elif reset_attempt_state:

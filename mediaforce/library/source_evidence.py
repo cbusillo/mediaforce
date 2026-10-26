@@ -18,6 +18,7 @@ from mediaforce.core.db_tables import target_production_outcomes
 from mediaforce.core.evidence import canonical_json_bytes, stable_json_hash
 from mediaforce.core.utils import descriptor_content_version_fingerprint, descriptor_sha256, file_stat_signature, timestamp
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EvidenceKind, parse_evidence_summary
+from mediaforce.encoding.cadence import cadence_measurement_complete
 
 # Design #971 section 6 records library encoders from the first commit through the reviewed history.
 # Tag/profile coverage for readable-source admission is separate and is not implemented here.
@@ -398,8 +399,9 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
                                            tuple(row["measurement_id"] for row in eligible), summary, None)
                 continue
         traits[kind] = SourceTrait(kind, reason=reason or ("conflicting_measurements" if eligible else "missing_source_measurement"))
-    availability = "available" if readable and not reason else "unavailable" if checks.get("unavailability") else "unknown"
-    return SourceEvidence(generation, active, original["version_id"], availability, version_location(connection, original),
+    location = version_location(connection, original)
+    availability = "available" if readable and not reason and location else "unavailable" if checks.get("unavailability") or not location else "unknown"
+    return SourceEvidence(generation, active, original["version_id"], availability, location,
                           {**json.loads(original["profile_json"]), "source_size_bytes": original["size_bytes"],
                            "content_version_fingerprint": original["sample_fingerprint"]}, traits)
 
@@ -414,7 +416,8 @@ def observed_measurement_matches(row: DBRow, identity: Mapping[str, Any], *, req
             and before.get("size_bytes") == identity["size_bytes"]
             and (not require_stat or before.get("stat") == identity.get("stat"))
             and hashlib.sha256(row["summary_json"].encode()).hexdigest() == row["summary_sha256"]
-            and bool(summary) and summary.get("decision", {}).get("status") in {"measured", "resolved"})
+            and bool(summary) and (summary.get("decision", {}).get("status") in {"measured", "resolved"}
+                                  or (row["kind"] == "cadence_analysis" and cadence_measurement_complete(summary.get("analysis", {})))))
 
 
 def _historical_measurement_matches(row: DBRow, checks: Mapping[str, Any]) -> bool:

@@ -93,7 +93,7 @@ class RemoteMediaCommands:
             process_controller=process_controller,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"{self.host_label} could not read this file for a content check; check its library mount")
+            raise RuntimeError(f"{self.host_label} could not complete a content check for this file; the check will retry")
         observation = json.loads(result.stdout)
         if (not isinstance(observation, dict) or observation.get("strength") != "observed"
                 or not isinstance(observation.get("sample_fingerprint"), str)

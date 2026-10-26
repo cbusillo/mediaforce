@@ -312,3 +312,5 @@ samples and size across hosts and stat signatures within each host. Stat-only
 hosts cannot qualify. Existing staged scratch, capacity and cleanup rules are
 unchanged. Probable traits support advisory grouping and grant no deletion,
 cleanup or approval-transfer authority.
+
+Failed or cancelled automatic original checks remain visible in the maintenance backlog and become eligible again after the queue's cooldown. Discovery can refill either missing trait. A completed full-file hash survives a later probe failure as an observed version, without admitting an original. Prepare can extend a background-only active batch without replacing its leases; completed operator rows do not prevent later preparation.

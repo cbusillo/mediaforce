@@ -13,7 +13,7 @@ from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.library.background_work import list_evidence_backlog, load_background_work_state, \
     summarize_evidence_inventory
 from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EVIDENCE_QUEUE_ACTIVE_STATUSES, \
-    evidence_queue_summary, runnable_evidence_work_count
+    evidence_queue_summary, runnable_evidence_work_count, evidence_queue_allows_preparation
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps, run_evidence_queue_until_blocked
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.metadata_sync import metadata_configuration_status
@@ -96,7 +96,10 @@ def start_ready_evidence_work(db_path: Path, runner: BoundedEvidenceRunner) -> b
     """Run evidence work that is queued and unpaused but has no runner, such as checks production waits on."""
     if runner.active:
         return False
-    runner.prepare_background_work()
+    try:
+        runner.prepare_background_work()
+    except Exception:
+        LOGGER.exception("Original discovery failed; queued analysis can still start")
     with open_db(db_path) as connection:
         runnable = runnable_evidence_work_count(connection)
     if runnable <= 0:
@@ -185,7 +188,7 @@ def build_operator_work_payload(
             "progress": progress,
             "inventory": inventory,
             "backlog": backlog,
-            "can_prepare": not background_paused and not queue_active,
+            "can_prepare": not background_paused and evidence_queue_allows_preparation(connection, queue),
             "can_pause": (
                 not background_paused
                 and not bool(queue.get("is_paused"))

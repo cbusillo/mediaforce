@@ -283,6 +283,17 @@ export function evidenceWorkReasonView(reason: string | null): EvidenceWorkReaso
 
 export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): OperatorStateView {
 	const status = row.work_status;
+	if (
+		row.work_reason === 'original_source_measurement' &&
+		row.retry_not_before &&
+		(status === 'failed' || status === 'cancelled')
+	) {
+		return {
+			label: 'Will retry',
+			tone: 'wait',
+			detail: `${friendlyFailureCopy(row.last_error, 'This check was stopped.')} Original checks will retry later.`
+		};
+	}
 	if (!status) {
 		return { label: 'Not prepared', tone: 'idle', detail: 'This item is not in the active batch.' };
 	}
@@ -290,7 +301,10 @@ export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): Operato
 		return {
 			label: libraryCheckLabels.analysisReady,
 			tone: 'wait',
-			detail: 'Waiting for an explicit start.'
+			detail:
+				row.work_reason === 'original_source_measurement'
+					? 'Waiting for its next check.'
+					: 'Waiting for an explicit start.'
 		};
 	}
 	if (status === 'running') {

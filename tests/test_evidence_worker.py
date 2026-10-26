@@ -261,6 +261,7 @@ class EvidenceWorkerTests(unittest.TestCase):
                 library_item_ids=[item_id],
                 work_reason="encode_safety",
             )
+        runner.prepare_background_work.side_effect = RuntimeError("discovery unavailable")
         self.assertTrue(start_ready_evidence_work(self.config.paths.db_path, runner))
         runner.start.assert_called_once_with(max_work_items=1)
 

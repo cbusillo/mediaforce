@@ -380,13 +380,11 @@ def test_digest_is_bounded_by_observed_length_even_while_file_grows(tmp_path: Pa
 
 
 def test_hash_has_no_wall_clock_ceiling(tmp_path: Path) -> None:
-    import mediaforce.library.evidence_worker as worker
-
     config = _config(tmp_path)
     item_id, _path = _source(config)
     _discover(config)
     ticks = iter([index * 1800.0 for index in range(100)])
-    with patch.object(worker, "time", SimpleNamespace(monotonic=lambda: next(ticks))):
+    with patch("time.monotonic", side_effect=lambda: next(ticks)):
         assert _work(config)
     with open_db(config.paths.db_path) as database:
         assert load_source_evidence(database, item_id).traits["media_fingerprint"].tier == "probable"
@@ -407,3 +405,147 @@ def test_new_download_is_claimed_before_a_due_host_retry(tmp_path: Path) -> None
     with open_db(config.paths.db_path) as database:
         claim = claim_next_evidence_work(database, worker_id="fixture", lease_seconds=60)
         assert claim is not None and claim.library_item_id == second_id
+
+
+@pytest.mark.parametrize("kind", ["media_fingerprint", "cadence_analysis"])
+def test_terminal_background_checks_retry_after_cooldown(tmp_path: Path, kind: str) -> None:
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    _discover(config)
+
+    def analyze(_path: Path, requested: str, **_kwargs: object) -> dict[str, Any]:
+        if requested == kind:
+            raise RuntimeError("temporary analysis failure")
+        return _summary(requested)
+
+    _work(config, analyze)
+    _work(config, analyze)
+    with open_db(config.paths.db_path) as database:
+        database.execute(
+            update(library_item_evidence_state)
+            .where(library_item_evidence_state.c.evidence_kind == kind)
+            .values(work_status="failed", retry_not_before="9999-01-01T00:00:00+00:00", attempt_count=3)
+        )
+    assert _discover(config) == 0
+    with open_db(config.paths.db_path) as database:
+        database.execute(
+            update(library_item_evidence_state)
+            .where(library_item_evidence_state.c.evidence_kind == kind)
+            .values(retry_not_before="2000-01-01T00:00:00+00:00")
+        )
+    assert _discover(config) == 1
+    assert _work(config)
+    with open_db(config.paths.db_path) as database:
+        assert load_source_evidence(database, item_id).traits[kind].tier == "probable"
+        assert (
+            database.execute(
+                select(library_item_evidence_state.c.work_status).where(library_item_evidence_state.c.evidence_kind == kind)
+            ).scalar_one()
+            == "completed"
+        )
+
+
+def test_failed_probe_reuses_digest_without_admitting_original(tmp_path: Path) -> None:
+    import mediaforce.library.source_intake as intake
+    from mediaforce.core.process_control import ManagedProcessController
+
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    observations = Mock(wraps=intake.observe_file)
+    with (
+        patch.object(intake, "observe_file", observations),
+        patch.object(intake, "_probe_payload", side_effect=RuntimeError("probe failed")),
+    ):
+        with pytest.raises(RuntimeError, match="probe failed"):
+            intake.assess_source_input(config, item_id, ManagedProcessController(), lambda: None)
+    with open_db(config.paths.db_path) as database:
+        assert database.execute(select(func.count()).select_from(source_admissions)).scalar_one() == 0
+    observations.reset_mock()
+    with patch.object(intake, "observe_file", observations), patch.object(intake, "_probe_payload", return_value=_probe()):
+        intake.assess_source_input(config, item_id, ManagedProcessController(), lambda: None)
+    assert not any(call.kwargs.get("full_digest") for call in observations.call_args_list)
+
+
+def test_background_discovery_preserves_higher_priority_reason(tmp_path: Path) -> None:
+    from mediaforce.library.evidence_queue import queue_decision_evidence_work
+
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        queue_decision_evidence_work(
+            database,
+            config,
+            "tv/source.mkv",
+            library_item_ids=[item_id],
+            evidence_kind="media_fingerprint",
+            work_reason="sample_safety",
+            priority=10,
+            require_measurement=True,
+        )
+        queue_decision_evidence_work(
+            database,
+            config,
+            "tv/source.mkv",
+            library_item_ids=[item_id],
+            evidence_kind="media_fingerprint",
+            work_reason="original_source_measurement",
+            priority=70,
+            require_measurement=True,
+        )
+        row = database.execute(select(library_item_evidence_state)).mappings().one()
+        assert row["work_reason"] == "sample_safety" and row["work_priority"] == 10
+
+
+def test_completed_operator_rows_do_not_block_later_prepare(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _source(config, "first")
+    second_id, _path = _source(config, "second")
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        database.execute(
+            update(library_item_evidence_state)
+            .where(library_item_evidence_state.c.library_item_id != second_id)
+            .values(work_status="completed", work_reason="operator_scope")
+        )
+        from mediaforce.web.runtime.operator_work import build_operator_work_payload
+
+        payload = build_operator_work_payload(
+            database, config, scan_job=None, catalog_is_stale=False, latest_scan_completed_at=None, evidence_runner_active=True
+        )
+        assert payload["evidence"]["can_prepare"]
+        result = start_evidence_work(database, config, "tv/second.mkv")
+        assert result["is_paused"]
+
+
+def test_empty_prepare_does_not_pause_background_work(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _source(config, "measured")
+    _discover(config)
+    _work(config)
+    _work(config)
+    _source(config, "new")
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        result = start_evidence_work(database, config, "tv/measured.mkv")
+        assert not result["is_paused"]
+        assert runnable_evidence_work_count(database) > 0
+
+
+def test_fully_measured_ambiguous_cadence_is_retained(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    _discover(config)
+
+    def analyze(_path: Path, kind: str, **_kwargs: object) -> dict[str, Any]:
+        summary = _summary(kind)
+        if kind == "cadence_analysis":
+            summary = json.loads(worker_fixtures.EvidenceWorkerTests._blocked_cadence_summary_json())
+        return summary
+
+    _work(config, analyze)
+    _work(config, analyze)
+    with open_db(config.paths.db_path) as database:
+        trait = load_source_evidence(database, item_id).traits["cadence_analysis"]
+        assert trait.tier == "probable"
+        assert trait.summary["decision"]["status"] == "blocked"
