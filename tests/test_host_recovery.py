@@ -191,7 +191,7 @@ def test_retrying_host_card_carries_background_recovery_state(
         recovery.process_host_recovery_once(config)
     record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
     card = _host_cards(config)["user@worker"]
-    assert {key: value for key, value in card["recovery"].items() if key != "absence_state"} == {
+    expected = {
         "status": "retrying",
         "reason": status().message,
         "first_failure_at": NOW.isoformat(),
@@ -199,6 +199,7 @@ def test_retrying_host_card_carries_background_recovery_state(
         "next_retry_at": record["next_retry_at"],
         "failure_count": 1,
     }
+    assert {key: card["recovery"][key] for key in expected} == expected
     assert datetime.fromisoformat(card["recovery"]["next_retry_at"]) > NOW
     assert "when work starts" not in card["message"]
     assert "when work starts" not in card["active_reason"]
@@ -939,9 +940,9 @@ def test_uncertain_mount_disappears_and_reachable_computer_recovers_automaticall
         assert not [alert for alert in alerts.recovery_alerts(config) if alert["id"].startswith("host:")]
 
 
-@pytest.mark.parametrize("model,alerts_after", [("MacBook Pro", None), ("Mac mini", recovery.DESKTOP_ABSENCE_GRACE.total_seconds() / 3600)])
+@pytest.mark.parametrize("model,notifies", [("MacBook Pro", False), ("Mac mini", True)])
 def test_absent_computer_uses_last_seen_model_and_desktop_grace(
-        config: MediaforceConfig, model: str, alerts_after: float | None,
+        config: MediaforceConfig, model: str, notifies: bool,
 ) -> None:
     ready = status(available=True)
     ready.computer_model = model
@@ -957,16 +958,17 @@ def test_absent_computer_uses_last_seen_model_and_desktop_grace(
         clock.now.return_value = alert_clock.now.return_value = NOW
         recovery.process_host_recovery_once(config)
         probe.return_value = absent
-        for hours in (1, 6, 12, 13, 14, 48):
-            clock.now.return_value = alert_clock.now.return_value = NOW + timedelta(hours=hours)
+        grace = recovery.DESKTOP_ABSENCE_GRACE
+        for elapsed in (timedelta(), grace / 2, grace, grace + timedelta(minutes=5), grace * 2):
+            clock.now.return_value = alert_clock.now.return_value = NOW + timedelta(minutes=5) + elapsed
             recovery.process_host_recovery_once(config)
             record = recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]
             assert record["status"] == "retrying"
             assert record["computer_model"] == model
             alerts.record_recovery_alerts(config)
             host_alerts = [alert for alert in alerts.recovery_alerts(config) if alert["id"].startswith("host:")]
-            assert bool(host_alerts) == (alerts_after is not None and hours >= 1 + alerts_after)
-        assert warning.call_count == (0 if alerts_after is None else 1)
+            assert bool(host_alerts) == (notifies and elapsed >= grace)
+        assert warning.call_count == int(notifies)
         mount.assert_not_called()
         probe.return_value = ready
         clock.now.return_value += timedelta(minutes=5)

@@ -12965,6 +12965,7 @@ raise SystemExit(0)
             "source_roots": {"tv": "/Volumes/My Share/tv"},
             "staging_root": "/Volumes/My Share/transcode",
         }
+        model = "MacBook Pro"
         stdout = "\n".join(
             [
                 "mount|/Volumes/My Share|0",
@@ -12985,7 +12986,7 @@ raise SystemExit(0)
                 "tool|ffmpeg_libsvtav1|1",
                 "tool|ab_av1|1",
                 "meta|platform|macos",
-                "meta|computer_model|MacBook Pro",
+                f"meta|computer_model|{model}",
                 "time|utc_offset|+0000",
                 "repo|exists|1",
             ]
@@ -12996,7 +12997,7 @@ raise SystemExit(0)
         ) as run_remote_ssh_mock, patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
 
-        self.assertEqual(status.computer_model, "MacBook Pro")
+        self.assertEqual(status.computer_model, model)
         self.assertFalse(status.available)
         self.assertTrue(status.probe_available)
         self.assertEqual(status.message, "Shared storage disconnected")
