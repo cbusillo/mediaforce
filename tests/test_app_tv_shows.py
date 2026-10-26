@@ -40,8 +40,10 @@ def test_seasons_group_into_shows_with_their_totals_biggest_show_first(connectio
     shows = _shows(connection, [
         _card("tv/Futurama/Season 10", items=13, size=4000, reclaim=3000),
         _card("tv/ER/Season 1", items=25, size=9000, reclaim=7000),
-        _card("tv/Futurama/Season 2", items=20, size=3000, reclaim=2000, key="ready_to_compare", tone="ready",
-              action="review_sample"),
+        {**_card("tv/Futurama/Season 2", items=20, size=3000, reclaim=2000, key="ready_to_compare", tone="ready",
+                 action="review_sample"),
+         "page_state": {"key": "ready_to_compare", "tone": "ready", "primary_action": "review_sample", "failure": None,
+                        "recovery_kind": None, "approval_source": "kind", "approval_kind": "darker_live_action"}},
         _card("tv/Futurama/Specials", items=2, size=500, reclaim=100),
         {"prefix": ""},
     ])
@@ -56,8 +58,8 @@ def test_seasons_group_into_shows_with_their_totals_biggest_show_first(connectio
     assert [season["season"] for season in futurama["seasons"]] == [2, 10, None]
     assert futurama["seasons"][0] == {
         "prefix": "tv/Futurama/Season 2", "season": 2, "state": "ready_to_compare", "action": "review_sample",
-        "failure": None, "tone": "ready", "episode_count": 20, "bytes": 3000, "files_need_you": False,
-        "checks_only": False,
+        "failure": None, "tone": "ready", "approval_source": "kind", "approval_kind": "darker_live_action",
+        "episode_count": 20, "bytes": 3000, "files_need_you": False, "checks_only": False,
     }
 
 

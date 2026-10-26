@@ -173,6 +173,9 @@ Guidance:
       tried under the same approval with the same waiting files; attempts are
       kept beside the kind approvals, and a refused season is retried after
       six hours
+    - the Mac app's kind facts (`GET /api/app/kinds`): what each kind covers,
+      by show, and its approval; approving extends a folder's own current
+      approval (`POST /api/app/kinds/{kind}/approve`), and stopping removes it
   - `production_approval.py`
     - the one rule for which sample approval governs a file: the nearest folder
       holding an approval (the file, then its season, show and library); when

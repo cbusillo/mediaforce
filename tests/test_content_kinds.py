@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from mediaforce import cli
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_items, metadata, series_metadata, source_admissions, source_generations
+from mediaforce.core.db_tables import library_items, metadata, motion_keep_decisions, series_metadata, source_admissions, source_generations
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.utils import timestamp
 from mediaforce.library.content_kinds import EpisodeTraits, season_kind, season_kind_report
@@ -159,3 +159,15 @@ def test_only_a_current_folder_approval_takes_a_season_out_of_waiting(tmp_path: 
     assert cli._current_folder_approval(config, "tv/Drama/Season 2")
     assert not cli._current_folder_approval(config, "tv/Other/Season 1")
     assert not cli._current_folder_approval(config, "tv/Unknown/Season 1")
+
+
+def test_a_file_kept_original_no_longer_waits(connection: DBClient) -> None:
+    kept = _item(connection, "tv/Drama/Season 1/e01.mkv", status="discovered", codec="h264", current_dark=0.0)
+    connection.execute(motion_keep_decisions.insert().values(
+        library_item_id=kept, source_fingerprint="sample-tv/Drama/Season 1/e01.mkv", reason_code="motion",
+        prefix="tv/Drama/Season 1", kept_at=timestamp(),
+    ))
+
+    report = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+
+    assert report["seasons"] == []

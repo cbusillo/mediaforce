@@ -260,6 +260,8 @@ def _tv_season(identity: Mapping[str, Any], card: Mapping[str, Any]) -> dict[str
         "action": state.get("primary_action"),
         "failure": state.get("failure"),
         "tone": state.get("tone"),
+        "approval_source": state.get("approval_source"),
+        "approval_kind": state.get("approval_kind"),
         "episode_count": int(card.get("item_count") or 0),
         "bytes": int(card.get("total_size_bytes") or 0),
         # A compressing season still says so when some of its files already need the owner.
