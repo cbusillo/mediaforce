@@ -89,6 +89,8 @@ def approve_kind(
 
 
 def stop_kind_approval(config: MediaforceConfig, kind: str) -> bool:
+    if kind not in APPROVABLE_KINDS:
+        return False
     try:
         kind_approval_file(config, kind).unlink()
     except FileNotFoundError:
@@ -279,6 +281,7 @@ def next_kind_season(
 
 KINDS_IN_ORDER = ("darker_live_action", "bright_live_action", "cartoon", "4k")
 NO_FOLDER_APPROVAL_CODE = "no_folder_approval"
+SOURCE_KIND_DIFFERS_CODE = "source_kind_differs"
 
 
 def _approval_facts(calibration: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -299,9 +302,13 @@ def kinds_payload(
 ) -> dict[str, Any]:
     """Facts for the page where each kind of content's approval is decided; the app words every one."""
 
+    def folders_only(loader_config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+        return load_calibration_state(loader_config, prefix)
+
     def folder_approved(prefix: str) -> bool:
-        approval = effective_production_approval(config, prefix, load_calibration_state)
-        return approval is not None and approval.kind is None and approval.current
+        # Folders alone: a kind's approval is what this page decides, so it never counts here.
+        approval = effective_production_approval(config, prefix, folders_only)
+        return approval is not None and approval.current
 
     report = season_kind_report(connection, library_types=config.library_type_map, folder_approved=folder_approved)
     shows: dict[str, dict[str, dict[str, int]]] = {kind: {} for kind in KINDS_IN_ORDER}
@@ -334,10 +341,20 @@ def approve_kind_action(
         from_prefix: str,
         *,
         load_calibration_state: LoadCalibrationState,
+        kind_of: KindOf,
         approved_at: str,
 ) -> dict[str, Any]:
-    """Use the approval governing a folder for every season of this kind; only a folder's own approval extends."""
+    """Use the approval governing a season for every season of this kind.
+
+    Only a folder's own approval extends, and only from a season that measures as this kind, so the settings
+    chosen for one kind of picture never cover another.
+    """
+    if kind not in APPROVABLE_KINDS:
+        return {"ok": False, "code": KIND_IS_ONE_TIME_CODE}
     approval = effective_production_approval(config, from_prefix, load_calibration_state)
     if approval is None or approval.kind is not None:
         return {"ok": False, "code": NO_FOLDER_APPROVAL_CODE}
+    season = season_prefix_of(config, from_prefix)
+    if season is None or kind_of(config, season) != kind:
+        return {"ok": False, "code": SOURCE_KIND_DIFFERS_CODE}
     return approve_kind(config, kind, approval.prefix, approval.calibration, approved_at=approved_at)

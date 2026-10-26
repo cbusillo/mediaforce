@@ -2801,7 +2801,8 @@ def create_app(
         player_file=lambda library_item_id, side: player_file(config, library_item_id, side),
         kinds_payload=_kinds_payload,
         approve_kind_action=lambda kind, from_prefix: approve_kind_action(
-            config, kind, from_prefix, load_calibration_state=_load_calibration_state, approved_at=_now_iso(),
+            config, kind, from_prefix, load_calibration_state=_load_calibration_state, kind_of=_season_kinds,
+            approved_at=_now_iso(),
         ),
         stop_kind_action=lambda kind: {"ok": True, "stopped": stop_kind_approval(config, kind)},
     )
@@ -4368,8 +4369,9 @@ def _load_saved_calibration_state(config: MediaforceConfig, prefix: str) -> Acti
     return load_calibration_state(_folder_state_deps(), config, prefix, _calibration_file(config, prefix))
 
 
+_season_kinds = SeasonKinds()
 # Reads each folder as saved; the approval resolver also finds kind approvals through it.
-_load_calibration_state = KindAwareLoader(_load_saved_calibration_state, SeasonKinds())
+_load_calibration_state = KindAwareLoader(_load_saved_calibration_state, _season_kinds)
 
 
 def _load_calibration_state_for_boundary(config: MediaforceConfig, prefix: str) -> ActionPayload | None:

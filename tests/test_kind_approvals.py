@@ -29,7 +29,7 @@ from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.kind_approvals import APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
     KIND_QUEUE_WAITS_CODE, KIND_RETRY_SECONDS, SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, KindSeason, SeasonKinds, \
-    NO_FOLDER_APPROVAL_CODE, approve_kind, approve_kind_action, background_queue_blocker, kinds_payload, load_kind_approval, \
+    NO_FOLDER_APPROVAL_CODE, SOURCE_KIND_DIFFERS_CODE, approve_kind, approve_kind_action, background_queue_blocker, kinds_payload, load_kind_approval, \
     next_kind_season, record_kind_attempt, stop_kind_approval
 from mediaforce.web.runtime.page_state import PageStateFacts, decide_page_state
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_matches, \
@@ -356,9 +356,12 @@ def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_pat
                                                            updated_at="now"))
         approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="2026-10-26T01:00:00+00:00")
 
-        facts = kinds_payload(connection, config, load_calibration_state=_loader({}, {}))
+        asked: list[str] = []
+        facts = kinds_payload(connection, config, load_calibration_state=_loader({}, {"tv/Fresh/Season 1": DARKER}, asked))
     engine.dispose()
 
+    # Only folder approvals are counted, so the page never works out a season's kind just to skip it.
+    assert asked == []
     kinds = {kind["kind"]: kind for kind in facts["kinds"]}
     assert [kind["kind"] for kind in facts["kinds"]] == ["darker_live_action", "bright_live_action", "cartoon", "4k"]
     assert kinds[DARKER]["shows"] == [{"prefix": "tv/Drama", "seasons": 1, "waiting_bytes": 1000}]
@@ -368,17 +371,33 @@ def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_pat
     assert facts["unmeasured_seasons"] == 1
 
 
-def test_only_a_folders_own_current_approval_extends_to_a_kind(tmp_path: Path) -> None:
+def test_only_a_folders_own_approval_from_a_season_of_that_kind_extends_to_it(tmp_path: Path) -> None:
     config = _config(tmp_path)
     folders = {APPROVED_SEASON: _approved(config)}
+    kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER, OTHER_SEASON: "cartoon"}
 
-    assert approve_kind_action(config, DARKER, f"{APPROVED_SEASON}/e01.mkv", load_calibration_state=_loader(folders, {}),
-                               approved_at="now")["ok"]
-    covered = approve_kind_action(config, DARKER, SEASON, load_calibration_state=_loader(folders, {SEASON: DARKER}),
-                                  approved_at="now")
-    assert covered["code"] == NO_FOLDER_APPROVAL_CODE
-    assert approve_kind_action(config, DARKER, OTHER_SEASON, load_calibration_state=_loader({}, {}),
-                               approved_at="now")["code"] == NO_FOLDER_APPROVAL_CODE
+    def extend(kind: str, prefix: str, approved: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        return approve_kind_action(config, kind, prefix, load_calibration_state=_loader(approved, kinds),
+                                   kind_of=lambda _config, season: kinds.get(season), approved_at="now")
+
+    assert extend("bright_live_action", APPROVED_SEASON, folders)["code"] == SOURCE_KIND_DIFFERS_CODE
+    assert extend(DARKER, OTHER_SEASON, {OTHER_SEASON: _approved(config)})["code"] == SOURCE_KIND_DIFFERS_CODE
+    assert extend("cartoon", OTHER_SEASON, {OTHER_SEASON: _approved(config)})["code"] == KIND_IS_ONE_TIME_CODE
+    assert extend(DARKER, "tv/Drama", {"tv/Drama": _approved(config)})["code"] == SOURCE_KIND_DIFFERS_CODE
+    assert load_kind_approval(config, DARKER) is None
+    assert extend(DARKER, f"{APPROVED_SEASON}/e01.mkv", folders)["ok"]
+    assert extend(DARKER, SEASON, folders)["code"] == NO_FOLDER_APPROVAL_CODE
+    assert extend(DARKER, OTHER_SEASON, {})["code"] == NO_FOLDER_APPROVAL_CODE
+
+
+def test_stopping_touches_only_a_kinds_approval(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    attempts = config.paths.web_state_dir / "kinds" / "attempts.json"
+    attempts.parent.mkdir(parents=True)
+    attempts.write_text("{}")
+
+    assert not stop_kind_approval(config, "attempts")
+    assert attempts.exists()
 
 
 def test_a_seasons_page_state_says_which_approval_governs_it(tmp_path: Path) -> None:
