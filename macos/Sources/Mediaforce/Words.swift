@@ -26,7 +26,7 @@ enum Words {
         case "password_needed": "Needs its password once"
         case "away": "Away. Picks up work when it returns"
         case "reconnecting": "Reconnecting automatically"
-        case "unreachable_long": "Has been off the network for about 12 hours"
+        case "unreachable_long": "Has been off the network for a long time"
         case "recovery_required": "Needs its storage checked"
         case "unreachable": "Can't reach it. Is it on and awake?"
         case "remote_login_off": "Needs Remote Login turned on"

@@ -42,8 +42,9 @@ checking and publishing remain explicit overrides. Rollback copies stay until
 the user approves cleanup.
 
 Remote computers reconnect missing shared storage in the background. After an uncertain
-connection, Mediaforce checks on that computer that the mount, connection job,
-and lock are gone before trying again. If it cannot prove that, it shows what
+connection, the same mount helper checks that computer again before retrying.
+It waits for a running connection request, clears an old unused lock, and
+refuses to mount beside a leftover folder. If it cannot prove that, it shows what
 it found and keeps checking. A laptop identified from its last-seen Mac model
 stays quiet while away; a desktop missing from the network for about 12 hours
 notifies once. Other computers keep working, and returning computers rejoin

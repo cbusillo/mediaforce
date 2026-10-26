@@ -9,13 +9,14 @@ from mediaforce.core.config import MediaforceConfig, load_runtime_settings, upda
 from mediaforce.hosts.config import host_targets_current_machine
 from mediaforce.hosts.controller_mount import controller_mount_lock
 from mediaforce.remote import (
-    probe_host_status, recover_remote_host_mounts_no_ui, reconcile_remote_host_mounts,
+    probe_host_status, recover_remote_host_mounts_no_ui,
     remote_mount_recovery_supported,
 )
 from mediaforce.web.runtime.host_status import publish_host_status
 
 _INITIAL_RETRY_SECONDS = 30
 _MAX_RETRY_SECONDS = 300
+DESKTOP_ABSENCE_GRACE = timedelta(hours=12)
 _UNREADABLE_STATE = "Computer recovery state is unreadable; review it before reconnecting storage."
 
 
@@ -146,23 +147,13 @@ def _recovery_pass(
     state["absent_since"] = (
         previous.get("absent_since") or now.isoformat() if state["network_absent"] else None
     )
-    if state["mount_uncertain"] and not status.available and not state["network_absent"] and not state_error:
-        unresolved = reconcile_remote_host_mounts(config, host, status)
-        if unresolved:
-            state.update(status="action_required", reason=unresolved)
-            _store_host_state(config, key, state)
-            return state
-        state["mount_uncertain"] = False
     if status.available:
         state["mount_uncertain"] = False
     elif state["network_absent"]:
         _store_host_state(config, key, state)
         return state
-    elif state["mount_uncertain"] or state_error:
-        state["status"] = "action_required"
-        state["reason"] = state_error or (
-            previous.get("reason") if previous.get("status") == "action_required" else None
-        ) or "An earlier storage request has no confirmed result. Reconnect storage on this computer, then use Retry connection."
+    elif state_error:
+        state.update(status="action_required", reason=state_error)
     elif remote_mount_recovery_supported(config, host, status) and previous.get("retry_paused") and not requested:
         # Only someone at that computer can fix this; keep asking, and keep checking often so
         # the warning clears soon after Retry connection, Set up computer or a manual connection.
@@ -171,6 +162,8 @@ def _recovery_pass(
             next_retry_at=(now + timedelta(seconds=_INITIAL_RETRY_SECONDS)).isoformat(),
         )
     elif remote_mount_recovery_supported(config, host, status):
+        if previous.get("status") == "action_required":
+            state.update(status="action_required", reason=previous.get("reason"))
         # Persist before SSH: transport loss can leave a remote mount request running.
         state["mount_uncertain"] = True
         state["last_attempt_at"] = now.isoformat()
@@ -178,8 +171,8 @@ def _recovery_pass(
         result = recover_remote_host_mounts_no_ui(config, host, status)
         state["mount_uncertain"] = result.uncertain
         if result.uncertain:
-            state["status"] = "action_required"
-            state["reason"] = "Storage could not be connected safely. Check this computer's shared storage in Finder, then use Retry connection."
+            state["status"] = "action_required" if previous.get("mount_uncertain") else "retrying"
+            state["reason"] = "This computer did not confirm its storage connection. Mediaforce keeps checking before trying again."
         elif result.action:
             state.update(status="action_required", reason=result.action, retry_paused=not result.retry)
             if not result.retry:
@@ -187,8 +180,11 @@ def _recovery_pass(
         else:
             refreshed = probe_host_status(config, host)
             publish_host_status(config, refreshed)
+            state.update(status="retrying", reason=refreshed.message)
             if refreshed.available:
                 state.update(status="ready", reason=None, first_failure_at=None, failure_count=0)
+    if state["mount_uncertain"] and status.check_failure and not state_error:
+        state.update(status="action_required", reason=status.message)
     _store_host_state(config, key, state)
     return state
 
@@ -231,7 +227,7 @@ def host_absence_state(record: dict[str, Any], now: datetime | None = None) -> s
     if "macbook" in str(record.get("computer_model") or "").lower():
         return "away"
     since = _parse_time(record.get("absent_since"))
-    if since is not None and (now or datetime.now(timezone.utc)) - since >= timedelta(hours=12):
+    if since is not None and (now or datetime.now(timezone.utc)) - since >= DESKTOP_ABSENCE_GRACE:
         return "unreachable_long"
     return "reconnecting"
 

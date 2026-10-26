@@ -46,6 +46,7 @@ def _store_remote_tool_payload(ssh_host: str, payload: dict[str, object], *, now
             "tool_paths": dict(object_dict(payload.get("tool_paths"))),
             "tool_meta": dict(object_dict(payload.get("tool_meta"))),
             "platform": str(payload.get("platform") or "unknown"),
+            "computer_model": payload.get("computer_model"),
         },
     )
 
@@ -86,6 +87,8 @@ def _merge_cached_remote_tools(payload: dict[str, object], cached: dict[str, obj
     merged_tool_paths = dict(object_dict(cached.get("tool_paths")))
     merged_tool_paths.update(object_dict(payload.get("tool_paths")))
     merged = dict(payload)
+    if not merged.get("computer_model"):
+        merged["computer_model"] = cached.get("computer_model")
     merged["tools"] = merged_tools
     merged["tool_paths"] = merged_tool_paths
     merged_tool_meta = dict(object_dict(cached.get("tool_meta")))
@@ -136,15 +139,6 @@ def _run_remote_status_probe(
     if last_exception is not None:
         raise last_exception
     raise RuntimeError("Remote status probe did not produce a result.")
-
-
-def _probe_exception_kind(exc: Exception) -> str:
-    """A check that never finished: a timeout reads as a computer that is off or asleep."""
-    return "unreachable" if isinstance(exc, subprocess.TimeoutExpired) else "check_failed"
-
-
-def _probe_exception_copy(exc: Exception, label: str) -> tuple[str, list[str]]:
-    return computer_check_failure_copy(_probe_exception_kind(exc), label)
 
 
 def _remote_host_status(
@@ -223,13 +217,13 @@ def _remote_host_status(
             priority=_host_priority(host),
             capabilities=_host_capabilities(host),
             available=False,
-            message=_probe_exception_copy(exc, label)[0],
+            message=computer_check_failure_copy("check_failed", label)[0],
             missing_paths=[],
             probe_available=False,
             repo_path=repo_path,
-            issues=_probe_exception_copy(exc, label)[1],
+            issues=computer_check_failure_copy("check_failed", label)[1],
             detail=str(exc),
-            check_failure=_probe_exception_kind(exc),
+            check_failure="check_failed",
         )
 
     if result.returncode != 0:
@@ -296,13 +290,13 @@ def _remote_host_status(
                 priority=_host_priority(host),
                 capabilities=_host_capabilities(host),
                 available=False,
-                message=_probe_exception_copy(exc, label)[0],
+                message=computer_check_failure_copy("check_failed", label)[0],
                 missing_paths=[],
                 probe_available=False,
                 repo_path=repo_path,
-                issues=_probe_exception_copy(exc, label)[1],
+                issues=computer_check_failure_copy("check_failed", label)[1],
                 detail=str(exc),
-                check_failure=_probe_exception_kind(exc),
+                check_failure="check_failed",
             )
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "SSH host unavailable"

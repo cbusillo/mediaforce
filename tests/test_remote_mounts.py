@@ -769,6 +769,35 @@ class GeneratedMountScriptTests(unittest.TestCase):
         with patch("mediaforce.remote._run_remote_ssh", side_effect=ssh):
             return remote.recover_remote_host_mounts_no_ui(config, host, status)
 
+    def test_no_ui_rechecks_a_lost_request_then_recovers_when_it_has_ended(self) -> None:
+        (self.root / "job-running").touch()
+        waiting = self._recover_without_dialog("0")
+        self.assertTrue(waiting.uncertain)
+        self.assertEqual(self._osascript_runs(), [])
+        self.assertEqual(self._launchctl_calls("bootstrap"), [])
+        (self.root / "job-running").unlink()
+        recovered = self._recover_without_dialog("0")
+        self.assertTrue(recovered.ok)
+        self.assertEqual(self._osascript_runs(), ["1"])
+
+    def test_no_ui_reclaims_an_old_lock_only_after_the_request_is_gone(self) -> None:
+        import hashlib
+
+        lock_hash = hashlib.sha256(b"/Volumes/media").hexdigest()[:24]
+        lock = self.root / "home/Library/Caches/mediaforce" / f"mount-{lock_hash}.lock"
+        lock.mkdir(parents=True)
+        os.utime(lock, (time.time() - 300, time.time() - 300))
+        recovered = self._recover_without_dialog("0")
+        self.assertTrue(recovered.ok)
+        self.assertEqual(self._osascript_runs(), ["1"])
+
+    def test_no_ui_keeps_uncertainty_when_the_computer_cannot_read_its_mount_table(self) -> None:
+        (self.stubs / "mount").write_text("#!/bin/sh\nexit 1\n")
+        result = self._recover_without_dialog("0")
+        self.assertTrue(result.uncertain)
+        self.assertEqual(self._osascript_runs(), [])
+        self.assertEqual(self._launchctl_calls("bootstrap"), [])
+
     def _osascript_runs(self) -> list[str]:
         log = self.root / "osascript.log"
         return log.read_text().splitlines() if log.exists() else []
@@ -957,45 +986,3 @@ class GeneratedMountScriptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class MountReconciliationTests(unittest.TestCase):
-    def test_remote_proof_requires_absent_path_mount_request_and_lock(self) -> None:
-        import hashlib
-        import shlex
-        from mediaforce.hosts.mount_runtime import reconcile_missing_mounts
-
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            point = root / "media share"
-            mount = RemoteSmbMount(point, "media", "smb://nas/media")
-            lock_hash = hashlib.sha256(str(point).encode()).hexdigest()[:24]
-            lock = root / "Library/Caches/mediaforce" / f"mount-{lock_hash}.lock"
-            observed = {"mounts": "", "jobs": "", "mount_exit": 0, "job_exit": 0}
-
-            def run(script: str, timeout: int) -> subprocess.CompletedProcess[str]:
-                mount_command = f'printf "%s\\n" {shlex.quote(observed["mounts"])}; exit {observed["mount_exit"]}'
-                job_command = f'printf "%s\\n" {shlex.quote(observed["jobs"])}; exit {observed["job_exit"]}'
-                script = script.replace('/sbin/mount', f'sh -c {shlex.quote(mount_command)}')
-                script = script.replace('/bin/launchctl print "gui/$uid"', f'sh -c {shlex.quote(job_command)}')
-                return subprocess.run(["/bin/sh", "-s"], input=script, text=True, capture_output=True,
-                                      timeout=timeout, env={**os.environ, "HOME": str(root)})
-
-            self.assertIsNone(reconcile_missing_mounts([mount], run_mount_script=run))
-            point.mkdir()
-            self.assertIsNotNone(reconcile_missing_mounts([mount], run_mount_script=run))
-            point.rmdir()
-            observed["mounts"] = f"//user@nas/media on {str(point).replace(' ', r'\040')} (smbfs, nodev)"
-            self.assertIsNotNone(reconcile_missing_mounts([mount], run_mount_script=run))
-            observed["mounts"] = ""
-            observed["jobs"] = f"123 com.mediaforce.mount.{lock_hash}"
-            self.assertIsNotNone(reconcile_missing_mounts([mount], run_mount_script=run))
-            observed["jobs"] = ""
-            lock.mkdir(parents=True)
-            self.assertIsNotNone(reconcile_missing_mounts([mount], run_mount_script=run))
-            lock.rmdir()
-            for command in ("mount_exit", "job_exit"):
-                observed[command] = 1
-                self.assertIsNotNone(reconcile_missing_mounts([mount], run_mount_script=run))
-                observed[command] = 0
-            self.assertIsNone(reconcile_missing_mounts([mount], run_mount_script=run))

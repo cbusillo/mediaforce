@@ -314,50 +314,12 @@ def mount_smb_shares_no_ui(
         except subprocess.TimeoutExpired:
             return NoUiMountResult(ok=False, uncertain=True)
         except (OSError, subprocess.SubprocessError):
-            return NoUiMountResult(ok=False)
+            return NoUiMountResult(ok=False, uncertain=True)
         if result.returncode == 0:
             continue
         _log_helper_failure(label, mount, result)
         return _no_ui_failure(label, mount, result, attempt_seconds=attempt_seconds)
     return NoUiMountResult(ok=True)
-
-
-def reconcile_missing_mounts(
-        mounts: list[RemoteSmbMount],
-        *,
-        run_mount_script: Callable[[str, int], subprocess.CompletedProcess[str]],
-) -> str | None:
-    if not mounts:
-        return "No shared-storage location could be identified on this computer."
-    script = [
-        'set -eu',
-        'mounts="$(/sbin/mount)"',
-        'uid="$(/usr/bin/id -u)"',
-        'jobs="$(/bin/launchctl print "gui/$uid")"',
-    ]
-    for mount in mounts:
-        point = str(mount.mount_point)
-        lock_hash = hashlib.sha256(point.encode()).hexdigest()[:24]
-        script.extend([
-            f'point={shlex.quote(point)}',
-            'if [ -e "$point" ] || [ -L "$point" ]; then exit 21; fi',
-            f'if printf "%s\\n" "$mounts" | /usr/bin/grep -F -q -- {shlex.quote(" on " + mount_output_field(point) + " (")}; then exit 22; fi',
-            f'if printf "%s\\n" "$jobs" | /usr/bin/grep -F -q -- com.mediaforce.mount.{lock_hash}; then exit 23; fi',
-            f'if [ -e "$HOME/Library/Caches/mediaforce/mount-{lock_hash}.lock" ]; then exit 24; fi',
-        ])
-    script.append('printf "MEDIAFORCE_MOUNTS_ABSENT\\n"')
-    try:
-        result = run_mount_script("\n".join(script), 10)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"The storage check on this computer did not finish ({exc.__class__.__name__})."
-    if result.returncode == 0 and result.stdout.strip() == "MEDIAFORCE_MOUNTS_ABSENT":
-        return None
-    return {
-        21: "The shared-storage location still exists on this computer, but its storage is not healthy.",
-        22: "The computer still lists the shared storage as mounted, but it is not healthy.",
-        23: "An earlier storage connection is still registered on this computer.",
-        24: "An earlier storage connection still holds its lock on this computer.",
-    }.get(result.returncode, "The computer could not confirm its mounted storage and running connection requests.")
 
 
 def _no_ui_failure(
@@ -389,7 +351,7 @@ def _no_ui_failure(
             retry=False,
         )
     if result.returncode in {_MOUNT_BUSY_EXIT, _MOUNT_HELPER_EXIT, _MOUNT_REQUEST_WAITING_EXIT}:
-        return NoUiMountResult(ok=False)
+        return NoUiMountResult(ok=False, uncertain=True)
     if result.returncode != _MOUNT_NOT_CONNECTED_EXIT:
         # A timeout, a lost SSH connection or an unknown exit leaves no confirmed result.
         return NoUiMountResult(ok=False, uncertain=True)
@@ -519,7 +481,7 @@ label={q_label}
 attempt_seconds={int(attempt_seconds)}
 keep_waiting_request={0 if no_ui else 1}
 mount_present() {{
-  mount_output="$(/sbin/mount 2>/dev/null || true)"
+  mount_output="$(/sbin/mount 2>/dev/null)" || exit {_MOUNT_HELPER_EXIT}
   if printf '%s\\n' "$mount_output" | /usr/bin/grep -F -- " on $expected (smbfs," >/dev/null 2>&1; then
     return 0
   fi
@@ -533,7 +495,7 @@ mount_present() {{
 # earlier connection. Prints the first such mount point, as `mount` writes it, of this same share:
 # another server's share with the same name is left alone.
 mounted_elsewhere() {{
-  /sbin/mount 2>/dev/null | while IFS= read -r line; do
+  printf '%s\\n' "$mount_output" | while IFS= read -r line; do
     case "$line" in //*" (smbfs,"*) ;; *) continue ;; esac
     point="${{line#* on }}"
     point="${{point%% (smbfs,*}}"

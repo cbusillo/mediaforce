@@ -565,12 +565,12 @@ def _unavailable_computer_state(row: Mapping[str, Any]) -> str:
     recovery = row.get("recovery") or {}
     if recovery.get("absence_state"):
         return str(recovery["absence_state"])
+    if row.get("check_failure"):
+        return str(row["check_failure"])
     if recovery.get("status") == "action_required":
         return "recovery_required"
     if recovery.get("status") == "retrying" and not row.get("check_failure"):
         return "reconnecting"
-    if row.get("check_failure"):
-        return str(row["check_failure"])
     if row.get("missing_mounts") or row.get("controller_storage_issue"):
         return "storage_unreachable"
     return "not_ready"

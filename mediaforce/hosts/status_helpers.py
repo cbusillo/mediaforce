@@ -13,7 +13,6 @@ from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQU
 from mediaforce.hosts.config import _host_supports_capability, host_media_access_for_host, \
     _parse_utc_offset_minutes, remote_shell_path_export_line, stream_host_has_remote_source_roots
 from mediaforce.hosts.mount_runtime import mount_output_field
-from mediaforce.hosts.transport import ssh_host_unreachable
 from mediaforce.hosts.types import VMAF_MODEL_MISSING_ISSUE, VMAF_SELF_TEST_ARGS
 from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, FFMPEG_MISSING_ISSUE, HostStatus, \
     LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE, \
@@ -432,7 +431,7 @@ def _classify_ssh_failure(
         kind = "new_name"
     elif "connection refused" in lowered:
         kind = "remote_login_off"
-    elif "operation timed out" in lowered or "no route to host" in lowered:
+    elif returncode in {None, 255} and ("operation timed out" in lowered or "no route to host" in lowered):
         kind = "unreachable"
     elif (
             "could not resolve hostname" in lowered
@@ -445,8 +444,7 @@ def _classify_ssh_failure(
         kind = "python_missing"
         flags.update(setup_supported=True)
     else:
-        # Setup stays offered for anything unrecognized; only the words say a lost link is likely sleep.
-        kind = "unreachable" if returncode is not None and ssh_host_unreachable(returncode, detail) else "check_failed"
+        kind = "check_failed"
         flags.update(setup_supported=True)
     message, issues = computer_check_failure_copy(kind, label)
     return {"kind": kind, "message": message, "issues": issues, **flags}
@@ -476,6 +474,7 @@ def _remote_status_script(
     ]
     if include_expensive_tools:
         lines.extend([
+            'if [ "$PLATFORM_NAME" = macos ]; then COMPUTER_MODEL="$(/usr/sbin/system_profiler SPHardwareDataType 2>/dev/null | /usr/bin/sed -n \'s/^[[:space:]]*Model Name: //p\')"; printf "meta|computer_model|%s\\n" "$COMPUTER_MODEL"; fi',
             'FFMPEG_FILTERS=""',
             'FFMPEG_ENCODERS=""',
             'FFMPEG_HWACCELS=""',
@@ -503,7 +502,6 @@ def _remote_status_script(
     lines.extend([
         'if [ -n "$AB_AV1_BIN" ]; then printf "tool|ab_av1|1\\n"; else printf "tool|ab_av1|0\\n"; fi',
         'printf "meta|platform|%s\\n" "$PLATFORM_NAME"',
-        'if [ "$PLATFORM_NAME" = macos ]; then COMPUTER_MODEL="$(/usr/sbin/system_profiler SPHardwareDataType 2>/dev/null | /usr/bin/sed -n \'s/^[[:space:]]*Model Name: //p\')"; printf "meta|computer_model|%s\\n" "$COMPUTER_MODEL"; fi',
         'TIMEZONE_NAME=""',
         'if [ -L /etc/localtime ]; then TIMEZONE_PATH="$(readlink /etc/localtime 2>/dev/null || true)"; case "$TIMEZONE_PATH" in */zoneinfo.default/*) TIMEZONE_NAME="${TIMEZONE_PATH#*/zoneinfo.default/}" ;; */zoneinfo/*) TIMEZONE_NAME="${TIMEZONE_PATH#*/zoneinfo/}" ;; esac; fi',
         'if [ -z "$TIMEZONE_NAME" ] && [ -r /etc/timezone ]; then TIMEZONE_NAME="$(head -n 1 /etc/timezone 2>/dev/null | tr -d "[:space:]" || true)"; fi',
