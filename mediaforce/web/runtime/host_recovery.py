@@ -16,6 +16,7 @@ from mediaforce.web.runtime.host_status import publish_host_status
 
 _INITIAL_RETRY_SECONDS = 30
 _MAX_RETRY_SECONDS = 300
+DESKTOP_ABSENCE_GRACE = timedelta(hours=12)
 _UNREADABLE_STATE = "Computer recovery state is unreadable; review it before reconnecting storage."
 
 
@@ -139,13 +140,20 @@ def _recovery_pass(
         "mount_uncertain": previous.get("mount_uncertain", False),
         "retry_paused": False,
     }
+    state["computer_model"] = status.computer_model or previous.get("computer_model")
+    state["network_absent"] = status.check_failure in {"unreachable", "not_found"}
+    state["absent_since"] = (
+        previous.get("absent_since") or now.isoformat() if state["network_absent"] else None
+    )
+    if previous.get("status") == "action_required" and not status.available and not state["network_absent"]:
+        state.update(status="action_required", reason=previous.get("reason") or status.message)
     if status.available:
         state["mount_uncertain"] = False
-    elif state["mount_uncertain"] or state_error:
-        state["status"] = "action_required"
-        state["reason"] = state_error or (
-            previous.get("reason") if previous.get("status") == "action_required" else None
-        ) or "An earlier storage request has no confirmed result. Reconnect storage on this computer, then use Retry connection."
+    elif state["network_absent"]:
+        _store_host_state(config, key, state)
+        return state
+    elif state_error:
+        state.update(status="action_required", reason=state_error)
     elif remote_mount_recovery_supported(config, host, status) and previous.get("retry_paused") and not requested:
         # Only someone at that computer can fix this; keep asking, and keep checking often so
         # the warning clears soon after Retry connection, Set up computer or a manual connection.
@@ -161,8 +169,8 @@ def _recovery_pass(
         result = recover_remote_host_mounts_no_ui(config, host, status)
         state["mount_uncertain"] = result.uncertain
         if result.uncertain:
-            state["status"] = "action_required"
-            state["reason"] = "Storage could not be connected safely. Check this computer's shared storage in Finder, then use Retry connection."
+            state["status"] = "action_required" if previous.get("mount_uncertain") else "retrying"
+            state["reason"] = result.action or "This computer did not confirm its storage connection. Check its shared storage; Mediaforce keeps trying."
         elif result.action:
             state.update(status="action_required", reason=result.action, retry_paused=not result.retry)
             if not result.retry:
@@ -170,8 +178,14 @@ def _recovery_pass(
         else:
             refreshed = probe_host_status(config, host)
             publish_host_status(config, refreshed)
+            state.update(status="retrying", reason=refreshed.message)
             if refreshed.available:
                 state.update(status="ready", reason=None, first_failure_at=None, failure_count=0)
+    if status.check_failure and not state_error and (
+        state["mount_uncertain"] or previous.get("status") == "action_required"
+        or (count >= 2 and status.check_failure in {"check_failed", "unreadable_reply"})
+    ):
+        state.update(status="action_required", reason=status.message)
     _store_host_state(config, key, state)
     return state
 
@@ -206,6 +220,17 @@ def _update_snapshot(
         return snapshot
 
     update_runtime_settings(host_recovery_path(config), update)
+
+
+def host_absence_state(record: dict[str, Any], now: datetime | None = None) -> str | None:
+    if not record.get("network_absent"):
+        return None
+    if "macbook" in str(record.get("computer_model") or "").lower():
+        return "away"
+    since = _parse_time(record.get("absent_since"))
+    if since is not None and (now or datetime.now(timezone.utc)) - since >= DESKTOP_ABSENCE_GRACE:
+        return "unreachable_long"
+    return "reconnecting"
 
 
 def _parse_time(value: str | None) -> datetime | None:

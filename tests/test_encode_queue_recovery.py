@@ -12902,8 +12902,7 @@ raise SystemExit(0)
         host: dict[str, object] = {"host": "cbusillo@encode-host", "label": "Encode Host", "capabilities": ["encode_queue"]}
         outcomes = {
             "password_needed": subprocess.CompletedProcess(args=["ssh"], returncode=255, stdout="", stderr="Permission denied"),
-            "unreachable": subprocess.TimeoutExpired(cmd=["ssh"], timeout=8),
-            "check_failed": OSError("ssh could not start"),
+            "check_failed": subprocess.TimeoutExpired(cmd=["ssh"], timeout=8),
             "unreadable_reply": subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="not a status reply", stderr=""),
         }
         for kind, outcome in outcomes.items():
@@ -12966,6 +12965,7 @@ raise SystemExit(0)
             "source_roots": {"tv": "/Volumes/My Share/tv"},
             "staging_root": "/Volumes/My Share/transcode",
         }
+        model = "MacBook Pro"
         stdout = "\n".join(
             [
                 "mount|/Volumes/My Share|0",
@@ -12986,6 +12986,7 @@ raise SystemExit(0)
                 "tool|ffmpeg_libsvtav1|1",
                 "tool|ab_av1|1",
                 "meta|platform|macos",
+                f"meta|computer_model|{model}",
                 "time|utc_offset|+0000",
                 "repo|exists|1",
             ]
@@ -12996,6 +12997,7 @@ raise SystemExit(0)
         ) as run_remote_ssh_mock, patch("mediaforce.remote._learn_remote_wake_mac"):
             status = remote._remote_host_status(self.config, host)
 
+        self.assertEqual(status.computer_model, model)
         self.assertFalse(status.available)
         self.assertTrue(status.probe_available)
         self.assertEqual(status.message, "Shared storage disconnected")

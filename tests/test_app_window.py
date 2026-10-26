@@ -374,3 +374,40 @@ def test_held_seasons_carry_their_reason_codes(connection: DBClient) -> None:
         ("tv/Pitt/Season 2", ["current_season", "recent_acquisition"]),
         ("tv/Expanse/Season 1", ["motion_pattern"]),
     ]
+
+
+@pytest.mark.parametrize("absence,state,expected", [
+    ("away", "retrying", "away"),
+    ("reconnecting", "retrying", "reconnecting"),
+    ("unreachable_long", "retrying", "unreachable_long"),
+    (None, "action_required", "recovery_required"),
+    (None, "retrying", "reconnecting"),
+])
+def test_computer_recovery_state_reaches_native_app(
+        connection: DBClient, absence: str | None, state: str, expected: str,
+) -> None:
+    row = _computer("worker", available=False, storage_recovery_available=True, recovery={
+        "status": state, "absence_state": absence, "reason": "Storage check needs help",
+    })
+    [computer] = _payload(connection, computers=[row])["computers"]
+    assert computer["state"] == expected
+    assert computer["attention_reason"] == (row["recovery"]["reason"] if state == "action_required" else None)
+
+
+@pytest.mark.parametrize("available,reconnectable,issues,expected", [
+    (False, False, ["Encoder missing"], "not_ready"),
+    (False, True, [], "reconnecting"),
+    (True, False, [], "ready"),
+])
+def test_computer_only_claims_reconnection_when_its_storage_can_be_reconnected(
+        connection: DBClient, available: bool, reconnectable: bool, issues: list[str], expected: str,
+) -> None:
+    row = _computer("worker", available=available, issues=issues, storage_recovery_available=reconnectable,
+                    recovery={"status": "retrying", "reason": "Stored earlier problem"})
+    [computer] = _payload(connection, computers=[row])["computers"]
+    assert computer["state"] == expected
+    assert computer["attention_reason"] is None
+    row["available"] = True
+    row["recovery"]["status"] = "action_required"
+    [computer] = _payload(connection, computers=[row])["computers"]
+    assert computer["attention_reason"] is None

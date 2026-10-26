@@ -16,6 +16,7 @@ struct HostsFacts: Decodable, Sendable {
 
         struct Recovery: Decodable, Sendable {
             let status: String
+            let reason: String?
         }
 
         /// Offered while the server is recovering a computer it can't use.
@@ -84,6 +85,11 @@ struct ComputerStatus: View {
                 Text(state.map(Words.computerState) ?? Words.computerNotHeardFrom)
                     .font(.headline)
                 Spacer()
+            }
+            if host?.recovery?.status == "action_required", let reason = host?.recovery?.reason {
+                Text(reason)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let help = state.flatMap(Words.computerFixHelp) {
                 Text(help)
