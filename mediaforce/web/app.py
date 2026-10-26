@@ -162,7 +162,7 @@ from mediaforce.web.checked_output_preview import (
 )
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
-from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds
+from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, next_kind_season
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_folders_payload, \
     dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
@@ -681,6 +681,7 @@ def create_app(
                     config,
                     evidence_runner=evidence_runner,
                     held_files_sweep=_join_cleared_held_files,
+                    kind_seasons_sweep=_queue_next_kind_season,
                     automatic_publish_sweep=lambda stop_event: publish_checked_files_once(
                         load_config(config.paths.config_path), load_calibration_state=_load_calibration_state,
                         stop_event=stop_event,
@@ -2235,6 +2236,22 @@ def create_app(
                 now_iso=_now_iso,
         ):
             LOGGER.info("Held files joining production: %s", result.get("message") or result.get("code"))
+
+    kind_seasons_tried: set[tuple[str, str]] = set()
+
+    def _queue_next_kind_season() -> None:
+        # The season is chosen and its connection closed before queueing opens its own write transaction.
+        with open_db(config.paths.db_path) as connection:
+            chosen = next_kind_season(
+                connection, config, load_calibration_state=_load_calibration_state, tried=kind_seasons_tried,
+            )
+        if chosen is None:
+            return
+        try:
+            result = _queue_folder_encode_action(chosen.season, "Queued under its kind of content's approval.", False)
+        except HTTPException as refusal:
+            result = {"ok": False, "message": str(getattr(refusal, "detail", refusal))}
+        LOGGER.info("Kind of content %s, %s: %s", chosen.kind, chosen.season, result.get("message") or result.get("ok"))
 
     def _queue_folder_encode_action(
             normalized_prefix: str,
@@ -5371,6 +5388,7 @@ def _start_background_workers(
         *,
         evidence_runner: BoundedEvidenceRunner | None = None,
         held_files_sweep: Callable[[], None] | None = None,
+        kind_seasons_sweep: Callable[[], None] | None = None,
         automatic_publish_sweep: Callable[[threading.Event], None] | None = None,
 ) -> BackgroundWorkerRuntime | None:
     lease = _acquire_background_worker_leadership(config)
@@ -5400,6 +5418,13 @@ def _start_background_workers(
                 process_once_fn=held_files_sweep,
                 poll_seconds=HELD_FILES_POLL_SECONDS,
                 failure_message="Joining held files to production failed; it will retry.",
+            ))
+        if kind_seasons_sweep is not None:
+            handles.append(_start_supervised_worker(
+                name="kind-seasons-worker",
+                process_once_fn=kind_seasons_sweep,
+                poll_seconds=HELD_FILES_POLL_SECONDS,
+                failure_message="Queueing seasons a kind of content covers failed; it will retry.",
             ))
     except BaseException:
         for handle in handles:

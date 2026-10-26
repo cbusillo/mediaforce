@@ -13,18 +13,25 @@ import json
 import os
 import tempfile
 import threading
+from dataclasses import dataclass
 from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from sqlalchemy import select
+
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import open_readonly_db
+from mediaforce.core.db import DBClient, open_readonly_db
+from mediaforce.core.db_tables import encode_jobs, library_items
+from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, load_queue_state
 from mediaforce.core.type_defs import object_dict
 from mediaforce.library.candidate_selection import season_identity
+from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.content_kinds import evidence_stamp, season_evidence, season_grouping, season_stamp
 from mediaforce.library.source_evidence import SourceEvidenceContext
-from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, holds_approval, \
-    production_approval_contract
+from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
+    effective_production_approval, holds_approval, production_approval_contract
+from mediaforce.web.runtime.production_holds import approval_identity
 
 APPROVABLE_KINDS = ("darker_live_action", "bright_live_action")
 KIND_IS_ONE_TIME_CODE = "kind_is_one_time"
@@ -152,3 +159,66 @@ class KindAwareLoader:
         if calibration is None:
             return None
         return EffectiveApproval(season, calibration, production_approval_contract(calibration), kind=kind)
+
+
+# A run that ended badly leaves its season for the Director; the background queue never retries it.
+_UNSETTLED_RUN_STATUSES = ("failed", "stopped", "needs_attention")
+
+
+def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tuple[str, int]]:
+    """Seasons with files still to compress, largest waiting space first."""
+    waiting: dict[str, int] = {}
+    for item in connection.execute(select(
+        library_items.c.rel_path, library_items.c.status, library_items.c.video_codec, library_items.c.size_bytes,
+    ).where(LIBRARY_ITEM_PRESENT, library_items.c.status != "promoted")).mappings():
+        if str(item["video_codec"] or "").casefold() == "av1":
+            continue
+        season = season_prefix_of(config, str(item["rel_path"]))
+        if season is not None and str(item["rel_path"]).startswith(f"{season}/"):
+            waiting[season] = waiting.get(season, 0) + int(item["size_bytes"] or 0)
+    return sorted(waiting.items(), key=lambda entry: (-entry[1], entry[0]))
+
+
+def _latest_run_unsettled(connection: DBClient, season: str) -> bool:
+    status = connection.execute(
+        select(encode_jobs.c.status).where(encode_jobs.c.prefix == season).order_by(encode_jobs.c.created_at.desc()).limit(1)
+    ).scalar_one_or_none()
+    return status in _UNSETTLED_RUN_STATUSES
+
+
+@dataclass(frozen=True, slots=True)
+class KindSeason:
+    season: str
+    kind: str
+    waiting_bytes: int
+
+
+def next_kind_season(
+        connection: DBClient,
+        config: MediaforceConfig,
+        *,
+        load_calibration_state: LoadCalibrationState,
+        tried: set[tuple[str, str]],
+) -> KindSeason | None:
+    """The next waiting season a current kind approval covers, to queue on its own, largest first.
+
+    None while the owner has paused work or any production run is queued or running, so seasons go one at a
+    time. A season tried under this approval is not offered again, so a refusal stays with its season, and a
+    season whose last run ended badly waits for the Director.
+    """
+    if not approved_kinds(config) or load_queue_state(connection).get("is_paused"):
+        return None
+    if connection.execute(select(encode_jobs.c.job_id).where(
+        encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES), encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS),
+    ).limit(1)).first() is not None:
+        return None
+    for season, waiting_bytes in _waiting_seasons(connection, config):
+        approval = effective_production_approval(config, season, load_calibration_state)
+        if approval is None or approval.kind is None or not approval.current:
+            continue
+        attempt = (season, approval_identity(approval.calibration, approval.contract))
+        if attempt in tried or _latest_run_unsettled(connection, season):
+            continue
+        tried.add(attempt)
+        return KindSeason(season, approval.kind, waiting_bytes)
+    return None
