@@ -25,6 +25,7 @@ from mediaforce.library.evidence_acquisition import load_fingerprint_acquisition
 from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EvidenceQueueConflict, \
     cancel_evidence_queue, evidence_queue_summary, pause_evidence_queue, resume_evidence_queue, \
     start_evidence_work
+from mediaforce.library.content_kinds import season_kind_report
 from mediaforce.library.evidence_state import EVIDENCE_KINDS
 from mediaforce.library.evidence_worker import default_evidence_worker_deps, run_evidence_queue_until_blocked
 from mediaforce.library.source_evidence_backfill import restore_published_source_evidence
@@ -43,6 +44,8 @@ from mediaforce.tuning.quality_acceptance import format_quality_acceptance_repor
 from mediaforce.tuning.content_intent_backfill import backfill_content_intent_approvals
 from mediaforce.tuning.target_defaults import load_target_default_report
 from mediaforce.tuning.production_outcomes import load_target_production_report
+from mediaforce.web.runtime.folder_state import state_slug
+from mediaforce.web.runtime.production_approval import effective_production_approval
 from mediaforce.web.runtime_lock import (
     MediaforceRuntimeBusyError,
     exclusive_mediaforce_runtime_lock,
@@ -154,6 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="json_output",
         help="Print the stable JSON report",
+    )
+
+    subparsers.add_parser(
+        "content-kinds",
+        help="Report waiting seasons grouped into kinds of content by their originals' measured traits, as JSON",
     )
 
     target_defaults_parser = subparsers.add_parser(
@@ -301,6 +309,15 @@ def _main(
                 connection, config.paths.web_state_dir, apply=False,
             )
         print(json.dumps(backfill.to_payload(), indent=2, sort_keys=True))
+        return 0
+    if args.command == "content-kinds":
+        with open_readonly_db(config.paths.db_path) as connection:
+            payload = season_kind_report(
+                connection,
+                library_types=config.library_type_map,
+                folder_approved=lambda prefix: _current_folder_approval(config, prefix),
+            )
+        print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     if args.command == "target-defaults":
         try:
@@ -1012,6 +1029,21 @@ def _run_review(
     )
     for clip in clips:
         print(f"compare {clip.output_path} start={clip.timestamp_seconds:.2f}s duration={clip.duration_seconds:.2f}s")
+
+
+def _current_folder_approval(config: MediaforceConfig, prefix: str) -> bool:
+    """A folder approval production can still run under; a stale one leaves the season waiting."""
+    approval = effective_production_approval(config, prefix, _saved_approval)
+    return approval is not None and approval.current
+
+
+def _saved_approval(config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+    """A folder's saved sample file as written, without the web page's clip and proposal checks."""
+    path = config.paths.web_state_dir / f"{state_slug(prefix)}.json"
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text())
+    return payload if isinstance(payload, dict) else None
 
 
 def _format_channel_layout(channels: int) -> str:

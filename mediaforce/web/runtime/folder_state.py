@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 import tempfile
@@ -10,6 +11,11 @@ from mediaforce.core.type_defs import float_value, object_dict, object_list
 from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
 from mediaforce.tuning.quality_risk import quality_risk_public_view
 from mediaforce.web.runtime.proposal_recovery import proposal_recovery
+
+
+def state_slug(value: str) -> str:
+    """The file-name stem a folder's files take in the web state directory."""
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
 
 @dataclass(slots=True)

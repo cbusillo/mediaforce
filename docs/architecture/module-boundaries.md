@@ -360,6 +360,8 @@ Guidance:
 - `source_evidence.py` and `source_evidence_backfill.py`
   - independent source generations, output versions and immutable measurements
   - typed original-trait reads and advisory historical-plan recovery, separate from current-input evidence
+- `content_kinds.py`
+  - kinds of content: seasons grouped by number ranges of their original traits, and the read-only report
 - `media_scopes.py`
   - canonical user grouping for TV, movie, and generic media roots
   - exact-item versus descendant matching, SQL-safe boundaries, and API scope payloads

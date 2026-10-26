@@ -161,6 +161,7 @@ from mediaforce.web.checked_output_preview import (
     checked_output_stream_response,
 )
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
+from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_folders_payload, \
     dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
@@ -4084,7 +4085,7 @@ def _folder_tuning_runtime_deps() -> FolderTuningRuntimeDeps:
         review_media_context=_review_media_context,
         review_file_from_url=_review_file_from_url,
         review_url=_review_url,
-        slug=_slug,
+        slug=state_slug,
     )
 
 
@@ -4268,29 +4269,25 @@ def _state_web_dir(config: MediaforceConfig) -> Path:
     return state_dir
 
 
-def _slug(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-
-
 def _calibration_file(config: MediaforceConfig, prefix: str) -> Path:
-    return _state_web_dir(config) / f"{_slug(prefix)}.json"
+    return _state_web_dir(config) / f"{state_slug(prefix)}.json"
 
 
 def _advice_file(config: MediaforceConfig, prefix: str) -> Path:
-    return _state_web_dir(config) / f"{_slug(prefix)}.advice.json"
+    return _state_web_dir(config) / f"{state_slug(prefix)}.advice.json"
 
 
 def _proposal_file(config: MediaforceConfig, prefix: str) -> Path:
-    return _state_web_dir(config) / f"{_slug(prefix)}.proposal.json"
+    return _state_web_dir(config) / f"{state_slug(prefix)}.proposal.json"
 
 
 def _job_file(config: MediaforceConfig, prefix: str) -> Path:
-    return _state_web_dir(config) / f"{_slug(prefix)}.job.json"
+    return _state_web_dir(config) / f"{state_slug(prefix)}.job.json"
 
 
 def _scan_job_file(config: MediaforceConfig, prefix: str | None) -> Path:
     name = "full-catalog" if prefix is None else f"prefix-{prefix}"
-    return _state_web_dir(config) / f"scan-{_slug(name)}.job.json"
+    return _state_web_dir(config) / f"scan-{state_slug(name)}.job.json"
 
 
 def _scan_job_files(config: MediaforceConfig) -> tuple[Path, ...]:
