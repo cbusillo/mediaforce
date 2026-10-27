@@ -424,12 +424,26 @@ def _remake_or_keep_failed_copy(
         ),
         str(result.get("message") or ""),
     )
+    refusals = int(
+        object_dict(object_dict(json.loads(str(saved))).get("automatic_publish")).get("failure_attempts") or 0
+    ) + 1
+    # A copy already removed but not queued, or a remake refused every time, needs the owner; it never loops unseen.
+    if item_id in result.get("removed_library_item_ids", []) or refusals >= UNKNOWN_FAILURE_RETRY_LIMIT:
+        _record_wait(
+            connection,
+            item_id,
+            "failed",
+            f"Its compressed copy didn't pass its check, and Mediaforce couldn't make it again. {left_out}".strip(),
+            failure_attempts=refusals,
+        )
+        return True
     _record_wait(
         connection,
         item_id,
         REMAKING_AFTER_FAILED_CHECK,
         f"Its compressed copy didn't pass its check. Mediaforce will make it again when it can. {left_out}".strip(),
-        retry_after=time.time() + PUBLISH_RETRY_DELAY_SECONDS,
+        failure_attempts=refusals,
+        retry_after=time.time() + PUBLISH_RETRY_DELAY_SECONDS * refusals,
     )
     return True
 

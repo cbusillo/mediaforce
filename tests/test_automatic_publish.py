@@ -461,8 +461,9 @@ def test_repeated_integrity_hold_keeps_one_bounded_reason(
             .scalars()
             .all()
         )
-        assert len(events) == 1
-        reason = json.loads(events[0])["reason"]
+        # A refused remake records each try until it reaches the owner, then stops.
+        assert len(events) == (delivery.UNKNOWN_FAILURE_RETRY_LIMIT if problem == "failed_check" else 1)
+        reason = json.loads(events[-1])["reason"]
         report = staged_integrity_report(
             connection, config, "tv/Show/Season 1", discover=False
         )
@@ -1100,3 +1101,25 @@ def test_failed_copy_waiting_to_be_made_again_does_not_wait_on_the_owner(config:
     assert state.lane != "blocked"
     [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
     assert (episode["stage"], episode["validation"], episode["owner_action"]) == ("waiting", "remaking", None)
+
+
+def test_failed_copy_whose_remake_is_always_refused_goes_to_the_owner(config: MediaforceConfig) -> None:
+    item_id, _, staged = _stage(config, "tv/Show/Season 1/broken.mkv")
+    refusals = []
+
+    def refuse(prefix: str, ids: Any) -> dict[str, Any]:
+        refusals.append(ids)
+        return _remake_refused(prefix, ids)
+
+    with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
+        for attempt in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 2):
+            later = attempt * delivery.PUBLISH_RETRY_DELAY_SECONDS * (delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1)
+            with patch.object(delivery.time, "time", return_value=later):
+                delivery.publish_checked_files_once(
+                    config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=refuse
+                )
+
+    assert len(refusals) == delivery.UNKNOWN_FAILURE_RETRY_LIMIT
+    assert staged.exists()
+    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    assert (episode["stage"], episode["validation"]) == ("needs_you", "failed")
