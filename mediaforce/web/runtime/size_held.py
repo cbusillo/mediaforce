@@ -158,7 +158,9 @@ def remake_staged_files(
                     continue
                 intent = remake_intent(row)
                 if intent.get("state") != "removed" and (reason := staged_output_cleanup_blocker(connection, config, row)):
-                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
+                    # Something still owns the copy's paths; that clears once its work ends.
+                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
+                                     "busy": True})
                     continue
                 if not intent or requested_copy_is_present(row):
                     run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
