@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -60,15 +61,22 @@ def paths_overlap(left: Path, right: Path) -> bool:
 
 
 @contextmanager
-def runtime_activity(support_dir: Path, *, cleanup: bool = False) -> Iterator[bool]:
+def runtime_activity(support_dir: Path, *, cleanup: bool = False, wait_seconds: float = 0) -> Iterator[bool]:
+    """Holds the deploy lock: shared for cleanup, exclusive for a deploy. Waits up to `wait_seconds` for a holder to
+    finish, then yields False."""
     runtime = support_dir / "runtime"
     runtime.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + wait_seconds
     with (runtime / "deploy.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, (fcntl.LOCK_SH if cleanup else fcntl.LOCK_EX) | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-            return
+        while True:
+            try:
+                fcntl.flock(lock, (fcntl.LOCK_SH if cleanup else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    yield False
+                    return
+                time.sleep(0.5)
         try:
             yield True
         finally:
