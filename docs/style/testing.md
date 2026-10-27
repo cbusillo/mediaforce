@@ -35,11 +35,6 @@ must not assert or depend on.
 - Keep test doubles and fixtures typed enough to stay inspection- and Ruff-clean
 - Prefer real reusable helpers over repeated ad hoc setup in each test
 
-Inspection preparation uses Python tests with pinned UV, npm and Node stubs for
-orchestration, profile byte preservation and dependency-cache invalidation.
-The existing Vitest lane exercises the actual JavaScript module normalization
-and manifest digest, including its CLI, using temporary inputs.
-
 Development launcher behavior tests use temporary checkouts and pipe-owned
 server fixtures. The fixtures expose native PGIDs through a pinned process
 inventory command and close their lifetime pipe for independent teardown.
