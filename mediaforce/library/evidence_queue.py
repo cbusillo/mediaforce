@@ -1,5 +1,8 @@
 import json
+import os
+import socket
 import uuid
+from collections.abc import Collection
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Sequence
@@ -709,6 +712,7 @@ def claim_next_evidence_work(
         worker_id: str,
         lease_seconds: int,
         now: datetime | None = None,
+        excluded_media_roots: Collection[str] = (),
 ) -> EvidenceWorkClaim | None:
     current = now or datetime.now(UTC)
     now_iso = current.isoformat(timespec="seconds")
@@ -735,7 +739,15 @@ def claim_next_evidence_work(
             return None
         # A check queued before its file was kept original would only measure what no one will encode.
         _release_kept_motion_work(connection, batch_id=batch_id, updated_at=now_iso)
-        candidate = connection.execute(next_evidence_work_query(batch_id, now_iso)).mappings().fetchone()
+        candidate_query = next_evidence_work_query(batch_id, now_iso)
+        if excluded_media_roots:
+            unavailable_items = select(library_items.c.id).where(library_items.c.media_root.in_(excluded_media_roots))
+            candidate_query = candidate_query.where(or_(
+                library_item_evidence_state.c.library_item_id.not_in(unavailable_items),
+                (library_item_evidence_state.c.state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED)
+                & (func.coalesce(library_item_evidence_state.c.work_reason, "") != EVIDENCE_WORK_REASON_ORIGINAL_SOURCE),
+            ))
+        candidate = connection.execute(candidate_query).mappings().fetchone()
         if candidate is None:
             _refresh_evidence_queue_state(connection, batch_id=batch_id, updated_at=now_iso)
             connection.commit()
@@ -989,10 +1001,16 @@ def recover_evidence_queue(
         library_item_evidence_state.c.work_status == "running",
     ]
     if not reclaim_all_running:
+        abandoned = [
+            worker_id for worker_id in connection.execute(
+                select(library_item_evidence_state.c.worker_id).where(*conditions).distinct()
+            ).scalars() if _local_worker_exited(worker_id)
+        ]
         conditions.append(
             or_(
                 library_item_evidence_state.c.lease_expires_at.is_(None),
                 library_item_evidence_state.c.lease_expires_at <= now_iso,
+                library_item_evidence_state.c.worker_id.in_(abandoned),
             )
         )
     target_status = "cancelled" if bool(queue_state.get("cancel_requested")) else "queued"
@@ -1018,6 +1036,22 @@ def recover_evidence_queue(
     recovered_count = _rowcount(result.rowcount)
     _refresh_evidence_queue_state(connection, batch_id=batch_id, updated_at=now_iso)
     return recovered_count
+
+
+def _local_worker_exited(worker_id: str | None) -> bool:
+    parts = (worker_id or "").split(":", 2)
+    if len(parts) != 3 or parts[0] != socket.gethostname() or not parts[1].isdigit() or not parts[2]:
+        return False
+    pid = int(parts[1])
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (OSError, OverflowError):
+        return False
+    return False
 
 
 def current_library_item_source_fingerprint(

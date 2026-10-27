@@ -5,7 +5,7 @@ import socket
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -88,6 +88,17 @@ def process_evidence_queue_once(
         config: MediaforceConfig | None = None,
         deps: EvidenceWorkerDeps | None = None,
 ) -> bool:
+    claim, _outcome = _process_evidence_claim_once(config_path=config_path, config=config, deps=deps)
+    return claim is not None
+
+
+def _process_evidence_claim_once(
+        *,
+        config_path: Path,
+        config: MediaforceConfig | None = None,
+        deps: EvidenceWorkerDeps | None = None,
+        excluded_media_roots: Collection[str] = (),
+) -> tuple[EvidenceWorkClaim | None, Literal["waiting_host"] | None]:
     runtime_deps = deps or default_evidence_worker_deps()
     current_config = config or runtime_deps.load_config(config_path)
     worker_id = _evidence_worker_id()
@@ -97,15 +108,16 @@ def process_evidence_queue_once(
             connection,
             worker_id=worker_id,
             lease_seconds=runtime_deps.lease_seconds,
+            excluded_media_roots=excluded_media_roots,
         )
     if claim is None:
-        return False
-    _run_evidence_claim(
+        return None, None
+    outcome = _run_evidence_claim(
         config=current_config,
         claim=claim,
         deps=runtime_deps,
     )
-    return True
+    return claim, outcome
 
 
 def run_evidence_queue_until_blocked(
@@ -126,6 +138,7 @@ def run_evidence_queue_until_blocked(
         runtime_deps = replace(runtime_deps, shutdown_event=stop_event)
     current_config = config or runtime_deps.load_config(config_path)
     processed = 0
+    unavailable_roots: set[str] = set()
     started_at = time.monotonic()
     stop_reason = "blocked"
     stop_requested = stop_event.is_set if stop_event is not None else lambda: False
@@ -139,14 +152,18 @@ def run_evidence_queue_until_blocked(
                 stop_reason = "time_budget"
                 break
             runtime_deps = replace(runtime_deps, prepare_next_original=prefetch.start if processed + 1 < max_work_items else None)
-            if not process_evidence_queue_once(
+            claim, outcome = _process_evidence_claim_once(
                 config_path=config_path,
                 config=current_config,
                 deps=runtime_deps,
-            ):
+                excluded_media_roots=unavailable_roots,
+            )
+            if claim is None:
                 break
             prefetch.wait()
             processed += 1
+            if outcome == "waiting_host":
+                unavailable_roots.add(claim.media_root)
             if processed >= max_work_items:
                 stop_reason = "item_budget"
     with open_db(current_config.paths.db_path) as connection:
@@ -161,7 +178,7 @@ def _run_evidence_claim(
         config: MediaforceConfig,
         claim: EvidenceWorkClaim,
         deps: EvidenceWorkerDeps,
-) -> None:
+) -> Literal["waiting_host"] | None:
     with open_db(config.paths.db_path) as connection:
         active_claim = _reload_owned_claim(connection, claim)
     if active_claim is None:
@@ -206,6 +223,15 @@ def _run_evidence_claim(
     heartbeat = _ClaimHeartbeat(config=config, claim=claim, process_controller=process_controller, deps=deps)
     attempt_started = False
     try:
+        try:
+            analysis_target = _analysis_target(config, claim, source_path, deps, process_controller)
+        except RemoteMediaHostUnavailableError:
+            analysis_target = None
+        _throw_if_preparation_cancelled(config, claim, process_controller)
+        if analysis_target is None:
+            heartbeat.stop()
+            _defer_for_encode_computer(config, claim, deps, restore_attempt=attempt_started)
+            return "waiting_host"
         if original_work:
             from mediaforce.library.source_intake import assess_source_input
             from mediaforce.library.evidence_queue import EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, queue_decision_evidence_work
@@ -252,15 +278,6 @@ def _run_evidence_claim(
             if evidence.availability != "available" or (evidence.traits[claim.evidence_kind].tier == "probable" and claim.evidence_state == EVIDENCE_STATE_CURRENT):
                 _finish_claim(config, claim, work_status="completed", reset_attempt_state=True)
                 return
-        try:
-            analysis_target = _analysis_target(config, claim, source_path, deps, process_controller)
-        except RemoteMediaHostUnavailableError:
-            analysis_target = None
-        _throw_if_preparation_cancelled(config, claim, process_controller)
-        if analysis_target is None:
-            heartbeat.stop()
-            _defer_for_encode_computer(config, claim, deps, restore_attempt=attempt_started)
-            return
         if not attempt_started:
             with open_db(config.paths.db_path) as connection:
                 active_claim = mark_evidence_attempt_started(connection, claim)
@@ -326,7 +343,7 @@ def _run_evidence_claim(
     except RemoteMediaHostUnavailableError:
         heartbeat.stop()
         _defer_for_encode_computer(config, claim, deps, restore_attempt=attempt_started)
-        return
+        return "waiting_host"
     except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError, SQLAlchemyError) as exc:
         heartbeat.stop()
         source_availability, _current_fingerprint = _source_fingerprint(config, claim, source_path)

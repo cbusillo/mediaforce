@@ -5,15 +5,16 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
-from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.library.background_work import list_evidence_backlog, load_background_work_state, \
     summarize_evidence_inventory
 from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EVIDENCE_QUEUE_ACTIVE_STATUSES, \
-    evidence_queue_summary, runnable_evidence_work_count, evidence_queue_allows_preparation
+    evidence_queue_summary, recover_evidence_queue, runnable_evidence_work_count, evidence_queue_allows_preparation
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps, run_evidence_queue_until_blocked
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.metadata_sync import metadata_configuration_status
@@ -33,7 +34,6 @@ class BoundedEvidenceRunner:
         self._thread: threading.Thread | None = None
 
     def prepare_background_work(self) -> int:
-        from mediaforce.core.config import load_config
         from mediaforce.library.source_intake import queue_original_intake
 
         config = self._deps.load_config(self._config_path) if self._deps else load_config(self._config_path)
@@ -78,12 +78,25 @@ class BoundedEvidenceRunner:
     def _run(self, *, max_work_items: int) -> None:
         current_thread = threading.current_thread()
         try:
-            run_evidence_queue_until_blocked(
-                config_path=self._config_path,
-                deps=self._deps,
-                max_work_items=max_work_items,
-                stop_event=self._stop_event,
-            )
+            while self._stop_event is None or not self._stop_event.is_set():
+                result = run_evidence_queue_until_blocked(
+                    config_path=self._config_path,
+                    deps=self._deps,
+                    max_work_items=max_work_items,
+                    stop_event=self._stop_event,
+                )
+                if (not result or result["stop_reason"] != "item_budget"
+                        or (self._stop_event is not None and self._stop_event.is_set())):
+                    break
+
+                config = self._deps.load_config(self._config_path) if self._deps else load_config(self._config_path)
+                with open_db(config.paths.db_path) as connection:
+                    if runnable_evidence_work_count(connection) <= 0:
+                        break
+                try:
+                    self.prepare_background_work()
+                except (OSError, RuntimeError, ValueError, SQLAlchemyError):
+                    LOGGER.exception("Original discovery failed; continuing the prepared analysis")
         except Exception:
             LOGGER.exception("Bounded evidence work failed")
         finally:
@@ -101,6 +114,7 @@ def start_ready_evidence_work(db_path: Path, runner: BoundedEvidenceRunner) -> b
     except Exception:
         LOGGER.exception("Original discovery failed; queued analysis can still start")
     with open_db(db_path) as connection:
+        recover_evidence_queue(connection)
         runnable = runnable_evidence_work_count(connection)
     if runnable <= 0:
         return False

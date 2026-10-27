@@ -3,6 +3,7 @@ import os
 import tempfile
 import threading
 import unittest
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -17,6 +18,7 @@ from mediaforce.library.background_work import set_background_work_paused
 from mediaforce.library.evidence_queue import EvidenceQueueConflict, claim_next_evidence_work, resume_evidence_queue, \
     start_evidence_work
 from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
+from mediaforce.library.evidence_worker import EvidenceWorkerDeps
 from mediaforce.library.scanner import ScanStats
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import job_runtime as job_runtime_module
@@ -1156,6 +1158,51 @@ class OperatorWorkTests(unittest.TestCase):
 
         self.assertEqual(exit_codes, [web_app.SCAN_FORCED_SHUTDOWN_EXIT_CODE])
         self.assertIn("stuck-scan", captured.output[0])
+
+    def test_autostart_waits_for_first_computer_check_before_claiming(self) -> None:
+        events: list[str] = []
+
+        def loop(*, process_once_fn: Callable[[], None], **_kwargs: object) -> None:
+            process_once_fn()
+            process_once_fn()
+
+        with patch("mediaforce.web.app._refresh_host_status_cache", side_effect=lambda _config: events.append("checked")), patch(
+            "mediaforce.web.app.start_ready_evidence_work", side_effect=lambda *_args: events.append("start")
+        ), patch("mediaforce.web.app.run_supervised_worker_loop", side_effect=loop):
+            web_app._evidence_autostart_worker_loop(config=self.config, runner=Mock(), stop_event=threading.Event())
+        self.assertEqual(events, ["checked", "start", "start"])
+
+    def test_shutdown_during_first_computer_check_does_not_start_work(self) -> None:
+        stop = threading.Event()
+
+        def loop(*, process_once_fn: Callable[[], None], **_kwargs: object) -> None:
+            process_once_fn()
+
+        with patch("mediaforce.web.app._refresh_host_status_cache", side_effect=lambda _config: stop.set()), patch(
+            "mediaforce.web.app.start_ready_evidence_work"
+        ) as start, patch("mediaforce.web.app.run_supervised_worker_loop", side_effect=loop):
+            web_app._evidence_autostart_worker_loop(config=self.config, runner=Mock(), stop_event=stop)
+        start.assert_not_called()
+
+    def test_runner_continues_a_ready_batch_without_waiting_for_autostart(self) -> None:
+        runner = BoundedEvidenceRunner(self.config.paths.config_path, deps=EvidenceWorkerDeps(load_config=lambda _path: self.config, analyze_evidence=Mock(), logger=Mock()))
+        runner.prepare_background_work = Mock(return_value=0)
+        with patch("mediaforce.web.runtime.operator_work.run_evidence_queue_until_blocked",
+                   side_effect=[{"stop_reason": "item_budget"}, {"stop_reason": "blocked"}]) as run, patch("mediaforce.web.runtime.operator_work.runnable_evidence_work_count", return_value=7):
+            runner._run(max_work_items=5)
+        self.assertEqual(run.call_count, 2)
+        runner.prepare_background_work.assert_called_once()
+
+    def test_runner_does_not_restart_after_pause_completion_or_shutdown(self) -> None:
+        for reason in ("blocked", "shutdown", "time_budget"):
+            with self.subTest(reason=reason):
+                runner = BoundedEvidenceRunner(self.config.paths.config_path)
+                runner.prepare_background_work = Mock()
+                with patch("mediaforce.web.runtime.operator_work.run_evidence_queue_until_blocked",
+                           return_value={"stop_reason": reason}) as run:
+                    runner._run(max_work_items=5)
+                self.assertEqual(run.call_count, 1)
+                runner.prepare_background_work.assert_not_called()
 
     def test_bounded_runner_rejects_duplicate_process_local_start(self) -> None:
         started = threading.Event()

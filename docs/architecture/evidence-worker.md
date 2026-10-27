@@ -218,8 +218,17 @@ computer, never on the controller:
 - Unavailable roots move to `waiting_source` without consuming an attempt.
 - Tool, corrupt-media, timeout, and parse failures use exponential backoff and
   stop after three attempts by default.
-- Expired leases are reclaimed on the next worker pass (CLI or autostart). A live lease
-  is never stolen merely because another scheduler starts.
+- Expired leases are reclaimed on the next worker pass (CLI or autostart).
+  Autostart also recovers before counting ready work. An unexpired lease is
+  reclaimed only when its owner names this controller and its PID is positively
+  gone; active, foreign and unknown owners keep their leases.
+- The background runner continues immediately after reaching a chunk budget
+  when prepared work remains runnable. It stops on a blocked queue, pause,
+  cancellation or shutdown, and discovers new inputs between continued chunks.
+- Autostart completes the first computer-status check in its background thread
+  before claiming work. Missing computers defer one file per library per pass;
+  other libraries and stored-result reclassification can still continue.
+  Original admission starts only after a measuring computer is selected.
 - Pause prevents new claims but does not interrupt the active safe unit.
 - The global background-work pause prevents new catalog scans, batch creation,
   queue resumes, and evidence claims. A scan or evidence update already running

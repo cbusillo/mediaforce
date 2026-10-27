@@ -146,6 +146,24 @@ def test_outputs_never_become_probable(connection: DBClient, tmp_path: Path, pro
     assert {trait.tier for trait in load_source_evidence(connection, item_id).traits.values()} == {"unknown"}
 
 
+def test_no_computer_waits_before_reading_an_original_digest(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    _discover(config)
+    with patch("mediaforce.library.evidence_worker._analysis_target", return_value=None), patch(
+        "mediaforce.library.source_intake._probe_payload"
+    ) as probe:
+        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config,
+            deps=EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock()))
+    with open_db(config.paths.db_path) as db:
+        state = db.execute(select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == item_id)).mappings().one()
+        assert state["work_status"] == "waiting_host"
+        assert state["attempt_count"] == 0
+        assert db.execute(select(source_admissions)).first() is None
+    probe.assert_not_called()
+
+
 def test_original_assessment_is_final_and_measurements_use_one_queue(tmp_path: Path) -> None:
     config = _config(tmp_path)
     item_id, _path = _source(config)

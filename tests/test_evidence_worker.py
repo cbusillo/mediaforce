@@ -8,6 +8,7 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
 from sqlalchemy import select, update
@@ -20,12 +21,12 @@ from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence, reclassify_cadence_summary, \
     unavailable_cadence_summary
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, analyze_media_fingerprint
-from mediaforce.library.evidence_queue import cancel_evidence_queue, claim_next_evidence_work, \
+from mediaforce.library.evidence_queue import EvidenceWorkClaim, cancel_evidence_queue, claim_next_evidence_work, \
     evidence_queue_summary, mark_evidence_attempt_started, pause_evidence_queue, recover_evidence_queue, \
     queue_decision_evidence_work, resume_evidence_queue, start_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, \
     load_library_item_evidence_states, rebuild_library_item_evidence_states, sync_library_item_evidence_state
-from mediaforce.library.evidence_worker import EvidenceWorkerDeps, process_evidence_queue_once
+from mediaforce.library.evidence_worker import EvidenceWorkerDeps, process_evidence_queue_once, run_evidence_queue_until_blocked
 from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker, cadence_queue_partition, \
     cadence_safety_partition
 from mediaforce.web.runtime.operator_work import start_ready_evidence_work
@@ -575,6 +576,62 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertIsNotNone(claim)
         self.assertEqual(live_recovery, 0)
         self.assertEqual(expired_recovery, 1)
+
+    def test_unavailable_library_does_not_consume_a_batch_or_hold_other_libraries(self) -> None:
+        first, _ = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+        second, _ = self._insert_item(2, cadence_summary_json=None, media_fingerprint_json=None)
+        available, _ = self._insert_item(3, cadence_summary_json=None, media_fingerprint_json=None)
+        self.config.raw["media"]["libraries"].append(
+            {"key": "movies", "path": str(self.media_root), "type": "movies", "availability": "production"}
+        )
+        with open_db(self.config.paths.db_path) as db:
+            start_evidence_work(db, self.config, "tv/show", evidence_kinds=[CADENCE_EVIDENCE_KIND])
+            resume_evidence_queue(db)
+            db.execute(update(library_items).where(library_items.c.id == available).values(media_root="movies"))
+        analyzer = Mock(return_value=json.loads(self._cadence_summary_json()))
+
+        def target(_config: MediaforceConfig, claim: EvidenceWorkClaim, path: Path, *_args: object) -> SimpleNamespace | None:
+            return SimpleNamespace(source_path=path, command_runner=None) if claim.media_root == "movies" else None
+
+        with patch("mediaforce.library.evidence_worker._analysis_target", side_effect=target):
+            result = run_evidence_queue_until_blocked(config_path=self.config.paths.config_path,
+                config=self.config, deps=self._deps(analyzer), max_work_items=25)
+        with open_db(self.config.paths.db_path) as db:
+            states = {row["library_item_id"]: row for row in db.execute(
+                select(library_item_evidence_state).where(library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND)
+            ).mappings()}
+        self.assertEqual(result["processed_count"], 2)
+        self.assertEqual(states[first]["work_status"], "waiting_host")
+        self.assertEqual(states[second]["work_status"], "queued")
+        self.assertEqual(states[second]["attempt_count"], 0)
+        self.assertEqual(states[available]["work_status"], "completed")
+        analyzer.assert_called_once()
+
+    def test_restart_reclaims_only_a_positively_dead_local_owner(self) -> None:
+        self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+        now = datetime.now(UTC)
+        for owner, error, expected in (("local:431:old-thread", ProcessLookupError(), 1),
+                                       ("local:431:old-thread", None, 0),
+                                       ("local:431:old-thread", PermissionError(), 0),
+                                       ("elsewhere:431:old-thread", ProcessLookupError(), 0),
+                                       ("local:invalid:old-thread", ProcessLookupError(), 0),
+                                       ("local:0:old-thread", ProcessLookupError(), 0)):
+            with self.subTest(owner=owner, error=error):
+                with open_db(self.config.paths.db_path) as db:
+                    start_evidence_work(db, self.config, "tv/show/item-1.mkv", evidence_kinds=[CADENCE_EVIDENCE_KIND])
+                    resume_evidence_queue(db)
+                with open_db(self.config.paths.db_path) as db:
+                    claim = claim_next_evidence_work(db, worker_id=owner, lease_seconds=300, now=now)
+                self.assertIsNotNone(claim)
+                with patch("mediaforce.library.evidence_queue.socket.gethostname", return_value="local"), patch(
+                    "mediaforce.library.evidence_queue.os.kill", side_effect=error
+                ) as probe, open_db(self.config.paths.db_path) as db:
+                    recovered = recover_evidence_queue(db, now=now + timedelta(seconds=1))
+                    self.assertEqual(recovered, expected)
+                    if not owner.startswith("local:431:"):
+                        probe.assert_not_called()
+                    recover_evidence_queue(db, reclaim_all_running=True)
+                    cancel_evidence_queue(db)
 
     def test_classification_only_work_is_claimed_before_media_analysis(self) -> None:
         analysis_item_id, _path = self._insert_item(
