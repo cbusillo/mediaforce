@@ -75,7 +75,7 @@ def probe_media(
         *,
         process_controller: ManagedProcessController | None = None,
 ) -> ProbeSummary:
-    payload = _probe_payload(path, process_controller=process_controller)
+    payload = probe_evidence_source(path, process_controller=process_controller)
     streams = [object_dict(stream) for stream in object_list(payload.get("streams"))]
     format_info = object_dict(payload.get("format"))
     video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
@@ -126,9 +126,11 @@ def probe_evidence(
         process_controller: ManagedProcessController | None = None,
         command_runner: "RemoteMediaCommands | None" = None,
         hardware_decoding: bool = True,
+        probe_payload: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Measure one kind of evidence; with a command runner, every command runs on that encode computer."""
-    payload = _probe_payload(path, process_controller=process_controller, command_runner=command_runner)
+    payload = probe_payload if probe_payload is not None else probe_evidence_source(
+        path, process_controller=process_controller, command_runner=command_runner)
     streams = [object_dict(stream) for stream in object_list(payload.get("streams"))]
     format_info = object_dict(payload.get("format"))
     video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
@@ -155,7 +157,7 @@ def probe_evidence(
     raise ValueError(f"Unsupported evidence kind: {evidence_kind}")
 
 
-def _probe_payload(
+def probe_evidence_source(
         path: Path,
         *,
         process_controller: ManagedProcessController | None,

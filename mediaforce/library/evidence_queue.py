@@ -558,7 +558,8 @@ def original_intake_hold(
         return "cancelled"
     if background_work_is_paused(connection) or state["is_paused"]:
         return "paused"
-    if connection.execute(next_evidence_work_query(batch_id, timestamp(), excluded_media_roots=excluded_media_roots).where(
+    if connection.execute(next_evidence_work_query(batch_id, timestamp(), excluded_media_roots=excluded_media_roots,
+                                                  include_running_items=True).where(
         library_item_evidence_state.c.work_priority < priority,
     )).first() is not None:
         return "higher_priority"
@@ -688,7 +689,8 @@ def cancel_evidence_queue(connection: DBClient, *, updated_at: str | None = None
     return evidence_queue_summary(connection)
 
 
-def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_roots: Collection[str] = ()) -> Any:
+def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_roots: Collection[str] = (),
+                             allowed_running_item: int | None = None, include_running_items: bool = False) -> Any:
     query = (
         select(library_item_evidence_state.c.library_item_id, library_item_evidence_state.c.evidence_kind)
         .where(
@@ -710,6 +712,12 @@ def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_root
     source_waiting_items = select(library_items.c.id).where(
         library_items.c.media_root.in_(_waiting_roots_query(batch_id, now_iso, "waiting_source"))
     )
+    if not include_running_items:
+        running = library_item_evidence_state.alias("running_items")
+        running_items = select(running.c.library_item_id).where(running.c.work_status == "running")
+        if allowed_running_item is not None:
+            running_items = running_items.where(running.c.library_item_id != allowed_running_item)
+        query = query.where(library_item_evidence_state.c.library_item_id.not_in(running_items))
     return query.where(
         or_(library_item_evidence_state.c.library_item_id.not_in(blocked_items), ~_evidence_requires_computer()),
         or_(~_evidence_requires_source(), library_item_evidence_state.c.library_item_id.not_in(source_waiting_items)),
@@ -824,26 +832,8 @@ def claim_next_evidence_work(
             _refresh_evidence_queue_state(connection, batch_id=batch_id, updated_at=now_iso)
             connection.commit()
             return None
-        update_result = connection.execute(
-            update(library_item_evidence_state)
-            .where(
-                library_item_evidence_state.c.library_item_id == int(candidate["library_item_id"]),
-                library_item_evidence_state.c.evidence_kind == str(candidate["evidence_kind"]),
-                library_item_evidence_state.c.work_batch_id == batch_id,
-                library_item_evidence_state.c.work_status.in_(EVIDENCE_WORK_CLAIMABLE_STATUSES),
-            )
-            .values(
-                work_status="running",
-                leased_at=now_iso,
-                lease_expires_at=lease_expires_at,
-                heartbeat_at=now_iso,
-                worker_id=worker_id,
-                process_pid=None,
-                retry_not_before=None,
-                updated_at=now_iso,
-            )
-        )
-        if _rowcount(update_result.rowcount) != 1:
+        if not _lease_evidence_row(connection, int(candidate["library_item_id"]), str(candidate["evidence_kind"]),
+                                   batch_id, worker_id, now_iso, lease_expires_at):
             connection.rollback()
             return None
         connection.execute(
@@ -864,6 +854,80 @@ def claim_next_evidence_work(
         connection.rollback()
         raise
     return claim
+
+
+def _lease_evidence_row(connection: DBClient, item_id: int, kind: str, batch_id: str,
+                        worker_id: str, now_iso: str, lease_expires_at: str) -> bool:
+    update_result = connection.execute(
+        update(library_item_evidence_state)
+        .where(
+            library_item_evidence_state.c.library_item_id == item_id,
+            library_item_evidence_state.c.evidence_kind == kind,
+            library_item_evidence_state.c.work_batch_id == batch_id,
+            library_item_evidence_state.c.work_status.in_(EVIDENCE_WORK_CLAIMABLE_STATUSES),
+        )
+        .values(
+            work_status="running",
+            leased_at=now_iso,
+            lease_expires_at=lease_expires_at,
+            heartbeat_at=now_iso,
+            worker_id=worker_id,
+            process_pid=None,
+            retry_not_before=None,
+            updated_at=now_iso,
+        )
+    )
+    return _rowcount(update_result.rowcount) == 1
+
+
+def extend_evidence_claim(
+        connection: DBClient,
+        claim: EvidenceWorkClaim,
+        *,
+        lease_seconds: int,
+        excluded_media_roots: Collection[str] = (),
+) -> EvidenceWorkClaim | None:
+    now = datetime.now(UTC)
+    now_iso = now.isoformat(timespec="seconds")
+    connection.commit()
+    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    try:
+        owned = connection.execute(select(library_item_evidence_state.c.library_item_id).where(
+            *_claim_owner_filter(claim), library_item_evidence_state.c.lease_expires_at > now_iso,
+        )).first()
+        if owned is None or _claimable_batch_id(connection) != claim.batch_id:
+            connection.rollback()
+            return None
+        _mark_unavailable_evidence_work(connection, claim.batch_id, now_iso, excluded_media_roots)
+        _release_kept_motion_work(connection, batch_id=claim.batch_id, updated_at=now_iso)
+        candidate = connection.execute(next_evidence_work_query(
+            claim.batch_id, now_iso, excluded_media_roots=excluded_media_roots,
+            allowed_running_item=claim.library_item_id,
+        )).mappings().first()
+        if candidate is None or int(candidate["library_item_id"]) != claim.library_item_id:
+            connection.commit()
+            return None
+        kind = str(candidate["evidence_kind"])
+        row = connection.execute(select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == claim.library_item_id,
+            library_item_evidence_state.c.evidence_kind == kind,
+        )).mappings().one()
+        original = row["work_reason"] == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
+        if (row["work_source_fingerprint"] != claim.expected_source_fingerprint
+                or original != (claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE)
+                or (not original and row["state"] != EVIDENCE_STATE_ANALYSIS_REQUIRED)):
+            connection.commit()
+            return None
+        if not _lease_evidence_row(connection, claim.library_item_id, kind, claim.batch_id, claim.worker_id,
+                                  now_iso, (now + timedelta(seconds=max(1, lease_seconds))).isoformat(timespec="seconds")):
+            connection.rollback()
+            return None
+        companion = load_evidence_work_claim(connection, library_item_id=claim.library_item_id, evidence_kind=kind)
+        connection.commit()
+        return companion
+    except BaseException:
+        connection.rollback()
+        raise
 
 
 def load_evidence_work_claim(

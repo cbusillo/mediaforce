@@ -26,13 +26,13 @@ from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaCon
 from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, \
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host, unmeasurable_evidence_roots
 from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, SOURCE_ROOT_WAIT_REASON, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
-    current_library_item_source_fingerprint, evidence_queue_summary, heartbeat_evidence_work, \
+    current_library_item_source_fingerprint, evidence_queue_summary, extend_evidence_claim, heartbeat_evidence_work, \
     load_evidence_queue_state, load_evidence_work_claim, mark_evidence_attempt_started, original_intake_hold, recover_evidence_queue, \
     transition_evidence_work, waiting_evidence_host_roots
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, parse_evidence_summary, \
     sync_library_item_evidence_state
-from mediaforce.library.probe import probe_evidence
+from mediaforce.library.probe import probe_evidence, probe_evidence_source
 from mediaforce.library.source_evidence import load_source_evidence, observe_file, pending_source_operation, record_current_measurement
 from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher
 
@@ -67,6 +67,7 @@ class EvidenceWorkerDeps:
     shutdown_event: threading.Event | None = None
     prepare_next_original: Callable[[MediaforceConfig, EvidenceWorkClaim], None] | None = None
     remote_commands: Callable[[dict[str, object]], RemoteMediaCommands] | None = None
+    read_probe: Callable[..., dict[str, object]] = probe_evidence_source
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +90,10 @@ def process_evidence_queue_once(
         config: MediaforceConfig | None = None,
         deps: EvidenceWorkerDeps | None = None,
         excluded_media_roots: Collection[str] | None = None,
-) -> bool:
+        max_work_items: int | None = 1,
+) -> int:
+    if max_work_items is not None and max_work_items <= 0:
+        raise ValueError("Evidence worker item budget must be greater than zero.")
     runtime_deps = deps or default_evidence_worker_deps()
     current_config = config or runtime_deps.load_config(config_path)
     roots = excluded_media_roots if excluded_media_roots is not None else _unmeasurable_roots(current_config, runtime_deps)
@@ -103,14 +107,14 @@ def process_evidence_queue_once(
             excluded_media_roots=roots,
         )
     if claim is None:
-        return False
-    _run_evidence_claim(
+        return 0
+    return _run_evidence_claim(
         config=current_config,
         claim=claim,
         deps=runtime_deps,
         excluded_media_roots=roots,
+        max_work_items=max_work_items,
     )
-    return True
 
 
 def run_evidence_queue_until_blocked(
@@ -131,7 +135,7 @@ def run_evidence_queue_until_blocked(
         runtime_deps = replace(runtime_deps, shutdown_event=stop_event)
     current_config = config or runtime_deps.load_config(config_path)
     processed = 0
-    progress_since_discovery = False
+    progress_since_discovery = 0
     started_at = time.monotonic()
     stop_reason = "blocked"
     stop_requested = stop_event.is_set if stop_event is not None else lambda: False
@@ -154,19 +158,21 @@ def run_evidence_queue_until_blocked(
             runtime_deps = replace(runtime_deps, remote_commands=runtime_deps.remote_commands or connections.runner, prepare_next_original=(
                 prepare_next if max_work_items is None or processed + 1 < max_work_items else None
             ))
-            if not process_evidence_queue_once(config_path=config_path, config=current_config,
-                                              deps=runtime_deps, excluded_media_roots=roots):
+            completed = process_evidence_queue_once(config_path=config_path, config=current_config,
+                deps=runtime_deps, excluded_media_roots=roots,
+                max_work_items=None if max_work_items is None else max_work_items - processed)
+            if not completed:
                 if max_work_items is None and progress_since_discovery and not stop_requested():
-                    progress_since_discovery = False
+                    progress_since_discovery = 0
                     if _discover_originals(current_config, runtime_deps):
                         continue
                 break
             prefetch.wait()
-            processed += 1
-            progress_since_discovery = True
-            if max_work_items is None and processed % DEFAULT_EVIDENCE_BATCH_LIMIT == 0 and not stop_requested():
+            processed += completed
+            progress_since_discovery += completed
+            if max_work_items is None and progress_since_discovery >= DEFAULT_EVIDENCE_BATCH_LIMIT and not stop_requested():
                 _discover_originals(current_config, runtime_deps)
-                progress_since_discovery = False
+                progress_since_discovery = 0
             if max_work_items is not None and processed >= max_work_items:
                 stop_reason = "item_budget"
     with open_db(current_config.paths.db_path) as connection:
@@ -204,11 +210,12 @@ def _run_evidence_claim(
         claim: EvidenceWorkClaim,
         deps: EvidenceWorkerDeps,
         excluded_media_roots: Collection[str] = (),
-) -> None:
+        max_work_items: int | None = 1,
+) -> int:
     with open_db(config.paths.db_path) as connection:
         active_claim = _reload_owned_claim(connection, claim)
     if active_claim is None:
-        return
+        return 1
     claim = active_claim
     original_work = claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
     if claim.evidence_state == EVIDENCE_STATE_CURRENT and not original_work:
@@ -218,16 +225,16 @@ def _run_evidence_claim(
             work_status="completed",
             reset_attempt_state=True,
         )
-        return
+        return 1
     if claim.evidence_state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED and not original_work:
         _run_classification_claim(config, claim)
-        return
+        return 1
 
     source_path = Path(claim.source_path)
     source_availability, actual_fingerprint = _source_fingerprint(config, claim, source_path)
     if source_availability == "root_unavailable":
         _defer_unavailable_source(config, claim, deps, restore_attempt=False)
-        return
+        return 1
     if source_availability == "source_unavailable":
         _finish_claim(
             config,
@@ -235,7 +242,7 @@ def _run_evidence_claim(
             work_status="failed",
             last_error="Source file is unavailable; run a scan before starting new evidence work.",
         )
-        return
+        return 1
     if actual_fingerprint != claim.expected_source_fingerprint:
         _finish_claim(
             config,
@@ -243,11 +250,18 @@ def _run_evidence_claim(
             work_status="failed",
             last_error="Source changed since the catalog snapshot; run a scan before retrying evidence work.",
         )
-        return
+        return 1
 
     process_controller = ManagedProcessController()
-    heartbeat = _ClaimHeartbeat(config=config, claim=claim, process_controller=process_controller, deps=deps)
-    attempt_started = False
+    claims = [claim]
+    started: set[str] = set()
+    heartbeats = [_ClaimHeartbeat(config=config, claim=claim, process_controller=process_controller, deps=deps)]
+    shared_probe_started = False
+
+    def stop_heartbeats() -> None:
+        for heartbeat in heartbeats:
+            heartbeat.stop()
+
     try:
         if original_work:
             from mediaforce.library.source_intake import assess_source_input
@@ -256,9 +270,10 @@ def _run_evidence_claim(
             with open_db(config.paths.db_path) as connection:
                 active_claim = mark_evidence_attempt_started(connection, claim)
             if active_claim is None:
-                return
+                return 1
             claim = active_claim
-            attempt_started = True
+            claims[0] = claim
+            started.add(claim.evidence_kind)
             last_guard_check = 0.0
 
             def guard_intake() -> None:
@@ -294,147 +309,161 @@ def _run_evidence_claim(
                             priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, start_new_batch=True, manage_transaction=False)
             if evidence.availability != "available" or (evidence.traits[claim.evidence_kind].tier == "probable" and claim.evidence_state == EVIDENCE_STATE_CURRENT):
                 _finish_claim(config, claim, work_status="completed", reset_attempt_state=True)
-                return
-        try:
-            analysis_target = _analysis_target(config, claim, source_path, deps, process_controller)
-        except RemoteMediaHostUnavailableError:
-            analysis_target = None
+                return 1
+        analysis_target = _analysis_target(config, claim, source_path, deps, process_controller)
         _throw_if_preparation_cancelled(config, claim, process_controller)
         if analysis_target is None:
-            heartbeat.stop()
-            _defer_for_encode_computer(config, claim, deps, restore_attempt=attempt_started)
-            return
-        if not attempt_started:
+            raise RemoteMediaHostUnavailableError(EVIDENCE_HOST_WAIT_REASON)
+        if max_work_items is None or max_work_items >= 2:
             with open_db(config.paths.db_path) as connection:
-                active_claim = mark_evidence_attempt_started(connection, claim)
-            if active_claim is None:
-                return
-            claim = active_claim
-            attempt_started = True
+                companion = extend_evidence_claim(connection, claim, lease_seconds=deps.lease_seconds,
+                                                  excluded_media_roots=excluded_media_roots)
+                evidence = load_source_evidence(connection, claim.library_item_id) if companion is not None else None
+            if companion is not None:
+                if (companion.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
+                        and evidence is not None and (evidence.availability != "available"
+                        or (evidence.traits[companion.evidence_kind].tier == "probable"
+                            and companion.evidence_state == EVIDENCE_STATE_CURRENT))):
+                    _finish_claim(config, companion, work_status="queued")
+                else:
+                    claims.append(companion)
+                    heartbeats.append(_ClaimHeartbeat(config=config, claim=companion,
+                                                      process_controller=process_controller, deps=deps))
+        if claim.evidence_kind not in started:
+            with open_db(config.paths.db_path) as connection:
+                active = mark_evidence_attempt_started(connection, claim)
+            if active is None:
+                raise ProcessCancelledError("Evidence claim ownership was lost.")
+            claim = active
+            claims[0] = claim
+            started.add(claim.evidence_kind)
         remote_before = (analysis_target.command_runner.observe_source(analysis_target.source_path, process_controller=process_controller)
                          if analysis_target.command_runner else None)
-        local_before = observe_file(source_path)
-        source_matches = remote_before is None or all(local_before[key] == remote_before.get(key) for key in ("size_bytes", "sample_fingerprint"))
+        measurement_before = observe_file(source_path)
+        if remote_before is not None and any(measurement_before[key] != remote_before.get(key)
+                                            for key in ("size_bytes", "sample_fingerprint")):
+            stop_heartbeats()
+            for owned in claims:
+                _finish_claim(config, owned, work_status="failed", last_error=REMOTE_SOURCE_MISMATCH_ERROR)
+            return len(claims)
         _throw_if_preparation_cancelled(config, claim, process_controller)
-        if not source_matches:
-            heartbeat.stop()
-            _finish_claim(
-                config,
-                claim,
-                work_status="failed",
-                last_error=REMOTE_SOURCE_MISMATCH_ERROR,
-            )
-            return
-
-        process_controller.throw_if_cancelled()
-        analysis_kwargs: dict[str, Any] = (
-            {"command_runner": analysis_target.command_runner}
-            if analysis_target.command_runner is not None
-            else {}
-        )
-        if claim.evidence_kind == MEDIA_FINGERPRINT_EVIDENCE_KIND:
-            previous = parse_evidence_summary(claim.canonical_summary_json) or {}
-            if fingerprint_video_decode_timed_out(previous):
-                analysis_kwargs["hardware_decoding"] = False
-        measurement_before = local_before
-        if original_work and deps.prepare_next_original is not None:
+        kwargs: dict[str, Any] = {"process_controller": process_controller}
+        if analysis_target.command_runner is not None:
+            kwargs["command_runner"] = analysis_target.command_runner
+        summaries: dict[str, dict[str, object]] = {}
+        errors: dict[str, Exception] = {}
+        shared_probe = None
+        if original_work and deps.prepare_next_original is not None and (max_work_items is None or max_work_items > len(claims)):
             deps.prepare_next_original(config, claim)
-        summary = deps.analyze_evidence(
-            analysis_target.source_path,
-            claim.evidence_kind,
-            process_controller=process_controller,
-            **analysis_kwargs,
-        )
-        process_controller.throw_if_cancelled()
+        for owned in tuple(claims):
+            if owned != claim:
+                with open_db(config.paths.db_path) as connection:
+                    active = _reload_owned_claim(connection, owned)
+                    if active is None:
+                        raise ProcessCancelledError("Evidence claim ownership was lost.")
+                    claims[claims.index(owned)] = active
+                    owned = active
+                    hold = original_intake_hold(connection, batch_id=owned.batch_id, priority=owned.work_priority,
+                                                excluded_media_roots=excluded_media_roots)
+                if hold == "cancelled":
+                    raise ProcessCancelledError("Evidence work was cancelled.")
+                if hold in {"higher_priority", "paused"} or (deps.shutdown_event is not None and deps.shutdown_event.is_set()):
+                    heartbeats[-1].stop()
+                    _finish_claim(config, owned, work_status="queued")
+                    claims.remove(owned)
+                    continue
+            if deps.shutdown_event is not None and deps.shutdown_event.is_set():
+                raise EvidenceWorkDeferred("Original checks will resume after the app restarts")
+            if owned.evidence_kind not in started:
+                with open_db(config.paths.db_path) as connection:
+                    active = mark_evidence_attempt_started(connection, owned)
+                if active is None:
+                    raise ProcessCancelledError("Evidence claim ownership was lost.")
+                claims[claims.index(owned)] = active
+                owned = active
+                started.add(owned.evidence_kind)
+            if len(claims) > 1 and shared_probe is None:
+                shared_probe_started = True
+                shared_probe = deps.read_probe(analysis_target.source_path, **kwargs)
+            analysis_kwargs = dict(kwargs)
+            if shared_probe is not None:
+                analysis_kwargs["probe_payload"] = shared_probe
+            if owned.evidence_kind == MEDIA_FINGERPRINT_EVIDENCE_KIND:
+                if fingerprint_video_decode_timed_out(parse_evidence_summary(owned.canonical_summary_json) or {}):
+                    analysis_kwargs["hardware_decoding"] = False
+            try:
+                summaries[owned.evidence_kind] = deps.analyze_evidence(
+                    analysis_target.source_path, owned.evidence_kind, **analysis_kwargs)
+            except (ProcessCancelledError, ProcessDeadlineEnforcementError, RemoteMediaHostUnavailableError):
+                raise
+            except (OSError, RuntimeError, TypeError, ValueError, subprocess.SubprocessError, SQLAlchemyError) as exc:
+                errors[owned.evidence_kind] = exc
+            process_controller.throw_if_cancelled()
         measurement_after = observe_file(source_path)
         remote_after = (analysis_target.command_runner.observe_source(analysis_target.source_path, process_controller=process_controller)
                         if analysis_target.command_runner else None)
-        remote_source_unchanged = remote_before == remote_after
         if measurement_before != measurement_after:
             raise RuntimeError("Source changed during evidence measurement")
     except EvidenceWorkDeferred as exc:
-        heartbeat.stop()
-        _defer_claim(config, claim, deps, work_status="retry_wait", reason=str(exc), restore_attempt=attempt_started)
-        return
+        stop_heartbeats()
+        for owned in claims:
+            _defer_claim(config, owned, deps, work_status="retry_wait", reason=str(exc), restore_attempt=owned.evidence_kind in started)
+        return len(claims)
     except ProcessCancelledError:
-        heartbeat.stop()
-        _finish_claim(
-            config,
-            claim,
-            work_status="cancelled",
-            last_error="Evidence work was cancelled.",
-            restore_attempt=attempt_started,
-        )
-        return
+        stop_heartbeats()
+        for owned in claims:
+            _finish_claim(config, owned, work_status="cancelled", last_error="Evidence work was cancelled.",
+                          restore_attempt=owned.evidence_kind in started)
+        return len(claims)
     except RemoteMediaHostUnavailableError:
-        heartbeat.stop()
-        _defer_for_encode_computer(config, claim, deps, restore_attempt=attempt_started)
-        return
+        stop_heartbeats()
+        for owned in claims:
+            _defer_for_encode_computer(config, owned, deps, restore_attempt=owned.evidence_kind in started)
+        return len(claims)
     except ProcessDeadlineEnforcementError:
         raise
-    except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError, SQLAlchemyError) as exc:
-        heartbeat.stop()
+    except (OSError, RuntimeError, TypeError, ValueError, subprocess.SubprocessError, SQLAlchemyError) as exc:
+        stop_heartbeats()
         source_availability, _current_fingerprint = _source_fingerprint(config, claim, source_path)
-        if source_availability == "root_unavailable":
-            _defer_unavailable_source(config, claim, deps, restore_attempt=attempt_started)
-        elif source_availability == "source_unavailable":
-            _finish_claim(
-                config,
-                claim,
-                work_status="failed",
-                last_error="Source file became unavailable during evidence analysis; the result was discarded.",
-                restore_attempt=attempt_started,
-            )
-        else:
-            _retry_or_fail(config, claim, deps, exc)
-        return
+        for owned in claims:
+            if source_availability == "root_unavailable":
+                _defer_unavailable_source(config, owned, deps, restore_attempt=owned.evidence_kind in started)
+            elif source_availability == "source_unavailable":
+                _finish_claim(config, owned, work_status="failed",
+                    last_error="Source file became unavailable during evidence analysis; the result was discarded.",
+                    restore_attempt=owned.evidence_kind in started)
+            else:
+                if owned.evidence_kind not in started and not shared_probe_started:
+                    _defer_claim(config, owned, deps, work_status="retry_wait", reason=str(exc), restore_attempt=False)
+                    continue
+                if owned.evidence_kind not in started:
+                    with open_db(config.paths.db_path) as connection:
+                        active = mark_evidence_attempt_started(connection, owned)
+                    if active is None:
+                        continue
+                    owned = active
+                _retry_or_fail(config, owned, deps, exc)
+        return len(claims)
     finally:
-        heartbeat.stop()
+        stop_heartbeats()
         process_controller.reset()
 
-    if not remote_source_unchanged:
-        _finish_claim(
-            config,
-            claim,
-            work_status="failed",
-            last_error="Source changed during evidence analysis; the result was discarded.",
-            restore_attempt=True,
-        )
-        return
     final_availability, final_fingerprint = _source_fingerprint(config, claim, source_path)
-    if final_availability == "root_unavailable":
-        _defer_unavailable_source(config, claim, deps, restore_attempt=True)
-        return
-    if final_availability == "source_unavailable":
-        _finish_claim(
-            config,
-            claim,
-            work_status="failed",
-            last_error="Source file became unavailable during evidence analysis; the result was discarded.",
-            restore_attempt=True,
-        )
-        return
-    if final_fingerprint != actual_fingerprint:
-        _finish_claim(
-            config,
-            claim,
-            work_status="failed",
-            last_error="Source changed during evidence analysis; the result was discarded.",
-            restore_attempt=True,
-        )
-        return
-    _commit_evidence_summary(
-        config,
-        claim,
-        summary,
-        actual_fingerprint=final_fingerprint,
-        classification_only=False,
-        deps=deps,
-        observation={"before": measurement_before, "after": measurement_after,
-                     "worker_id": claim.worker_id, "lease_batch_id": claim.batch_id,
-                     "source_revision": claim.source_revision,
-                     "remote_before": remote_before, "remote_after": remote_after},
-    )
+    for owned in claims:
+        if final_availability == "root_unavailable":
+            _defer_unavailable_source(config, owned, deps, restore_attempt=True)
+        elif final_availability == "source_unavailable" or final_fingerprint != actual_fingerprint or remote_before != remote_after:
+            _finish_claim(config, owned, work_status="failed",
+                last_error="Source changed during evidence analysis; the result was discarded.", restore_attempt=True)
+        elif owned.evidence_kind in errors:
+            _retry_or_fail(config, owned, deps, errors[owned.evidence_kind])
+        else:
+            _commit_evidence_summary(config, owned, summaries[owned.evidence_kind], actual_fingerprint=final_fingerprint,
+                classification_only=False, deps=deps,
+                observation={"before": measurement_before, "after": measurement_after,
+                    "worker_id": owned.worker_id, "lease_batch_id": owned.batch_id,
+                    "source_revision": owned.source_revision, "remote_before": remote_before, "remote_after": remote_after})
+    return len(claims)
 
 
 def _run_classification_claim(
@@ -811,7 +840,7 @@ def _reload_owned_claim(connection: Any, claim: EvidenceWorkClaim) -> EvidenceWo
         library_item_id=claim.library_item_id,
         evidence_kind=claim.evidence_kind,
     )
-    if active_claim is None or active_claim.worker_id != claim.worker_id:
+    if active_claim is None or active_claim.worker_id != claim.worker_id or active_claim.batch_id != claim.batch_id:
         return None
     return active_claim
 

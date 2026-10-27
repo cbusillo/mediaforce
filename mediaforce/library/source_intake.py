@@ -27,7 +27,7 @@ from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, sync_library_item_evidence_state
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import MediaScopeConflict
-from mediaforce.library.probe import _probe_payload
+from mediaforce.library.probe import probe_evidence_source
 from mediaforce.library.source_evidence import (
     HISTORICAL_OUTPUT_PROFILES,
     SourceEvidenceContext,
@@ -303,7 +303,7 @@ def assess_source_input(
             item = cast(
                 dict[str, Any], dict(connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one())
             )
-    probe = _probe_payload(path, process_controller=controller)
+    probe = probe_evidence_source(path, process_controller=controller)
     after = observe_file(path)
     if any(before[key] != after[key] for key in ("stat", "size_bytes", "sample_fingerprint")):
         raise RuntimeError("The file changed while checking its original; the check will retry")
