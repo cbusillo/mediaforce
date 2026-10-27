@@ -72,8 +72,8 @@ def prepare_release(source: Path, target: str, home: Path) -> Path:
     _run(["git", "checkout", "--detach", sha], cwd=root)
     _run(["uv", "sync", "--project", str(root), "--locked", "--no-dev"], cwd=root)
     _run(["bash", str(root / "scripts/build-mac-app.sh"), "build", str(built_mac_app(root).parent)], cwd=root)
-    if not (root / ".venv/bin/mediaforce-web").is_file() or not (root / "frontend/build/index.html").is_file():
-        raise RuntimeError("prepared runtime lacks its entrypoint or frontend build")
+    if not (root / ".venv/bin/mediaforce-web").is_file():
+        raise RuntimeError("prepared runtime lacks its entrypoint")
     if not built_mac_app(root).is_dir():
         raise RuntimeError("prepared runtime lacks its Mac app")
     return root

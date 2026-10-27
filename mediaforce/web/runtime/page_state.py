@@ -2,7 +2,7 @@
 
 The server decides it from database rows and saved samples, never from the hour-long job notice the
 page payload carries, so a page and its library card agree and nothing changes when a notice expires.
-The frontend maps the key to wording.
+The Mac app maps the key to wording.
 
 Order, first match wins:
 

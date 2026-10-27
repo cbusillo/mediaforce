@@ -37,15 +37,18 @@ final class SampleTests: XCTestCase {
         XCTAssertFalse(try decode(Self.facts(state: "finished", action: nil)).isInProgress)
         XCTAssertEqual(try decode(Self.facts(state: "ready_to_make", action: "queue_encode")).actions, [.startCompressing])
         let laterStages: [(String, String?, SampleFacts.Action)] = [
-            ("needs_help", "retry_encode", .retryUnfinished), ("needs_help", "review_files", .openInBrowser),
-            ("ready_to_check", "validate_outputs", .checkFiles), ("ready_to_finish", "promote_outputs", .replaceOriginals),
-            ("motion_held", "decide_motion", .decideMotion), ("finish_blocked", nil, .openInBrowser),
-            ("ready_to_check", nil, .openInBrowser), ("ready_to_finish", nil, .openInBrowser),
+            ("needs_help", "retry_encode", .retryUnfinished), ("ready_to_check", "validate_outputs", .checkFiles),
+            ("ready_to_finish", "promote_outputs", .replaceOriginals), ("motion_held", "decide_motion", .decideMotion),
         ]
-        for (state, action, expected) in laterStages {
+        // A blocked file and a state with no native step still say where the season is, with no button.
+        let noNativeStep: [(String, String?)] = [
+            ("needs_help", "review_files"), ("finish_blocked", nil), ("ready_to_check", nil), ("ready_to_finish", nil),
+        ]
+        let makeSampleHeadline = Words.sampleHeadline(try decode(Self.facts(state: "needs_help", action: "make_sample")))
+        for (state, action, expected) in laterStages.map({ ($0.0, $0.1, [$0.2]) }) + noNativeStep.map({ ($0.0, $0.1, []) }) {
             let facts = try decode(Self.facts(state: state, action: action))
-            XCTAssertEqual(facts.actions, [expected], state)
-            XCTAssertNotEqual(Words.sampleHeadline(facts), Words.sampleHeadline(try decode(Self.facts(state: "needs_help", action: "make_sample"))), state)
+            XCTAssertEqual(facts.actions, expected, state)
+            XCTAssertNotEqual(Words.sampleHeadline(facts), makeSampleHeadline, state)
         }
     }
 
@@ -128,13 +131,13 @@ final class SampleClientTests: XCTestCase {
         XCTAssertEqual(sent["reviewed_draft_hash"] as? String, "draft-1")
     }
 
-    func testOnlyAChoiceTheBrowserAsksForSendsTheOwnerThere() async throws {
+    func testOnlyAReasonThatNeedsAChoiceIsSaidAsOne() async throws {
         let needsChoice = try await client(status: 200, body: #"{"ok": true, "compressing": false, "reason": "confirm_compression_goal"}"#)
             .compressSeason("tv/Lucifer/Season 2")
-        XCTAssertTrue(needsChoice.needsBrowser)
+        XCTAssertTrue(needsChoice.needsChoice)
         let waiting = try await client(status: 200, body: #"{"ok": true, "compressing": false, "reason": "free_space_reserve"}"#)
             .compressSeason("tv/Lucifer/Season 2")
-        XCTAssertFalse(waiting.needsBrowser)
+        XCTAssertFalse(waiting.needsChoice)
     }
 
     func testAServerErrorOnAnActionThrows() async {

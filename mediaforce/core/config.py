@@ -47,7 +47,7 @@ def _source_checkout_default_config_path(project_root: Path) -> Path | None:
     if (
             candidate.is_file()
             and (project_root / "pyproject.toml").is_file()
-            and (project_root / "hatch_build.py").is_file()
+            and (project_root / "alembic.ini").is_file()
     ):
         return candidate
     return None

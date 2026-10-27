@@ -1,16 +1,13 @@
 # Module Boundaries
 
 This document records the durable module boundaries after the structural
-refactor pass that split oversized backend modules and frontend routes into
-stable package and component seams.
+refactor pass that split oversized backend modules into stable package seams.
 
 ## Intent
 
 - Keep thin compatibility surfaces at the top level where tests patch directly.
 - Prefer adding new runtime logic under focused backend packages instead of
   re-bloating compatibility wrappers.
-- Keep Svelte route files thin and move substantial behavior or markup into
-  dedicated component and helper layers.
 
 ## Backend boundaries
 
@@ -138,7 +135,6 @@ Guidance:
   - `settings.py`
   - `hosts.py`
   - `queues.py`
-  - `frontend.py`
 - `runtime/`
   - `folder_cards.py`
   - `host_status.py`
@@ -236,9 +232,6 @@ Guidance:
     - the read-only projection reads each item's whole stored evidence row,
       so a source or policy changed since measuring needs a check on the page
       exactly as it does in the synchronized queue
-    - the frontend only words it (`frontend/src/lib/season/page-state.ts`):
-      one table from key, recovery kind, failure kind and episode or season
-      scope to label, detail and recovery action; it never orders jobs
   - `folder_tuning_helpers.py`
   - `folder_tuning_advice.py`
   - `folder_tuning_runtime.py`
@@ -491,11 +484,11 @@ Guidance:
   `mediaforce/tuning/`.
 - Keep compression direction and contrary-movement authorization under
   `mediaforce/tuning/compression_intent.py`; routes, recovery, prompts, and the
-  frontend consume its typed snapshots and decisions rather than deriving
+  Mac app consume its typed snapshots and decisions rather than deriving
   authority independently.
 - Keep quality-risk facts, deterministic gates, typed risk normalization, and
   current review authority under `mediaforce/tuning/quality_risk.py` instead of
-  re-deriving them independently in routes, prompts, or the frontend.
+  re-deriving them independently in routes, prompts, or the Mac app.
 - Keep content-by-intent boundary identity, eligibility, append-only correction,
   and replay under `mediaforce/tuning/content_intent_observations.py`. Runtime
   review actions may emit explicit events, but they must not independently
@@ -575,55 +568,6 @@ Guidance:
 `mediaforce/cli.py` is still a single file. Split it into a package only if it
 keeps growing materially.
 
-## Frontend boundaries
-
-### Route wrappers
-
-- `frontend/src/routes/+page.svelte` and `frontend/src/routes/folders/+page.svelte`
-  - render the TV library
-    (`frontend/src/lib/components/season/SeasonLibraryPage.svelte`)
-- `frontend/src/routes/movies/` and `frontend/src/routes/other/`
-  - Movies and Other libraries (`components/workstation/MovieLibraryPage.svelte`,
-    `OtherLibraryPage.svelte`)
-- `frontend/src/routes/ops/` and `frontend/src/routes/completed/`
-  - Activity and Finished (`components/workstation/OpsWorkstationView.svelte`,
-    `CompletedWorkstationView.svelte`)
-- `frontend/src/routes/settings/+page.svelte`
-  - thin wrapper around
-    `frontend/src/lib/components/settings/SettingsEditor.svelte`
-  - shared draft/action helpers live in
-    `frontend/src/lib/settings/editor.ts`
-- `frontend/src/routes/folders/[...prefix]/+page.svelte`
-  - loads one scope and dispatches to the show or season view
-    (`components/season/SeasonLibrary.svelte`,
-    `components/season/SeasonExperience.svelte`) or to
-    `components/workstation/MovieStudioView.svelte` /
-    `OtherStudioView.svelte`
-  - shared folder display helpers live in `frontend/src/lib/folders/`
-
-Guidance:
-
-- Treat the route breakup as complete for the structural refactor baseline.
-- Keep extracting from the component layer first instead of rebuilding large
-  route pages.
-
-### Large extracted frontend views
-
-- `frontend/src/lib/components/season/SeasonExperience.svelte`
-  - the TV season and show page; at over 7,000 lines, the main decomposition
-    target
-- `frontend/src/lib/components/settings/SettingsEditor.svelte`
-  - split further only if settings UI grows again
-
-### Shared review workspace
-
-- `frontend/src/lib/review/`
-  - scope-neutral review-pair normalization, availability/recovery derivation,
-    sample-size summaries, and synchronized comparison helpers
-- `frontend/src/lib/components/review/ComparisonWorkspace.svelte`
-  - shared browser comparison surface for TV, Movies, and Other
-  - receives scope-neutral labels and callbacks; owns synchronized media playback
-
 ## Extraction heuristics
 
 Consider extracting a file when any of these is true:
@@ -639,8 +583,7 @@ Consider extracting a file when any of these is true:
 - `uv run --with pytest pytest tests/test_encode_queue_recovery.py \
 tests/test_tuning_runtime.py tests/test_scanner_runtime.py`
 - `uv run --with ruff ruff check <touched files>`
-- `cd frontend && npm run check` when route payloads or frontend code change
-- real browser verification when visible route behavior changes
+- `bash scripts/build-mac-app.sh test` when route payloads the Mac app reads change
 
 ### Development server launcher
 
@@ -650,6 +593,6 @@ loads `.env` and calls it with the checkout's prepared interpreter. A watchdog
 retains the server leader until its group is empty and watches the launcher
 connection for EOF. On Linux it adopts orphaned descendants as a child subreaper;
 on macOS launchd reaps them. Development lifecycle behavior and the migration
-from older foreground/login-item launches are documented in README's Local web
+from older foreground/login-item launches are documented in README's Local server
 development section. Production workers continue through `process_control.py`
 and `_process_deadline.py`; they do not use the development launcher.
