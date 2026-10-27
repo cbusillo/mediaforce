@@ -39,12 +39,15 @@ class SourceAdmissionPrefetcher:
         if self._future is not None:
             return
         try:
-            with open_db(config.paths.db_path) as connection:
-                item_id = self._next_item(connection, claim)
-            if item_id is not None:
-                self._future = self._executor.submit(self._prepare, config, claim, item_id)
-        except Exception:
+            self._future = self._executor.submit(self._prepare_next, config, claim)
+        except (OSError, RuntimeError):
             self._logger.exception("Original admission preparation could not start; continuing the current file")
+
+    def _prepare_next(self, config: MediaforceConfig, claim: EvidenceWorkClaim) -> None:
+        with open_db(config.paths.db_path) as connection:
+            item_id = self._next_item(connection, claim)
+        if item_id is not None:
+            self._prepare(config, claim, item_id)
 
     @staticmethod
     def _next_item(connection: DBClient, claim: EvidenceWorkClaim) -> int | None:
@@ -62,14 +65,13 @@ class SourceAdmissionPrefetcher:
     def wait(self) -> None:
         if self._future is None:
             return
-        try:
-            self._future.result()
-        except ProcessCancelledError:
+        error = self._future.exception()
+        self._future = None
+        if isinstance(error, ProcessCancelledError):
             self._logger.debug("Original admission preparation was interrupted")
-        except Exception:
-            self._logger.exception("Original admission preparation failed; its queued claim will retry normally")
-        finally:
-            self._future = None
+        elif error is not None:
+            self._logger.error("Original admission preparation failed; its queued claim will retry normally",
+                               exc_info=(type(error), error, error.__traceback__))
 
     def _prepare(self, config: MediaforceConfig, claim: EvidenceWorkClaim, item_id: int) -> None:
         controller = ManagedProcessController()

@@ -8,7 +8,7 @@ from uuid import uuid4
 from sqlalchemy import exists, func, or_, select, update
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import (
     item_events,
     library_item_evidence_state,
@@ -116,7 +116,7 @@ def assess_readable_source(
     }
 
 
-def _matches_scanned_identity(item: Mapping[str, Any], identity: Mapping[str, Any]) -> bool:
+def _matches_scanned_identity(item: Mapping[str, Any] | DBRow, identity: Mapping[str, Any]) -> bool:
     return (item["size_bytes"] == identity["size_bytes"]
             and item["content_version_fingerprint"] == identity["sample_fingerprint"]
             and item["mtime_ns"] == identity["stat"][3])

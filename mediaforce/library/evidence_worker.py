@@ -128,13 +128,13 @@ def run_evidence_queue_until_blocked(
     processed = 0
     started_at = time.monotonic()
     stop_reason = "blocked"
+    stop_requested = stop_event.is_set if stop_event is not None else lambda: False
     with SourceAdmissionPrefetcher(stop_event=stop_event, logger=runtime_deps.logger,
                                  deadline=started_at + max_seconds if max_seconds is not None else None) as prefetch:
         while processed < max_work_items:
-            if stop_event is not None:
-                if stop_event.is_set():
-                    stop_reason = "shutdown"
-                    break
+            if stop_requested():
+                stop_reason = "shutdown"
+                break
             if max_seconds is not None and time.monotonic() - started_at >= max_seconds:
                 stop_reason = "time_budget"
                 break
