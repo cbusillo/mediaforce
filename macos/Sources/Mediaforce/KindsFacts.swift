@@ -16,7 +16,11 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         // Shows already approved on a season of this kind, whose setting the kind could use.
         let settings: [Setting]
         let approval: Approval?
+        // The season whose sample is being made or waits to be watched; nil when none is.
+        let sampleSeason: String?
         var id: String { kind }
+
+        var sampleShow: String? { sampleSeason?.split(separator: "/").prefix(2).joined(separator: "/") }
 
         /// The setting the page plays first: the decided one, else the first with an episode to watch.
         var firstSetting: Setting? {
@@ -31,6 +35,8 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         let prefix: String
         let seasons: Int
         let waitingBytes: Int64
+        // Its biggest waiting season of the kind, where a sample for the show is made.
+        let sampleSeason: String
         var id: String { prefix }
         var name: String { String(prefix.split(separator: "/").last ?? "") }
     }

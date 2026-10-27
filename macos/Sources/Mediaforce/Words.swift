@@ -450,6 +450,25 @@ extension Words {
     static let hear = "Hear"
     static let momentChoice = "Moment"
 
+    /// The sample's headline; a kind's page names the season, since its title names the kind.
+    static func sampleHeadline(_ facts: SampleFacts, namesSeason: Bool, now: Date) -> String {
+        let ready = facts.readyInSeconds.map { " Ready by about \(readyBy(now.addingTimeInterval(TimeInterval($0))))." } ?? ""
+        guard namesSeason else { return sampleHeadline(facts) + (facts.state == "making_test" ? ready : "") }
+        let name = season(facts.show, facts.season)
+        return switch (facts.state, facts.action) {
+        case ("making_test", _): "Making a sample of \(name).\(ready)"
+        case ("sample_waiting", _): "The \(name) sample waits for a free computer."
+        case ("ready_to_compare", _): "The \(name) sample is ready. Watch it next to the original."
+        default: "\(name): \(sampleHeadline(facts))"
+        }
+    }
+
+    // Rounded up to five minutes, since it is an estimate.
+    static func readyBy(_ date: Date) -> String {
+        let minutes = (date.timeIntervalSinceReferenceDate / 300).rounded(.up) * 300
+        return Date(timeIntervalSinceReferenceDate: minutes).formatted(date: .omitted, time: .shortened)
+    }
+
     static func sampleHeadline(_ facts: SampleFacts) -> String {
         switch (facts.state, facts.action) {
         case ("making_test", _): "Making the sample now."
@@ -1323,7 +1342,11 @@ extension Words {
     }
 
     static let kindNothingToWatch = "No episode made with this setting is kept to compare yet."
-    static let kindNoSetting = "No show of this kind has an approved sample yet. Approve one show's sample to use it here."
+    static let makeASample = "Make a Sample"
+
+    static func makeSampleOf(_ show: String) -> String {
+        "Make a Sample of \(show)"
+    }
 
     static func kindRefusal(_ code: String?) -> String {
         switch code {
