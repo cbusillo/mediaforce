@@ -42,11 +42,19 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
         "goal_bytes": _goal_bytes(folder),
         "size_status": object_dict(folder.get("size_target_analysis")).get("status"),
         "draft_hash": calibration.get("draft_hash"),
+        "ready_in_seconds": _ready_in_seconds(status) if page_state.get("key") == "making_test" else None,
         "size_choices": [
             {"key": choice["key"], "target_bytes": int_value(object_dict(choice["resolved_size_goal"]).get("target_size_bytes"))}
             for choice in _size_choices(folder)
         ],
     }
+
+
+def _ready_in_seconds(status: Mapping[str, Any]) -> int | None:
+    """The latest the running sample should be ready by, from comparable finished samples; None without enough of them."""
+    estimate = object_dict(object_dict(object_dict(status.get("exact_calibration_job")).get("progress")).get("estimate"))
+    remaining = estimate.get("remaining_seconds_high")
+    return int(remaining) if isinstance(remaining, int | float) else None
 
 
 def approve_sample(

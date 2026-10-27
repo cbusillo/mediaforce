@@ -225,3 +225,13 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert make(unbalanced, _status(), "smaller") == {"ok": False, "code": "choose_balance"}
     assert make(_folder(), _status(), "a size that is not offered") == {"ok": False, "code": "choose_size"}
     assert calls == []
+
+
+def test_a_running_sample_says_when_it_should_be_ready_only_when_comparable_samples_tell() -> None:
+    def running(estimate: dict[str, Any] | None, key: str = "making_test") -> dict[str, Any]:
+        return {**_status(key, None), "exact_calibration_job": {"progress": {"estimate": estimate}}}
+
+    assert sample_facts(_folder(), running({"remaining_seconds_low": 600, "remaining_seconds_high": 1500}))["ready_in_seconds"] == 1500
+    assert sample_facts(_folder(), running(None))["ready_in_seconds"] is None
+    # A sample that waits for a computer has no start yet to count from.
+    assert sample_facts(_folder(), running({"remaining_seconds_high": 1500}, "sample_waiting"))["ready_in_seconds"] is None

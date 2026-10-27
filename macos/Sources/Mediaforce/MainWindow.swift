@@ -216,7 +216,8 @@ struct MainWindow: View {
                         case .kind(let code):
                             if let kind = model.kinds?.kinds.first(where: { $0.kind == code }) {
                                 KindPage(kind: kind, leftOut: model.kinds?.leftOut.count ?? 0, model: model,
-                                         openItem: { place = .item($0) }, openLeftOut: { place = .seasonsWithoutKind })
+                                         openItem: { place = .item($0) }, openSample: { place = .sample($0) },
+                                         openLeftOut: { place = .seasonsWithoutKind })
                             }
                         default: LibraryPage(facts: facts, posters: model.posters) { go($0) }
                         }

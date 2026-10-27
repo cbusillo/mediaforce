@@ -16,6 +16,8 @@ struct SampleFacts: Decodable, Sendable {
     let goalBytes: Int64
     let sizeStatus: String?
     let draftHash: String?
+    // The latest a running sample should be ready by, from comparable finished samples; nil when they can't tell.
+    let readyInSeconds: Int?
     let sizeChoices: [SizeChoice]
 
     struct Moment: Decodable, Sendable, Hashable {

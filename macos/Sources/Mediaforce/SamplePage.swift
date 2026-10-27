@@ -3,12 +3,37 @@ import Combine
 import SwiftUI
 
 struct SamplePage: View {
-    static let pollInterval: Duration = .seconds(5)
-
     let prefix: String
     let model: MainWindowModel
     let openItem: (String) -> Void
     @State private var facts: SampleFacts?
+
+    var body: some View {
+        PageFrame(title: title) {
+            SampleWork(prefix: prefix, model: model, facts: $facts, openItem: openItem)
+        }
+    }
+
+    private var title: String {
+        if let facts { return Words.season(facts.show, facts.season) }
+        let samples = (model.facts?.samples.waitingOnYou ?? []) + (model.facts?.samples.approvedNotStarted ?? [])
+        if let sample = samples.first(where: { $0.prefix == prefix }) { return Words.season(sample.show, sample.season) }
+        return prefix.split(separator: "/").dropFirst().joined(separator: ", ")
+    }
+}
+
+/// A season's sample and what can be done with it: the headline, the comparison, its facts and the actions. The
+/// sample page shows it under the season's name; a kind's page shows it with the season named in the headline.
+struct SampleWork: View {
+    static let pollInterval: Duration = .seconds(5)
+
+    let prefix: String
+    let model: MainWindowModel
+    @Binding var facts: SampleFacts?
+    var namesSeason = false
+    let openItem: (String) -> Void
+    // After an action, what else the page around it reads again.
+    var acted: () async -> Void = {}
     @State private var unreadable = false
     @State private var working = false
     @State private var refreshes = 0
@@ -18,9 +43,9 @@ struct SamplePage: View {
     @Environment(\.openURL) private var openURL
 
     var body: some View {
-        PageFrame(title: title) {
+        VStack(alignment: .leading, spacing: 18) {
             if let facts {
-                Text(Words.sampleHeadline(facts))
+                Text(Words.sampleHeadline(facts, namesSeason: namesSeason, now: .now))
                     .font(.title3.weight(.semibold))
                 if let failure = Words.sampleFailure(facts.failure), facts.state == "needs_help" {
                     Text(failure)
@@ -70,13 +95,6 @@ struct SamplePage: View {
         } message: { notice in
             Text(notice.message)
         }
-    }
-
-    private var title: String {
-        if let facts { return Words.season(facts.show, facts.season) }
-        let samples = (model.facts?.samples.waitingOnYou ?? []) + (model.facts?.samples.approvedNotStarted ?? [])
-        if let sample = samples.first(where: { $0.prefix == prefix }) { return Words.season(sample.show, sample.season) }
-        return prefix.split(separator: "/").dropFirst().joined(separator: ", ")
     }
 
     private func watch() async {
@@ -166,6 +184,7 @@ struct SamplePage: View {
             working = false
             refreshes += 1
             await model.refresh()
+            await acted()
         }
     }
 }
