@@ -258,6 +258,13 @@ def aggregate_media_metrics(ranges: list[Mapping[str, Any]]) -> dict[str, Any]:
     return weighted
 
 
+def fingerprint_video_decode_timed_out(summary: Mapping[str, Any]) -> bool:
+    ranges = object_list(object_dict(summary.get("analysis")).get("ranges"))
+    return any(row.get("status") == "timeout" and (
+        str(row.get("decoder", "")).startswith("videotoolbox-") or row.get("decoder") == "software"
+    ) for row in map(object_dict, ranges))
+
+
 def classify_media_fingerprint(analysis: Mapping[str, Any] | None) -> dict[str, Any]:
     payload = object_dict(analysis)
     sampled_frames = int_value(payload.get("sampled_frames"))

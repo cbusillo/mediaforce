@@ -18,10 +18,9 @@ from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_item_evidence_state, library_items
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
-from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, reclassify_cadence_summary
-from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, reclassify_media_fingerprint_summary
+from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, fingerprint_video_decode_timed_out, reclassify_media_fingerprint_summary
 from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaHostUnavailableError
 from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, \
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host
@@ -289,10 +288,7 @@ def _run_evidence_claim(
         )
         if claim.evidence_kind == MEDIA_FINGERPRINT_EVIDENCE_KIND:
             previous = parse_evidence_summary(claim.canonical_summary_json) or {}
-            previous_ranges = object_list(object_dict(previous.get("analysis")).get("ranges"))
-            if any(row.get("status") == "timeout" and (
-                    str(row.get("decoder", "")).startswith("videotoolbox-") or row.get("decoder") == "software"
-            ) for row in map(object_dict, previous_ranges)):
+            if fingerprint_video_decode_timed_out(previous):
                 analysis_kwargs["hardware_decoding"] = False
         measurement_before = local_before
         summary = deps.analyze_evidence(

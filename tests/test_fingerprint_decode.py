@@ -98,14 +98,13 @@ def test_incomplete_hardware_metadata_retries_in_software() -> None:
 def test_short_final_range_requires_expected_frames(hardware_frames: int, calls: int) -> None:
     runner = Mock()
     runner.tool_lineage.return_value = {"ffmpeg_version": "test"}
-    runner.run.side_effect = [_video_result(24, 120), _video_result(24, 100),
-                              _video_result(24, hardware_frames), _video_result(24, 20)]
+    runner.run.side_effect = [_video_result(24, hardware_frames), _video_result(24, 20)]
     summary = analyze_media_fingerprint(
         Path("short.mkv"), video_stream={"codec_name": "h264", "pix_fmt": "yuv420p"},
-        audio_streams=[], duration_seconds=100, command_runner=runner,
+        audio_streams=[], duration_seconds=10, max_frames=120, range_count=1, sample_fps=2, command_runner=runner,
     )
 
-    assert runner.run.call_count == 2 + calls
+    assert runner.run.call_count == calls
     assert summary["analysis"]["ranges"][-1]["sampled_frames"] == 20
 
 

@@ -174,7 +174,7 @@ def test_unknown_fingerprint_never_replaces_successful_original_traits(tmp_path:
     assert _work(config, analyzer, max_attempts=1)
     with open_db(config.paths.db_path) as database:
         earlier = load_source_evidence(database, item_id).traits["media_fingerprint"]
-        item = dict(database.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one())
+        item = cast(dict[str, Any], dict(database.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()))
         observation = observe_file(path)
         record_current_measurement(database, item, kind="media_fingerprint", summary=unknown, binding="observed",
                                    provenance={"before": observation, "after": observation})
