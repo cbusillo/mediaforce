@@ -20,8 +20,6 @@ has to look up is a defect.
   is the Director's to do.
 - Mediaforce is not a landing page, analytics dashboard, or conversational
   assistant.
-- Stay on the existing SvelteKit frontend; redesign the workflow surface, not
-  the framework stack.
 - Keep regions stable so things are where the Director saw them last time.
 - Every count maps to reachable rows through visible browsing, pagination,
   filtering, or complete scrolling. Search may narrow a list, but it is never
@@ -217,14 +215,12 @@ has to look up is a defect.
 
 ## Process expectations
 
-- Before changing a primary user surface, read this guide together with
-  `docs/style/frontend.md`.
 - For major UI resets, write or update a short design brief before coding.
-- Validate in a real browser and critique the rendered result against this
-  guide, not just against the component code.
+- Validate in the running app and critique the rendered result against this
+  guide, not just against the code.
 - Reach the surface through ordinary navigation, and test functional behavior
   separately from visual quality.
-- Test desktop and 390px, keyboard focus, long lists, blockers, failure
+- Test keyboard focus, long lists, blockers, failure
   recovery, important transitions, and destructive-action safety.
 - Reject implementations that are technically correct but still ugly,
   exhausting, narratively verbose, or dependent on developer knowledge.

@@ -212,7 +212,6 @@ def _scannable_member(member: PurePosixPath) -> bool:
         ".map",
         ".md",
         ".py",
-        ".svelte",
         ".toml",
         ".ts",
         ".txt",

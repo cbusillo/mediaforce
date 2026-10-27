@@ -17,7 +17,7 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 ## Architecture
 
-- `docs/architecture/module-boundaries.md`: durable backend/frontend module
+- `docs/architecture/module-boundaries.md`: durable backend module
   boundary map after the structural refactor pass
 - `docs/architecture/representative-evidence.md`: deterministic representative
   selection, coverage, and the versioned evidence contract
@@ -76,10 +76,6 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   legacy-bridge notes, and migration validation commands
 - `docs/development/package-builds.md`: wheel/sdist resource boundaries and
   privacy-safe package verification
-- `docs/development/browser-review-guidance.md`: browser-review subagent launch
-  contract for UI exploration and critique
-- `docs/development/browser-qa-matrix.md`: repeatable browser route, fixture,
-  and narrow-layout validation matrix
 - `docs/development/activity-refresh-benchmark.md`: synthetic pending-queue refresh
   measurement, count agreement and resource evidence
 - `docs/development/catalog-refresh-benchmark.md`: generated catalog-scale

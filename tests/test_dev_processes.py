@@ -71,7 +71,7 @@ worker.wait(timeout=5)
 '''
 
 # The fixture supplies the process inventory from native PGIDs of only the
-# processes it launched. No installed ps/npm/launchctl or host process state.
+# processes it launched. No installed ps/launchctl or host process state.
 PS = '''
 import os, pathlib, sys
 failure = pathlib.Path(os.environ['TEST_INVENTORY_FAILURE'])
@@ -141,12 +141,12 @@ class DevFixture:
 def dev(tmp_path: Path) -> Iterator[DevFixture]:
     source = Path(__file__).resolve().parents[1]
     root = tmp_path / 'checkout with spaces'
-    for name in ('scripts', 'mediaforce/ops', '.venv/bin', 'frontend', 'bin'):
+    for name in ('scripts', 'mediaforce/ops', '.venv/bin', 'bin'):
         (root / name).mkdir(parents=True)
     shutil.copyfile(source / 'scripts/mediaforce-dev.sh', root / 'scripts/mediaforce-dev.sh')
     shutil.copyfile(source / 'mediaforce/ops/dev_processes.py', root / 'mediaforce/ops/dev_processes.py')
     (root / '.venv/bin/python').symlink_to(sys.executable)
-    for name, code in (('.venv/bin/mediaforce-web', SERVER), ('bin/npm', SERVER), ('bin/ps', PS)):
+    for name, code in (('.venv/bin/mediaforce-web', SERVER), ('bin/ps', PS)):
         executable = root / name
         executable.write_text('#!' + sys.executable + '\n' + code)
         executable.chmod(0o755)
@@ -155,7 +155,7 @@ def dev(tmp_path: Path) -> Iterator[DevFixture]:
     registry = tmp_path / 'processes'
     registry.touch()
     env = dict(os.environ, MEDIAFORCE_DEV_STATE_DIR=str(state),
-               MEDIAFORCE_WEB_PORT=str(free_port()), MEDIAFORCE_FRONTEND_DEV_PORT=str(free_port()),
+               MEDIAFORCE_WEB_PORT=str(free_port()),
                PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'],
                TEST_REGISTRY=str(registry), TEST_CRASH=str(tmp_path / 'crash'),
                TEST_INVENTORY_FAILURE=str(tmp_path / 'inventory-failure'))
@@ -165,7 +165,7 @@ def dev(tmp_path: Path) -> Iterator[DevFixture]:
     os.mkfifo(fifo)
     writer = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
     # Replace the wrapper with one that acquires the FIFO, then execs the server.
-    for executable in (root / '.venv/bin/mediaforce-web', root / 'bin/npm'):
+    for executable in (root / '.venv/bin/mediaforce-web',):
         code = executable.read_text().replace("fd = int(os.environ['TEST_LIFETIME_FD'])", "fd = os.open(os.environ['TEST_LIFETIME_FIFO'], os.O_RDONLY | os.O_NONBLOCK)\nos.set_inheritable(fd, True)")
         executable.write_text(code)
     env['TEST_LIFETIME_FIFO'] = str(fifo)
@@ -176,14 +176,13 @@ def dev(tmp_path: Path) -> Iterator[DevFixture]:
         os.close(writer)
         # FIFO EOF gives every test-owned worker independent teardown even when
         # a deliberately broken launcher fails its group cleanup.
-        for component in ('frontend', 'backend'):
-            fixture.run('stop', component)
+        fixture.run('stop', 'backend')
         if fixture.foreign:
             fixture.foreign.wait(timeout=8)
 
 
-@pytest.mark.parametrize('component', ['backend', 'frontend'])
-def test_start_reuse_stop_and_restart(dev: DevFixture, component: str) -> None:
+def test_start_reuse_stop_and_restart(dev: DevFixture) -> None:
+    component = 'backend'
     assert dev.run('start', component).returncode == 0
     first = dev.status(component)
     assert first['state'] == 'running'
@@ -647,16 +646,13 @@ def test_silent_control_client_preserves_running_or_failed_owner(
         broker.wait(timeout=5)
 
 
-@pytest.mark.parametrize('component,variable', [
-    ('backend', 'MEDIAFORCE_WEB_PORT'), ('frontend', 'MEDIAFORCE_FRONTEND_DEV_PORT'),
-])
 @pytest.mark.parametrize('port', ['-1', '0', '87777'])
 def test_invalid_development_port_is_rejected_before_launch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, component: str, variable: str, port: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, port: str,
 ) -> None:
-    monkeypatch.setenv(variable, port)
+    monkeypatch.setenv('MEDIAFORCE_WEB_PORT', port)
     with pytest.raises(ValueError):
-        dev_processes.component_command(component, tmp_path)
+        dev_processes.component_command(tmp_path)
 
 
 def test_broker_waits_for_a_temporary_lock_probe(dev: DevFixture, tmp_path: Path) -> None:
@@ -882,13 +878,12 @@ print(json.dumps(module.request('backend', 'status')))
         broker.kill(); broker.wait(timeout=5)
 
 
-def test_invalid_restart_settings_preserve_both_components(dev: DevFixture) -> None:
+def test_invalid_restart_settings_preserve_the_running_server(dev: DevFixture) -> None:
     assert dev.run('start', 'all').returncode == 0
-    backend = dev.status('backend')['pid']; frontend = dev.status('frontend')['pid']
-    dev.env['MEDIAFORCE_FRONTEND_DEV_PORT'] = '87777'
+    backend = dev.status('backend')['pid']
+    dev.env['MEDIAFORCE_WEB_PORT'] = '87777'
     assert dev.run('restart', 'all').returncode != 0
     assert dev.status('backend')['pid'] == backend
-    assert dev.status('frontend')['pid'] == frontend
     assert dev.run('stop', 'all').returncode == 0
 
 
@@ -912,28 +907,6 @@ def test_one_empty_snapshot_cannot_reap_a_leader_while_a_worker_lives(monkeypatc
     monkeypatch.setattr(dev_processes, 'leader_exited', lambda _pid: True)
     monkeypatch.setattr(dev_processes, 'reap_descendants', descendants)
     assert dev_processes.stop_group(child) == 0
-
-
-def test_unavailable_frontend_control_does_not_skip_backend_stop(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    # A real unavailable socket response is checked separately; this controls the
-    # command's two-component dispatch without waiting on host processes.
-    monkeypatch.setattr(sys, 'argv', ['fixture', 'stop', 'all', '--state-dir', str(tmp_path)])
-    stopped: list[str] = []
-    def stop(component: str) -> dev_processes.Status:
-        stopped.append(component)
-        if component == 'frontend':
-            return {'state': 'unknown', 'error': 'control unavailable'}
-        return {'state': 'stopped'}
-    monkeypatch.setattr(dev_processes, 'stop', stop)
-    original = Path.cwd()
-    try:
-        assert dev_processes.main() == 1
-    finally:
-        os.chdir(original)
-    assert stopped == ['frontend', 'backend']
-    assert 'backend' in capsys.readouterr().out
 
 
 def test_empty_control_reply_is_unknown_not_stopped(tmp_path: Path) -> None:

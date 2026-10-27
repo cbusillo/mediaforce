@@ -165,19 +165,6 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Set up Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        run: npm --prefix frontend ci
-
-      - name: Install browser smoke dependencies
-        run: npm --prefix frontend exec playwright install --with-deps chromium
-
       - name: Restore media tools archive
         id: media-tools-cache
         uses: actions/cache@v5
@@ -211,7 +198,7 @@ jobs:
           echo "Media tools installed in ${elapsed}s."
           echo "Media tools install: ${elapsed}s (cache hit: ${{ steps.media-tools-cache.outputs.cache-hit }})." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Run complete backend and frontend tests
+      - name: Run complete backend tests
         run: |
           set -euo pipefail
           test_command="$(jq -er '.qualityGate.test.ci | select(type == "string" and length > 0)' .github/github.json)"
@@ -220,15 +207,6 @@ jobs:
       - name: Run CLI smoke
         run: uv run mediaforce --help
 
-      - name: Run frontend checks
-        run: npm --prefix frontend run check
-
-      - name: Run frontend lint
-        run: npm --prefix frontend run lint
-
-      - name: Build frontend
-        run: npm --prefix frontend run build
-
       - name: Build package archives
         run: uv build
 
@@ -236,22 +214,6 @@ jobs:
         run: >-
           uv run python scripts/verify_package_contents.py
           dist/*.whl dist/*.tar.gz
-
-      - name: Run web route smoke
-        env:
-          MEDIAFORCE_WEB_REVIEW_ARTIFACTS: ${{ github.workspace }}/scratch/web-review
-        run: npm --prefix frontend run smoke:web
-
-      - name: Retain built frontend and synthetic review fixtures
-        if: always() && github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v7
-        with:
-          name: web-review-${{ github.event.pull_request.head.sha }}
-          path: |
-            frontend/build/
-            scratch/web-review/
-          if-no-files-found: error
-          retention-days: 3
 
       - name: Report time budget
         if: always()

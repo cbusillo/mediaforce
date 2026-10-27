@@ -146,7 +146,7 @@ from mediaforce.tuning.target_provenance import exact_item_target_provenance_blo
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_app_window_routes, register_completed_routes, \
     register_compression_settings_routes, register_computer_settings_routes, register_dashboard_routes, \
-    register_folder_routes, register_frontend_routes, register_host_routes, register_library_settings_routes, \
+    register_folder_routes, register_host_routes, register_library_settings_routes, \
     register_metadata_settings_routes, register_operator_work_routes, register_queue_routes, register_settings_routes
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
@@ -720,11 +720,6 @@ def create_app(
         StaticFiles(directory=str(review_dir), check_dir=False),
         name="review_media",
     )
-    project_frontend_build_dir = config.paths.project_root / "frontend" / "build"
-    packaged_frontend_build_dir = Path(__file__).resolve().parent / "frontend_build"
-    frontend_build_dir = (
-        project_frontend_build_dir if project_frontend_build_dir.exists() else packaged_frontend_build_dir
-    )
 
     @app.middleware("http")
     async def ensure_review_media_root(
@@ -734,9 +729,6 @@ def create_app(
             review_dir.mkdir(parents=True, exist_ok=True)
         return await call_next(request)
 
-    frontend_app_dir = frontend_build_dir / "_app"
-    if frontend_app_dir.exists():
-        app.mount("/_app", StaticFiles(directory=str(frontend_app_dir)), name="frontend_app")
     app.state.config = config
     app.state.evidence_runner = evidence_runner
 
@@ -2839,24 +2831,6 @@ def create_app(
         stop_calibration_queue_action=_stop_calibration_queue_action,
     )
 
-    def _frontend_index_path() -> Path:
-        index_path = frontend_build_dir / "index.html"
-        if not index_path.exists():
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Frontend build is missing. Run `npm run build` in "
-                    f"{config.paths.project_root / 'frontend'} before starting the web UI."
-                ),
-            )
-        return index_path
-
-    register_frontend_routes(
-        app,
-        frontend_build_dir=frontend_build_dir,
-        frontend_index_path=_frontend_index_path,
-    )
-
     return app
 
 
@@ -3253,7 +3227,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def _parse_web_startup_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="mediaforce-web", description="Run the Mediaforce web UI.")
+    parser = argparse.ArgumentParser(prog="mediaforce-web", description="Run the Mediaforce server the Mac app talks to.")
     parser.add_argument("--config", help="Path to the TOML config file")
     parser.add_argument("--host", help="Bind host for the FastAPI app")
     parser.add_argument("--port", type=int, help="Bind port for the FastAPI app")

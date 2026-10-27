@@ -3,7 +3,7 @@
 `GET /api/app/main-window` gives the Mac app everything its main window
 shows, as facts and stable codes. It sends no screen words: the app turns every
 code into words. Folder names (`show`, `season_folder`) are data, not wording.
-The web pages keep their own endpoints until the web app is retired.
+The older endpoints the removed web pages read are still served; some are still used by the app, the CLI or the deploy.
 
 The read is pure: database rows, the computers' cached check results, the
 controller storage record and the saved sample state the library cards already
@@ -87,15 +87,15 @@ sample is no longer the draft the Director watched (nothing is approved), or
 compressing (action `queue_encode`), the same way approval does, and answers
 `{"ok": true, "compressing": bool}`. Approve and compress both add `reason`,
 the queue's code when compressing did not start, such as
-`confirm_compression_goal` or `confirm_legacy_size` (a choice made on the web
-page) or `free_space_reserve`.
+`confirm_compression_goal` or `confirm_legacy_size` (a choice the app says is
+needed but has no step for yet) or `free_space_reserve`.
 
 `POST .../make` with `size` (a choice key, or null) makes the sample again: it
 retries the saved request when the sample failed for a reason a retry fixes,
 remakes a reviewed sample at its measured goal, or asks for a new sample at
 the chosen or recommended size. It answers `409` with `choose_size` when a
 size must be chosen, `choose_balance` when the season has no size and detail
-balance chosen yet (the app then offers the web page), or `refused`.
+balance chosen yet (the app says so; it has no step for it yet), or `refused`.
 
 ## TV shows
 
@@ -145,7 +145,7 @@ files they hold, which match that number unless `truncated`.
 ## One show season, movie or folder
 
 Every list row, the sample page and a finished season's notification open the
-item page; the app never opens the web page. `GET /api/app/items/{prefix}`
+item page; the app never opens a browser. `GET /api/app/items/{prefix}`
 gives its facts, or `404` when the prefix names no present file: `prefix`,
 `domain`, `kind` and `title` (the media scope's), for a TV season `show`,
 `show_prefix` and `season`, and `files` in episode order. Each file has its

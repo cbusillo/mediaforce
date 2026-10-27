@@ -568,117 +568,6 @@ def test_retry_connection_route_posts_and_reads_stay_check_free(
         routes[("/api/recovery-alerts", "GET")]()
 
 
-def _button_labels() -> set[str]:
-    import re
-
-    workstation = Path(__file__).parents[1] / "frontend/src/lib/components/workstation"
-    sources = [
-        workstation / "OpsWorkstationView.svelte",
-        workstation / "OperatorWorkConsole.svelte",
-        Path(__file__).parents[1] / "frontend/src/lib/components/shell/ShellWarnings.svelte",
-    ]
-    labels: set[str] = set()
-    for source in sources:
-        text = source.read_text()
-        labels |= {label.strip() for label in re.findall(r">\s*([A-Z][^<>{}]*?)\s*</button", text)}
-        # Labels that change with state, such as {busy ? 'Starting…' : 'Start analysis'}.
-        for expression in re.findall(r"\{([^{}]*)\}\s*</button", text):
-            labels |= set(re.findall(r"'([A-Z][^']*)'", expression))
-    return labels
-
-
-def _named_buttons(message: str) -> list[str]:
-    """The button names a message tells people to use, without the words that follow them."""
-    import re
-
-    return [
-        re.sub(r"\s+(?:to|for|on|in|before|after|again|then|once|and|if)\b.*", "", phrase)
-        for phrase in re.findall(r"\b(?i:use|click|select|press) ([A-Z][\w ]*)", message)
-    ]
-
-
-def _assert_named_buttons_exist(messages: list[str]) -> None:
-    labels = _button_labels()
-    named = [(message, button) for message in messages for button in _named_buttons(message)]
-    assert named, "the messages tell people which button to use"
-    for message, button in named:
-        assert button in labels, message
-
-
-def _computer_action_messages(config: MediaforceConfig) -> list[str]:
-    import subprocess
-
-    from mediaforce.hosts import mount_runtime
-    from mediaforce.hosts.mount_runtime import RemoteSmbMount
-
-    host = {"host": "user@worker", "label": "Worker", "user": "worker"}
-    mounts = [RemoteSmbMount(Path("/Volumes/media"), "media", "smb://nas/media")]
-
-    def helper(exit_code: int, output: str = "") -> Any:
-        return lambda _script, _timeout: subprocess.CompletedProcess([], exit_code, output, "")
-
-    messages: list[str] = []
-    for code, stdout in [
-        (41, ""), (44, ""), (45, ""), (46, "MEDIAFORCE_MOUNT_AT=/Volumes/media-1"), (99, ""),
-        (42, "MEDIAFORCE_MOUNT_JOB=running"), (42, ""), (42, "MEDIAFORCE_MOUNT_ERR=User canceled (-128)"),
-        (42, "MEDIAFORCE_MOUNT_ERR=Authentication failed"), (42, "MEDIAFORCE_MOUNT_ERR=Server could not be found"),
-        (42, "MEDIAFORCE_MOUNT_ERR=Something else"),
-    ]:
-        result = mount_runtime.mount_smb_shares(host, mounts, run_mount_script=helper(code, stdout), transport="ssh")
-        messages += [result.message, result.detail or ""]
-    for code, stdout in [(46, ""), (48, ""), (47, 'MEDIAFORCE_MOUNT_NETFS={"status": 80}')]:
-        result = mount_runtime.mount_smb_shares_no_ui(host, mounts, run_mount_script=helper(code, stdout))
-        messages.append(result.action or "")
-    with patch_attr(recovery, "probe_host_status", return_value=status()), patch_attr(
-        recovery, "recover_remote_host_mounts_no_ui", return_value=NoUiMountResult(ok=False, uncertain=True),
-    ):
-        recovery.process_host_recovery_once(config)
-        messages.append(recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["reason"])
-        recovery.process_host_recovery_once(config)
-    messages += [alert["detail"] for alert in alerts.recovery_alerts(config)]
-    return messages
-
-
-def test_computer_messages_name_buttons_that_exist(config: MediaforceConfig) -> None:
-    assert {"Set up computer", "Retry connection"} <= _button_labels()
-    _assert_named_buttons_exist(_computer_action_messages(config))
-
-
-def _motion_pattern_messages() -> list[str]:
-    from unittest.mock import MagicMock
-
-    from mediaforce.web.runtime import decision_evidence
-    from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
-    from mediaforce.web.runtime.left_out_files import cadence_left_out_files
-
-    work_states: list[dict[str, Any]] = [{"is_paused": True}, {"status": "running"}, {"status": "queued"}]
-    messages: list[str] = []
-    for count in (1, 2):
-        for preparation in [{"terminal_failure_count": count}, *({"work": work} for work in work_states)]:
-            with patch_attr(decision_evidence, "_queue_cadence_evidence_work", return_value=[
-                {"required_count": count, **preparation},
-            ]):
-                blocker = decision_evidence.cadence_evidence_blocker(
-                    MagicMock(), MagicMock(), "tv/Show", library_item_ids=[1], decision_label="queueing this sample",
-                    work_reason="sample_safety", synchronize=False,
-                )
-            assert blocker is not None
-            messages.append(blocker["message"])
-    for work in work_states:
-        partition = CadenceQueuePartition(
-            cleared_item_ids=frozenset(), blocked_item_ids=frozenset(), analysis_queued_item_ids=frozenset({1}),
-            analysis_failed_item_ids=frozenset({2}), analysis_unavailable_item_ids=frozenset(),
-            analysis_unavailable_reason=None, evidence_work=work,
-        )
-        messages += [left_out.reason for left_out in cadence_left_out_files(partition, {})]
-    return messages
-
-
-def test_motion_pattern_messages_name_buttons_that_exist() -> None:
-    assert {"Prepare analysis", "Start analysis"} <= _button_labels()
-    _assert_named_buttons_exist(_motion_pattern_messages())
-
-
 def test_host_alert_reads_as_sentences(config: MediaforceConfig, empty_host_status_cache: None) -> None:
     unreachable = status()
     unreachable.platform = "unknown"
@@ -896,14 +785,11 @@ config, host,
     assert not recovery.host_recovery_snapshot(config)["hosts"]["user@worker"]["network_absent"]
 
 
-def test_failed_check_keeps_the_same_buttons_and_says_which_to_use(config: MediaforceConfig) -> None:
+def test_failed_check_keeps_the_same_buttons(config: MediaforceConfig) -> None:
     identity = _checked(config, _CHECK_FAILURES["identity_changed"])
     password = _checked(config, _CHECK_FAILURES["password_needed"])
     assert identity.trust_reset_supported and not identity.setup_supported and identity.detail is None
     assert password.setup_supported and password.setup_requires_password
-    _assert_named_buttons_exist([
-        issue for case in sorted(_CHECK_FAILURES) for issue in _checked(config, _CHECK_FAILURES[case]).issues
-    ])
 
 
 def test_storage_warning_keeps_the_mount_point_behind_details(config: MediaforceConfig) -> None:
@@ -920,7 +806,6 @@ def test_storage_warning_keeps_the_mount_point_behind_details(config: Mediaforce
         for text in (warning["title"], warning["detail"]):
             assert "/" not in text and "smb" not in text.lower() and "controller" not in text.lower()
         assert "/" in warning["technical"]
-    _assert_named_buttons_exist([warning["detail"] for warning in warnings])
 
 
 def test_uncertain_mount_disappears_and_reachable_computer_recovers_automatically(config: MediaforceConfig) -> None:

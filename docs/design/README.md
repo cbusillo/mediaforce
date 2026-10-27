@@ -12,8 +12,6 @@ sources below. Treat archived briefs as evidence only.
 - `docs/design/movies-workflow.md`: active Movies Library and movie page
   contract.
 - `docs/style/workstation-ui.md`: workstation doctrine.
-- `docs/style/frontend.md`: Svelte/frontend implementation and validation
-  expectations.
 
 ## Quarantined Historical Briefs
 
