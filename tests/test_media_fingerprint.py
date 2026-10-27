@@ -3,9 +3,11 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, patch
 
 from mediaforce.encoding.fingerprint import (
+    analyze_media_fingerprint,
     classify_media_fingerprint,
     media_fingerprint_manifest_payload,
     media_fingerprint_staleness,
@@ -285,3 +287,140 @@ True peak:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_combined_fingerprint_preserves_signal_and_edge_metadata() -> None:
+    signal = "\n".join(
+        f"frame:{index} pts:{index} pts_time:{index / 2}\nmediaforce.range={group}\nlavfi.signalstats.YAVG=24\n"
+        "lavfi.signalstats.YDIF=2\nlavfi.signalstats.YMIN=20\nlavfi.signalstats.YMAX=32"
+        for group in range(3) for index in range(120)
+    )
+    edge = "\n".join(
+        f"frame:{index} pts:{index} pts_time:{index / 2}\nmediaforce.range={group}\nlavfi.signalstats.YAVG=51"
+        for group in range(3) for index in range(120)
+    )
+    runner = Mock()
+    runner.run.return_value = subprocess.CompletedProcess([], 0, signal, edge)
+    runner.tool_lineage.return_value = {"ffmpeg_version": "test"}
+    summary = _fingerprint_without_audio(runner)
+
+    assert runner.run.call_count == 1
+    assert summary["analysis"]["coverage"] == 1
+    aggregate = summary["analysis"]["aggregate"]
+    assert aggregate["sampled_frames"] == 360
+    assert aggregate["dark_frame_fraction"] == 1
+    assert aggregate["edge_density_mean"] == 0.2
+    assert aggregate["duplicate_like_frame_fraction"] == 0
+
+
+def test_failed_combined_pass_cannot_claim_measured_coverage() -> None:
+    runner = Mock()
+    runner.run.return_value = subprocess.CompletedProcess(
+        [], 1, "frame:0 pts:0 pts_time:0\nlavfi.signalstats.YAVG=24", "decoder failed",
+    )
+    runner.tool_lineage.return_value = {"ffmpeg_version": "test"}
+    summary = _fingerprint_without_audio(runner)
+
+    assert summary["analysis"]["coverage"] == 0
+    assert summary["decision"]["status"] == "unknown"
+    assert all(row["status"] == "failed" for row in summary["analysis"]["ranges"])
+
+
+def test_unavailable_hardware_retries_complete_range_in_software() -> None:
+    from mediaforce.encoding.fingerprint import _run_fingerprint_ranges
+
+    runner = Mock()
+    runner.run.side_effect = [
+        subprocess.CompletedProcess([], 1, "partial hardware metadata", "unsupported decoder"),
+        subprocess.CompletedProcess([], 0, "software signal", "software edges"),
+    ]
+    result = _run_fingerprint_ranges(
+        Path("episode.mkv"), ffmpeg_name="ffmpeg", starts=[120],
+        frame_limit=120, sample_fps=2, download_format="nv12", timeout_seconds=60,
+        process_controller=None, command_runner=runner,
+    )
+
+    assert runner.run.call_count == 2
+    assert result["status"] == "measured"
+    assert result["stdout"] == "software signal"
+    assert result["stderr"] == "software edges"
+    first, second = [call.args[0] for call in runner.run.call_args_list]
+    assert "-hwaccel" in first
+    assert "-hwaccel" not in second
+
+
+def test_hardware_download_matches_probed_bit_depth() -> None:
+    for pixel_format, download_format in (("yuv420p", "nv12"), ("yuv420p10le", "p010le")):
+        runner = Mock()
+        runner.run.return_value = subprocess.CompletedProcess([], 0, "", "")
+        runner.tool_lineage.return_value = {"ffmpeg_version": "test"}
+        analyze_media_fingerprint(
+            Path("episode.mkv"), video_stream={"codec_name": "hevc", "pix_fmt": pixel_format},
+            audio_streams=[], duration_seconds=1200, command_runner=runner,
+        )
+        command = runner.run.call_args.args[0]
+        graph = command[command.index("-filter_complex") + 1]
+        assert f"hwdownload,format={download_format}," in graph
+        assert graph.index("fps=") < graph.index("hwdownload")
+
+
+def test_unmapped_pixel_format_uses_full_software_pass() -> None:
+    runner = Mock()
+    runner.run.return_value = subprocess.CompletedProcess([], 0, "", "")
+    runner.tool_lineage.return_value = {"ffmpeg_version": "test"}
+    analyze_media_fingerprint(
+        Path("episode.mkv"), video_stream={"codec_name": "hevc", "pix_fmt": "yuv444p12le"},
+        audio_streams=[], duration_seconds=1200, command_runner=runner,
+    )
+    for call in runner.run.call_args_list:
+        assert "-hwaccel" not in call.args[0]
+
+
+def test_interleaved_fingerprint_frames_keep_range_boundaries() -> None:
+    from mediaforce.encoding.fingerprint import parse_fingerprint_ranges
+
+    output = """
+frame:0 pts:0
+lavfi.signalstats.YAVG=24
+lavfi.signalstats.YDIF=0
+mediaforce.range=2
+frame:1 pts:1
+lavfi.signalstats.YAVG=130
+lavfi.signalstats.YDIF=0
+mediaforce.range=0
+frame:2 pts:2
+lavfi.signalstats.YAVG=32
+lavfi.signalstats.YDIF=8
+mediaforce.range=2
+"""
+    ranges = parse_fingerprint_ranges(output)
+
+    assert [frame["yavg"] for frame in ranges[2]] == [24, 32]
+    assert [frame["yavg"] for frame in ranges[0]] == [130]
+    assert 1 not in ranges
+
+
+def test_missing_fingerprint_range_or_edges_cannot_claim_full_coverage() -> None:
+    frames = "\n".join(
+        f"frame:{index} pts:{index}\nmediaforce.range={group}\nlavfi.signalstats.YAVG=24"
+        for group in range(2) for index in range(120)
+    )
+    runner = Mock()
+    runner.run.return_value = subprocess.CompletedProcess([], 0, frames, frames)
+    runner.tool_lineage.return_value = {"ffmpeg_version": "test"}
+    summary = _fingerprint_without_audio(runner)
+    assert summary["analysis"]["measured_range_count"] == 2
+    assert summary["analysis"]["coverage"] < 1
+    assert summary["analysis"]["ranges"][2]["status"] == "failed"
+
+    runner.run.return_value = subprocess.CompletedProcess([], 0, frames, "")
+    summary = _fingerprint_without_audio(runner)
+    assert summary["decision"]["status"] == "unknown"
+    assert summary["analysis"]["coverage"] == 0
+
+
+def _fingerprint_without_audio(runner: Mock) -> dict[str, Any]:
+    return analyze_media_fingerprint(
+        Path("episode.mkv"), video_stream={"codec_name": "h264"}, audio_streams=[],
+        duration_seconds=1200, command_runner=runner,
+    )

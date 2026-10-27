@@ -16,6 +16,15 @@ The web app's evidence-autostart worker runs any unpaused batch that has
 claimable work (see the just-in-time path below). Catalog scans never start
 analysis. The CLI `evidence run` pass claims bounded work and exits.
 
+Fingerprint analysis reads its three video ranges in one FFmpeg command,
+with separate inputs and one decode per range. It keeps the same uniformly
+spaced frames and computes brightness, temporal differences and edges in two
+branches. Range tags keep the measurements separate. For supported 8-bit and
+10-bit 4:2:0 formats, VideoToolbox keeps frames on the GPU until after selection;
+only retained frames reach the CPU filters. Unsupported formats or failed
+hardware decoding use the complete software pass. Audio measurements and
+cadence analysis retain their sampling and independent safety decisions.
+
 ## Durable state
 
 `library_item_evidence_state` owns one independent work unit for each
