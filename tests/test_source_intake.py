@@ -80,8 +80,9 @@ def _work(
     *,
     stop_event: threading.Event | None = None,
     max_attempts: int | None = None,
-) -> bool:
-    deps = EvidenceWorkerDeps(
+    max_work_items: int = 1,
+) -> int:
+    deps = EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(),
         load_config=lambda _path: config,
         analyze_evidence=analyze or (lambda _path, kind, **_kwargs: _summary(kind)),
         logger=Mock(),
@@ -91,13 +92,13 @@ def _work(
         **({"max_attempts": max_attempts} if max_attempts is not None else {}),
     )
     with (
-        patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()),
+        patch("mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()),
         patch(
             "mediaforce.library.evidence_worker._analysis_target",
             side_effect=lambda _config, _claim, path, *_args: SimpleNamespace(source_path=path, command_runner=None),
         ),
     ):
-        return process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps)
+        return process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps, max_work_items=max_work_items)
 
 
 def _measure_source_traits(config: MediaforceConfig) -> None:
@@ -166,10 +167,10 @@ def test_no_computer_waits_before_reading_an_original_digest(tmp_path: Path) -> 
     item_id, _path = _source(config)
     _discover(config)
     with patch("mediaforce.encoding.remote_media.run_remote_command", side_effect=AssertionError("no real SSH")), patch(
-        "mediaforce.library.source_intake._probe_payload"
+        "mediaforce.library.source_intake.probe_evidence_source"
     ) as probe:
         assert not process_evidence_queue_once(config_path=config.paths.config_path, config=config,
-            deps=EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
+            deps=EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(), load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
                 evidence_host_rows=lambda _config: [{"key": "offline.example", "available": False}]))
     with open_db(config.paths.db_path) as db:
         state = db.execute(select(library_item_evidence_state).where(
@@ -189,10 +190,10 @@ def test_computer_schedule_is_checked_again_after_original_admission(tmp_path: P
             for opened in (True, False)]
     analyze = Mock(side_effect=AssertionError("closed schedule"))
     with patch("mediaforce.encoding.remote_media.run_remote_command", side_effect=AssertionError("no real SSH")), patch(
-        "mediaforce.library.source_intake._probe_payload", return_value=_probe()
+        "mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()
     ):
         assert process_evidence_queue_once(config_path=config.paths.config_path, config=config,
-            deps=EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock(),
+            deps=EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(), load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock(),
                 evidence_host_rows=Mock(side_effect=[[row] for row in rows])))
     with open_db(config.paths.db_path) as db:
         state = db.execute(select(library_item_evidence_state).where(
@@ -212,10 +213,10 @@ def test_current_original_receipts_finish_without_a_computer(tmp_path: Path) -> 
     assert _discover(config) == 1
     for qualification in range(2):
         with patch("mediaforce.library.evidence_worker._analysis_target", side_effect=AssertionError("stored result needs no computer")), patch(
-            "mediaforce.library.source_intake._probe_payload", return_value=_probe()
+            "mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()
         ):
             assert process_evidence_queue_once(config_path=config.paths.config_path, config=config,
-                deps=EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
+                deps=EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(), load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
                     evidence_host_rows=lambda _config: [{"key": "offline.example", "available": False}]))
         with open_db(config.paths.db_path) as db:
             state = db.execute(select(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item_id,
@@ -239,7 +240,7 @@ def test_prefetch_skips_libraries_waiting_for_a_computer(tmp_path: Path) -> None
     with open_db(config.paths.db_path) as db:
         claim = claim_next_evidence_work(db, worker_id="test", lease_seconds=60, excluded_media_roots={"tv"})
     assert claim is not None and claim.library_item_id == current
-    with patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()), SourceAdmissionPrefetcher(
+    with patch("mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()), SourceAdmissionPrefetcher(
         stop_event=None, logger=Mock()
     ) as prefetch:
         prefetch.start(config, claim, excluded_media_roots={"tv"})
@@ -280,9 +281,9 @@ def test_automatic_loop_overlaps_eligible_inputs_and_discovers_without_a_poll(tm
         measured.append((path, kind))
         return _summary(kind)
 
-    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock(),
+    deps = EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(), load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock(),
         evidence_host_rows=lambda _config: [{"key": "tv.example", "available": True, "capabilities": ["encode_queue"]}])
-    with patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()), patch(
+    with patch("mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()), patch(
         "mediaforce.library.source_intake.observe_file", side_effect=observe
     ), patch("mediaforce.library.evidence_worker._analysis_target",
              side_effect=lambda _config, _claim, path, *_args: SimpleNamespace(source_path=path, command_runner=None)):
@@ -323,8 +324,8 @@ def test_automatic_loop_preserves_real_stop_controls(tmp_path: Path, control: st
                 (pause_evidence_queue if control == "pause" else cancel_evidence_queue)(database)
         return _summary(kind)
 
-    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock())
-    with patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()), patch(
+    deps = EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(), load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock())
+    with patch("mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()), patch(
         "mediaforce.library.evidence_worker._analysis_target",
         side_effect=lambda _config, _claim, path, *_args: SimpleNamespace(source_path=path, command_runner=None)
     ):
@@ -354,7 +355,7 @@ def test_automatic_loop_stops_after_one_missing_root_observation(tmp_path: Path)
             stop.set()
         return "root_unavailable", None
 
-    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock())
+    deps = EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(), load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock())
     clock = Mock(wraps=datetime)
     clock.now.return_value = datetime.now(UTC).replace(microsecond=0)
     with patch("mediaforce.library.evidence_worker.datetime", clock), patch(
@@ -381,9 +382,9 @@ def test_missing_root_does_not_hold_a_healthy_original_at_lower_priority(tmp_pat
     _discover(config)
     with open_db(config.paths.db_path) as db:
         db.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id.in_(offline)).values(work_priority=0))
-    deps = EvidenceWorkerDeps(load_config=lambda _path: config,
+    deps = EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(), load_config=lambda _path: config,
         analyze_evidence=lambda _path, kind, **_kwargs: _summary(kind), logger=Mock())
-    with patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()):
+    with patch("mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()):
         run_evidence_queue_until_blocked(config_path=config.paths.config_path, config=config, deps=deps, max_work_items=None)
     with open_db(config.paths.db_path) as db:
         assert {trait.tier for trait in load_source_evidence(db, healthy).traits.values()} == {"probable"}
@@ -446,9 +447,9 @@ def test_current_unreceipted_originals_wait_or_prefetch_by_computer_readiness(tm
             assert prepared.wait(5)
         return _summary(kind)
 
-    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock(),
+    deps = EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(), load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock(),
         evidence_host_rows=lambda _config: [{"key": "worker.example", "available": True, "capabilities": ["encode_queue"]}])
-    with patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()), patch(
+    with patch("mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()), patch(
         "mediaforce.library.source_intake.observe_file", side_effect=observe
     ), patch("mediaforce.library.evidence_worker._analysis_target",
         side_effect=lambda _config, _claim, path, *_args: SimpleNamespace(source_path=path, command_runner=None)):
@@ -490,7 +491,7 @@ def test_shutdown_during_computer_readiness_does_not_claim_or_mark_work(tmp_path
         return []
 
     result = run_evidence_queue_until_blocked(config_path=config.paths.config_path, config=config,
-        deps=EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(), evidence_host_rows=rows),
+        deps=EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(), load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(), evidence_host_rows=rows),
         max_work_items=None, stop_event=stop)
     assert result["stop_reason"] == "shutdown"
     assert result["processed_count"] == 0
@@ -832,7 +833,7 @@ def test_failed_probe_reuses_digest_without_admitting_original(tmp_path: Path) -
     observations = Mock(wraps=observe_file)
     with (
         patch("mediaforce.library.source_intake.observe_file", observations),
-        patch("mediaforce.library.source_intake._probe_payload", side_effect=RuntimeError("probe failed")),
+        patch("mediaforce.library.source_intake.probe_evidence_source", side_effect=RuntimeError("probe failed")),
     ):
         with pytest.raises(RuntimeError, match="probe failed"):
             intake.assess_source_input(config, item_id, ManagedProcessController(), lambda: None)
@@ -841,7 +842,7 @@ def test_failed_probe_reuses_digest_without_admitting_original(tmp_path: Path) -
     observations.reset_mock()
     with (
         patch("mediaforce.library.source_intake.observe_file", observations),
-        patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()),
+        patch("mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()),
     ):
         intake.assess_source_input(config, item_id, ManagedProcessController(), lambda: None)
     assert not any(call.kwargs.get("full_digest") for call in observations.call_args_list)
@@ -874,10 +875,10 @@ def test_next_original_admission_overlaps_analysis_and_digest_is_reused(tmp_path
         measured.append((path, kind))
         return _summary(kind)
 
-    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock())
+    deps = EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(), load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock())
     with (
         patch("mediaforce.library.source_intake.observe_file", side_effect=observe),
-        patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()),
+        patch("mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()),
         patch("mediaforce.library.evidence_worker._analysis_target",
               side_effect=lambda _config, _claim, path, *_args: SimpleNamespace(source_path=path, command_runner=None)),
     ):
@@ -1057,10 +1058,10 @@ def test_one_item_run_does_not_prepare_an_extra_original(tmp_path: Path) -> None
     _source(config, "first")
     _source(config, "second")
     _discover(config)
-    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=lambda _path, kind, **_kw: _summary(kind), logger=Mock())
+    deps = EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(), load_config=lambda _path: config, analyze_evidence=lambda _path, kind, **_kw: _summary(kind), logger=Mock())
     with (
         patch("mediaforce.library.source_intake.observe_file", wraps=observe_file) as observed,
-        patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()),
+        patch("mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()),
         patch("mediaforce.library.evidence_worker._analysis_target",
               side_effect=lambda _config, _claim, path, *_args: SimpleNamespace(source_path=path, command_runner=None)),
     ):
@@ -1096,7 +1097,7 @@ def test_original_digest_preserves_terminal_and_resumable_interruptions(tmp_path
             kwargs["check_cancelled"]()
         return observe_file(path, **kwargs)
 
-    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=analyzer, logger=Mock(),
+    deps = EvidenceWorkerDeps(read_probe=lambda *_args, **_kw: _probe(), load_config=lambda _path: config, analyze_evidence=analyzer, logger=Mock(),
                               heartbeat_seconds=60, shutdown_event=stopped)
     with patch("mediaforce.library.source_intake.observe_file", side_effect=observe):
         assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps)
@@ -1305,3 +1306,79 @@ def test_cancelled_kind_with_ineligible_original_does_not_enqueue_another_kind(t
             database.execute(select(library_item_evidence_state.c.evidence_kind, library_item_evidence_state.c.work_status)).all()
         )
         assert statuses == {"cadence_analysis": "failed", "media_fingerprint": "completed"}
+
+
+def test_paired_original_records_two_observed_receipts_from_one_probe(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    _discover(config)
+    probe = Mock(return_value=_probe())
+    measured: list[tuple[str, object]] = []
+    def analyze(_path: Path, kind: str, **kwargs: Any) -> dict[str, Any]:
+        measured.append((kind, kwargs["probe_payload"]))
+        return _summary(kind)
+    from mediaforce.library.evidence_worker import run_evidence_queue_until_blocked
+    deps = EvidenceWorkerDeps(load_config=lambda _: config, analyze_evidence=analyze, logger=Mock(), read_probe=probe)
+    with patch("mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()):
+        result = run_evidence_queue_until_blocked(config_path=config.paths.config_path, config=config, deps=deps, max_work_items=2)
+    assert result["processed_count"] == 2
+    probe.assert_called_once()
+    assert len(measured) == 2 and measured[0][1] is measured[1][1]
+    with open_db(config.paths.db_path) as db:
+        receipts = db.execute(select(source_measurements)).mappings().all()
+        evidence = load_source_evidence(db, item_id)
+    assert {row["kind"] for row in receipts} == set(EVIDENCE_KINDS)
+    assert {row["binding"] for row in receipts} == {"observed"}
+    assert len(receipts) == 2
+    assert {trait.tier for trait in evidence.traits.values()} == {"probable"}
+
+
+@pytest.mark.parametrize("action", ["cancel", "pause", "shutdown"])
+def test_pair_interrupt_restores_each_started_attempt(tmp_path: Path, action: str) -> None:
+    from mediaforce.core.process_control import ProcessCancelledError
+    from mediaforce.library.evidence_queue import pause_evidence_queue
+    from mediaforce.library.evidence_worker import EvidenceWorkDeferred
+    config = _config(tmp_path)
+    _source(config)
+    _discover(config)
+    def analyze(_path: Path, _kind: str, **_kwargs: Any) -> dict[str, Any]:
+        with open_db(config.paths.db_path) as controls:
+            if action == "cancel":
+                cancel_evidence_queue(controls)
+            elif action == "pause":
+                pause_evidence_queue(controls)
+        if action == "cancel":
+            raise ProcessCancelledError("cancelled")
+        raise EvidenceWorkDeferred(action)
+    assert _work(config, analyze, max_work_items=2) == 2
+    with open_db(config.paths.db_path) as db:
+        rows = db.execute(select(library_item_evidence_state)).mappings().all()
+        assert db.execute(select(func.count()).select_from(source_measurements)).scalar_one() == 0
+    assert {row["attempt_count"] for row in rows} == {0}
+    assert {row["work_status"] for row in rows} == ({"cancelled"} if action == "cancel" else {"retry_wait"})
+
+
+@pytest.mark.parametrize("fence", ["cancel", "source_operation"])
+def test_pair_fence_between_commits_preserves_first_receipt(tmp_path: Path, fence: str) -> None:
+    from mediaforce.library import evidence_worker
+    config = _config(tmp_path)
+    _source(config)
+    _discover(config)
+    commit = evidence_worker._commit_evidence_summary
+    committed: list[str] = []
+    def commit_and_cancel(current: MediaforceConfig, claim: EvidenceWorkClaim, *args: Any, **kwargs: Any) -> None:
+        commit(current, claim, *args, **kwargs)
+        committed.append(claim.evidence_kind)
+        if fence == "cancel":
+            with open_db(config.paths.db_path) as controls:
+                cancel_evidence_queue(controls)
+    with patch("mediaforce.library.evidence_worker._commit_evidence_summary", side_effect=commit_and_cancel), patch(
+        "mediaforce.library.evidence_worker.pending_source_operation",
+        side_effect=lambda *_: fence == "source_operation" and bool(committed),
+    ):
+        assert _work(config, max_work_items=2) == 2
+    with open_db(config.paths.db_path) as db:
+        receipts = db.execute(select(source_measurements.c.kind)).scalars().all()
+        rows = db.execute(select(library_item_evidence_state.c.work_status)).scalars().all()
+    assert receipts == committed[:1]
+    assert sorted(rows) == sorted(["cancelled" if fence == "cancel" else "failed", "completed"])
