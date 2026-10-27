@@ -316,6 +316,7 @@ extension Words {
         case "motion_unclear": "motion pattern unclear"
         case "motion_put_back": "you put the original back"
         case "motion_check_failed": "its compressed copy kept failing its check"
+        case "motion_over_size": "its compressed copy came out over the size you allow"
         default: "kept by you"
         }
     }
