@@ -232,7 +232,10 @@ computer, never on the controller:
   current eligible libraries. Queued measurement work in an unavailable library
   becomes `waiting_host` without taking a lease or consuming attempts; urgent
   unavailable rows therefore do not interrupt a healthy library's admission.
-  Current stored-result rows and policy-only reclassification can still finish.
+  Non-original current rows and policy-only reclassification can still finish.
+  A current original needs a relevant observed receipt before it can qualify
+  without a computer; legacy summary JSON alone does not imply that receipt.
+  Prefetch includes those legacy originals when their computer is eligible.
 - An actual connection failure keeps the existing retry interval. Remote
   workers and prefetch read that retained wait, so a stale available host check
   cannot repeatedly admit the next files. Local runs with no encode computers

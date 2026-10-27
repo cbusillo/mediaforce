@@ -18,7 +18,6 @@ from mediaforce.library.evidence_queue import (
     waiting_evidence_host_roots,
 )
 from mediaforce.library.source_intake import assess_source_input
-from mediaforce.library.evidence_state import EVIDENCE_STATE_CURRENT
 from mediaforce.library.evidence_hosts import remote_evidence_hosts
 
 
@@ -59,7 +58,6 @@ class SourceAdmissionPrefetcher:
             roots = set(roots) | waiting_evidence_host_roots(connection, batch_id=claim.batch_id)
         candidate = connection.execute(next_evidence_work_query(claim.batch_id, timestamp(), excluded_media_roots=roots).where(
             library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
-            library_item_evidence_state.c.state != EVIDENCE_STATE_CURRENT,
             library_item_evidence_state.c.library_item_id != claim.library_item_id,
         )).mappings().first()
         return int(candidate["library_item_id"]) if candidate is not None else None
@@ -86,7 +84,7 @@ class SourceAdmissionPrefetcher:
 
         def require_runnable(connection: DBClient) -> None:
             self._check_stopped()
-            if (original_intake_hold(connection, batch_id=claim.batch_id, priority=claim.work_priority) is not None
+            if (original_intake_hold(connection, batch_id=claim.batch_id, priority=claim.work_priority, excluded_media_roots=roots) is not None
                     or self._next_item(config, connection, claim, roots) != item_id):
                 raise ProcessCancelledError("Original admission preparation is no longer runnable")
 

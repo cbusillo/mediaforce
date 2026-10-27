@@ -7,12 +7,12 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Sequence
 
-from sqlalchemy import and_, bindparam, case, func, or_, select, update
+from sqlalchemy import and_, bindparam, case, func, or_, select, true, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import evidence_queue_state, library_item_evidence_state, library_items
+from mediaforce.core.db_tables import evidence_queue_state, library_item_evidence_state, library_items, source_admissions, source_measurements
 from mediaforce.core.evidence import stable_source_id
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.core.utils import timestamp
@@ -550,7 +550,7 @@ def _evidence_due_now(now_iso: str) -> Any:
 
 
 def original_intake_hold(
-    connection: DBClient, *, batch_id: str, priority: int,
+    connection: DBClient, *, batch_id: str, priority: int, excluded_media_roots: Collection[str] = (),
 ) -> Literal["cancelled", "paused", "higher_priority"] | None:
     state = load_evidence_queue_state(connection)
     if (state["batch_id"] != batch_id or state["cancel_requested"]
@@ -558,11 +558,9 @@ def original_intake_hold(
         return "cancelled"
     if background_work_is_paused(connection) or state["is_paused"]:
         return "paused"
-    if connection.execute(select(library_item_evidence_state.c.library_item_id).where(
-        library_item_evidence_state.c.work_batch_id == batch_id,
-        library_item_evidence_state.c.work_status == "queued",
+    if connection.execute(next_evidence_work_query(batch_id, timestamp(), excluded_media_roots=excluded_media_roots).where(
         library_item_evidence_state.c.work_priority < priority,
-    ).limit(1)).first() is not None:
+    )).first() is not None:
         return "higher_priority"
     return None
 
@@ -713,17 +711,37 @@ def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_root
         library_items.c.media_root.in_(_waiting_roots_query(batch_id, now_iso, "waiting_source"))
     )
     return query.where(
-        or_(~_evidence_requires_computer(), library_item_evidence_state.c.library_item_id.not_in(blocked_items)),
+        or_(library_item_evidence_state.c.library_item_id.not_in(blocked_items), ~_evidence_requires_computer()),
         or_(~_evidence_requires_source(), library_item_evidence_state.c.library_item_id.not_in(source_waiting_items)),
     )
 
 
 def _evidence_requires_computer() -> Any:
+    original = func.coalesce(library_item_evidence_state.c.work_reason, "") == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
     return and_(
-        library_item_evidence_state.c.state != EVIDENCE_STATE_CURRENT,
-        or_(library_item_evidence_state.c.state != EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
-            func.coalesce(library_item_evidence_state.c.work_reason, "") == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE),
+        or_(library_item_evidence_state.c.state != EVIDENCE_STATE_CURRENT,
+            and_(original, ~_observed_original_receipt_exists())),
+        or_(library_item_evidence_state.c.state != EVIDENCE_STATE_CLASSIFICATION_REQUIRED, original),
     )
+
+
+def _observed_original_receipt_exists() -> Any:
+    items = library_items.alias("receipt_items")
+    measurements = source_measurements.alias("observed_receipts")
+    admissions = source_admissions.alias("receipt_admissions")
+    frozen = func.json_each(admissions.c.checks_json, "$.measurement_ids").table_valued("value", joins_implicitly=True).alias("frozen_receipts")
+    direct = select(measurements.c.measurement_id).select_from(items.join(
+        measurements, measurements.c.version_id == items.c.active_source_version_id,
+    )).where(items.c.id == library_item_evidence_state.c.library_item_id,
+             measurements.c.kind == library_item_evidence_state.c.evidence_kind,
+             measurements.c.binding == "observed").exists()
+    qualified = select(measurements.c.measurement_id).select_from(
+        items.join(admissions, admissions.c.version_id == items.c.active_source_version_id)
+        .join(frozen, true()).join(measurements, measurements.c.measurement_id == frozen.c.value)
+    ).where(items.c.id == library_item_evidence_state.c.library_item_id,
+            measurements.c.kind == library_item_evidence_state.c.evidence_kind,
+            measurements.c.binding == "observed").exists()
+    return or_(direct, qualified)
 
 
 def _evidence_requires_source() -> Any:

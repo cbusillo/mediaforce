@@ -26,10 +26,14 @@ from mediaforce.core.db_tables import (
 from mediaforce.encoding.remote_media import source_observation_script
 from mediaforce.library.evidence_queue import (
     DEFAULT_EVIDENCE_BATCH_LIMIT,
+    EVIDENCE_WORK_PRIORITY_REPRESENTATIVE,
+    EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
     EvidenceWorkClaim,
     cancel_evidence_queue,
     claim_next_evidence_work,
     resume_evidence_queue,
+    original_intake_hold,
+    queue_decision_evidence_work,
     runnable_evidence_work_count,
     start_evidence_work,
 )
@@ -206,16 +210,20 @@ def test_current_original_receipts_finish_without_a_computer(tmp_path: Path) -> 
     _measure_source_traits(config)
     config.raw["remote_hosts"] = [{"host": "offline.example", "mode": "ssh", "source_roots": {"tv": str(config.source_root_map["tv"])}}]
     assert _discover(config) == 1
-    with patch("mediaforce.library.evidence_worker._analysis_target", side_effect=AssertionError("stored result needs no computer")), patch(
-        "mediaforce.library.source_intake._probe_payload", return_value=_probe()
-    ):
-        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config,
-            deps=EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
-                evidence_host_rows=lambda _config: [{"key": "offline.example", "available": False}]))
-    with open_db(config.paths.db_path) as db:
-        state = db.execute(select(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item_id,
-            library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
-        assert state["work_status"] == "completed"
+    for qualification in range(2):
+        with patch("mediaforce.library.evidence_worker._analysis_target", side_effect=AssertionError("stored result needs no computer")), patch(
+            "mediaforce.library.source_intake._probe_payload", return_value=_probe()
+        ):
+            assert process_evidence_queue_once(config_path=config.paths.config_path, config=config,
+                deps=EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
+                    evidence_host_rows=lambda _config: [{"key": "offline.example", "available": False}]))
+        with open_db(config.paths.db_path) as db:
+            state = db.execute(select(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item_id,
+                library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
+            assert state["work_status"] == "completed"
+            if qualification == 0:
+                queue_decision_evidence_work(db, config, "tv/source.mkv", library_item_ids=[item_id], evidence_kind="media_fingerprint",
+                    work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, require_measurement=True, restart_terminal=True, start_new_batch=True)
 
 
 def test_prefetch_skips_libraries_waiting_for_a_computer(tmp_path: Path) -> None:
@@ -346,7 +354,7 @@ def test_automatic_loop_stops_after_one_missing_root_observation(tmp_path: Path)
             stop.set()
         return "root_unavailable", None
 
-    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(), source_retry_delay_seconds=0)
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock())
     clock = Mock(wraps=datetime)
     clock.now.return_value = datetime.now(UTC).replace(microsecond=0)
     with patch("mediaforce.library.evidence_worker.datetime", clock), patch(
@@ -405,6 +413,89 @@ def test_source_wait_preserves_only_metadata_fast_paths(tmp_path: Path, state: s
     assert (claim is not None) == can_claim
     if claim is not None:
         assert claim.library_item_id == candidate
+
+
+@pytest.mark.parametrize("offline", [True, False])
+def test_current_unreceipted_originals_wait_or_prefetch_by_computer_readiness(tmp_path: Path, offline: bool) -> None:
+    from mediaforce.library.evidence_worker import run_evidence_queue_until_blocked
+    config = _config(tmp_path)
+    config.raw["media"]["source_roots"]["movies"] = str(config.source_root_map["tv"])
+    first, first_path = _source(config, "first")
+    legacy, legacy_path = _source(config)
+    with open_db(config.paths.db_path) as db:
+        db.execute(update(library_items).where(library_items.c.id == legacy).values(
+            media_root="movies", media_fingerprint_json=json.dumps(_summary("media_fingerprint"))))
+    config.raw["remote_hosts"] = [{"host": "worker.example", "mode": "ssh", "allowed_libraries": ["tv"] if offline else ["tv", "movies"],
+        "source_roots": {"tv": str(config.source_root_map["tv"]), "movies": str(config.source_root_map["movies"])}}]
+    _discover(config)
+    with open_db(config.paths.db_path) as db:
+        assert db.execute(select(library_item_evidence_state.c.state).where(library_item_evidence_state.c.library_item_id == legacy,
+            library_item_evidence_state.c.evidence_kind == "media_fingerprint")).scalar_one() == EVIDENCE_STATE_CURRENT
+    prepared = threading.Event()
+    digests: list[tuple[Path, str]] = []
+
+    def observe(path: Path, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("full_digest"):
+            digests.append((path, threading.current_thread().name))
+            if path == legacy_path:
+                prepared.set()
+        return observe_file(path, **kwargs)
+
+    def analyze(path: Path, kind: str, **_kwargs: Any) -> dict[str, Any]:
+        if path == first_path and not offline:
+            assert prepared.wait(5)
+        return _summary(kind)
+
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock(),
+        evidence_host_rows=lambda _config: [{"key": "worker.example", "available": True, "capabilities": ["encode_queue"]}])
+    with patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()), patch(
+        "mediaforce.library.source_intake.observe_file", side_effect=observe
+    ), patch("mediaforce.library.evidence_worker._analysis_target",
+        side_effect=lambda _config, _claim, path, *_args: SimpleNamespace(source_path=path, command_runner=None)):
+        run_evidence_queue_until_blocked(config_path=config.paths.config_path, config=config, deps=deps, max_work_items=None)
+    with open_db(config.paths.db_path) as db:
+        row = db.execute(select(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == legacy,
+            library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
+        assert row["work_status"] == ("waiting_host" if offline else "completed")
+        if offline:
+            assert row["attempt_count"] == 0
+            assert legacy_path not in {path for path, _thread in digests}
+        else:
+            assert any(path == legacy_path and thread.startswith("original-admission") for path, thread in digests)
+
+
+def test_unavailable_urgent_work_queued_during_admission_does_not_interrupt_it(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _source(config, "first")
+    urgent, _path = _source(config, "urgent")
+    _discover(config)
+    with open_db(config.paths.db_path) as db:
+        db.execute(update(library_items).where(library_items.c.id == urgent).values(media_root="movies"))
+        db.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == urgent).values(work_priority=0))
+        batch = db.execute(select(library_item_evidence_state.c.work_batch_id).limit(1)).scalar_one()
+        assert original_intake_hold(db, batch_id=batch, priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, excluded_media_roots={"movies"}) is None
+        assert original_intake_hold(db, batch_id=batch, priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE) == "higher_priority"
+
+
+def test_shutdown_during_computer_readiness_does_not_claim_or_mark_work(tmp_path: Path) -> None:
+    from mediaforce.library.evidence_worker import run_evidence_queue_until_blocked
+    config = _config(tmp_path)
+    _source(config)
+    _discover(config)
+    config.raw["remote_hosts"] = [{"host": "worker.example", "mode": "ssh", "source_roots": {"tv": str(config.source_root_map["tv"])}}]
+    stop = threading.Event()
+
+    def rows(_config: MediaforceConfig) -> list[dict[str, Any]]:
+        stop.set()
+        return []
+
+    result = run_evidence_queue_until_blocked(config_path=config.paths.config_path, config=config,
+        deps=EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(), evidence_host_rows=rows),
+        max_work_items=None, stop_event=stop)
+    assert result["stop_reason"] == "shutdown"
+    assert result["processed_count"] == 0
+    with open_db(config.paths.db_path) as db:
+        assert db.execute(select(library_item_evidence_state.c.work_status)).scalar_one() == "queued"
 
 
 def test_original_assessment_is_final_and_measurements_use_one_queue(tmp_path: Path) -> None:

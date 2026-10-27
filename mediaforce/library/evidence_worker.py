@@ -107,6 +107,7 @@ def process_evidence_queue_once(
         config=current_config,
         claim=claim,
         deps=runtime_deps,
+        excluded_media_roots=roots,
     )
     return True
 
@@ -145,6 +146,9 @@ def run_evidence_queue_until_blocked(
             if config is None and processed:
                 current_config = runtime_deps.load_config(config_path)
             roots = _unmeasurable_roots(current_config, runtime_deps)
+            if stop_requested():
+                stop_reason = "shutdown"
+                break
             prepare_next = partial(prefetch.start, excluded_media_roots=roots)
             runtime_deps = replace(runtime_deps, prepare_next_original=(
                 prepare_next if max_work_items is None or processed + 1 < max_work_items else None
@@ -198,6 +202,7 @@ def _run_evidence_claim(
         config: MediaforceConfig,
         claim: EvidenceWorkClaim,
         deps: EvidenceWorkerDeps,
+        excluded_media_roots: Collection[str] = (),
 ) -> None:
     with open_db(config.paths.db_path) as connection:
         active_claim = _reload_owned_claim(connection, claim)
@@ -263,7 +268,7 @@ def _run_evidence_claim(
                     return
                 last_guard_check = now
                 with open_db(config.paths.db_path) as database:
-                    hold = original_intake_hold(database, batch_id=claim.batch_id, priority=claim.work_priority)
+                    hold = original_intake_hold(database, batch_id=claim.batch_id, priority=claim.work_priority, excluded_media_roots=excluded_media_roots)
                 if hold == "cancelled":
                     raise ProcessCancelledError("Evidence work was cancelled.")
                 if shutting_down:
@@ -763,7 +768,7 @@ def _defer_claim(
 ) -> None:
     """Wait for something outside this file to come back, without using up one of its attempts."""
     retry_not_before = (
-        datetime.now(UTC) + timedelta(seconds=max(1, deps.source_retry_delay_seconds))
+        datetime.now(UTC) + timedelta(seconds=deps.source_retry_delay_seconds)
     ).isoformat(timespec="seconds")
     _finish_claim(
         config,
