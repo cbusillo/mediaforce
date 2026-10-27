@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from functools import cache
 from pathlib import Path
 from typing import Any, cast
@@ -32,7 +32,8 @@ from mediaforce.library.remake_intents import (
 from mediaforce.library.staged_validation import missed_only_final_size, staged_validation_outcome
 from mediaforce.tuning.calibration_jobs import EXECUTION_ACTIVE_JOB_STATUSES, load_latest_job
 from mediaforce.web.runtime.encode_runtime import (
-    remove_stale_staging_path, staged_output_cleanup_blocker, staged_output_cleanup_target,
+    remove_stale_staging_path, staged_output_cleanup_blocker, staged_output_cleanup_refusal,
+    staged_output_cleanup_target,
 )
 from mediaforce.web.runtime.ambiguous_motion import _legacy_queue_mode
 from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, staged_requeue_size_blocker, \
@@ -154,13 +155,17 @@ def remake_staged_files(
                 reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
                 if recovery is None or reason:
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
+                                     "codes": _refusal_codes(recovery),
                                      "busy": bool(recovery and recovery["busy"])})
                     continue
                 intent = remake_intent(row)
-                if intent.get("state") != "removed" and (reason := staged_output_cleanup_blocker(connection, config, row)):
-                    # Something still owns the copy's paths; that clears once its work ends.
+                code, reason = "", ""
+                if row is not None and intent.get("state") != "removed":
+                    code, reason = staged_output_cleanup_refusal(connection, config, row)
+                if reason:
+                    # Work that still owns the copy clears by itself; a missing path or computer setting needs someone.
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
-                                     "busy": True})
+                                     "codes": [code], "busy": code == "copy_in_use"})
                     continue
                 if not intent or requested_copy_is_present(row):
                     run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
@@ -175,18 +180,21 @@ def remake_staged_files(
                 recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval,
                                                 manifest_reader=manifest_reader, retry_failed_check=retry_failed_check)
                 reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
+                codes = _refusal_codes(recovery)
                 if not reason and remake_intent(row) != intent:
-                    reason = "This file’s saved request changed. Refresh it before retrying."
+                    reason, codes = "This file’s saved request changed. Refresh it before retrying.", ["request_changed"]
                 if not reason and recovery is not None and recovery["approval"] != intent["approval"]:
                     reason = "The approved settings changed before removal. Refresh before retrying. Nothing was removed."
+                    codes = ["approval_changed"]
                 busy = bool(recovery and recovery["busy"])
                 if not reason and intent.get("state") != "removed" and not _remove_finished_output(config, row):
                     reason, busy = "Mediaforce could not remove the finished copy yet. Try again.", True
+                    codes = ["copy_not_removed"]
                 if recovery is None or reason:
                     if request_saved and remake_intent(row) == intent:
                         save_remake_intent(connection, row, {}, now=now_iso())
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
-                                     "busy": busy})
+                                     "codes": codes, "busy": busy})
                     continue
                 removed.append(item_id)
                 run_prefix, mode = str(intent["prefix"]), str(intent["mode"])
@@ -205,16 +213,19 @@ def remake_staged_files(
             left_out.append({"library_item_id": item_id, "name": names[item_id],
                              "reason": ("Finished copy removed, but recovery was not saved. "
                                         "Use Make again to retry with its saved settings." if item_id in removed else
-                                        "Could not finish this file’s recovery. Use Make again to retry.")})
+                                        "Could not finish this file’s recovery. Use Make again to retry."),
+                             "codes": ["recovery_not_saved" if item_id in removed else "recovery_failed"]})
     runs: list[dict[str, Any]] = []
     queued_ids: list[int] = []
     for (run_prefix, mode, saved_approval), item_ids in groups.items():
         approval = object_dict(json.loads(saved_approval))
+        queue_failed = False
         try:
             result = queue_items(run_prefix, mode, item_ids, approval)
         except Exception:
             logger.exception("Could not queue remade files for %s in %s mode", run_prefix, mode)
             result = {"ok": False, "message": "Queueing failed. Use Make again to retry with its saved settings."}
+            queue_failed = True
         runs.append(result)
         queue_left_out = object_list(result.get("left_out"))
         excluded_ids = {file.get("library_item_id") for file in queue_left_out}
@@ -228,9 +239,12 @@ def remake_staged_files(
                             else str(result.get("message") or "Try queueing again."))
                 reason = next((str(file.get("reason")) for file in queue_left_out
                                if file.get("library_item_id") == item_id), fallback)
+                code = ("queue_failed" if queue_failed
+                        else "queue_excluded" if result.get("ok") or item_id in excluded_ids else "queue_refused")
                 left_out.append({"library_item_id": item_id, "name": names[item_id],
                                  "reason": f"Finished copy removed, but not queued: {reason} "
-                                           "Use Make again to retry only this file with its saved settings once this clears."})
+                                           "Use Make again to retry only this file with its saved settings once this clears.",
+                                 "codes": [code]})
         accepted = [item_id for item_id in item_ids if item_id in queued_ids]
         if accepted:
             try:
@@ -247,6 +261,11 @@ def remake_staged_files(
         "left_out": left_out, "runs": runs,
         **({"job": runs[0]["job"]} if len(runs) == 1 and runs[0].get("job") else {}),
     }
+
+
+def _refusal_codes(recovery: Mapping[str, Any] | None) -> list[str]:
+    """Why a remake was refused, as codes: the recovery's own blockers, or that the file no longer waits for one."""
+    return list(recovery["blocked_codes"]) if recovery is not None else ["not_waiting"]
 
 
 def keep_original_after_failed_checks(
@@ -331,20 +350,26 @@ def staged_remake_details(
     if not (held or final_size or missing_policy or intent or failed_check):
         return None
     run_prefix, _mode, context_available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
-    blocked_reasons: list[str] = []
+    blocked: list[tuple[str, str]] = []
     approval = current_approval(run_prefix)
     if intent and approval != intent.get("approval"):
-        blocked_reasons.append("The approved settings changed after this remake was saved. Restore that approval before retrying.")
+        blocked.append((
+            "approval_changed",
+            "The approved settings changed after this remake was saved. Restore that approval before retrying.",
+        ))
     if not context_available:
-        blocked_reasons.append("Restore the saved run settings before making this file again. Nothing was removed.")
+        blocked.append((
+            "run_settings_missing", "Restore the saved run settings before making this file again. Nothing was removed.",
+        ))
     else:
         if approval is None:
-            blocked_reasons.append("Approve a fresh sample before making this file again.")
+            blocked.append(("approval_missing", "Approve a fresh sample before making this file again."))
         elif not intent and final_size and not manifest_reader(Path(str(row["manifest_path"] or ""))):
-            blocked_reasons.append(
+            blocked.append((
+                "run_details_missing",
                 "Restore the run manifest from a run backup before making this file again; "
-                "its size comparison cannot be verified. Nothing was removed."
-            )
+                "its size comparison cannot be verified. Nothing was removed.",
+            ))
         elif not intent and final_size:
             blocker = _final_size_requeue_contract_blocker({
                 "manifest_path": row["manifest_path"],
@@ -355,42 +380,50 @@ def staged_remake_details(
                 }},
             }, approval, manifest_reader=manifest_reader)
             if blocker:
-                blocked_reasons.append(
+                blocked.append((
+                    "size_settings_unchanged",
                     "Approve a fresh sample with changed size or quality settings before making this file again. "
-                    "Older runs without approval history need a changed size goal."
-                )
+                    "Older runs without approval history need a changed size goal.",
+                ))
     queue_blocker = staged_requeue_size_blocker(
         connection, run_prefix, int(row["library_item_id"]), approval, manifest_reader=manifest_reader,
     )
     if queue_blocker is not None:
-        blocked_reasons.append(
-            "This file’s saved size checks still block a new encode. Review its run settings before making it again."
-        )
+        blocked.append((
+            "size_checks_block",
+            "This file’s saved size checks still block a new encode. Review its run settings before making it again.",
+        ))
     original = Path(str(row["original_source_path"] or ""))
     staging = Path(str(row["staging_path"] or ""))
     if not original.is_file():
-        blocked_reasons.append("Restore access to the original file before making it again. Nothing was removed.")
+        blocked.append((
+            "original_unreachable", "Restore access to the original file before making it again. Nothing was removed.",
+        ))
     elif original.resolve() in {staging.resolve(), partial_output_path(staging).resolve()}:
-        blocked_reasons.append(
-            "The compressed copy points at the original. Check this file’s paths before making it again."
-        )
+        blocked.append((
+            "copy_points_at_original",
+            "The compressed copy points at the original. Check this file’s paths before making it again.",
+        ))
     # Work still running here clears by itself; every other blocker needs someone to act.
-    lasting_blockers = len(blocked_reasons)
+    lasting_blockers = len(blocked)
     sample = load_latest_job(connection, run_prefix)
     if sample and sample.get("status") in EXECUTION_ACTIVE_JOB_STATUSES:
-        blocked_reasons.append("Mediaforce is still sampling here. Make this file again once that sample finishes.")
+        blocked.append(("sampling", "Mediaforce is still sampling here. Make this file again once that sample finishes."))
     active_jobs = load_active_encode_jobs_for_prefix(connection, run_prefix)
     if any(job.get("status") != "queued" or job.get("started_at") is not None for job in active_jobs):
-        blocked_reasons.append("Mediaforce is still compressing here. Make this file again once that run finishes.")
+        blocked.append(("compressing", "Mediaforce is still compressing here. Make this file again once that run finishes."))
     elif active_jobs:
         busy_ids = _queued_run_item_ids(active_jobs, manifest_reader=manifest_reader)
         if busy_ids is None or int(row["library_item_id"]) in busy_ids:
-            blocked_reasons.append("A queued run may still make this file. Wait for it before making this file again.")
+            blocked.append((
+                "queued_run", "A queued run may still make this file. Wait for it before making this file again.",
+            ))
     reason = ("size_held" if held else "final_size" if final_size else "check_failed" if failed_check
               else "settings_history")
     return {"reason": intent.get("reason") or reason,
-            "blocked_reason": " ".join(blocked_reasons), "approval": approval,
-            "busy": not lasting_blockers and len(blocked_reasons) > lasting_blockers}
+            "blocked_reason": " ".join(sentence for _code, sentence in blocked),
+            "blocked_codes": [code for code, _sentence in blocked], "approval": approval,
+            "busy": not lasting_blockers and len(blocked) > lasting_blockers}
 
 
 def _queued_run_item_ids(jobs: list[dict[str, Any]], *, manifest_reader: ManifestReader) -> set[int] | None:

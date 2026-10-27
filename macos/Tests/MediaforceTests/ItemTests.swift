@@ -14,12 +14,13 @@ final class ItemTests: XCTestCase {
     }
 
     private func file(_ id: Int, stage: String, bytes: Int64, original: Int64? = nil, backup: Bool = false,
-                      validation: String? = nil, kept: String? = nil, question: String = "null") -> String {
+                      validation: String? = nil, kept: String? = nil, question: String = "null",
+                      waitReason: String = "null") -> String {
         let quoted = { (value: String?) in value.map { #""\#($0)""# } ?? "null" }
         return #"""
         {"library_item_id": \#(id), "rel_path": "tv/Futurama/Season 2/Futurama.S02E0\#(id).mkv",
          "name": "Futurama.S02E0\#(id).mkv", "episode": \#(id), "stage": "\#(stage)", "validation": \#(quoted(validation)),
-         "kept_reason": \#(quoted(kept)), "held_reason": null, "percent_complete": null, "size_question": \#(question),
+         "wait_reason": \#(waitReason), "kept_reason": \#(quoted(kept)), "held_reason": null, "percent_complete": null, "size_question": \#(question),
          "bytes": \#(bytes), "original_bytes": \#(original.map(String.init) ?? "null"), "original_backup": \#(backup)}
         """#
     }
@@ -47,6 +48,36 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(Words.fileState(season.files[0]), "Kept original: you put the original back")
         XCTAssertEqual(Words.fileState(season.files[1]), "Didn't pass its check")
         XCTAssertTrue(Words.waitingReason(season.files[1]).hasPrefix("The compressed copy didn't pass its check"))
+    }
+
+    func testEachWaitSaysWhyInPlainWords() throws {
+        let notMadeAgain = { (blockers: String) in #"{"code": "not_made_again", "blockers": [\#(blockers)]}"# }
+        let season = try facts([
+            file(1, stage: "needs_you", bytes: 1),
+            file(2, stage: "needs_you", bytes: 1, waitReason: #"{"code": "something_new"}"#),
+            file(3, stage: "needs_you", bytes: 1, waitReason: #"{"code": "stopped"}"#),
+            file(4, stage: "needs_you", bytes: 1, waitReason: #"{"code": "storage_io"}"#),
+            file(5, stage: "needs_you", bytes: 1, waitReason: #"{"code": "restart_stopped", "computer": "Attic Mini"}"#),
+            file(6, stage: "needs_you", bytes: 1, waitReason: notMadeAgain("")),
+            file(7, stage: "needs_you", bytes: 1, waitReason: notMadeAgain(#""approval_missing""#)),
+            file(8, stage: "needs_you", bytes: 1, waitReason: notMadeAgain(#""original_unreachable""#)),
+            file(9, stage: "needs_you", bytes: 1, waitReason: notMadeAgain(#""approval_missing", "original_unreachable""#)),
+        ])
+        let label = season.files.map(Words.fileState)
+        let reason = season.files.map(Words.waitingReason)
+
+        XCTAssertFalse((label + reason).contains(where: \.isEmpty))
+        // A reason this app does not know yet reads like a file with no reason at all.
+        XCTAssertEqual(label[1], label[0])
+        XCTAssertEqual(reason[1], reason[0])
+        for known in 2...5 {
+            XCTAssertNotEqual(label[known], label[0])
+            XCTAssertNotEqual(reason[known], reason[0])
+        }
+        XCTAssertNotEqual(reason[2], reason[3])
+        XCTAssertTrue(reason[4].contains("Attic Mini"))
+        // Each blocker shows in the sentence, so two blockers read unlike either one alone or none.
+        XCTAssertEqual(Set(reason[5...8]).count, 4)
     }
 
     func testASizeQuestionNamesBothSizes() throws {

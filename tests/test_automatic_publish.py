@@ -23,6 +23,7 @@ from mediaforce.encoding.delivery_lock import delivery_lock
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.staging import FINAL_SIZE_GOAL_CHECK, PromotionRestoreError, PromotionWaiting
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
+from mediaforce.library.staged_validation import not_remade_blockers
 from mediaforce.library.staged_integrity import staged_integrity_report
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web import app as web_app
@@ -160,6 +161,10 @@ def _probe() -> ProbeSummary:
 
 def _no_remake(_prefix: str, _ids: Any) -> NoReturn:
     raise AssertionError("only a copy that failed a check other than its size goal is made again")
+
+
+def _queue_nothing(_prefix: str, _mode: str, _ids: Any, _approval: dict[str, Any]) -> dict[str, Any]:
+    raise AssertionError("A refused remake never reaches the queue.")
 
 
 def _remake_refused(_prefix: str, _ids: Any) -> dict[str, Any]:
@@ -1109,7 +1114,11 @@ def test_failed_copy_whose_remake_is_always_refused_goes_to_the_owner(config: Me
 
     def refuse(prefix: str, ids: Any) -> dict[str, Any]:
         refusals.append(ids)
-        return _remake_refused(prefix, ids)
+        # No approved sample governs the season anymore, so making it again is refused every time.
+        return size_held.remake_staged_files(
+            config, prefix, ids, now_iso=timestamp, queue_items=_queue_nothing,
+            current_approval=lambda _prefix: None, retry_failed_check=True,
+        )
 
     with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
         for attempt in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 2):
@@ -1123,6 +1132,54 @@ def test_failed_copy_whose_remake_is_always_refused_goes_to_the_owner(config: Me
     assert staged.exists()
     [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
     assert (episode["stage"], episode["validation"]) == ("needs_you", "failed")
+    assert episode["wait_reason"] == {"code": "not_made_again", "blockers": ["approval_missing"]}
+
+
+def test_failed_copy_removed_but_not_queued_keeps_why_the_queue_refused_it(config: MediaforceConfig) -> None:
+    item_id, _, staged = _stage(config, "tv/Show/Season 1/broken.mkv")
+
+    def queue_refuses(_prefix: str, _mode: str, _ids: Any, _approval: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": False, "message": "The queue is closed."}
+
+    def remake(prefix: str, ids: Any) -> dict[str, Any]:
+        return size_held.remake_staged_files(
+            config, prefix, ids, now_iso=timestamp, queue_items=queue_refuses,
+            current_approval=lambda _prefix: {"approval": "current"}, retry_failed_check=True,
+        )
+
+    with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
+        delivery.publish_checked_files_once(
+            config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=remake
+        )
+
+    assert not staged.exists()
+    with open_db(config.paths.db_path) as connection:
+        saved = connection.execute(
+            select(staged_artifacts.c.validation_json).where(staged_artifacts.c.library_item_id == item_id)
+        ).scalar_one()
+    assert not_remade_blockers(saved) == ["copy_removed_not_queued", "queue_refused"]
+
+
+def test_a_remake_that_fails_before_removal_reaches_the_owner_with_its_reason(config: MediaforceConfig) -> None:
+    _stage(config, "tv/Show/Season 1/broken.mkv")
+
+    def remake(prefix: str, ids: Any) -> dict[str, Any]:
+        return size_held.remake_staged_files(
+            config, prefix, ids, now_iso=timestamp, queue_items=_queue_nothing,
+            current_approval=lambda _prefix: {"approval": "current"}, retry_failed_check=True,
+        )
+
+    with (patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")),
+          patch("mediaforce.web.runtime.size_held.save_remake_intent", side_effect=RuntimeError("disk full"))):
+        for attempt in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1):
+            later = attempt * delivery.PUBLISH_RETRY_DELAY_SECONDS * (delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1)
+            with patch.object(delivery.time, "time", return_value=later):
+                delivery.publish_checked_files_once(
+                    config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=remake
+                )
+
+    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    assert episode["wait_reason"] == {"code": "not_made_again", "blockers": ["recovery_failed"]}
 
 
 def test_failed_copy_waits_for_running_work_without_going_to_the_owner(config: MediaforceConfig) -> None:
@@ -1142,3 +1199,30 @@ def test_failed_copy_waits_for_running_work_without_going_to_the_owner(config: M
     assert staged.exists()
     [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
     assert (episode["stage"], episode["validation"]) == ("waiting", "remaking")
+
+
+@pytest.mark.parametrize(("refusal", "reaches_owner"), [("copy_in_use", False), ("remote_settings_missing", True)])
+def test_only_a_copy_still_in_use_keeps_waiting_without_the_owner(
+    config: MediaforceConfig, refusal: str, reaches_owner: bool,
+) -> None:
+    _stage(config, "tv/Show/Season 1/broken.mkv")
+
+    def remake(prefix: str, ids: Any) -> dict[str, Any]:
+        return size_held.remake_staged_files(
+            config, prefix, ids, now_iso=timestamp, queue_items=_queue_nothing,
+            current_approval=lambda _prefix: {"approval": "current"}, retry_failed_check=True,
+        )
+
+    with (patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")),
+          patch("mediaforce.web.runtime.size_held.staged_output_cleanup_refusal", return_value=(refusal, "Not yet."))):
+        for attempt in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1):
+            later = attempt * delivery.PUBLISH_RETRY_DELAY_SECONDS * (delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1)
+            with patch.object(delivery.time, "time", return_value=later):
+                delivery.publish_checked_files_once(
+                    config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=remake
+                )
+
+    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    assert (episode["stage"] == "needs_you") is reaches_owner
+    if reaches_owner:
+        assert episode["wait_reason"]["blockers"] == [refusal]

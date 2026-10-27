@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import time
@@ -84,6 +85,28 @@ def test_a_season_lists_each_episode_with_its_sizes_and_backup(config: Mediaforc
     assert (first["bytes"], first["original_bytes"], first["original_backup"]) == (100, 700, True)
     assert (second["library_item_id"], second["episode"], second["original_bytes"], second["original_backup"]) == (
         waiting, 2, None, False)
+
+
+def test_a_failed_copy_that_could_not_be_made_again_says_why(config: MediaforceConfig, tmp_path: Path) -> None:
+    validation = {
+        "passed": False,
+        "checks": [{"message": "picture matches the original", "passed": False}],
+        "automatic_publish": {"state": "failed", "reason": "Couldn't make it again.", "blockers": ["original_unreachable"]},
+    }
+    with open_db(config.paths.db_path) as connection:
+        item_id = _episode(connection, tmp_path, 1, size=900, status="encoded")
+        connection.execute(staged_artifacts.insert().values(
+            library_item_id=item_id, staging_path=str(tmp_path / "staging" / "1.mkv"), source_size_bytes=900,
+            bytes_saved=800, validation_json=json.dumps(validation), updated_at=NOW,
+        ))
+        connection.commit()
+
+    facts = item_payload(config, SEASON, sound=lambda _connection, _prefix: None)
+
+    assert facts is not None
+    [file] = facts["files"]
+    assert (file["stage"], file["validation"]) == ("needs_you", "failed")
+    assert file["wait_reason"] == {"code": "not_made_again", "blockers": ["original_unreachable"]}
 
 
 def test_a_deleted_backup_leaves_nothing_to_compare(config: MediaforceConfig, tmp_path: Path) -> None:

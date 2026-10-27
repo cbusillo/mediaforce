@@ -2,7 +2,7 @@ import unittest
 from typing import Any
 
 from mediaforce.library.workflow_state import ItemWorkflowState
-from mediaforce.web.runtime.encode_runtime import SIZE_QUESTION_QUALITY_NEEDS_MORE
+from mediaforce.web.runtime.encode_runtime import CONTROLLER_RESTART_STOP_REASON, SIZE_QUESTION_QUALITY_NEEDS_MORE
 from mediaforce.web.runtime.episode_progress import season_episode_progress
 
 SEASON = "tv/Show/Season 1"
@@ -182,6 +182,69 @@ class SeasonEpisodeProgressTests(unittest.TestCase):
         self.assertEqual(by_name["Episode 02.mkv"]["detail"], "didn't pass its check")
         # Making it again is the newer work, so it shows instead of the old question.
         self.assertEqual(by_name["Episode 03.mkv"]["stage"], "compressing")
+
+    def test_each_episode_waiting_on_the_owner_says_why(self) -> None:
+        stopped, restarted, failed, held, checked, not_remade, lost = (_item(number) for number in range(1, 8))
+        lost = ItemWorkflowState(
+            item_id=lost.item_id, rel_path=lost.rel_path, status="encoded", state="blocked", lane="blocked",
+            has_staged_output=False, blocker="Encoded item is missing its staged output.",
+        )
+        excluded = _item(8, "blocked", blocker="Open this item through its own work first.")
+        runs = {
+            stopped.rel_path: _run("stopped"),
+            restarted.rel_path: _run("stopped", terminal_reason=CONTROLLER_RESTART_STOP_REASON, host={"label": "M2 MBP"}),
+            failed.rel_path: _run("failed", last_failure_kind="storage_io"),
+        }
+
+        episodes = season_episode_progress(
+            [stopped, restarted, failed, held, checked, not_remade, lost, excluded],
+            runs,
+            {},
+            {held.item_id: "size_held", checked.item_id: "failed", not_remade.item_id: "failed"},
+            {not_remade.item_id: ["original_unreachable"]},
+        )
+        reasons = {episode["rel_path"].rsplit("/", 1)[-1]: episode["wait_reason"] for episode in episodes}
+
+        self.assertEqual({episode["stage"] for episode in episodes}, {"needs_you"})
+        self.assertEqual(reasons, {
+            "Episode 01.mkv": {"code": "stopped"},
+            "Episode 02.mkv": {"code": "restart_stopped", "computer": "M2 MBP"},
+            "Episode 03.mkv": {"code": "storage_io"},
+            "Episode 04.mkv": {"code": "size_held"},
+            "Episode 05.mkv": {"code": "check_failed"},
+            "Episode 06.mkv": {"code": "not_made_again", "blockers": ["original_unreachable"]},
+            "Episode 07.mkv": {"code": "copy_missing"},
+            "Episode 08.mkv": {"code": "settings_block"},
+        })
+
+    def test_a_checked_copy_says_more_than_the_run_that_left_it(self) -> None:
+        missed_size, stopped, waiting_on_owner, running = (_item(number, "ready_to_validate") for number in range(1, 5))
+        runs = {
+            missed_size.rel_path: _run("needs_attention", progress={"failure_analysis": {"kind": "final_size_target_miss"}}),
+            stopped.rel_path: _run("stopped"),
+            waiting_on_owner.rel_path: _run(
+                "queued", waiting_reason="Reserve inputs are missing; rebuild the plan before it can run.",
+            ),
+            running.rel_path: _run("running", progress={"progress_state": "encoding"}),
+        }
+
+        episodes = season_episode_progress(
+            [missed_size, stopped, waiting_on_owner, running],
+            runs,
+            {},
+            {missed_size.item_id: "failed", stopped.item_id: "size_held", waiting_on_owner.item_id: "failed",
+             running.item_id: "failed"},
+            {missed_size.item_id: ["original_unreachable"]},
+        )
+        reasons = {episode["rel_path"].rsplit("/", 1)[-1]: (episode["stage"], episode["wait_reason"]) for episode in episodes}
+
+        self.assertEqual(reasons, {
+            "Episode 01.mkv": ("needs_you", {"code": "not_made_again", "blockers": ["original_unreachable"]}),
+            "Episode 02.mkv": ("needs_you", {"code": "size_held"}),
+            "Episode 03.mkv": ("needs_you", {"code": "check_failed"}),
+            # Work under way is newer than any copy's check.
+            "Episode 04.mkv": ("compressing", None),
+        })
 
     def test_missing_files_are_left_out(self) -> None:
         self.assertEqual(season_episode_progress([_item(1, "missing")], {}, {}), [])

@@ -22,6 +22,7 @@ struct ItemFacts: Decodable, Sendable {
         let episode: Int?
         let stage: String
         let validation: String?
+        let waitReason: WaitReason?
         let keptReason: String?
         let heldReason: String?
         let percentComplete: Int?
@@ -34,12 +35,21 @@ struct ItemFacts: Decodable, Sendable {
         var inShowPage = false
 
         private enum CodingKeys: String, CodingKey {
-            case libraryItemId, relPath, name, season, episode, stage, validation, keptReason, heldReason
+            case libraryItemId, relPath, name, season, episode, stage, validation, waitReason, keptReason, heldReason
             case percentComplete, sizeQuestion, bytes, originalBytes, originalBackup
         }
 
         var compressed: Bool { stage == "published" }
         var needsYou: Bool { stage == "needs_you" }
+    }
+
+    /// Why a file waits on the Director, as a code with any values its words need.
+    struct WaitReason: Decodable, Sendable, Equatable {
+        let code: String
+        /// The computer a restart stopped it on.
+        let computer: String?
+        /// Why a failed copy could not be made again.
+        let blockers: [String]?
     }
 
     /// The file needs more than its size goal to keep the picture right.
