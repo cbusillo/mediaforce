@@ -1,5 +1,5 @@
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Literal
 
@@ -567,8 +567,13 @@ def guided_size_goal_options(
         default_video_policy: dict[str, Any],
         audio_policy: dict[str, Any] | None = None,
         subtitle_policy: dict[str, Any] | None = None,
+        requested_budget_bytes: int | None = None,
 ) -> list[dict[str, Any]]:
     intent = size_goal_from_policy(video_policy, default_video_policy=default_video_policy)
+    if (intent.value_bytes is None or intent.value_bytes <= 0) and requested_budget_bytes:
+        # Settings that hold no size keep the per-episode size the owner asked for, so a sample can be made again (#1149).
+        intent = replace(intent, mode="absolute", value_bytes=requested_budget_bytes, reference_runtime_seconds=None,
+                         source="requested_budget", requires_confirmation=False)
     resolved = intent.resolve(item_runtime_seconds)
     if intent.requires_confirmation or intent.mode == "ambiguous":
         return _legacy_confirmation_options(

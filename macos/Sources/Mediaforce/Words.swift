@@ -560,11 +560,6 @@ extension ActionNotice {
         title: "Choose this season's balance first",
         message: "This season needs its balance of size and detail chosen before a new sample, and Mediaforce can't ask for it here yet."
     )
-
-    static let chooseSize = ActionNotice(
-        title: "Choose a size first",
-        message: "This season's sample needs a size chosen before it can be made again."
-    )
 }
 
 extension Words {

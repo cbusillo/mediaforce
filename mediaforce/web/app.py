@@ -33,7 +33,7 @@ from mediaforce.core.audio_presets import AUDIO_PRESETS
 from mediaforce.advisor import TuningPolicyResponse
 from mediaforce.advising.routing import advisor_routing_from_config
 from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
-    list_queue_summary, update_job_telemetry
+    list_queue_summary, sample_failures_in_a_row, update_job_telemetry
 from mediaforce.tuning.quality_observations import (
     backfill_quality_search_observations,
     load_current_quality_search_observations,
@@ -143,7 +143,7 @@ from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_
 from mediaforce.tuning.compression_intent import compression_intent_options
 from mediaforce.tuning.size_goals import guided_size_goal_options, operator_intent_from_policy
 from mediaforce.tuning.target_provenance import exact_item_target_provenance_blocker, target_size_provenance
-from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
+from mediaforce.core.type_defs import JSONValue, float_value, int_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_app_window_routes, register_completed_routes, \
     register_compression_settings_routes, register_computer_settings_routes, register_dashboard_routes, \
     register_folder_routes, register_host_routes, register_library_settings_routes, \
@@ -151,7 +151,8 @@ from mediaforce.web.routes import register_app_window_routes, register_completed
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status
-from mediaforce.web.runtime.app_samples import approve_sample, make_sample, sample_facts, start_compressing
+from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
+    samples_to_remake, start_compressing
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
 from mediaforce.web.runtime.show_settings_runtime import prefixes_with_samples, use_show_settings
@@ -360,6 +361,7 @@ CATALOG_STALE_AFTER_WITHOUT_AUTOMATIC_REFRESH = timedelta(days=1)
 CATALOG_REFRESH_POLL_SECONDS = 60.0
 EVIDENCE_AUTOSTART_POLL_SECONDS = 30.0
 HELD_FILES_POLL_SECONDS = 60.0
+SAMPLE_REMAKE_POLL_SECONDS = 300.0
 CATALOG_REFRESH_FAILURE_COOLDOWN = timedelta(minutes=30)
 PREFIX_SCAN_STALE_AFTER = timedelta(minutes=15)
 SCAN_RETRY_COOLDOWN = timedelta(minutes=5)
@@ -684,6 +686,7 @@ def create_app(
                     evidence_runner=evidence_runner,
                     held_files_sweep=_join_cleared_held_files,
                     kind_seasons_sweep=_queue_next_kind_season,
+                    sample_remake_sweep=_remake_waiting_samples,
                     automatic_publish_sweep=lambda stop_event: publish_checked_files_once(
                         load_config(config.paths.config_path), load_calibration_state=_load_calibration_state,
                         remake_files=_remake_failed_checks, stop_event=stop_event,
@@ -1830,6 +1833,7 @@ def create_app(
             default_video_policy=persisted_policy_default,
             audio_policy=object_dict(policy.get("audio")),
             subtitle_policy=object_dict(policy.get("subtitle")),
+            requested_budget_bytes=int_value(object_dict(size_target_analysis).get("budget_bytes")),
         )
         current_quality_risk_policy = (
             object_dict(object_dict(calibration).get("policy"))
@@ -2255,6 +2259,17 @@ def create_app(
             result = {"ok": False, "message": str(refusal.detail)}
         record_kind_attempt(config, chosen, result, at=wall_time())
         LOGGER.info("Kind of content %s, %s: %s", chosen.kind, chosen.season, result.get("message") or result.get("code") or result.get("ok"))
+
+    def _remake_waiting_samples() -> None:
+        # The seasons are chosen and the connection closed before making a sample opens its own.
+        with open_db(config.paths.db_path) as connection:
+            seasons = samples_to_remake(
+                [asdict(card) for card in _list_library_detail_cards(config, connection)],
+                lambda season_prefix: sample_failures_in_a_row(connection, season_prefix, limit=SAMPLE_REMAKE_LIMIT),
+            )
+        for season in seasons:
+            result = _make_app_sample_action(season, None)
+            LOGGER.info("Making the sample for %s again: %s", season, result.get("code") or result.get("ok"))
 
     def _queue_folder_encode_action(
             normalized_prefix: str,
@@ -5401,6 +5416,7 @@ def _start_background_workers(
         held_files_sweep: Callable[[], None] | None = None,
         kind_seasons_sweep: Callable[[], None] | None = None,
         automatic_publish_sweep: Callable[[threading.Event], None] | None = None,
+        sample_remake_sweep: Callable[[], None] | None = None,
 ) -> BackgroundWorkerRuntime | None:
     lease = _acquire_background_worker_leadership(config)
     if lease is None:
@@ -5436,6 +5452,13 @@ def _start_background_workers(
                 process_once_fn=kind_seasons_sweep,
                 poll_seconds=HELD_FILES_POLL_SECONDS,
                 failure_message="Queueing seasons a kind of content covers failed; it will retry.",
+            ))
+        if sample_remake_sweep is not None:
+            handles.append(_start_supervised_worker(
+                name="sample-remake-worker",
+                process_once_fn=sample_remake_sweep,
+                poll_seconds=SAMPLE_REMAKE_POLL_SECONDS,
+                failure_message="Making samples again failed; it will retry.",
             ))
     except BaseException:
         for handle in handles:

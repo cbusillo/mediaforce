@@ -11,7 +11,8 @@ from starlette.routing import Route
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime import folder_actions
-from mediaforce.web.runtime.app_samples import approve_sample, make_sample, sample_facts, start_compressing
+from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
+    samples_to_remake, start_compressing
 
 PREFIX = "tv/Lucifer/Season 2"
 
@@ -221,8 +222,14 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     _kind, _prefix, note, _host, intent, _token = calls.pop()
     assert "294 MB" in note and intent["compression_intent"]["confirmed"] is True
 
-    unbalanced = _folder(compression_intent_options=[{"key": "balanced", "selected": False}])
-    assert make(unbalanced, _status(), "smaller") == {"ok": False, "code": "choose_balance"}
+    # A season that never chose its balance is made as close to its size goal as still looks right.
+    unchosen = _folder(compression_intent_options=[
+        {"key": "reference", "selected": False, "compression_intent": {"level": "reference"}},
+        {"key": "balanced", "selected": False, "compression_intent": {"level": "balanced"}},
+    ])
+    assert make(unchosen, _status("needs_help", "make_sample", "missing_clips"), None)["ok"] is True
+    assert calls.pop()[4]["compression_intent"]["level"] == "balanced"
+    assert make(_folder(compression_intent_options=[]), _status(), "smaller") == {"ok": False, "code": "choose_balance"}
     assert make(_folder(), _status(), "a size that is not offered") == {"ok": False, "code": "choose_size"}
     assert calls == []
 
@@ -235,3 +242,23 @@ def test_a_running_sample_says_when_it_should_be_ready_only_when_comparable_samp
     assert sample_facts(_folder(), running(None))["ready_in_seconds"] is None
     # A sample that waits for a computer has no start yet to count from.
     assert sample_facts(_folder(), running({"remaining_seconds_high": 1500}, "sample_waiting"))["ready_in_seconds"] is None
+
+
+def test_a_sample_that_needs_making_again_is_made_again_until_it_fails_too_often() -> None:
+    def card(prefix: str, action: str, failure: str | None, key: str = "needs_help", recovery: str | None = "test") -> dict[str, Any]:
+        return {"prefix": prefix, "page_state": {"key": key, "recovery_kind": recovery, "primary_action": action,
+                                                 "failure": failure}}
+
+    failures = {"tv/Failing/Season 1": SAMPLE_REMAKE_LIMIT, "tv/Failed once/Season 1": 1}
+    cards = [
+        card("tv/Clips gone/Season 1", "make_sample", "missing_clips"),
+        card("tv/Failed once/Season 1", "retry_sample", "restarted"),
+        card("tv/Failing/Season 1", "retry_sample", "unexplained"),
+        card("tv/Stopped/Season 1", "make_sample", "stopped"),
+        card("tv/Too small/Season 1", "choose_size", "bound_exhausted"),
+        card("tv/Season encode/Season 1", "retry_encode", "unexplained", recovery="season"),
+        card("tv/Watch it/Season 1", "review_sample", None, key="ready_to_compare", recovery=None),
+    ]
+    assert samples_to_remake(cards, lambda prefix: failures.get(prefix, 0)) == [
+        "tv/Clips gone/Season 1", "tv/Failed once/Season 1",
+    ]
