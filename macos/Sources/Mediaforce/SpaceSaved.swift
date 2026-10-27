@@ -11,10 +11,8 @@ struct SpaceSavedPage: View {
     var body: some View {
         // Around the page, so it reaches the page's own scroll view.
         ScrollViewReader { proxy in
-            RefreshingPage(title: Words.spaceSaved, load: { try await SpaceSavedFacts.load(model.client) }) { (saved: SpaceSavedFacts) in
-                Text(Words.savedSoFar(facts.spaceSaved.bytes))
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
+            RefreshingPage(title: Words.spaceSaved, subtitle: Words.savedSoFar(facts.spaceSaved.bytes),
+                           load: { try await SpaceSavedFacts.load(model.client) }) { (saved: SpaceSavedFacts) in
                 if saved.shows.isEmpty {
                     Text(Words.noBackupsToCheck)
                         .foregroundStyle(.secondary)

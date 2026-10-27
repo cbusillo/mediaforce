@@ -53,8 +53,7 @@ struct ItemPage: View {
                             }
                         }
                         .padding(.horizontal, 28)
-                        .padding(.top, 6)
-                        .padding(.bottom, 24)
+                        .padding(.vertical, 20)
                     }
                     .frame(maxWidth: .infinity)
                     Divider()
@@ -71,6 +70,9 @@ struct ItemPage: View {
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .navigationTitle(facts.map(Words.itemTitle) ?? Words.appName)
+        // A season names its show; a show's own page is already named by it.
+        .navigationSubtitle(facts.flatMap { $0.kind == "tv_series" ? nil : $0.show } ?? "")
         .task(id: prefix) { await watch() }
         .alert(item: $notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
@@ -260,19 +262,12 @@ struct ItemHeader: View {
                     .pointerStyle(seasonsShow == nil ? nil : .link)
             }
             VStack(alignment: .leading, spacing: 5) {
-                if let show = facts.show {
-                    if let showPrefix = seasonsShow {
-                        Button(show) { openShow(showPrefix) }
-                            .buttonStyle(QuietLinkStyle())
-                            .font(.title3)
-                    } else {
-                        Text(show)
-                            .font(.title3)
-                            .foregroundStyle(.secondary)
-                    }
+                // The title bar names the page; on a season's page the show's name here opens the show.
+                if let show = facts.show, let showPrefix = seasonsShow {
+                    Button(show) { openShow(showPrefix) }
+                        .buttonStyle(QuietLinkStyle())
+                        .font(.title3)
                 }
-                Text(Words.itemTitle(facts))
-                    .font(.system(size: 30, weight: .bold))
                 Text(Words.beforeAfter(facts.originalBytes, facts.bytes))
                     .font(.system(size: 17, weight: .semibold))
                     .monospacedDigit()
