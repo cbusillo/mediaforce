@@ -18,11 +18,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_items
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ProcessDeadlineEnforcementError
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, reclassify_cadence_summary
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, fingerprint_video_decode_timed_out, reclassify_media_fingerprint_summary
-from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaHostUnavailableError
+from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaConnections, RemoteMediaHostUnavailableError
 from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, \
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host, unmeasurable_evidence_roots
 from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, SOURCE_ROOT_WAIT_REASON, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
@@ -66,6 +66,7 @@ class EvidenceWorkerDeps:
     evidence_host_rows: Callable[[MediaforceConfig], list[dict[str, Any]]] = collect_evidence_host_rows
     shutdown_event: threading.Event | None = None
     prepare_next_original: Callable[[MediaforceConfig, EvidenceWorkClaim], None] | None = None
+    remote_commands: Callable[[dict[str, object]], RemoteMediaCommands] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +135,7 @@ def run_evidence_queue_until_blocked(
     started_at = time.monotonic()
     stop_reason = "blocked"
     stop_requested = stop_event.is_set if stop_event is not None else lambda: False
-    with SourceAdmissionPrefetcher(stop_event=stop_event, logger=runtime_deps.logger,
+    with RemoteMediaConnections() as connections, SourceAdmissionPrefetcher(stop_event=stop_event, logger=runtime_deps.logger,
                                  deadline=started_at + max_seconds if max_seconds is not None else None) as prefetch:
         while max_work_items is None or processed < max_work_items:
             if stop_requested():
@@ -150,7 +151,7 @@ def run_evidence_queue_until_blocked(
                 stop_reason = "shutdown"
                 break
             prepare_next = partial(prefetch.start, excluded_media_roots=roots)
-            runtime_deps = replace(runtime_deps, prepare_next_original=(
+            runtime_deps = replace(runtime_deps, remote_commands=runtime_deps.remote_commands or connections.runner, prepare_next_original=(
                 prepare_next if max_work_items is None or processed + 1 < max_work_items else None
             ))
             if not process_evidence_queue_once(config_path=config_path, config=current_config,
@@ -369,6 +370,8 @@ def _run_evidence_claim(
         heartbeat.stop()
         _defer_for_encode_computer(config, claim, deps, restore_attempt=attempt_started)
         return
+    except ProcessDeadlineEnforcementError:
+        raise
     except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError, SQLAlchemyError) as exc:
         heartbeat.stop()
         source_availability, _current_fingerprint = _source_fingerprint(config, claim, source_path)
@@ -658,7 +661,7 @@ def _analysis_target(
     host = select_evidence_host(config, deps.evidence_host_rows(config), media_root=claim.media_root)
     if host is None:
         return None
-    command_runner = RemoteMediaCommands(host)
+    command_runner = (deps.remote_commands or RemoteMediaCommands)(host)
     command_runner.ffmpeg_version(process_controller)
     return _AnalysisTarget(
         source_path=evidence_source_path_on_host(

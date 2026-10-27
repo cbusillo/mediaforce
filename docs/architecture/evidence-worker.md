@@ -31,6 +31,20 @@ counts meeting the expected available frames, without reducing the decode cap.
 Audio and
 cadence retain their measurements and safety decisions.
 
+The worker reuses an SSH master per unchanged encode-computer configuration
+within its run. Sockets live in private short temporary directories. The worker starts a
+foreground master as its own resource and closes it when the run ends. Individual
+managed commands use that master without spawning a background descendant,
+preserving command-containment proof.
+Every command retains its wake probe, wake assertion and current schedule
+deadline. The master sends bounded keepalives so a sleeping or lost computer
+does not leave its socket looking usable indefinitely. Host
+eligibility and ffmpeg's version are refreshed for every claim. Source checks
+before and after measurement are unchanged. A multiplexed status 255, including
+one with empty stderr, triggers a local master-liveness check. A lost master
+defers the file for its computer; a live master preserves ordinary per-file
+failure handling so one bad file cannot indefinitely hold its library.
+
 ## Durable state
 
 `library_item_evidence_state` owns one independent work unit for each

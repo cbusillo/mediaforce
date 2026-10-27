@@ -122,6 +122,7 @@ def _run_remote_ssh(
         wake_before_connect: bool = True,
         process_controller: ManagedProcessController | None = None,
         idle_timeout: float | None = None,
+        control_path: Path | None = None,
         ensure_remote_awake_for_ssh: Callable[[dict[str, object]], None],
         ssh_client_options_func: Callable[..., list[str]],
         subprocess_run: Callable[..., subprocess.CompletedProcess[str]],
@@ -133,6 +134,8 @@ def _run_remote_ssh(
     if identity_file is not None:
         cmd.extend(["-i", str(identity_file), "-o", "IdentitiesOnly=yes"])
     cmd.extend(ssh_client_options_func(batch_mode=batch_mode))
+    if control_path is not None:
+        cmd.extend(["-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ForkAfterAuthentication=no", "-o", f"ControlPath={control_path}"])
     cmd.append(ssh_host)
     if remote_args:
         cmd.append(shlex.join([str(arg) for arg in remote_args]))
@@ -155,6 +158,7 @@ def run_remote_command(
         process_controller: ManagedProcessController | None = None,
         *,
         idle_timeout: float | None = None,
+        control_path: Path | None = None,
         wake_before_connect: bool = True,
         ssh_target_for_host: Callable[[dict[str, object]], str],
         remote_shell_path_export_line: Callable[[], str],
@@ -194,6 +198,8 @@ def run_remote_command(
         remote_kwargs["idle_timeout"] = idle_timeout
     if not wake_before_connect:
         remote_kwargs["wake_before_connect"] = False
+    if control_path is not None:
+        remote_kwargs["control_path"] = control_path
     result = run_remote_ssh(
         normalized_host,
         "sh",
