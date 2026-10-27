@@ -181,11 +181,14 @@ struct KindShows: View {
                     ForEach(kind.shows.filter { show in !kind.settings.contains { $0.show == show.prefix } }) { show in
                         VStack(alignment: .leading, spacing: 2) {
                             tile(show.prefix, name: show.name, detail: Words.size(show.waitingBytes), watchable: false) { open(show.prefix) }
-                            if let offer, show != kind.shows.first {
+                            if let offer {
+                                // The biggest show's link stays hidden, keeping every tile one height in the lazy row.
                                 Button(Words.makeASample) { offer(show) }
                                     .buttonStyle(.link)
                                     .font(.caption)
                                     .help(Words.makeSampleOf(show.name))
+                                    .opacity(show == kind.shows.first ? 0 : 1)
+                                    .disabled(show == kind.shows.first)
                             }
                         }
                     }
