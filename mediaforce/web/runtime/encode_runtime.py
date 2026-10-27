@@ -31,7 +31,7 @@ from mediaforce.web.runtime.controller_storage_recovery import controller_storag
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
 from mediaforce.hosts.transport import SSH_ACCESS_REFUSED_MARKERS, ssh_host_unreachable
-from mediaforce.core.db import DBClient, is_database_busy_failure, open_db
+from mediaforce.core.db import DBClient, DBRow, is_database_busy_failure, open_db
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import item_events
@@ -1135,20 +1135,31 @@ def staged_output_cleanup_target(
 def staged_output_cleanup_blocker(
         connection: DBClient, config: MediaforceConfig, row: Mapping[str, Any],
 ) -> str:
+    return staged_output_cleanup_refusal(connection, config, row)[1]
+
+
+def staged_output_cleanup_refusal(
+        connection: DBClient, config: MediaforceConfig, row: Mapping[str, Any] | DBRow,
+) -> tuple[str, str]:
+    """Why a staged output can't be removed yet, as a code and a message; empty when it can.
+
+    Only "copy_in_use" clears by itself; the other two need the path or the computer's settings restored.
+    """
     target = staged_output_cleanup_target(config, row)
     if target is None:
-        return "The saved output path is unavailable; restore it before retrying cleanup."
+        return "copy_path_missing", "The saved output path is unavailable; restore it before retrying cleanup."
     path, host = target
     if (object_dict(host).get("remote_cleanup_unavailable")
             and host_media_access_for_host(host) != "stream"):
-        return "The earlier remote host configuration is unavailable; restore it before retrying cleanup."
+        return ("remote_settings_missing",
+                "The earlier remote host configuration is unavailable; restore it before retrying cleanup.")
     item_id = int(row.get("library_item_id") or row.get("id") or 0)
     active = _active_encode_outputs(connection, config, statuses=("queued", "retry_backoff", "running"))
     if (active is None or item_id in active[0]
             or str(path) in active[1] or str(partial_output_path(path)) in active[1]
             or _active_standalone_cli_encode(connection, item_id)):
-        return "An active encode may own this file or its output; retry when it ends."
-    return ""
+        return "copy_in_use", "An active encode may own this file or its output; retry when it ends."
+    return "", ""
 
 
 def _remove_stale_staging_path(

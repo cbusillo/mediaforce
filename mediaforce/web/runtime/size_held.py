@@ -32,7 +32,8 @@ from mediaforce.library.remake_intents import (
 from mediaforce.library.staged_validation import missed_only_final_size, staged_validation_outcome
 from mediaforce.tuning.calibration_jobs import EXECUTION_ACTIVE_JOB_STATUSES, load_latest_job
 from mediaforce.web.runtime.encode_runtime import (
-    remove_stale_staging_path, staged_output_cleanup_blocker, staged_output_cleanup_target,
+    remove_stale_staging_path, staged_output_cleanup_blocker, staged_output_cleanup_refusal,
+    staged_output_cleanup_target,
 )
 from mediaforce.web.runtime.ambiguous_motion import _legacy_queue_mode
 from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, staged_requeue_size_blocker, \
@@ -158,10 +159,13 @@ def remake_staged_files(
                                      "busy": bool(recovery and recovery["busy"])})
                     continue
                 intent = remake_intent(row)
-                if intent.get("state") != "removed" and (reason := staged_output_cleanup_blocker(connection, config, row)):
-                    # Something still owns the copy's paths; that clears once its work ends.
+                code, reason = "", ""
+                if row is not None and intent.get("state") != "removed":
+                    code, reason = staged_output_cleanup_refusal(connection, config, row)
+                if reason:
+                    # Work that still owns the copy clears by itself; a missing path or computer setting needs someone.
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
-                                     "codes": ["copy_in_use"], "busy": True})
+                                     "codes": [code], "busy": code == "copy_in_use"})
                     continue
                 if not intent or requested_copy_is_present(row):
                     run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)

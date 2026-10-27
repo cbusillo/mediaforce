@@ -1170,7 +1170,7 @@ def test_a_remake_that_fails_before_removal_reaches_the_owner_with_its_reason(co
         )
 
     with (patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")),
-          patch.object(size_held, "save_remake_intent", side_effect=RuntimeError("disk full"))):
+          patch("mediaforce.web.runtime.size_held.save_remake_intent", side_effect=RuntimeError("disk full"))):
         for attempt in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1):
             later = attempt * delivery.PUBLISH_RETRY_DELAY_SECONDS * (delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1)
             with patch.object(delivery.time, "time", return_value=later):
@@ -1199,3 +1199,30 @@ def test_failed_copy_waits_for_running_work_without_going_to_the_owner(config: M
     assert staged.exists()
     [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
     assert (episode["stage"], episode["validation"]) == ("waiting", "remaking")
+
+
+@pytest.mark.parametrize(("refusal", "reaches_owner"), [("copy_in_use", False), ("remote_settings_missing", True)])
+def test_only_a_copy_still_in_use_keeps_waiting_without_the_owner(
+    config: MediaforceConfig, refusal: str, reaches_owner: bool,
+) -> None:
+    _stage(config, "tv/Show/Season 1/broken.mkv")
+
+    def remake(prefix: str, ids: Any) -> dict[str, Any]:
+        return size_held.remake_staged_files(
+            config, prefix, ids, now_iso=timestamp, queue_items=_queue_nothing,
+            current_approval=lambda _prefix: {"approval": "current"}, retry_failed_check=True,
+        )
+
+    with (patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")),
+          patch("mediaforce.web.runtime.size_held.staged_output_cleanup_refusal", return_value=(refusal, "Not yet."))):
+        for attempt in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1):
+            later = attempt * delivery.PUBLISH_RETRY_DELAY_SECONDS * (delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1)
+            with patch.object(delivery.time, "time", return_value=later):
+                delivery.publish_checked_files_once(
+                    config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=remake
+                )
+
+    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    assert (episode["stage"] == "needs_you") is reaches_owner
+    if reaches_owner:
+        assert episode["wait_reason"]["blockers"] == [refusal]

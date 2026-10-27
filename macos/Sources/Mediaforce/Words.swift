@@ -1168,6 +1168,8 @@ extension Words {
         case "copy_removed_not_queued": "its old copy was removed, but the new one didn't start"
         case "not_waiting": "it was no longer waiting to be made again"
         case "copy_in_use": "its compressed copy was still in use"
+        case "copy_path_missing": "the place its compressed copy was saved can't be found"
+        case "remote_settings_missing": "the computer that made its compressed copy is no longer set up"
         case "request_changed": "its saved request changed partway"
         case "copy_not_removed": "its old copy couldn't be removed"
         case "recovery_not_saved": "its new start couldn't be saved"
