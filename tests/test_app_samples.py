@@ -230,6 +230,26 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert make(unchosen, _status("needs_help", "make_sample", "missing_clips"), None)["ok"] is True
     assert calls.pop()[4]["compression_intent"]["level"] == "balanced"
     assert make(_folder(compression_intent_options=[]), _status(), "smaller") == {"ok": False, "code": "choose_balance"}
+
+    # Made again at the season's own size, a sample keeps the season's resolution; a size the owner picks brings its own.
+    limited = _folder(resolved_operator_intent={
+        **_folder()["resolved_operator_intent"], "resolution": {"mode": "max_height", "max_height": 1080, "requires_confirmation": False},
+    })
+    assert make(limited, _status("needs_help", "make_sample", "missing_clips"), None)["ok"] is True
+    _kind, _prefix, note, _host, intent, _token = calls.pop()
+    assert intent["resolution"] == {"mode": "max_height", "max_height": 1080} and "1080p" in note
+    assert make(limited, _status(), "smaller")["ok"] is True
+    assert calls.pop()[4]["resolution"]["mode"] == "source"
+
+    # A saved request that can no longer run is asked for anew rather than refused.
+    refused_retry = make_sample(
+        _folder(), _status("needs_help", "retry_sample"), None,
+        ai_tune=lambda *args: calls.append(("new", *args)) or {"ok": True},
+        retry_saved=lambda *args: calls.append(("retry", *args)) or {"ok": False},
+    )
+    assert refused_retry == {"ok": True, "code": None}
+    assert [call[0] for call in calls] == ["retry", "new"]
+    calls.clear()
     assert make(_folder(), _status(), "a size that is not offered") == {"ok": False, "code": "choose_size"}
     assert calls == []
 

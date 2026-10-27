@@ -112,9 +112,9 @@ def make_sample(
     if size is None and action == "choose_size":
         return {"ok": False, "code": "choose_size"}
     try:
-        if size is None and action == "retry_sample":
-            result = retry_saved(prefix, "", "")
-        else:
+        result = retry_saved(prefix, "", "") if size is None and action == "retry_sample" else {}
+        # A saved request that can't run again, such as one under older settings, is asked for anew.
+        if not result.get("ok"):
             request = _sample_request(folder, size, remake=action == "review_sample")
             if isinstance(request, str):
                 return {"ok": False, "code": request}
@@ -158,6 +158,11 @@ def _sample_request(
     if balance is None:
         return "choose_balance"
     intent = with_compression_intent(object_dict(choice["operator_intent"]), object_dict(balance.get("compression_intent")))
+    resolution = None if size else _current_resolution(folder)
+    if resolution is not None:
+        # A sample made at the season's own size keeps its resolution; a size the owner picks brings its own.
+        intent = {**intent, "resolution": resolution}
+        choice = {**choice, "operator_intent": intent}
     return sample_goal_request(choice), intent
 
 
@@ -179,6 +184,13 @@ def _measured_request(folder: Mapping[str, Any]) -> str:
         f"Keep the {goal} whole-episode goal and current resolution. Make another representative test that addresses "
         "the operator's review concerns without changing the size target."
     )
+
+
+def _current_resolution(folder: Mapping[str, Any]) -> dict[str, Any] | None:
+    resolution = object_dict(object_dict(folder.get("resolved_operator_intent")).get("resolution"))
+    if resolution.get("mode") not in ("source", "max_height") or resolution.get("requires_confirmation"):
+        return None
+    return {"mode": resolution["mode"], "max_height": resolution.get("max_height")}
 
 
 def _current_operator_intent(folder: Mapping[str, Any]) -> dict[str, Any] | None:

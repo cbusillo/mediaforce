@@ -2261,15 +2261,21 @@ def create_app(
         LOGGER.info("Kind of content %s, %s: %s", chosen.kind, chosen.season, result.get("message") or result.get("code") or result.get("ok"))
 
     def _remake_waiting_samples() -> None:
-        # The seasons are chosen and the connection closed before making a sample opens its own.
         with open_db(config.paths.db_path) as connection:
-            seasons = samples_to_remake(
-                [asdict(card) for card in _list_library_detail_cards(config, connection)],
-                lambda season_prefix: sample_failures_in_a_row(connection, season_prefix, limit=SAMPLE_REMAKE_LIMIT),
+            cards = [asdict(card) for card in _list_library_detail_cards(config, connection)]
+        for season in samples_to_remake(cards, _sample_failures_in_a_row):
+            # The season is read again just before its sample is made, so one the owner changed meanwhile is left alone.
+            payloads = _season_payloads(season)
+            if payloads is None or not samples_to_remake([{**payloads[1], "prefix": season}], _sample_failures_in_a_row):
+                continue
+            result = make_sample(
+                *payloads, None, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action,
             )
-        for season in seasons:
-            result = _make_app_sample_action(season, None)
             LOGGER.info("Making the sample for %s again: %s", season, result.get("code") or result.get("ok"))
+
+    def _sample_failures_in_a_row(season: str) -> int:
+        with open_db(config.paths.db_path) as connection:
+            return sample_failures_in_a_row(connection, season, limit=SAMPLE_REMAKE_LIMIT)
 
     def _queue_folder_encode_action(
             normalized_prefix: str,
