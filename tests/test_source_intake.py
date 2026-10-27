@@ -1427,3 +1427,23 @@ def test_pair_lost_companion_cannot_publish_without_shared_validation(tmp_path: 
     assert {row["attempt_count"] for row in rows} == {0}
     assert {row["work_status"] for row in rows} == {"running", "cancelled"}
     assert next(row for row in rows if row["work_status"] == "running")["worker_id"] == "replacement-worker"
+
+
+def test_urgent_sibling_remains_visible_while_original_admission_owns_the_file(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        primary = claim_next_evidence_work(database, worker_id="intake-owner", lease_seconds=60)
+    assert primary is not None
+    with open_db(config.paths.db_path) as database:
+        item = cast(dict[str, Any], dict(database.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()))
+        from mediaforce.library.evidence_state import sync_library_item_evidence_state
+        sync_library_item_evidence_state(database, item, "cadence_analysis")
+        queue_decision_evidence_work(database, config, item["rel_path"], library_item_ids=[item_id],
+                                    evidence_kind="cadence_analysis", work_reason="sample_safety")
+    with open_db(config.paths.db_path) as database:
+        from mediaforce.library.evidence_queue import next_evidence_work_query
+        assert database.execute(next_evidence_work_query(primary.batch_id, datetime.now(UTC).isoformat())).first() is None
+        assert original_intake_hold(database, batch_id=primary.batch_id,
+                                    priority=primary.work_priority) == "higher_priority"

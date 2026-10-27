@@ -558,7 +558,8 @@ def original_intake_hold(
         return "cancelled"
     if background_work_is_paused(connection) or state["is_paused"]:
         return "paused"
-    if connection.execute(next_evidence_work_query(batch_id, timestamp(), excluded_media_roots=excluded_media_roots).where(
+    if connection.execute(next_evidence_work_query(batch_id, timestamp(), excluded_media_roots=excluded_media_roots,
+                                                  include_running_items=True).where(
         library_item_evidence_state.c.work_priority < priority,
     )).first() is not None:
         return "higher_priority"
@@ -689,7 +690,7 @@ def cancel_evidence_queue(connection: DBClient, *, updated_at: str | None = None
 
 
 def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_roots: Collection[str] = (),
-                             allowed_running_item: int | None = None) -> Any:
+                             allowed_running_item: int | None = None, include_running_items: bool = False) -> Any:
     query = (
         select(library_item_evidence_state.c.library_item_id, library_item_evidence_state.c.evidence_kind)
         .where(
@@ -711,12 +712,13 @@ def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_root
     source_waiting_items = select(library_items.c.id).where(
         library_items.c.media_root.in_(_waiting_roots_query(batch_id, now_iso, "waiting_source"))
     )
-    running = library_item_evidence_state.alias("running_items")
-    running_items = select(running.c.library_item_id).where(running.c.work_status == "running")
-    if allowed_running_item is not None:
-        running_items = running_items.where(running.c.library_item_id != allowed_running_item)
+    if not include_running_items:
+        running = library_item_evidence_state.alias("running_items")
+        running_items = select(running.c.library_item_id).where(running.c.work_status == "running")
+        if allowed_running_item is not None:
+            running_items = running_items.where(running.c.library_item_id != allowed_running_item)
+        query = query.where(library_item_evidence_state.c.library_item_id.not_in(running_items))
     return query.where(
-        library_item_evidence_state.c.library_item_id.not_in(running_items),
         or_(library_item_evidence_state.c.library_item_id.not_in(blocked_items), ~_evidence_requires_computer()),
         or_(~_evidence_requires_source(), library_item_evidence_state.c.library_item_id.not_in(source_waiting_items)),
     )
