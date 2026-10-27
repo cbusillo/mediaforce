@@ -208,8 +208,11 @@ struct MainWindow: View {
                             SpaceSavedPage(facts: facts, model: model)
                                 // Deleting backups changes what the page shows, so it reads its facts again at once.
                                 .id(facts.originalBackups.count)
-                        case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }
-                        case .item(let prefix): ItemPage(prefix: prefix, model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
+                        // A new page for each prefix, so none shows the last one's name or facts while its own loads.
+                        case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }.id(prefix)
+                        case .item(let prefix):
+                            ItemPage(prefix: prefix, model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
+                                .id(prefix)
                         case .media: MediaPage(model: model) { place = .item($0) }
                         case .seasonsWithoutKind:
                             MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { place = .media }) { place = .item($0) }
@@ -239,13 +242,11 @@ struct MainWindow: View {
                             Button("Library", systemImage: "chevron.backward") { place = .library }
                         }
                     }
-                    // Beside the sidebar on every page, before a kind's title where there is one, so Pause never moves.
+                    // Beside the sidebar, before the page's title, so Pause never moves.
                     ToolbarItem(placement: .navigation) {
                         PauseButton(facts: facts, model: model)
                     }
                 }
-                // Only a kind's page names itself in the title bar, as Mail names a mailbox.
-                .toolbar(removing: place.map(Self.showsTitle) == true ? nil : .title)
             } else {
                 ServerStatusView(state: model.connection, lastHeard: model.lastHeard, problem: model.problem) {
                     Task { await model.refresh() }
@@ -266,10 +267,6 @@ struct MainWindow: View {
         .alert(item: Bindable(model).notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
         }
-    }
-
-    private static func showsTitle(_ place: Place) -> Bool {
-        if case .kind = place { true } else { false }
     }
 
     /// Opens a place from a link on a page: a page of this window, or Settings › Computers for a computer.

@@ -9,9 +9,6 @@ struct LibraryPage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                Text("Library")
-                    .font(.system(size: 30, weight: .bold))
-                    .padding(.bottom, 10)
                 WorkStatus(facts: facts)
                     .padding(.bottom, 22)
                 StorageBar(facts: facts, open: open)
@@ -33,11 +30,11 @@ struct LibraryPage: View {
                 }
             }
             .padding(.horizontal, 34)
-            .padding(.top, 6)
-            .padding(.bottom, 24)
+            .padding(.vertical, 20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollBounceBehavior(.basedOnSize)
         .background(Color(nsColor: .textBackgroundColor))
+        .navigationTitle("Library")
     }
 }

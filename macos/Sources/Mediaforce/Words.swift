@@ -415,7 +415,7 @@ extension Words {
     static let deleteBackupsQuestion = "Delete everything in the Cleanup folder?"
     static let deleteBackupsHelp = "Delete everything in the Cleanup folder. Mediaforce shows what is there and asks first."
 
-    static func savedSoFar(_ bytes: Int64) -> String { "\(size(bytes)) saved so far." }
+    static func savedSoFar(_ bytes: Int64) -> String { "\(size(bytes)) saved so far" }
 
     static func spotCheckFile(_ seasonPrefix: String, _ file: ItemFacts.File) -> String {
         let folders = seasonPrefix.split(separator: "/").dropFirst().joined(separator: ", ")
