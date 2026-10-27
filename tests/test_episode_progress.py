@@ -217,6 +217,35 @@ class SeasonEpisodeProgressTests(unittest.TestCase):
             "Episode 08.mkv": {"code": "settings_block"},
         })
 
+    def test_a_checked_copy_says_more_than_the_run_that_left_it(self) -> None:
+        missed_size, stopped, waiting_on_owner, running = (_item(number, "ready_to_validate") for number in range(1, 5))
+        runs = {
+            missed_size.rel_path: _run("needs_attention", progress={"failure_analysis": {"kind": "final_size_target_miss"}}),
+            stopped.rel_path: _run("stopped"),
+            waiting_on_owner.rel_path: _run(
+                "queued", waiting_reason="Reserve inputs are missing; rebuild the plan before it can run.",
+            ),
+            running.rel_path: _run("running", progress={"progress_state": "encoding"}),
+        }
+
+        episodes = season_episode_progress(
+            [missed_size, stopped, waiting_on_owner, running],
+            runs,
+            {},
+            {missed_size.item_id: "failed", stopped.item_id: "size_held", waiting_on_owner.item_id: "failed",
+             running.item_id: "failed"},
+            {missed_size.item_id: ["original_unreachable"]},
+        )
+        reasons = {episode["rel_path"].rsplit("/", 1)[-1]: (episode["stage"], episode["wait_reason"]) for episode in episodes}
+
+        self.assertEqual(reasons, {
+            "Episode 01.mkv": ("needs_you", {"code": "not_made_again", "blockers": ["original_unreachable"]}),
+            "Episode 02.mkv": ("needs_you", {"code": "size_held"}),
+            "Episode 03.mkv": ("needs_you", {"code": "check_failed"}),
+            # Work under way is newer than any copy's check.
+            "Episode 04.mkv": ("compressing", None),
+        })
+
     def test_missing_files_are_left_out(self) -> None:
         self.assertEqual(season_episode_progress([_item(1, "missing")], {}, {}), [])
 

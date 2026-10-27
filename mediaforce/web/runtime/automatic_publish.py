@@ -440,7 +440,9 @@ def _remake_or_keep_failed_copy(
             NOT_REMADE_AFTER_FAILED_CHECK,
             f"Its compressed copy didn't pass its check, and Mediaforce couldn't make it again. {left_out}".strip(),
             failure_attempts=refusals,
-            blockers=["copy_removed_not_queued"] if removed else [str(code) for code in object_list(refusal.get("codes"))],
+            blockers=list(dict.fromkeys(
+                (["copy_removed_not_queued"] if removed else []) + [str(code) for code in object_list(refusal.get("codes"))]
+            )),
         )
         return True
     _record_wait(

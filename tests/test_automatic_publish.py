@@ -23,6 +23,7 @@ from mediaforce.encoding.delivery_lock import delivery_lock
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.staging import FINAL_SIZE_GOAL_CHECK, PromotionRestoreError, PromotionWaiting
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
+from mediaforce.library.staged_validation import not_remade_blockers
 from mediaforce.library.staged_integrity import staged_integrity_report
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web import app as web_app
@@ -1134,21 +1135,51 @@ def test_failed_copy_whose_remake_is_always_refused_goes_to_the_owner(config: Me
     assert episode["wait_reason"] == {"code": "not_made_again", "blockers": ["approval_missing"]}
 
 
-def test_failed_copy_removed_but_not_queued_says_so(config: MediaforceConfig) -> None:
-    item_id, _, _ = _stage(config, "tv/Show/Season 1/broken.mkv")
+def test_failed_copy_removed_but_not_queued_keeps_why_the_queue_refused_it(config: MediaforceConfig) -> None:
+    item_id, _, staged = _stage(config, "tv/Show/Season 1/broken.mkv")
 
-    def removed_not_queued(_prefix: str, ids: Any) -> dict[str, Any]:
-        return {"ok": False, "removed_library_item_ids": list(ids), "left_out": [
-            {"library_item_id": item_id, "reason": "Finished copy removed, but not queued.", "codes": []},
-        ]}
+    def queue_refuses(_prefix: str, _mode: str, _ids: Any, _approval: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": False, "message": "The queue is closed."}
+
+    def remake(prefix: str, ids: Any) -> dict[str, Any]:
+        return size_held.remake_staged_files(
+            config, prefix, ids, now_iso=timestamp, queue_items=queue_refuses,
+            current_approval=lambda _prefix: {"approval": "current"}, retry_failed_check=True,
+        )
 
     with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
         delivery.publish_checked_files_once(
-            config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=removed_not_queued
+            config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=remake
         )
 
+    assert not staged.exists()
+    with open_db(config.paths.db_path) as connection:
+        saved = connection.execute(
+            select(staged_artifacts.c.validation_json).where(staged_artifacts.c.library_item_id == item_id)
+        ).scalar_one()
+    assert not_remade_blockers(saved) == ["copy_removed_not_queued", "queue_refused"]
+
+
+def test_a_remake_that_fails_before_removal_reaches_the_owner_with_its_reason(config: MediaforceConfig) -> None:
+    _stage(config, "tv/Show/Season 1/broken.mkv")
+
+    def remake(prefix: str, ids: Any) -> dict[str, Any]:
+        return size_held.remake_staged_files(
+            config, prefix, ids, now_iso=timestamp, queue_items=_queue_nothing,
+            current_approval=lambda _prefix: {"approval": "current"}, retry_failed_check=True,
+        )
+
+    with (patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")),
+          patch.object(size_held, "save_remake_intent", side_effect=RuntimeError("disk full"))):
+        for attempt in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1):
+            later = attempt * delivery.PUBLISH_RETRY_DELAY_SECONDS * (delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 1)
+            with patch.object(delivery.time, "time", return_value=later):
+                delivery.publish_checked_files_once(
+                    config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=remake
+                )
+
     [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
-    assert episode["wait_reason"] == {"code": "not_made_again", "blockers": ["copy_removed_not_queued"]}
+    assert episode["wait_reason"] == {"code": "not_made_again", "blockers": ["recovery_failed"]}
 
 
 def test_failed_copy_waits_for_running_work_without_going_to_the_owner(config: MediaforceConfig) -> None:

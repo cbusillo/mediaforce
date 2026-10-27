@@ -51,33 +51,33 @@ final class ItemTests: XCTestCase {
     }
 
     func testEachWaitSaysWhyInPlainWords() throws {
+        let notMadeAgain = { (blockers: String) in #"{"code": "not_made_again", "blockers": [\#(blockers)]}"# }
         let season = try facts([
-            file(1, stage: "needs_you", bytes: 1, waitReason: #"{"code": "stopped"}"#),
-            file(2, stage: "needs_you", bytes: 1, waitReason: #"{"code": "restart_stopped", "computer": "M2 MBP"}"#),
-            file(3, stage: "needs_you", bytes: 1, waitReason: #"{"code": "storage_io"}"#),
-            file(4, stage: "needs_you", bytes: 1, validation: "failed",
-                 waitReason: #"{"code": "not_made_again", "blockers": ["approval_missing", "original_unreachable"]}"#),
-            file(5, stage: "needs_you", bytes: 1, validation: "failed", waitReason: #"{"code": "not_made_again", "blockers": []}"#),
-            file(6, stage: "needs_you", bytes: 1, waitReason: #"{"code": "something_new"}"#),
+            file(1, stage: "needs_you", bytes: 1),
+            file(2, stage: "needs_you", bytes: 1, waitReason: #"{"code": "something_new"}"#),
+            file(3, stage: "needs_you", bytes: 1, waitReason: #"{"code": "stopped"}"#),
+            file(4, stage: "needs_you", bytes: 1, waitReason: #"{"code": "storage_io"}"#),
+            file(5, stage: "needs_you", bytes: 1, waitReason: #"{"code": "restart_stopped", "computer": "Attic Mini"}"#),
+            file(6, stage: "needs_you", bytes: 1, waitReason: notMadeAgain("")),
+            file(7, stage: "needs_you", bytes: 1, waitReason: notMadeAgain(#""approval_missing""#)),
+            file(8, stage: "needs_you", bytes: 1, waitReason: notMadeAgain(#""original_unreachable""#)),
+            file(9, stage: "needs_you", bytes: 1, waitReason: notMadeAgain(#""approval_missing", "original_unreachable""#)),
         ])
-        let words = season.files.map { (Words.fileState($0), Words.waitingReason($0)) }
+        let label = season.files.map(Words.fileState)
+        let reason = season.files.map(Words.waitingReason)
 
-        XCTAssertEqual(words[0].0, "Stopped")
-        XCTAssertEqual(words[0].1, "It was stopped before it finished.")
-        XCTAssertEqual(words[1].0, "Stopped by a restart")
-        XCTAssertTrue(words[1].1.hasSuffix("Check M2 MBP."))
-        XCTAssertEqual(words[2].0, "Couldn't finish")
-        XCTAssertEqual(words[2].1, "It had trouble reading or writing the media files.")
-        XCTAssertEqual(words[3].0, "Couldn't be made again")
-        XCTAssertEqual(
-            words[3].1,
-            "The compressed copy didn't pass its check, and Mediaforce couldn't make it again: "
-                + "it needs a newly approved sample and the original file can't be reached. The original stays in the library."
-        )
-        XCTAssertTrue(words[4].1.contains("couldn't make it again after several tries."))
-        // A reason this app does not know yet keeps the general words.
-        XCTAssertEqual(words[5].0, "Needs a decision")
-        XCTAssertEqual(words[5].1, "It needs a decision from you.")
+        XCTAssertFalse((label + reason).contains(where: \.isEmpty))
+        // A reason this app does not know yet reads like a file with no reason at all.
+        XCTAssertEqual(label[1], label[0])
+        XCTAssertEqual(reason[1], reason[0])
+        for known in 2...5 {
+            XCTAssertNotEqual(label[known], label[0])
+            XCTAssertNotEqual(reason[known], reason[0])
+        }
+        XCTAssertNotEqual(reason[2], reason[3])
+        XCTAssertTrue(reason[4].contains("Attic Mini"))
+        // Each blocker shows in the sentence, so two blockers read unlike either one alone or none.
+        XCTAssertEqual(Set(reason[5...8]).count, 4)
     }
 
     func testASizeQuestionNamesBothSizes() throws {

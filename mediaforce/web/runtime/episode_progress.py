@@ -40,6 +40,7 @@ EPISODE_STAGES = (
 PUT_BACK_DETAIL = "Kept original: you put the original back."
 _RUNNING_PREPARATION_STATES = frozenset({"starting", "staging_source"})
 _OWNER_RUN_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
+_OWNER_VALIDATIONS = frozenset({"size_held", "failed"})
 _VALIDATION_DETAILS = {
     "size_held": "much smaller than expected; keep it or make it again",
     "failed": "didn't pass its check",
@@ -201,16 +202,19 @@ def _episode(
         return episode
     if run is not None and run_status in _OWNER_RUN_STATUSES | {"queued", "retry_backoff"}:
         reason, label, needs_owner = unfinished_child_reason(run)
-        if reason == "size_exception_declined":
-            episode["stage"] = "kept_original"
-        elif needs_owner or run_status in _OWNER_RUN_STATUSES:
-            episode["stage"] = "needs_you"
-            episode["size_question"] = size_exception_question(run)
-            episode["wait_reason"] = _run_wait_reason(reason, run)
-        else:
-            episode["stage"] = "waiting"
-        episode["detail"] = label
-        return episode
+        owner_run = reason != "size_exception_declined" and (needs_owner or run_status in _OWNER_RUN_STATUSES)
+        # A run that waits on the owner says less than the copy it left, once that copy has been checked.
+        if not (owner_run and validation in _OWNER_VALIDATIONS):
+            if reason == "size_exception_declined":
+                episode["stage"] = "kept_original"
+            elif owner_run:
+                episode["stage"] = "needs_you"
+                episode["size_question"] = size_exception_question(run)
+                episode["wait_reason"] = _run_wait_reason(reason, run)
+            else:
+                episode["stage"] = "waiting"
+            episode["detail"] = label
+            return episode
     if validation == "remaking":
         episode["stage"] = "waiting"
         episode["detail"] = _VALIDATION_DETAILS[validation]

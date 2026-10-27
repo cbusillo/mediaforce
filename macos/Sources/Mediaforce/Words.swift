@@ -1166,6 +1166,15 @@ extension Words {
         case "compressing": "other files here are still compressing"
         case "queued_run": "a waiting run may still make it"
         case "copy_removed_not_queued": "its old copy was removed, but the new one didn't start"
+        case "not_waiting": "it was no longer waiting to be made again"
+        case "copy_in_use": "its compressed copy was still in use"
+        case "request_changed": "its saved request changed partway"
+        case "copy_not_removed": "its old copy couldn't be removed"
+        case "recovery_not_saved": "its new start couldn't be saved"
+        case "recovery_failed": "something went wrong while setting it up again"
+        case "queue_failed": "adding it to the work list failed"
+        case "queue_refused": "the work list didn't take it"
+        case "queue_excluded": "the work list left it out"
         default: nil
         }
     }

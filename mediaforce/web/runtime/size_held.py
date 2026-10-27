@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from functools import cache
 from pathlib import Path
 from typing import Any, cast
@@ -154,14 +154,14 @@ def remake_staged_files(
                 reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
                 if recovery is None or reason:
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
-                                     "codes": recovery["blocked_codes"] if recovery else [],
+                                     "codes": _refusal_codes(recovery),
                                      "busy": bool(recovery and recovery["busy"])})
                     continue
                 intent = remake_intent(row)
                 if intent.get("state") != "removed" and (reason := staged_output_cleanup_blocker(connection, config, row)):
                     # Something still owns the copy's paths; that clears once its work ends.
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
-                                     "busy": True})
+                                     "codes": ["copy_in_use"], "busy": True})
                     continue
                 if not intent or requested_copy_is_present(row):
                     run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
@@ -176,18 +176,21 @@ def remake_staged_files(
                 recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval,
                                                 manifest_reader=manifest_reader, retry_failed_check=retry_failed_check)
                 reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
+                codes = _refusal_codes(recovery)
                 if not reason and remake_intent(row) != intent:
-                    reason = "This file’s saved request changed. Refresh it before retrying."
+                    reason, codes = "This file’s saved request changed. Refresh it before retrying.", ["request_changed"]
                 if not reason and recovery is not None and recovery["approval"] != intent["approval"]:
                     reason = "The approved settings changed before removal. Refresh before retrying. Nothing was removed."
+                    codes = ["approval_changed"]
                 busy = bool(recovery and recovery["busy"])
                 if not reason and intent.get("state") != "removed" and not _remove_finished_output(config, row):
                     reason, busy = "Mediaforce could not remove the finished copy yet. Try again.", True
+                    codes = ["copy_not_removed"]
                 if recovery is None or reason:
                     if request_saved and remake_intent(row) == intent:
                         save_remake_intent(connection, row, {}, now=now_iso())
                     left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
-                                     "codes": recovery["blocked_codes"] if recovery else [], "busy": busy})
+                                     "codes": codes, "busy": busy})
                     continue
                 removed.append(item_id)
                 run_prefix, mode = str(intent["prefix"]), str(intent["mode"])
@@ -206,16 +209,19 @@ def remake_staged_files(
             left_out.append({"library_item_id": item_id, "name": names[item_id],
                              "reason": ("Finished copy removed, but recovery was not saved. "
                                         "Use Make again to retry with its saved settings." if item_id in removed else
-                                        "Could not finish this file’s recovery. Use Make again to retry.")})
+                                        "Could not finish this file’s recovery. Use Make again to retry."),
+                             "codes": ["recovery_not_saved" if item_id in removed else "recovery_failed"]})
     runs: list[dict[str, Any]] = []
     queued_ids: list[int] = []
     for (run_prefix, mode, saved_approval), item_ids in groups.items():
         approval = object_dict(json.loads(saved_approval))
+        queue_failed = False
         try:
             result = queue_items(run_prefix, mode, item_ids, approval)
         except Exception:
             logger.exception("Could not queue remade files for %s in %s mode", run_prefix, mode)
             result = {"ok": False, "message": "Queueing failed. Use Make again to retry with its saved settings."}
+            queue_failed = True
         runs.append(result)
         queue_left_out = object_list(result.get("left_out"))
         excluded_ids = {file.get("library_item_id") for file in queue_left_out}
@@ -229,9 +235,12 @@ def remake_staged_files(
                             else str(result.get("message") or "Try queueing again."))
                 reason = next((str(file.get("reason")) for file in queue_left_out
                                if file.get("library_item_id") == item_id), fallback)
+                code = ("queue_failed" if queue_failed
+                        else "queue_excluded" if result.get("ok") or item_id in excluded_ids else "queue_refused")
                 left_out.append({"library_item_id": item_id, "name": names[item_id],
                                  "reason": f"Finished copy removed, but not queued: {reason} "
-                                           "Use Make again to retry only this file with its saved settings once this clears."})
+                                           "Use Make again to retry only this file with its saved settings once this clears.",
+                                 "codes": [code]})
         accepted = [item_id for item_id in item_ids if item_id in queued_ids]
         if accepted:
             try:
@@ -248,6 +257,11 @@ def remake_staged_files(
         "left_out": left_out, "runs": runs,
         **({"job": runs[0]["job"]} if len(runs) == 1 and runs[0].get("job") else {}),
     }
+
+
+def _refusal_codes(recovery: Mapping[str, Any] | None) -> list[str]:
+    """Why a remake was refused, as codes: the recovery's own blockers, or that the file no longer waits for one."""
+    return list(recovery["blocked_codes"]) if recovery is not None else ["not_waiting"]
 
 
 def keep_original_after_failed_checks(
