@@ -70,7 +70,8 @@ struct ItemPage: View {
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
-        .navigationTitle(facts.map(Words.itemTitle) ?? Words.appName)
+        // Until its facts arrive, the page is named by its folder.
+        .navigationTitle(facts.map(Words.itemTitle) ?? prefix.split(separator: "/").last.map(String.init) ?? prefix)
         // A season names its show; a show's own page is already named by it.
         .navigationSubtitle(facts.flatMap { $0.kind == "tv_series" ? nil : $0.show } ?? "")
         .task(id: prefix) { await watch() }

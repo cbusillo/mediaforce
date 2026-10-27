@@ -208,8 +208,11 @@ struct MainWindow: View {
                             SpaceSavedPage(facts: facts, model: model)
                                 // Deleting backups changes what the page shows, so it reads its facts again at once.
                                 .id(facts.originalBackups.count)
-                        case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }
-                        case .item(let prefix): ItemPage(prefix: prefix, model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
+                        // A new page for each prefix, so none shows the last one's name or facts while its own loads.
+                        case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }.id(prefix)
+                        case .item(let prefix):
+                            ItemPage(prefix: prefix, model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
+                                .id(prefix)
                         case .media: MediaPage(model: model) { place = .item($0) }
                         case .seasonsWithoutKind:
                             MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { place = .media }) { place = .item($0) }
