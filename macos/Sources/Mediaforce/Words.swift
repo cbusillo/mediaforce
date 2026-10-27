@@ -315,6 +315,7 @@ extension Words {
         case "motion_partly_interlaced": "partly interlaced"
         case "motion_unclear": "motion pattern unclear"
         case "motion_put_back": "you put the original back"
+        case "motion_check_failed": "its compressed copy kept failing its check"
         default: "kept by you"
         }
     }
@@ -1089,7 +1090,7 @@ extension Words {
         case "measuring": "Finding the right size"
         case "getting_ready": "Getting ready"
         case "checking": "Checking the compressed copy"
-        case "waiting": "Waiting its turn"
+        case "waiting": file.validation == "remaking" ? "Didn't pass its check, being made again" : "Waiting its turn"
         default: "Not compressed yet"
         }
     }

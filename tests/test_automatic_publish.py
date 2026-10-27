@@ -3,7 +3,7 @@ import threading
 from dataclasses import replace
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -12,16 +12,19 @@ from sqlalchemy import select
 
 from mediaforce import cli
 from mediaforce.web.runtime.archive_cleanup import clear_archive_cleanup_action
+from mediaforce.web.runtime.episode_progress import folder_episodes_payload
 from mediaforce.web.runtime.completed_runtime import list_completed_folders, clear_completed_backups_action
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
-from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
+from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.utils import file_fingerprint, timestamp
 from mediaforce.encoding.delivery_lock import delivery_lock
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.staging import FINAL_SIZE_GOAL_CHECK, PromotionRestoreError, PromotionWaiting
+from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.staged_integrity import staged_integrity_report
+from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import automatic_publish as delivery
 from mediaforce.web.runtime import size_held
@@ -155,10 +158,25 @@ def _probe() -> ProbeSummary:
     )
 
 
-def _run(config: MediaforceConfig, approval: dict[str, Any] | None = None) -> None:
+def _no_remake(_prefix: str, _ids: Any) -> NoReturn:
+    raise AssertionError("only a copy that failed a check other than its size goal is made again")
+
+
+def _remake_refused(_prefix: str, _ids: Any) -> dict[str, Any]:
+    return {"ok": False, "message": "Mediaforce is still compressing here."}
+
+
+def _run(
+    config: MediaforceConfig,
+    approval: dict[str, Any] | None = None,
+    *,
+    remake_files: delivery.RemakeFilesFn = _no_remake,
+) -> None:
     state = approval if approval is not None else _approval()
     with patch("mediaforce.execution.probe_media", return_value=_probe()):
-        delivery.publish_checked_files_once(config, load_calibration_state=lambda _config, _prefix: state)
+        delivery.publish_checked_files_once(
+            config, load_calibration_state=lambda _config, _prefix: state, remake_files=remake_files
+        )
 
 
 def _status(config: MediaforceConfig, item_id: int) -> str:
@@ -252,7 +270,7 @@ def test_unapproved_or_failed_files_are_not_published(config: MediaforceConfig, 
                 .values(encode_origin=None)
             )
         connection.commit()
-    _run(config, approval)
+    _run(config, approval, remake_files=_remake_refused)
     assert _status(config, item_id) == "encoded"
     assert not (config.archive_root / item["rel_path"]).exists()
 
@@ -298,7 +316,7 @@ def test_validation_failure_keeps_original_and_other_file_publishes(config: Medi
         return validate(connection, config, item)
 
     with patch.object(delivery, "validate_one_item", side_effect=failed_check):
-        _run(config)
+        _run(config, remake_files=_remake_refused)
     assert _status(config, failed_id) == "encoded"
     assert _status(config, ready_id) == "promoted"
 
@@ -431,7 +449,7 @@ def test_repeated_integrity_hold_keeps_one_bounded_reason(
             connection.commit()
     for attempt in range(5):
         with patch.object(delivery.time, "time", return_value=attempt * (delivery.PUBLISH_RETRY_DELAY_SECONDS + 1)):
-            _run(config)
+            _run(config, remake_files=_remake_refused)
     with open_db(config.paths.db_path) as connection:
         events = (
             connection.execute(
@@ -525,7 +543,7 @@ def test_shutdown_stops_between_files(config: MediaforceConfig) -> None:
         patch("mediaforce.execution.probe_media", return_value=_probe()),
     ):
         delivery.publish_checked_files_once(
-            config, load_calibration_state=lambda *_args: _approval(), stop_event=stop
+            config, load_calibration_state=lambda *_args: _approval(), remake_files=_no_remake, stop_event=stop
         )
     assert _status(config, first) == "promoted"
     assert _status(config, second) == "validated"
@@ -609,7 +627,7 @@ def test_unapproved_draft_does_not_hide_accepted_parent(
         return _approval() if prefix == "tv/Show" else {"policy": {}, "mode": "sample"}
 
     with patch("mediaforce.execution.probe_media", return_value=_probe()):
-        delivery.publish_checked_files_once(config, load_calibration_state=load)
+        delivery.publish_checked_files_once(config, load_calibration_state=load, remake_files=_no_remake)
     assert _status(config, item_id) == "promoted"
 
 
@@ -631,7 +649,9 @@ def test_a_show_run_file_publishes_only_while_the_show_approval_governs_it(
     approvals = {"tv/Show": show, **({"tv/Show/Season 1": season} if season_approval != "none" else {})}
 
     with patch("mediaforce.execution.probe_media", return_value=_probe()):
-        delivery.publish_checked_files_once(config, load_calibration_state=lambda _config, prefix: approvals.get(prefix))
+        delivery.publish_checked_files_once(
+            config, load_calibration_state=lambda _config, prefix: approvals.get(prefix), remake_files=_no_remake
+        )
 
     # The season's own approval governs its files even when it is too old to check against.
     assert (_status(config, item_id) == "promoted") == (season_approval == "none")
@@ -971,7 +991,9 @@ def test_encoder_size_miss_with_another_failure_stays_failed(config: MediaforceC
     item_id, item = _encoder_size_record(config, "tv/Show/Season 1/broken.mkv", lower=1, upper=2)
 
     with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
-        delivery.publish_checked_files_once(config, load_calibration_state=lambda _config, _prefix: _approval())
+        delivery.publish_checked_files_once(
+            config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=_remake_refused
+        )
 
     with open_db(config.paths.db_path) as connection:
         report = staged_integrity_report(connection, config, "tv/Show/Season 1", discover=False)
@@ -986,3 +1008,95 @@ def test_encoder_copy_inside_its_size_band_publishes_without_a_question(config: 
     _run(config)
     assert _status(config, item_id) == "promoted"
     assert Path(item["source_path"]).read_bytes() == b"av1"
+
+
+def _restage(config: MediaforceConfig, item_id: int, item: dict[str, Any]) -> None:
+    """Leave a new copy of an existing file, the way the queue does after it is made again."""
+    staged = Path(config.media["staging_root"]) / item["rel_path"]
+    staged.write_bytes(b"av1")
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(
+            staged_artifacts.insert().values(
+                library_item_id=item_id,
+                manifest_run_id=f"run-{item_id}",
+                manifest_path=str(config.paths.project_root / f"manifest-{item_id}.json"),
+                item_index=0,
+                encode_origin="queue",
+                staging_path=str(staged),
+                staging_size_bytes=staged.stat().st_size,
+                staging_mtime_ns=staged.stat().st_mtime_ns,
+                source_fingerprint=item["source_fingerprint"],
+                validation_json="{}",
+                updated_at=timestamp(),
+            )
+        )
+        connection.execute(library_items.update().where(library_items.c.id == item_id).values(status="encoded"))
+        connection.commit()
+
+
+def _kept_reason(config: MediaforceConfig, item_id: int) -> str | None:
+    with open_db(config.paths.db_path) as connection:
+        if not library_item_ids_kept_original(connection, [item_id]):
+            return None
+        return connection.execute(
+            select(motion_keep_decisions.c.reason_code).where(motion_keep_decisions.c.library_item_id == item_id)
+        ).scalar_one()
+
+
+def test_failed_check_is_made_again_until_the_limit_then_the_original_is_kept(config: MediaforceConfig) -> None:
+    item_id, item, staged = _stage(config, "tv/Show/Season 1/broken.mkv")
+    queued: list[list[int]] = []
+
+    def queue_items(_prefix: str, _mode: str, ids: Any, _approval: dict[str, Any]) -> dict[str, Any]:
+        queued.append(list(ids))
+        return {"ok": True, "queued_library_item_ids": list(ids)}
+
+    def remake(prefix: str, ids: Any) -> dict[str, Any]:
+        return size_held.remake_staged_files(
+            config, prefix, ids, now_iso=timestamp, queue_items=queue_items,
+            current_approval=lambda _prefix: {"approval": "current"}, retry_failed_check=True,
+        )
+
+    for attempt in range(1, delivery.CHECK_FAILURE_ATTEMPT_LIMIT + 1):
+        with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
+            delivery.publish_checked_files_once(
+                config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=remake
+            )
+        assert not staged.exists()
+        assert Path(item["source_path"]).read_bytes() == b"original media file"
+        if attempt < delivery.CHECK_FAILURE_ATTEMPT_LIMIT:
+            assert queued == [[item_id]] * attempt
+            assert _status(config, item_id) == "planned"
+            assert _kept_reason(config, item_id) is None
+            _restage(config, item_id, item)
+
+    assert len(queued) == delivery.CHECK_FAILURE_ATTEMPT_LIMIT - 1
+    assert _kept_reason(config, item_id) == size_held.CHECK_FAILED_KEEP_REASON
+    with open_db(config.paths.db_path) as connection:
+        assert connection.execute(
+            select(staged_artifacts.c.library_item_id).where(staged_artifacts.c.library_item_id == item_id)
+        ).first() is None
+    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    assert episode["stage"] == "kept_original"
+    with open_db(config.paths.db_path) as connection:
+        # A changed source lapses the keep, so the new source is worked on like any other file.
+        connection.execute(library_items.update().where(library_items.c.id == item_id).values(fingerprint="new"))
+        connection.commit()
+    assert _kept_reason(config, item_id) is None
+
+
+def test_failed_copy_waiting_to_be_made_again_does_not_wait_on_the_owner(config: MediaforceConfig) -> None:
+    item_id, _, staged = _stage(config, "tv/Show/Season 1/broken.mkv")
+
+    with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
+        delivery.publish_checked_files_once(
+            config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=_remake_refused
+        )
+
+    assert staged.exists()
+    assert _status(config, item_id) == "encoded"
+    with open_db(config.paths.db_path) as connection:
+        [state] = build_folder_workflow_state(connection, "tv/Show/Season 1").items
+    assert state.lane != "blocked"
+    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    assert (episode["stage"], episode["validation"], episode["owner_action"]) == ("waiting", "remaking", None)

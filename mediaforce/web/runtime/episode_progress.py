@@ -43,6 +43,7 @@ _OWNER_RUN_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
 _VALIDATION_DETAILS = {
     "size_held": "much smaller than expected; keep it or make it again",
     "failed": "didn't pass its check",
+    "remaking": "didn't pass its check; being made again",
 }
 
 
@@ -130,7 +131,7 @@ def season_episode_progress(
         bytes_saved: Mapping[int, int],
         validation: Mapping[int, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """`validation` names the staged files whose check waits on the owner: "size_held" or "failed"."""
+    """`validation` names each staged file's check outcome: "size_held" or "failed" wait on the owner, "remaking" does not."""
     validation = validation or {}
     episodes = [
         _episode(
@@ -194,6 +195,11 @@ def _episode(
         else:
             episode["stage"] = "waiting"
         episode["detail"] = label
+        return episode
+    if validation == "remaking":
+        episode["stage"] = "waiting"
+        episode["detail"] = _VALIDATION_DETAILS[validation]
+        episode["validation"] = validation
         return episode
     if validation is not None:
         episode["stage"] = "needs_you"

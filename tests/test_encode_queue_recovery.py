@@ -27393,12 +27393,13 @@ raise SystemExit(0)
 
         for force in (False, True):
             with self.subTest(force=force), open_db(self.config.paths.db_path) as connection, \
-                    self.assertRaisesRegex(staging_runtime.PromotionWaiting, "keep this file original"):
+                    self.assertRaises(staging_runtime.PromotionWaiting) as refused:
                 staging_runtime.promote_one_item(
                     connection, self.config, item, force=force, probe_media=Mock(), file_fingerprint=Mock(),
                     timestamp=web_app._now_iso, record_event=Mock(),
                     reserve_preflight=lambda *_args, **_kwargs: ReservePreflight(True, None, {}),
                 )
+            self.assertEqual(refused.exception.reason_code, "kept_original")
 
         self.assertTrue(source_path.exists())
         self.assertTrue(staging_path.exists())
