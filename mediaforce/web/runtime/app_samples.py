@@ -111,9 +111,15 @@ def make_sample(
     action = object_dict(status.get("page_state")).get("primary_action")
     if size is None and action == "choose_size":
         return {"ok": False, "code": "choose_size"}
+    result: Mapping[str, Any] = {}
+    if size is None and action == "retry_sample":
+        try:
+            result = retry_saved(prefix, "", "")
+        except HTTPException:
+            result = {}
     try:
-        result = retry_saved(prefix, "", "") if size is None and action == "retry_sample" else {}
-        # A saved request that can't run again, such as one under older settings, is asked for anew.
+        # A saved request that can't run again, such as one under older settings or on a computer gone since, is asked
+        # for anew.
         if not result.get("ok"):
             request = _sample_request(folder, size, remake=action == "review_sample")
             if isinstance(request, str):

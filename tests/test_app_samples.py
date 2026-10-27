@@ -250,6 +250,16 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert refused_retry == {"ok": True, "code": None}
     assert [call[0] for call in calls] == ["retry", "new"]
     calls.clear()
+
+    def computer_gone(*_args: Any) -> dict[str, Any]:
+        raise HTTPException(status_code=409, detail="That computer is gone.")
+
+    assert make_sample(
+        _folder(), _status("needs_help", "retry_sample"), None,
+        ai_tune=lambda *args: calls.append(("new", *args)) or {"ok": True}, retry_saved=computer_gone,
+    ) == {"ok": True, "code": None}
+    assert [call[0] for call in calls] == ["new"]
+    calls.clear()
     assert make(_folder(), _status(), "a size that is not offered") == {"ok": False, "code": "choose_size"}
     assert calls == []
 
