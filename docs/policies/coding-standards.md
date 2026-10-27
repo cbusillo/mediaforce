@@ -35,8 +35,7 @@
 - Preserve compatibility only when it still buys something concrete
 - Use `uv run` for Python tooling and tests instead of invoking Python directly
 - Use repo-native validation tools when available: PyCharm inspection for code
-  cleanup, browser validation for UI work, and the repo's own npm/pytest entry
-  points for automated checks
+  cleanup and the repo's own pytest and Mac app entry points for automated checks
 - Prefer fixing the root cause over adding broad suppressions or workaround
   layers
 
@@ -48,7 +47,7 @@
 
 ## Dependency updates
 
-- Keep Python and frontend dependency updates independently reviewable rather
+- Keep Python and Mac app dependency updates independently reviewable rather
   than combining unrelated ecosystems in one pull request.
 - Group routine minor and patch updates, but leave semantic-version majors as
   separate compatibility decisions after a bounded cooldown.

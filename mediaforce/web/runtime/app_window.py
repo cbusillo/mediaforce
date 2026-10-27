@@ -292,7 +292,7 @@ def movies_payload(titles: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     return {"movies": sorted(listed, key=lambda movie: (-movie["bytes"], movie["title"]))}
 
 
-# The web movie library's state group (frontend/src/lib/movies/library.ts movieLibraryStateGroup), checked in its order.
+# A movie's library state group, checked in its order.
 def movie_state(title: Mapping[str, Any]) -> str:
     workflow = title.get("workflow_state") or {}
     lane = workflow.get("primary_lane")
@@ -344,7 +344,7 @@ def other_media_payload(library: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-# The web Other library's state group (frontend/src/lib/other/library.ts otherLibraryStateGroup), checked in its order.
+# An Other library item's state group, checked in its order.
 def other_media_state(unit: Mapping[str, Any]) -> str:
     readiness = (unit.get("profile_readiness") or {}).get("state")
     lane = (unit.get("workflow_state") or {}).get("primary_lane")

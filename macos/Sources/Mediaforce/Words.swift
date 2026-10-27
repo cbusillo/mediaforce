@@ -365,7 +365,6 @@ extension Words {
     static let tryAnotherSize = "Try another size"
     static let chooseSizeHeadline = "Choose a size"
     static let openItem = "Open"
-    static let openInBrowser = "Open in browser"
     static let cancel = "Cancel"
     static let resume = "Resume"
     static let pausedBar = "Mediaforce is paused. Nothing new starts."
@@ -551,14 +550,14 @@ extension ActionNotice {
         message: "A new sample replaced the one you watched, so nothing was approved. Watch the new sample first."
     )
 
-    static let finishInBrowser = ActionNotice(
+    static let compressNeedsChoice = ActionNotice(
         title: "Compressing needs a choice first",
-        message: "The sample is approved, but this season needs a choice made on its page in the browser before it can compress."
+        message: "The sample is approved, but this season needs a choice Mediaforce can't ask for here yet, so it isn't compressing."
     )
 
     static let chooseBalance = ActionNotice(
         title: "Choose this season's balance first",
-        message: "This season needs its balance of size and detail chosen before a new sample. Choose it in the browser."
+        message: "This season needs its balance of size and detail chosen before a new sample, and Mediaforce can't ask for it here yet."
     )
 
     static let chooseSize = ActionNotice(
@@ -1209,7 +1208,6 @@ extension Words {
         case .replaceOriginals: "Replace Originals…"
         case .retryUnfinished: "Retry Unfinished Episodes"
         case .decideMotion: "Keep These Originals…"
-        case .openInBrowser: openInBrowser
         }
     }
 

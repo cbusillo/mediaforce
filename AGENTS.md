@@ -14,7 +14,7 @@ in an `AGENTS.md` too.
 
 Mediaforce reclaims media-library space by converting videos to AV1 and audio to Opus, while checking quality before publishing each file.
 Its native Mac app direction calls for automatic handling of measured problems, with the Director deciding judgment calls and rollback-copy cleanup.
-Evidence: [DIRECTION.md](DIRECTION.md); [README.md](README.md) describes implementation details, including the web interface.
+Evidence: [DIRECTION.md](DIRECTION.md); [README.md](README.md) describes implementation details.
 
 ## Naming
 
@@ -29,22 +29,16 @@ Evidence: [DIRECTION.md](DIRECTION.md); [README.md](README.md) describes impleme
   invariants
 - Do not reintroduce checked-in runtime state, SQLite databases, or review
   media artifacts into the repo
-- `uv build` now auto-builds `frontend/` during wheel packaging; do not rely on
-  stale checked-in or local `frontend/build/` artifacts
 - Use `.github/github.json` for repo commands and quality gates
 
 ## Workflow Notes
 
-- UI changes: validate in a real browser per
-  `docs/policies/acceptance-gate.md`
 - Local macOS launch item: use `uv run mediaforce service status` to inspect
   `~/Library/LaunchAgents/com.mediaforce.web.plist`. It may be disabled at
   session start when Mediaforce is not active work, so do not assume the local
-  web server is running; enable it intentionally when needed.
+  server is running; enable it intentionally when needed.
 - Before changing primary user surfaces, read
-  `docs/style/workstation-ui.md` together with `docs/style/frontend.md`
-- For browser exploration by subagents, follow
-  `docs/development/browser-review-guidance.md`.
+  `docs/style/workstation-ui.md`
 - Follow `docs/style/index.md` plus
   `docs/policies/coding-standards.md`
 - Before commits or ending a session, satisfy
@@ -67,5 +61,5 @@ Here that also means tests pin or stub the host platform, the developer's
 - `README.md`: durable user and developer overview
 - `docs/README.md`: docs table of contents
 - `docs/style/workstation-ui.md`: primary user-surface design doctrine
-- `docs/architecture/module-boundaries.md`: durable backend/frontend module
+- `docs/architecture/module-boundaries.md`: durable backend module
   boundaries after the structural refactor pass

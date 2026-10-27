@@ -17,7 +17,7 @@ update a development worktree in place.
 The controller installs into
 `~/Library/Application Support/mediaforce/runtime/releases/<full-sha>-<attempt>/`.
 Each release is an independent Git clone with its own environment and freshly
-built frontend. A fresh attempt folder lets the same commit be retried without
+built Mac app. A fresh attempt folder lets the same commit be retried without
 overwriting a retained candidate; it has no Git alternates or worktree registration pointing back
 to a development checkout. Launchd's program and working directory name that
 release directly. Service commands run from a development checkout address the

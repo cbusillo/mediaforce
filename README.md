@@ -25,8 +25,8 @@ defaults rather than product-level invariants.
 The current implementation covers:
 
 - discovery and inventory into SQLite, refreshed in the background
-- the web app: TV, Movies, and Other libraries, Activity, Finished, and
-  Settings
+- the Mac app: TV, Movies, and Other libraries, Activity, Finished, and
+  Settings, talking to the local server's API
 - per-file sample, encode, and machine validation across configured encode
   hosts, with work-window schedules
 - measured evidence (motion pattern, media fingerprint) checked automatically
@@ -77,7 +77,7 @@ For migration authoring and review workflow, see
 Transient calibration artifacts are also cleaned up automatically. By default,
 Mediaforce purges cached review clips, temporary calibration manifests, and
 `/Volumes/media/transcode/_calibration/` scratch outputs after `14` days.
-While the web UI or CLI is in active use, it also retries that cleanup sweep at
+While the server or CLI is in active use, it also retries that cleanup sweep at
 most once per hour so stale files get another chance to disappear if an earlier
 pass raced or only cleaned up partially. Run plans containing original source
 trait measurements are retained regardless of age or job status; unreadable or
@@ -111,7 +111,7 @@ On macOS, Mediaforce now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
 changes and normal formula upgrades. You can override either binary with
 `MEDIAFORCE_FFMPEG` or `MEDIAFORCE_FFPROBE`.
 
-Web and API reads only report persisted catalog and job state; opening or
+API reads only report persisted catalog and job state; opening or
 polling a page does not start scans, host probes, or media analysis. Catalog
 inventory refreshes in the background every `media.catalog_refresh_hours`
 (default 6; 0 turns it off). Save a library-path change in Settings or run
@@ -283,7 +283,7 @@ uv run mediaforce campaign \
   "tv/Suits/Season 5"
 ```
 
-The web app is the normal way to run Mediaforce. For a manual one-off or
+The Mac app is the normal way to run Mediaforce. For a manual one-off or
 debugging run from the CLI, start a run instead:
 
 ```bash
@@ -379,7 +379,7 @@ of untracked and temporary files under configured staging roots:
 uv run mediaforce staged-integrity "tv/Show/Season 1" --details
 ```
 
-The web app checks finished production files and publishes each passing file
+Mediaforce checks finished production files and publishes each passing file
 automatically, retaining the original in the Cleanup folder. Temporary holds
 retry; unknown failures retry with a delay before pausing for the manual check or publish override.
 Changed approvals, failed checks, and file conflicts stay with that file.
@@ -485,7 +485,7 @@ per-show or per-season tuning there.
 Bench-approved drafts are saved locally in runtime settings so future runs on
 that machine can reuse them without changing the tracked repo defaults.
 
-Use the web Settings page for ordered typed library roots, the transcode folder,
+Use the Mac app's Settings for ordered typed library roots, the transcode folder,
 remote host definitions, the Plex server URL, and Plex-to-Mediaforce path
 mappings so those environment details stay off the checked-in repo. Library
 labels are editable while root IDs remain stable. TV, Movies, and Other can
@@ -531,7 +531,7 @@ Mediaforce source roots using exact root boundaries. See
 selection contract.
 
 `mediaforce-web` reads optional startup defaults from the repo-local `.env`.
-Use that file for machine-specific web launcher settings like bind address,
+Use that file for machine-specific server launcher settings like bind address,
 port, and reload mode. A checked-in template lives at `.env.example`. Startup
 precedence is explicit CLI arguments, then shell environment variables, then
 `.env`, then built-in defaults. Prefer the `MEDIAFORCE_WEB_*` variable names
@@ -562,34 +562,17 @@ and reload the item after moving the checkout or recreating `.venv`, and use
 `docs/development/macos-login-item.md` for verification and raw launchctl
 fallbacks.
 
-## Local web development
+## Local server development
 
-The web UI is now split cleanly:
+FastAPI serves the API the Mac app uses, plus review media.
 
-- FastAPI serves the backend API and review media.
-- A SvelteKit frontend lives under `frontend/`.
-
-The frontend dev server now reads the same repo-local `.env` file. The clearest
-local setup is:
-
-- `MEDIAFORCE_WEB_PORT=8777` for the FastAPI app
-- `MEDIAFORCE_FRONTEND_DEV_PORT=4173` for Vite frontend development
-- `MEDIAFORCE_FRONTEND_API_ORIGIN=http://127.0.0.1:8777` so the frontend dev
-  server proxies API requests to the backend explicitly
-
-That means the two useful local URLs are:
-
-- `http://127.0.0.1:4173` while actively editing the frontend in dev mode
-- `http://127.0.0.1:8777` when checking the backend-served built app
-
-For local web work on macOS and Linux, prepare this checkout with
-`uv sync --locked` and `npm --prefix frontend ci`. Cleanup also needs `ps`
-(included on macOS; install `procps` on minimal Linux systems). Then use
-`scripts/mediaforce-dev.sh` with `start|stop|restart|status|smoke`. Pass `backend`
-or `frontend` as a second argument to manage one component, for example
-`scripts/mediaforce-dev.sh restart backend`. Commands read the repo-local `.env`
-and Vite uses `--strictPort`. Start reuses an existing owner; use Restart to
-apply changes to its host, port or configuration.
+For local server work on macOS and Linux, prepare this checkout with
+`uv sync --locked`. Cleanup also needs `ps` (included on macOS; install
+`procps` on minimal Linux systems). Then use `scripts/mediaforce-dev.sh` with
+`start|stop|restart|status|smoke`, for example
+`scripts/mediaforce-dev.sh restart backend`. Commands read the repo-local `.env`.
+Start reuses an existing owner; use Restart to apply changes to its host, port
+or configuration.
 
 Concurrent Start commands wait for their competing launchers to exit before
 reporting the shared owner. Once every Start reports that owner, Stop cannot
@@ -601,7 +584,7 @@ or Stop to cancel startup; a crash still triggers cleanup. Startup work is not
 terminated by the command's deadline. Bind checks use the configured host's
 usable resolved addresses, including IPv6 loopback and wildcard addresses.
 
-Each component has a launcher and a watchdog that owns the server from its
+The server has a launcher and a watchdog that owns the server from its
 first instruction, in a private session and process group. Stop asks that owner
 to send TERM to the group, then KILL if necessary. The watchdog keeps the leader
 unreaped until it has exited and consecutive observations find no other group
@@ -643,8 +626,8 @@ stop` command from its service checkout when intentionally switching to dev
 work. Then start the new launcher. Old PID records and cleanup markers remain
 untouched and are not authority for signalling or starting a replacement.
 
-The group contract is specific to these dev commands: backend (including
-reload children) and npm/Vite descendants were checked on both macOS and Linux
+The group contract is specific to these dev commands: the backend (including
+reload children) was checked on both macOS and Linux
 and stayed in their group's session. A component that deliberately detaches
 with `setsid` or `setpgid` needs OS service-manager containment instead. Production worker
 supervision keeps its separate native identity and containment rules.
@@ -662,18 +645,12 @@ checked-in hooks once per clone:
 git config core.hooksPath .githooks
 ```
 
-That pre-commit hook runs `scripts/pre-commit-check.sh` for static checks and
-CLI smoke. Select focused local tests through
-[the testing guide](docs/style/testing.md); the complete backend/frontend
-suites, full web route smoke and macOS custody tests run in CI before ready or merge.
+That pre-commit hook runs `scripts/pre-commit-check.sh` for CLI smoke. Select
+focused local tests through [the testing guide](docs/style/testing.md); the
+complete backend suite, Mac app tests and macOS custody tests run in CI before
+ready or merge.
 
-See [Local web development](#local-web-development) for platform-specific
-backend/frontend startup and [Production-style build](frontend/README.md#production-style-build)
-for the backend-served frontend build.
-
-When packaging Mediaforce with `uv build`, the wheel build now runs
-`npm ci` plus `npm run build` automatically so the packaged app always embeds a
-fresh frontend bundle from source.
+See [Local server development](#local-server-development) for server startup.
 
 Host configuration is now unified too: Mediaforce no longer injects a special
 synthetic local host. If you want the current machine to participate in sample
@@ -696,7 +673,7 @@ enforcement and user surfaces.
 Bounded host schedules are hard execution windows. A non-bypassed quality
 search or episode encode receives the selected host's absolute UTC close
 deadline; controller-side cancellation and a host-side watchdog stop encode
-CPU at that boundary even if SSH or the web process disappears. Mediaforce
+CPU at that boundary even if SSH or the server process disappears. Mediaforce
 discards that episode's partial output and returns it directly to the queue
 without consuming a failure attempt or applying host cooldown. Completed
 episodes stay complete, and the interrupted episode restarts from the beginning
@@ -750,7 +727,7 @@ the folder has finished. A folder is never planned twice while any overlapping
 encode, such as a show-wide one, still has parts of it queued or running.
 
 For a blank remote Mac, first turn on Remote Login so SSH answers. Once that is
-reachable, the runtime settings UI can finish setup from the web surface: if
+reachable, Settings can finish setup: if
 the host only needs first-time trust, enter the remote account password once so
 Mediaforce can install this Mac's SSH public key, then let the prep step
 create remote paths and install `ffmpeg-full` plus `ab-av1` for

@@ -2040,7 +2040,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn(Path(promoted_path).name, rows["promotion_completed"]["detail"])
         self.assertEqual(rows["promotion_completed"]["technical_detail"], promoted_path)
 
-    def test_history_size_text_matches_decimal_frontend_rounding(self) -> None:
+    def test_history_size_text_uses_decimal_rounding(self) -> None:
         from mediaforce.web.runtime.completed_runtime import _size_text
 
         self.assertEqual(_size_text(660981419), "661 MB")

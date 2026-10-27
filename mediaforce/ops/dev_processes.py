@@ -369,29 +369,24 @@ def tcp_port(value: str) -> int:
     return port
 
 
-def component_command(component: str, root: Path) -> tuple[list[str], Path, str, int]:
-    if component == "backend":
-        host = os.environ.get("MEDIAFORCE_WEB_HOST", "127.0.0.1")
-        port = tcp_port(os.environ.get("MEDIAFORCE_WEB_PORT", "8777"))
-        reload_enabled = os.environ.get("MEDIAFORCE_WEB_RELOAD", "false").lower() in {"1", "true", "yes", "on"}
-        command = [str(root / ".venv/bin/mediaforce-web"), "--host", host, "--port", str(port),
-                   "--reload" if reload_enabled else "--no-reload"]
-        if config := os.environ.get("MEDIAFORCE_CONFIG_PATH"):
-            config_path = Path(config).expanduser()
-            if not config_path.is_absolute():
-                config_path = root / config_path
-            command.extend(["--config", str(config_path.resolve())])
-        return command, root, host, port
-    host = os.environ.get("MEDIAFORCE_FRONTEND_DEV_HOST", "127.0.0.1")
-    port = tcp_port(os.environ.get("MEDIAFORCE_FRONTEND_DEV_PORT", "4173"))
-    return ["npm", "--prefix", str(root / "frontend"), "run", "dev", "--",
-            "--host", host, "--port", str(port), "--strictPort"], root / "frontend", host, port
+def component_command(root: Path) -> tuple[list[str], Path, str, int]:
+    host = os.environ.get("MEDIAFORCE_WEB_HOST", "127.0.0.1")
+    port = tcp_port(os.environ.get("MEDIAFORCE_WEB_PORT", "8777"))
+    reload_enabled = os.environ.get("MEDIAFORCE_WEB_RELOAD", "false").lower() in {"1", "true", "yes", "on"}
+    command = [str(root / ".venv/bin/mediaforce-web"), "--host", host, "--port", str(port),
+               "--reload" if reload_enabled else "--no-reload"]
+    if config := os.environ.get("MEDIAFORCE_CONFIG_PATH"):
+        config_path = Path(config).expanduser()
+        if not config_path.is_absolute():
+            config_path = root / config_path
+        command.extend(["--config", str(config_path.resolve())])
+    return command, root, host, port
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=["start", "stop", "restart", "status", "smoke", "serve"])
-    parser.add_argument("component", choices=["all", "backend", "frontend"])
+    parser.add_argument("component", choices=["all", "backend"])
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--cwd", type=Path)
@@ -411,8 +406,9 @@ def main() -> int:
         return serve(args.component, command, args.cwd, args.host, args.port)
     failed = False
     status: Status = {"state": "stopped"}
-    components = ["frontend", "backend"] if args.component == "all" else [args.component]
-    commands = {component: component_command(component, root) for component in components} \
+    # The server is the only development component; "all" stays as the launcher's default name for it.
+    components = ["backend"]
+    commands = {component: component_command(root) for component in components} \
         if args.action in {"start", "restart"} else {}
     for component in components:
         if args.action in {"stop", "restart"}:
@@ -429,9 +425,8 @@ def main() -> int:
             failed |= status["state"] != "running"
         elif args.action == "smoke":
             from urllib.request import urlopen
-            _, _, host, port = component_command(component, root)
-            routes = ["/", "/api/dashboard", "/api/settings", "/api/hosts"] if component == "backend" else ["/"]
-            for route in routes:
+            _, _, host, port = component_command(root)
+            for route in ["/api/dashboard", "/api/settings", "/api/hosts"]:
                 with urlopen(f"http://{host}:{port}{route}", timeout=2) as response:
                     response.read()
             status = {"state": "smoke passed"}
