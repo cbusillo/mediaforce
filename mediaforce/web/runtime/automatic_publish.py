@@ -416,17 +416,21 @@ def _remake_or_keep_failed_copy(
     result = remake_files(str(source["rel_path"]), [item_id])
     if item_id in result.get("queued_library_item_ids", []):
         return True
-    left_out = next(
+    refusal = next(
         (
-            str(file.get("reason") or "")
+            object_dict(file)
             for file in object_list(result.get("left_out"))
             if object_dict(file).get("library_item_id") == item_id
         ),
-        str(result.get("message") or ""),
+        {"reason": result.get("message")},
     )
+    left_out = str(refusal.get("reason") or "")
     refusals = int(
         object_dict(object_dict(json.loads(str(saved))).get("automatic_publish")).get("failure_attempts") or 0
-    ) + 1
+    )
+    # Work still running in the season clears by itself, so only a refusal that needs someone counts toward the owner.
+    if not refusal.get("busy"):
+        refusals += 1
     # A copy already removed but not queued, or a remake refused every time, needs the owner; it never loops unseen.
     if item_id in result.get("removed_library_item_ids", []) or refusals >= UNKNOWN_FAILURE_RETRY_LIMIT:
         _record_wait(
@@ -443,7 +447,7 @@ def _remake_or_keep_failed_copy(
         REMAKING_AFTER_FAILED_CHECK,
         f"Its compressed copy didn't pass its check. Mediaforce will make it again when it can. {left_out}".strip(),
         failure_attempts=refusals,
-        retry_after=time.time() + PUBLISH_RETRY_DELAY_SECONDS * refusals,
+        retry_after=time.time() + PUBLISH_RETRY_DELAY_SECONDS * max(refusals, 1),
     )
     return True
 

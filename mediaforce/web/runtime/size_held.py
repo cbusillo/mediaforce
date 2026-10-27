@@ -153,7 +153,8 @@ def remake_staged_files(
                                                     manifest_reader=manifest_reader, retry_failed_check=retry_failed_check)
                 reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
                 if recovery is None or reason:
-                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
+                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
+                                     "busy": bool(recovery and recovery["busy"])})
                     continue
                 intent = remake_intent(row)
                 if intent.get("state") != "removed" and (reason := staged_output_cleanup_blocker(connection, config, row)):
@@ -176,12 +177,14 @@ def remake_staged_files(
                     reason = "This file’s saved request changed. Refresh it before retrying."
                 if not reason and recovery is not None and recovery["approval"] != intent["approval"]:
                     reason = "The approved settings changed before removal. Refresh before retrying. Nothing was removed."
+                busy = bool(recovery and recovery["busy"])
                 if not reason and intent.get("state") != "removed" and not _remove_finished_output(config, row):
-                    reason = "Mediaforce could not remove the finished copy yet. Try again."
+                    reason, busy = "Mediaforce could not remove the finished copy yet. Try again.", True
                 if recovery is None or reason:
                     if request_saved and remake_intent(row) == intent:
                         save_remake_intent(connection, row, {}, now=now_iso())
-                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
+                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
+                                     "busy": busy})
                     continue
                 removed.append(item_id)
                 run_prefix, mode = str(intent["prefix"]), str(intent["mode"])
@@ -369,6 +372,8 @@ def staged_remake_details(
         blocked_reasons.append(
             "The compressed copy points at the original. Check this file’s paths before making it again."
         )
+    # Work still running here clears by itself; every other blocker needs someone to act.
+    lasting_blockers = len(blocked_reasons)
     sample = load_latest_job(connection, run_prefix)
     if sample and sample.get("status") in EXECUTION_ACTIVE_JOB_STATUSES:
         blocked_reasons.append("Mediaforce is still sampling here. Make this file again once that sample finishes.")
@@ -382,7 +387,8 @@ def staged_remake_details(
     reason = ("size_held" if held else "final_size" if final_size else "check_failed" if failed_check
               else "settings_history")
     return {"reason": intent.get("reason") or reason,
-            "blocked_reason": " ".join(blocked_reasons), "approval": approval}
+            "blocked_reason": " ".join(blocked_reasons), "approval": approval,
+            "busy": not lasting_blockers and len(blocked_reasons) > lasting_blockers}
 
 
 def _queued_run_item_ids(jobs: list[dict[str, Any]], *, manifest_reader: ManifestReader) -> set[int] | None:

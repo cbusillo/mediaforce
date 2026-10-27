@@ -456,7 +456,7 @@ def test_repeated_integrity_hold_keeps_one_bounded_reason(
                 select(item_events.c.details_json).where(
                     item_events.c.library_item_id == item_id,
                     item_events.c.event_type == "automatic_publish_waiting",
-                )
+                ).order_by(item_events.c.id)
             )
             .scalars()
             .all()
@@ -1123,3 +1123,22 @@ def test_failed_copy_whose_remake_is_always_refused_goes_to_the_owner(config: Me
     assert staged.exists()
     [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
     assert (episode["stage"], episode["validation"]) == ("needs_you", "failed")
+
+
+def test_failed_copy_waits_for_running_work_without_going_to_the_owner(config: MediaforceConfig) -> None:
+    item_id, _, staged = _stage(config, "tv/Show/Season 1/broken.mkv")
+
+    def busy(_prefix: str, _ids: Any) -> dict[str, Any]:
+        return {"ok": False, "left_out": [{"library_item_id": item_id, "reason": "Still compressing.", "busy": True}]}
+
+    with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
+        for attempt in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 2):
+            later = attempt * (delivery.PUBLISH_RETRY_DELAY_SECONDS + 1)
+            with patch.object(delivery.time, "time", return_value=later):
+                delivery.publish_checked_files_once(
+                    config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=busy
+                )
+
+    assert staged.exists()
+    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    assert (episode["stage"], episode["validation"]) == ("waiting", "remaking")
