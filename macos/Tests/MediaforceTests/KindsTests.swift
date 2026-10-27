@@ -6,13 +6,13 @@ final class KindsTests: XCTestCase {
     private func facts(approval: String = "null") throws -> KindsFacts {
         try JSONDecoder.mediaforce.decode(KindsFacts.self, from: Data("""
         {"kinds": [{"kind": "bright_live_action", "one_time": false, "seasons": 3, "waiting_bytes": 9000,
-                    "shows": [{"prefix": "tv/Psych", "seasons": 2, "waiting_bytes": 6000},
-                              {"prefix": "tv/Futurama", "seasons": 1, "waiting_bytes": 3000}],
+                    "shows": [{"prefix": "tv/Psych", "seasons": 2, "waiting_bytes": 6000, "sample_season": "tv/Psych/Season 3"},
+                              {"prefix": "tv/Futurama", "seasons": 1, "waiting_bytes": 3000, "sample_season": "tv/Futurama/Season 1"}],
                     "settings": [{"show": "tv/Big Brother (US)", "from_prefix": "tv/Big Brother (US)", "size_goal_mode": "normalized",
                                   "size_goal_mb": 220.0, "library_item_id": 10441},
                                  {"show": "tv/Raising Hope", "from_prefix": "tv/Raising Hope/Season 2", "size_goal_mode": "normalized",
                                   "size_goal_mb": 300.0, "library_item_id": null}],
-                    "approval": \(approval)}],
+                    "approval": \(approval), "sample_season": "tv/Psych/Season 3"}],
          "mixed_seasons": 1, "unmeasured_seasons": 1, "folder_approved_seasons": 0,
          "left_out": [{"season": "tv/Suits/Season 4", "kind": "mixed", "waiting_bytes": 100},
                       {"season": "tv/Dollhouse/Season 1", "kind": "unmeasured", "waiting_bytes": 700}]}
@@ -27,6 +27,13 @@ final class KindsTests: XCTestCase {
         """).kinds[0]
         XCTAssertEqual(decided.firstSetting?.show, "tv/Raising Hope")
         XCTAssertEqual(decided.approval?.showPrefix, "tv/Raising Hope")
+    }
+
+    func testAKindNamesTheShowWhoseSampleIsBeingMadeAndWhereEachShowsSampleWouldBe() throws {
+        let kind = try facts().kinds[0]
+        XCTAssertEqual(kind.sampleShow, "tv/Psych")
+        XCTAssertEqual(kind.shows.map(\.sampleSeason), ["tv/Psych/Season 3", "tv/Futurama/Season 1"])
+        XCTAssertEqual(Words.makeSampleOf(kind.shows[0].name), "Make a Sample of Psych")
     }
 
     func testTheSeasonsNoKindCoversListOneRowEachWithTheirShow() throws {

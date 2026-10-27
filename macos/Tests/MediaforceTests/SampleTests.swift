@@ -68,6 +68,24 @@ final class SampleTests: XCTestCase {
         XCTAssertNil(Words.sampleConfirmation("refused"))
     }
 
+    func testAKindsPageNamesTheSeasonAndARunningSampleSaysWhenItShouldBeReady() throws {
+        let running = try decode(Self.facts(state: "making_test", action: nil).replacingOccurrences(
+            of: #""size_choices""#, with: #""ready_in_seconds": 1500, "size_choices""#))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-26T23:07:00Z"))
+        let named = Words.sampleHeadline(running, namesSeason: true, now: now)
+        XCTAssertTrue(named.contains("Lucifer") && named.contains("Season 2"))
+        // Ready in 25 minutes, rounded up to the next five.
+        let readyBy = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-26T23:35:00Z"))
+        XCTAssertTrue(named.hasSuffix("\(readyBy.formatted(date: .omitted, time: .shortened))."), named)
+        XCTAssertTrue(Words.sampleHeadline(running, namesSeason: false, now: now).contains(readyBy.formatted(date: .omitted, time: .shortened)))
+        // Without enough finished samples to tell, there is no time.
+        let unknown = try decode(Self.facts(state: "making_test", action: nil))
+        XCTAssertFalse(Words.sampleHeadline(unknown, namesSeason: true, now: now).contains("Ready"))
+        let ready = try decode(Self.facts())
+        XCTAssertNotEqual(Words.sampleHeadline(ready, namesSeason: true, now: now), Words.sampleHeadline(ready))
+        XCTAssertTrue(Words.sampleHeadline(ready, namesSeason: true, now: now).contains("Lucifer"))
+    }
+
     func testMomentTimesReadAsClockTimes() {
         XCTAssertEqual(Words.momentTime(605), "10:05")
     }

@@ -31,9 +31,11 @@ from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.content_kinds import evidence_stamp, season_evidence, season_grouping, season_kind_report, \
     season_stamp
 from mediaforce.library.source_evidence import SourceEvidenceContext
+from mediaforce.tuning.calibration_jobs import load_latest_jobs_for_prefixes
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
     effective_production_approval, holds_approval, production_approval_contract
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
+from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 from mediaforce.web.runtime.production_holds import approval_identity
 
 APPROVABLE_KINDS = ("darker_live_action", "bright_live_action")
@@ -395,6 +397,20 @@ def _lent_settings(
     return sorted(settings, key=lambda setting: (setting["library_item_id"] is None, setting["show"]))
 
 
+SAMPLE_IN_HAND_STATUSES = SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES | SAMPLE_FAILED_STATUSES | {"pending_review"}
+
+
+def _season_with_sample(connection: DBClient, seasons: list[str]) -> str | None:
+    """The season of a kind whose sample is being made, waits to be watched, or stopped and needs making again, the
+    newest when there are several. A season's newest sample decides, as on its own page.
+
+    Approving a sample gives its show a folder approval, so that season leaves the kind and the page offers its setting.
+    """
+    jobs = [job for job in load_latest_jobs_for_prefixes(connection, seasons).values()
+            if job.get("lane") == "sample" and job.get("status") in SAMPLE_IN_HAND_STATUSES]
+    return str(max(jobs, key=lambda job: str(job.get("created_at") or ""))["prefix"]) if jobs else None
+
+
 def kinds_payload(
         connection: DBClient,
         config: MediaforceConfig,
@@ -418,13 +434,16 @@ def kinds_payload(
         return approval is not None and approval.current
 
     report = season_kind_report(connection, library_types=config.library_type_map, folder_approved=folder_approved)
-    shows: dict[str, dict[str, dict[str, int]]] = {kind: {} for kind in KINDS_IN_ORDER}
+    seasons: dict[str, dict[str, list[tuple[int, str]]]] = {kind: {} for kind in KINDS_IN_ORDER}
     for row in report["seasons"]:
-        if row["kind"] not in shows:
-            continue
-        show = shows[row["kind"]].setdefault("/".join(str(row["season"]).split("/")[:2]), {"seasons": 0, "waiting_bytes": 0})
-        show["seasons"] += 1
-        show["waiting_bytes"] += int(row["waiting_bytes"])
+        if row["kind"] in seasons:
+            season = str(row["season"])
+            seasons[row["kind"]].setdefault("/".join(season.split("/")[:2]), []).append((int(row["waiting_bytes"]), season))
+    # A show's sample is made on its biggest waiting season of the kind, the one that saves the most.
+    shows = {kind: {show: {"seasons": len(found), "waiting_bytes": sum(size for size, _ in found),
+                           "sample_season": min(found, key=lambda entry: (-entry[0], entry[1]))[1]}
+                    for show, found in by_show.items()}
+             for kind, by_show in seasons.items()}
     totals = report["totals"]
     approvals = {kind: _approval_facts(load_kind_approval(config, kind)) if kind in APPROVABLE_KINDS else None
                  for kind in KINDS_IN_ORDER}
@@ -446,6 +465,7 @@ def kinds_payload(
                       sorted(shows[kind].items(), key=lambda entry: (-entry[1]["waiting_bytes"], entry[0]))],
             "settings": _lent_settings(config, kind, approvals_by_show, episodes, kind_of),
             "approval": approvals[kind],
+            "sample_season": _season_with_sample(connection, [season for found in seasons[kind].values() for _, season in found]),
         } for kind in KINDS_IN_ORDER],
         "left_out": [{"season": row["season"], "kind": row["kind"], "waiting_bytes": int(row["waiting_bytes"])}
                      for row in report["seasons"] if row["kind"] in LEFT_OUT_KINDS],

@@ -15,7 +15,7 @@ from test_content_kinds import _admit_historical_original, _item as _content_ite
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, upsert_runtime_folder_policy_override
 from mediaforce.core.db import open_db, reset_engine_cache
-from mediaforce.core.db_tables import encode_jobs, library_items, metadata, series_metadata, source_admissions, source_generations, \
+from mediaforce.core.db_tables import calibration_jobs, encode_jobs, library_items, metadata, series_metadata, source_admissions, source_generations, \
     source_transitions, staged_artifacts
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
 from mediaforce.encoding.free_space import ReservePreflight
@@ -355,13 +355,60 @@ def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_pat
     assert asked == []
     kinds = {kind["kind"]: kind for kind in facts["kinds"]}
     assert [kind["kind"] for kind in facts["kinds"]] == ["darker_live_action", "bright_live_action", "cartoon", "4k"]
-    assert kinds[DARKER]["shows"] == [{"prefix": "tv/Drama", "seasons": 1, "waiting_bytes": 1000}]
+    assert kinds[DARKER]["shows"] == [{"prefix": "tv/Drama", "seasons": 1, "waiting_bytes": 1000,
+                                       "sample_season": APPROVED_SEASON}]
+    assert kinds[DARKER]["sample_season"] is None
     assert kinds[DARKER]["settings"] == []
     assert kinds[DARKER]["approval"] == {"from_prefix": APPROVED_SEASON, "approved_at": "2026-10-26T01:00:00+00:00",
                                          "size_goal_mode": "normalized", "size_goal_mb": 300.0, "library_item_id": None}
     assert kinds["bright_live_action"]["approval"] is None and kinds["cartoon"]["one_time"]
     assert facts["unmeasured_seasons"] == 1
     assert facts["left_out"] == [{"season": "tv/Fresh/Season 1", "kind": "unmeasured", "waiting_bytes": 1000}]
+
+
+def test_a_kind_offers_each_shows_biggest_season_to_sample_and_names_the_one_being_made(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    engine = create_engine("sqlite://")
+    with engine.connect() as connection:
+        metadata.create_all(connection)
+        # Each season measures darker from a published episode's original; the rest of its files wait.
+        for measured, waiting in [("tv/Drama/Season 1", 1), ("tv/Drama/Season 2", 2), ("tv/Crime/Season 1", 1),
+                                  ("tv/Crime/Season 2", 1)]:
+            published = _content_item(connection, f"{measured}/e00.mkv", status="promoted", codec="av1", current_dark=0.0)
+            _admit_historical_original(connection, published, dark=0.5)
+            for episode in range(1, waiting + 1):
+                _content_item(connection, f"{measured}/e0{episode}.mkv", status="discovered", codec="h264", current_dark=0.0)
+        for show in ["tv/Drama", "tv/Crime"]:
+            connection.execute(series_metadata.insert().values(series_prefix=show, tmdb_genres_json='["Drama"]',
+                                                               updated_at="now"))
+        load = _loader({}, {})
+
+        def kind_facts() -> dict[str, Any]:
+            facts = kinds_payload(connection, config, load_calibration_state=load, kind_of=lambda _config, _season: None)
+            return next(kind for kind in facts["kinds"] if kind["kind"] == DARKER)
+
+        def sample_job(season: str, status: str, created_at: str, lane: str = "sample") -> None:
+            connection.execute(calibration_jobs.insert().values(
+                job_id=f"{season}-{created_at}", prefix=season, status=status, lane=lane, action="sample",
+                host_json="{}", policy_json="{}", sample_item_json="{}", created_at=created_at, updated_at=created_at))
+
+        before = kind_facts()
+        # A full run and a sample already approved hold no sample to make or watch.
+        sample_job("tv/Crime/Season 1", "running", "2026-10-26T01:00:00+00:00", lane="full")
+        sample_job("tv/Drama/Season 1", "completed", "2026-10-26T02:00:00+00:00")
+        settled = kind_facts()
+        sample_job("tv/Crime/Season 2", "pending_review", "2026-10-26T03:00:00+00:00")
+        sample_job("tv/Drama/Season 2", "running", "2026-10-26T04:00:00+00:00")
+        making = kind_facts()
+        # A sample that stopped stays on the page until it is made again, so its trouble and choices show.
+        sample_job("tv/Drama/Season 2", "failed", "2026-10-26T05:00:00+00:00")
+        failed = kind_facts()
+    engine.dispose()
+
+    assert [(show["prefix"], show["sample_season"]) for show in before["shows"]] == [
+        ("tv/Drama", "tv/Drama/Season 2"), ("tv/Crime", "tv/Crime/Season 1")]
+    assert before["sample_season"] is None and settled["sample_season"] is None
+    assert making["sample_season"] == "tv/Drama/Season 2" and failed["sample_season"] == "tv/Drama/Season 2"
 
 
 def _keep_original_backup(connection: Any, item_id: int) -> None:
