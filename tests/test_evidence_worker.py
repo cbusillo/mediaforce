@@ -163,6 +163,13 @@ class EvidenceWorkerTests(unittest.TestCase):
             pause_evidence_queue(db)
         with open_db(self.config.paths.db_path) as db:
             self.assertIsNone(extend_evidence_claim(db, primary, lease_seconds=30))
+            resume_evidence_queue(db)
+            db.execute(update(library_item_evidence_state).where(
+                library_item_evidence_state.c.library_item_id == item_id,
+                library_item_evidence_state.c.evidence_kind != primary.evidence_kind,
+            ).values(work_reason="original_source_measurement"))
+        with open_db(self.config.paths.db_path) as db:
+            self.assertIsNone(extend_evidence_claim(db, primary, lease_seconds=30))
 
     def test_pair_shares_probe_and_commits_each_kind(self) -> None:
         item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
@@ -221,11 +228,11 @@ class EvidenceWorkerTests(unittest.TestCase):
         deps = self._deps(analyze)
         self.assertEqual(process_evidence_queue_once(config_path=self.config.paths.config_path,
             config=self.config, deps=deps, max_work_items=2), 1)
-        self.assertEqual(calls, [CADENCE_EVIDENCE_KIND])
+        self.assertEqual(len(calls), 1)
         with open_db(self.config.paths.db_path) as db:
             sibling = db.execute(select(library_item_evidence_state).where(
                 library_item_evidence_state.c.library_item_id == item_id,
-                library_item_evidence_state.c.evidence_kind == MEDIA_FINGERPRINT_EVIDENCE_KIND)).mappings().one()
+                library_item_evidence_state.c.evidence_kind != calls[0])).mappings().one()
             next_claim = claim_next_evidence_work(db, worker_id="worker-next", lease_seconds=30)
         self.assertEqual(sibling["work_status"], "queued")
         self.assertEqual(sibling["attempt_count"], 0)
@@ -246,6 +253,19 @@ class EvidenceWorkerTests(unittest.TestCase):
             rows = db.execute(select(library_item_evidence_state)).mappings().all()
         self.assertEqual({row["work_status"] for row in rows}, {"retry_wait"})
         self.assertEqual({row["attempt_count"] for row in rows}, {1})
+
+    def test_no_computer_defers_only_the_primary_row(self) -> None:
+        self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+        with open_db(self.config.paths.db_path) as db:
+            start_evidence_work(db, self.config, "tv")
+            resume_evidence_queue(db)
+        deps = self._deps(Mock())
+        with patch("mediaforce.library.evidence_worker._analysis_target", return_value=None):
+            self.assertEqual(process_evidence_queue_once(config_path=self.config.paths.config_path,
+                config=self.config, deps=deps, max_work_items=2), 1)
+        with open_db(self.config.paths.db_path) as db:
+            statuses = db.execute(select(library_item_evidence_state.c.work_status)).scalars().all()
+        self.assertEqual(sorted(statuses), ["queued", "waiting_host"])
 
     def test_batch_limit_caps_root_scope(self) -> None:
         self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)

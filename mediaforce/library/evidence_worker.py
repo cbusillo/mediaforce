@@ -310,6 +310,10 @@ def _run_evidence_claim(
             if evidence.availability != "available" or (evidence.traits[claim.evidence_kind].tier == "probable" and claim.evidence_state == EVIDENCE_STATE_CURRENT):
                 _finish_claim(config, claim, work_status="completed", reset_attempt_state=True)
                 return 1
+        analysis_target = _analysis_target(config, claim, source_path, deps, process_controller)
+        _throw_if_preparation_cancelled(config, claim, process_controller)
+        if analysis_target is None:
+            raise RemoteMediaHostUnavailableError(EVIDENCE_HOST_WAIT_REASON)
         if max_work_items is None or max_work_items >= 2:
             with open_db(config.paths.db_path) as connection:
                 companion = extend_evidence_claim(connection, claim, lease_seconds=deps.lease_seconds,
@@ -325,10 +329,6 @@ def _run_evidence_claim(
                     claims.append(companion)
                     heartbeats.append(_ClaimHeartbeat(config=config, claim=companion,
                                                       process_controller=process_controller, deps=deps))
-        analysis_target = _analysis_target(config, claim, source_path, deps, process_controller)
-        _throw_if_preparation_cancelled(config, claim, process_controller)
-        if analysis_target is None:
-            raise RemoteMediaHostUnavailableError(EVIDENCE_HOST_WAIT_REASON)
         if claim.evidence_kind not in started:
             with open_db(config.paths.db_path) as connection:
                 active = mark_evidence_attempt_started(connection, claim)
@@ -365,15 +365,13 @@ def _run_evidence_claim(
                     owned = active
                     hold = original_intake_hold(connection, batch_id=owned.batch_id, priority=owned.work_priority,
                                                 excluded_media_roots=excluded_media_roots)
-                if hold == "higher_priority":
+                if hold == "cancelled":
+                    raise ProcessCancelledError("Evidence work was cancelled.")
+                if hold in {"higher_priority", "paused"} or (deps.shutdown_event is not None and deps.shutdown_event.is_set()):
                     heartbeats[-1].stop()
                     _finish_claim(config, owned, work_status="queued")
                     claims.remove(owned)
                     continue
-                if hold == "cancelled":
-                    raise ProcessCancelledError("Evidence work was cancelled.")
-                if hold == "paused":
-                    raise EvidenceWorkDeferred("Original checks are paused")
             if deps.shutdown_event is not None and deps.shutdown_event.is_set():
                 raise EvidenceWorkDeferred("Original checks will resume after the app restarts")
             if owned.evidence_kind not in started:

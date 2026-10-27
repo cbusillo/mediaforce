@@ -854,7 +854,6 @@ def claim_next_evidence_work(
     return claim
 
 
-
 def _lease_evidence_row(connection: DBClient, item_id: int, kind: str, batch_id: str,
                         worker_id: str, now_iso: str, lease_expires_at: str) -> bool:
     update_result = connection.execute(
@@ -913,6 +912,7 @@ def extend_evidence_claim(
         )).mappings().one()
         original = row["work_reason"] == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
         if (row["work_source_fingerprint"] != claim.expected_source_fingerprint
+                or original != (claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE)
                 or (not original and row["state"] != EVIDENCE_STATE_ANALYSIS_REQUIRED)):
             connection.commit()
             return None

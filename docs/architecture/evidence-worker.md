@@ -45,13 +45,15 @@ one with empty stderr, triggers a local master-liveness check. A lost master
 defers the file for its computer; a live master preserves ordinary per-file
 failure handling so one bad file cannot indefinitely hold its library.
 
-When the next due row measures the same file, a run with room for two updates
+When the next due row measures the same file with the same admission requirements,
+a run with room for two updates
 leases both kinds to the same worker. Each row keeps its own heartbeat,
 attempt count, retry state and guarded commit. The pair shares host preparation,
 one analysis metadata probe, and source observations before and after both
 measurements. Admission still performs its full hash and independent checks.
 A one-update budget never pairs. A higher-priority request arriving during the
-first measurement releases the second row without spending its attempt.
+first measurement releases the second row without spending its attempt. Pause
+and shutdown also release the unstarted row while preserving a finished result.
 Failure in one analyzer preserves the other valid result; cancellation and source
 changes still fence both results. A cancellation between commits preserves only
 the already committed result. Running files are excluded from other claims.

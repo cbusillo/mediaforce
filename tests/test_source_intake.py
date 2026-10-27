@@ -1382,3 +1382,48 @@ def test_pair_fence_between_commits_preserves_first_receipt(tmp_path: Path, fenc
         rows = db.execute(select(library_item_evidence_state.c.work_status)).scalars().all()
     assert receipts == committed[:1]
     assert sorted(rows) == sorted(["cancelled" if fence == "cancel" else "failed", "completed"])
+
+
+@pytest.mark.parametrize("hold", ["pause", "shutdown"])
+def test_pair_retains_finished_kind_when_next_start_is_held(tmp_path: Path, hold: str) -> None:
+    from mediaforce.library.evidence_queue import pause_evidence_queue
+    config = _config(tmp_path)
+    _source(config)
+    _discover(config)
+    shutdown = threading.Event()
+    measured: list[str] = []
+    def analyze(_path: Path, kind: str, **_kwargs: Any) -> dict[str, Any]:
+        measured.append(kind)
+        if hold == "pause":
+            with open_db(config.paths.db_path) as controls:
+                pause_evidence_queue(controls)
+        else:
+            shutdown.set()
+        return _summary(kind)
+    assert _work(config, analyze, stop_event=shutdown, max_work_items=2) == 1
+    with open_db(config.paths.db_path) as db:
+        receipts = db.execute(select(source_measurements.c.kind)).scalars().all()
+        rows = db.execute(select(library_item_evidence_state)).mappings().all()
+    assert receipts == measured
+    assert len(measured) == 1
+    assert {row["attempt_count"] for row in rows} == {0}
+    assert {row["work_status"] for row in rows} == {"queued", "completed"}
+
+
+def test_pair_lost_companion_cannot_publish_without_shared_validation(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _source(config)
+    _discover(config)
+    def analyze(_path: Path, kind: str, **_kwargs: Any) -> dict[str, Any]:
+        with open_db(config.paths.db_path) as controls:
+            controls.execute(update(library_item_evidence_state).where(
+                library_item_evidence_state.c.evidence_kind != kind,
+            ).values(worker_id="replacement-worker"))
+        return _summary(kind)
+    assert _work(config, analyze, max_work_items=2) == 2
+    with open_db(config.paths.db_path) as db:
+        assert db.execute(select(func.count()).select_from(source_measurements)).scalar_one() == 0
+        rows = db.execute(select(library_item_evidence_state)).mappings().all()
+    assert {row["attempt_count"] for row in rows} == {0}
+    assert {row["work_status"] for row in rows} == {"running", "cancelled"}
+    assert next(row for row in rows if row["work_status"] == "running")["worker_id"] == "replacement-worker"
