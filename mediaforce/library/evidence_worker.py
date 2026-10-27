@@ -65,6 +65,7 @@ class EvidenceWorkerDeps:
     source_retry_delay_seconds: int = EVIDENCE_SOURCE_RETRY_DELAY_SECONDS
     evidence_host_rows: Callable[[MediaforceConfig], list[dict[str, Any]]] = collect_evidence_host_rows
     shutdown_event: threading.Event | None = None
+    prepare_next_original: Callable[[MediaforceConfig, EvidenceWorkClaim], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,23 +128,28 @@ def run_evidence_queue_until_blocked(
     processed = 0
     started_at = time.monotonic()
     stop_reason = "blocked"
-    while processed < max_work_items:
-        if stop_event is not None:
-            if stop_event.is_set():
-                stop_reason = "shutdown"
+    from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher
+
+    with SourceAdmissionPrefetcher(stop_event=stop_event, logger=runtime_deps.logger) as prefetch:
+        runtime_deps = replace(runtime_deps, prepare_next_original=prefetch.start)
+        while processed < max_work_items:
+            if stop_event is not None:
+                if stop_event.is_set():
+                    stop_reason = "shutdown"
+                    break
+            if max_seconds is not None and time.monotonic() - started_at >= max_seconds:
+                stop_reason = "time_budget"
                 break
-        if max_seconds is not None and time.monotonic() - started_at >= max_seconds:
-            stop_reason = "time_budget"
-            break
-        if not process_evidence_queue_once(
-            config_path=config_path,
-            config=current_config,
-            deps=runtime_deps,
-        ):
-            break
-        processed += 1
-        if processed >= max_work_items:
-            stop_reason = "item_budget"
+            if not process_evidence_queue_once(
+                config_path=config_path,
+                config=current_config,
+                deps=runtime_deps,
+            ):
+                break
+            prefetch.wait()
+            processed += 1
+            if processed >= max_work_items:
+                stop_reason = "item_budget"
     with open_db(current_config.paths.db_path) as connection:
         summary = evidence_queue_summary(connection)
     summary["processed_count"] = processed
@@ -246,6 +252,8 @@ def _run_evidence_claim(
                         queue_decision_evidence_work(connection, config, item["rel_path"], library_item_ids=[claim.library_item_id],
                             evidence_kind=kind, work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, require_measurement=True,
                             priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, start_new_batch=True, manage_transaction=False)
+            if deps.prepare_next_original is not None:
+                deps.prepare_next_original(config, claim)
             if evidence.availability != "available" or (evidence.traits[claim.evidence_kind].tier == "probable" and claim.evidence_state == EVIDENCE_STATE_CURRENT):
                 _finish_claim(config, claim, work_status="completed", reset_attempt_state=True)
                 return

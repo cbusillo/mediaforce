@@ -434,6 +434,12 @@ class EvidenceWorkerTests(unittest.TestCase):
             claim = claim_next_evidence_work(connection, worker_id="worker-a", lease_seconds=30)
 
         self.assertIsNotNone(claim)
+        with open_db(self.config.paths.db_path) as connection:
+            queued_priority = connection.execute(select(library_item_evidence_state.c.work_priority).where(
+                library_item_evidence_state.c.library_item_id == second_item_id,
+                library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+            )).scalar_one()
+        self.assertEqual(claim.work_priority, queued_priority)
         self.assertEqual(claim.library_item_id, second_item_id)
         self.assertNotEqual(claim.library_item_id, first_item_id)
 

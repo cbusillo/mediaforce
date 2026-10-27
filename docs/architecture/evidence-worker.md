@@ -305,6 +305,14 @@ file length and allocates no media copies. The queue's existing lease,
 heartbeat, retry, pause, cancellation and shutdown handling own the whole job.
 Higher priority analysis can defer a hash without consuming a failure attempt.
 
+While a file is measured, the bounded runner prepares admission for at most
+one next queued original on a separate controller thread. It uses the same
+digest, probe, before/after observations and admission commit checks. It takes
+no measurement lease and changes no work status. Pause, cancellation, shutdown
+or higher-priority work interrupt preparation; failure leaves the queued claim
+to retry normally. Preparation finishes before the runner claims another file,
+so the next claim can reuse the verified admission without racing its commit.
+
 An assessment is final for its unchanged input and rule versions. Stable
 negative checks leave the original unknown; transient failures stay in the
 queue's retry state, not in admission history. Unknown or missing checks never

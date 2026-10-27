@@ -498,6 +498,85 @@ def test_failed_probe_reuses_digest_without_admitting_original(tmp_path: Path) -
     assert not any(call.kwargs.get("full_digest") for call in observations.call_args_list)
 
 
+def test_next_original_admission_overlaps_analysis_and_digest_is_reused(tmp_path: Path) -> None:
+    import mediaforce.library.source_intake as intake
+    from mediaforce.library.evidence_worker import run_evidence_queue_until_blocked
+
+    config = _config(tmp_path)
+    first_id, first_path = _source(config, "first")
+    second_id, second_path = _source(config, "second")
+    _discover(config)
+    analyzing = threading.Event()
+    prefetched = threading.Event()
+    digests: list[Path] = []
+    measured: list[tuple[Path, str]] = []
+
+    def observe(path: Path, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("full_digest"):
+            digests.append(path)
+            if path == second_path:
+                assert analyzing.wait(5)
+                prefetched.set()
+        return observe_file(path, **kwargs)
+
+    def analyze(path: Path, kind: str, **_kwargs: Any) -> dict[str, Any]:
+        if path == first_path:
+            analyzing.set()
+            assert prefetched.wait(5)
+        measured.append((path, kind))
+        return _summary(kind)
+
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock())
+    with (
+        patch.object(intake, "observe_file", side_effect=observe),
+        patch.object(intake, "_probe_payload", return_value=_probe()),
+        patch("mediaforce.library.evidence_worker._analysis_target",
+              side_effect=lambda _config, _claim, path, *_args: SimpleNamespace(source_path=path, command_runner=None)),
+    ):
+        result = run_evidence_queue_until_blocked(config_path=config.paths.config_path, config=config, deps=deps, max_work_items=4)
+
+    assert result["processed_count"] == 4
+    assert digests == [first_path, second_path]
+    assert set(measured) == {(path, kind) for path in (first_path, second_path) for kind in ("media_fingerprint", "cadence_analysis")}
+    with open_db(config.paths.db_path) as database:
+        for item_id in (first_id, second_id):
+            assert load_source_evidence(database, item_id).availability == "available"
+        receipts = database.execute(select(source_measurements.c.summary_json)).scalars().all()
+    assert sorted(json.dumps(json.loads(raw)["analysis"], sort_keys=True) for raw in receipts) == sorted(
+        json.dumps(_summary(kind)["analysis"], sort_keys=True) for _, kind in measured
+    )
+
+
+def test_shutdown_interrupts_prefetched_digest_without_admission_or_queue_transition(tmp_path: Path) -> None:
+    import mediaforce.library.source_intake as intake
+    from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher
+
+    config = _config(tmp_path)
+    _source(config, "first")
+    second_id, _path = _source(config, "second")
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        claim = claim_next_evidence_work(database, worker_id="fixture", lease_seconds=60)
+    assert claim is not None
+    stopped = threading.Event()
+
+    def observe(path: Path, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("full_digest"):
+            stopped.set()
+            kwargs["check_cancelled"]()
+        return observe_file(path, **kwargs)
+
+    with patch.object(intake, "observe_file", side_effect=observe):
+        with SourceAdmissionPrefetcher(stop_event=stopped, logger=Mock()) as prefetch:
+            prefetch.start(config, claim)
+    assert stopped.is_set()
+    with open_db(config.paths.db_path) as database:
+        assert database.execute(select(func.count()).select_from(source_admissions)).scalar_one() == 0
+        assert database.execute(select(library_item_evidence_state.c.work_status).where(
+            library_item_evidence_state.c.library_item_id == second_id,
+        )).scalars().all() == ["queued"]
+
+
 def test_background_discovery_preserves_higher_priority_reason(tmp_path: Path) -> None:
     from mediaforce.library.evidence_queue import queue_decision_evidence_work
 
