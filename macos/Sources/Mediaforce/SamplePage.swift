@@ -39,6 +39,8 @@ struct SampleWork: View {
     @State private var refreshes = 0
     @State private var approval: SampleApproval?
     @State private var confirming: String?
+    // The sample can't be made until a size is chosen, so the page offers the sizes right there.
+    @State private var askingSize = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -58,8 +60,8 @@ struct SampleWork: View {
                 }
                 SampleFactsGrid(facts: facts)
                 SampleActions(
-                    facts: facts, working: working, approve: startApproval, make: { make(size: $0) }, compress: compress,
-                    openItem: { openItem(prefix) }
+                    facts: facts, working: working, askingSize: askingSize, approve: startApproval, make: { make(size: $0) },
+                    compress: compress, openItem: { openItem(prefix) }
                 )
             } else if unreadable {
                 Text(Words.staleNotice(.failing, lastHeard: nil))
@@ -147,12 +149,9 @@ struct SampleWork: View {
     private func make(size: String?) {
         act {
             let result = try await $0.makeSample(prefix, size: size)
-            if result.ok { return nil }
-            switch result.code {
-            case "choose_balance": return .chooseBalance
-            case "choose_size": return .chooseSize
-            default: return .sampleRefused
-            }
+            askingSize = result.code == "choose_size" && facts?.sizeChoices.isEmpty == false
+            if result.ok || askingSize { return nil }
+            return result.code == "choose_balance" ? .chooseBalance : .sampleRefused
         }
     }
 
@@ -192,6 +191,7 @@ struct SampleFactsGrid: View {
 struct SampleActions: View {
     let facts: SampleFacts
     let working: Bool
+    let askingSize: Bool
     let approve: () -> Void
     let make: (String?) -> Void
     let compress: () -> Void
@@ -200,7 +200,7 @@ struct SampleActions: View {
     var body: some View {
         let actions = facts.actions
         VStack(alignment: .leading, spacing: 10) {
-            if actions.contains(.chooseSize) {
+            if actions.contains(.chooseSize) || (askingSize && !facts.sizeChoices.isEmpty) {
                 Text(Words.chooseSizeHeadline)
                     .font(.headline)
                 HStack(spacing: 10) {

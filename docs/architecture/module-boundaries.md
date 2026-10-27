@@ -176,6 +176,21 @@ Guidance:
       to be watched or needs making again, and the seasons no kind covers;
       approving extends a folder's own current
       approval (`POST /api/app/kinds/{kind}/approve`), and stopping removes it
+  - `app_samples.py`
+    - the Mac app's sample facts and actions (`/api/app/samples/...`): a
+      sample is made at the season's chosen size, else its first offered
+      size, with its chosen balance of size and detail, else the balanced one;
+      made at the season's own size it keeps the season's resolution, and a
+      saved request that can no longer run is asked for anew
+    - the background choice of samples that need making again: a sample
+      whose comparison clips are gone or that failed is made again by itself
+      at the season's size goal, until three samples in a row have failed,
+      each season read again just before its sample is made; a
+      sample the owner stopped, or whose size goal can't be reached, waits on
+      the owner
+    - settings that hold no size offer sizes around the per-episode size the
+      owner asked for (`tuning/size_goals.py`), so a sample is never left
+      without one
   - `production_approval.py`
     - the one rule for which sample approval governs a file: the nearest folder
       holding an approval (the file, then its season, show and library); when

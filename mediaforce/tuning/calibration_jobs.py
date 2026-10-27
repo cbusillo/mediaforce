@@ -104,6 +104,23 @@ def load_latest_failed_sample_job(connection: DBClient, prefix: str) -> dict[str
     return _hydrate_job(row) if row is not None else None
 
 
+def sample_failures_in_a_row(connection: DBClient, prefix: str, *, limit: int) -> int:
+    """How many of the folder's newest samples failed or stopped in a row, counted up to ``limit``."""
+    statuses = connection.execute(
+        select(calibration_jobs.c.status)
+        .where(calibration_jobs.c.prefix == prefix)
+        .where(calibration_jobs.c.lane == "sample")
+        .order_by(calibration_jobs.c.created_at.desc(), _rowid_column().desc())
+        .limit(limit)
+    ).scalars().all()
+    failures = 0
+    for status in statuses:
+        if status not in ("failed", "stopped"):
+            break
+        failures += 1
+    return failures
+
+
 def load_latest_failed_target_size_sample_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
     rows = connection.execute(
         _calibration_job_select()

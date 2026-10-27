@@ -130,3 +130,18 @@ def test_replaced_pending_sample_keeps_its_saved_coverage(tmp_path: Path) -> Non
     assert set(rows) == {'replaced', 'replacement'}
     assert rows['replaced']['selection'] == original
     assert rows['replacement']['selection'] == replacement_selection
+
+
+def test_failures_in_a_row_count_only_the_newest_unbroken_run_of_samples(tmp_path: Path) -> None:
+    from mediaforce.tuning.calibration_jobs import sample_failures_in_a_row
+
+    with open_db(tmp_path / 'library.sqlite3') as connection:
+        assert sample_failures_in_a_row(connection, 'tv/Show', limit=3) == 0
+        oldest_first = (('old-failure', 'failed', 'sample'), ('made', 'completed', 'sample'),
+                        ('stopped', 'stopped', 'sample'), ('full', 'completed', 'full'), ('failed', 'failed', 'sample'))
+        for minute, (job_id, status, lane) in enumerate(oldest_first):
+            add_sample(connection, job_id, status=status, lane=lane)
+            connection.execute(update(calibration_jobs).where(calibration_jobs.c.job_id == job_id)
+                               .values(created_at=f'2026-10-01T00:0{minute}:00Z'))
+        assert sample_failures_in_a_row(connection, 'tv/Show', limit=3) == 2
+        assert sample_failures_in_a_row(connection, 'tv/Show', limit=1) == 1

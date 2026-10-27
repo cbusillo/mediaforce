@@ -1,4 +1,4 @@
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from typing import Any
 
 from fastapi import HTTPException
@@ -9,6 +9,7 @@ from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_follow
 from mediaforce.web.runtime.app_window import season_identity
 from mediaforce.web.runtime.folder_actions import APPROVED_SAMPLE_NOTES, ApprovalNeedsConfirmation, QueueNeedsChoice, \
     ReviewedDraftChanged
+from mediaforce.web.runtime.page_state import SIZE_GOAL_FAILURES
 
 SaveProfileFn = Callable[[str, bool, bool, str, str], Mapping[str, Any]]
 QueueEncodeFn = Callable[[str, str, bool, bool, str], Mapping[str, Any]]
@@ -16,6 +17,12 @@ AiTuneFn = Callable[[str, str, str, dict[str, Any] | None, str], Mapping[str, An
 RetrySampleFn = Callable[[str, str, str], Mapping[str, Any]]
 
 REFUSED = {"ok": False, "code": "refused"}
+# A season that never chose its balance of size and detail gets a sample as close to its size goal as still looks right.
+DEFAULT_BALANCE = "balanced"
+# How many samples in a row may fail before a season's sample waits on the owner instead of being made again.
+SAMPLE_REMAKE_LIMIT = 3
+# A sample the owner stopped, or whose size goal can't be reached, waits on the owner rather than being made again.
+_NOT_REMADE_FAILURES = SIZE_GOAL_FAILURES | {"stopped"}
 
 
 def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[str, Any]:
@@ -104,10 +111,16 @@ def make_sample(
     action = object_dict(status.get("page_state")).get("primary_action")
     if size is None and action == "choose_size":
         return {"ok": False, "code": "choose_size"}
-    try:
-        if size is None and action == "retry_sample":
+    result: Mapping[str, Any] = {}
+    if size is None and action == "retry_sample":
+        try:
             result = retry_saved(prefix, "", "")
-        else:
+        except HTTPException:
+            result = {}
+    try:
+        # A saved request that can't run again, such as one under older settings or on a computer gone since, is asked
+        # for anew.
+        if not result.get("ok"):
             request = _sample_request(folder, size, remake=action == "review_sample")
             if isinstance(request, str):
                 return {"ok": False, "code": request}
@@ -116,6 +129,20 @@ def make_sample(
     except HTTPException:
         return REFUSED
     return {"ok": True, "code": None} if result.get("ok") else REFUSED
+
+
+def samples_to_remake(cards: Iterable[Mapping[str, Any]], failed_in_a_row: Callable[[str], int]) -> list[str]:
+    """The seasons whose sample needs making again, which Mediaforce makes again by itself at the season's size goal
+    (#1149), until that season's samples have failed SAMPLE_REMAKE_LIMIT times in a row."""
+    remade = []
+    for card in cards:
+        state = object_dict(card.get("page_state"))
+        if (state.get("key") == "needs_help" and state.get("recovery_kind") == "test"
+                and state.get("primary_action") in ("make_sample", "retry_sample")
+                and state.get("failure") not in _NOT_REMADE_FAILURES
+                and failed_in_a_row(str(card["prefix"])) < SAMPLE_REMAKE_LIMIT):
+            remade.append(str(card["prefix"]))
+    return remade
 
 
 def _sample_request(
@@ -130,10 +157,18 @@ def _sample_request(
         choice = next((option for option in choices if not option.get("requires_explicit_selection")), None)
     if choice is None:
         return "choose_size"
-    balance = next((option for option in object_list(folder.get("compression_intent_options")) if option.get("selected")), None)
+    balances = object_list(folder.get("compression_intent_options"))
+    balance = next((option for option in balances if option.get("selected")), None) or next(
+        (option for option in balances if option.get("key") == DEFAULT_BALANCE), None
+    )
     if balance is None:
         return "choose_balance"
     intent = with_compression_intent(object_dict(choice["operator_intent"]), object_dict(balance.get("compression_intent")))
+    resolution = None if size else _current_resolution(folder)
+    if resolution is not None:
+        # A sample made at the season's own size keeps its resolution; a size the owner picks brings its own.
+        intent = {**intent, "resolution": resolution}
+        choice = {**choice, "operator_intent": intent}
     return sample_goal_request(choice), intent
 
 
@@ -155,6 +190,13 @@ def _measured_request(folder: Mapping[str, Any]) -> str:
         f"Keep the {goal} whole-episode goal and current resolution. Make another representative test that addresses "
         "the operator's review concerns without changing the size target."
     )
+
+
+def _current_resolution(folder: Mapping[str, Any]) -> dict[str, Any] | None:
+    resolution = object_dict(object_dict(folder.get("resolved_operator_intent")).get("resolution"))
+    if resolution.get("mode") not in ("source", "max_height") or resolution.get("requires_confirmation"):
+        return None
+    return {"mode": resolution["mode"], "max_height": resolution.get("max_height")}
 
 
 def _current_operator_intent(folder: Mapping[str, Any]) -> dict[str, Any] | None:

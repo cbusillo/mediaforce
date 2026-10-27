@@ -152,6 +152,22 @@ class SizeGoalTests(unittest.TestCase):
             all(option["operator_intent"]["size_goal"]["mode"] == "normalized" for option in options)
         )
 
+    def test_settings_without_a_size_offer_sizes_around_the_size_asked_for(self) -> None:
+        options = guided_size_goal_options(
+            {"max_height": 1080},
+            item_runtime_seconds=54 * 60,
+            default_video_policy={},
+            requested_budget_bytes=314_572_800,
+        )
+
+        self.assertEqual([option["key"] for option in options], ["recommended", "smaller", "roomier"])
+        self.assertFalse(any(option["requires_explicit_selection"] for option in options))
+        self.assertTrue(all(option["operator_intent"]["size_goal"]["mode"] == "absolute" for option in options))
+        self.assertEqual(
+            [option["resolved_size_goal"]["target_size_bytes"] for option in options],
+            [314_572_800, 235_929_600, 471_859_200],
+        )
+
     def test_ambiguous_legacy_goal_requires_an_explicit_mode_choice(self) -> None:
         options = guided_size_goal_options(
             {"target_size_mb": 225, "target_runtime_minutes": 45, "max_height": 1080},
