@@ -484,6 +484,21 @@ def load_config(config_path: Path | None = None) -> MediaforceConfig:
     return MediaforceConfig(raw=raw, paths=paths)
 
 
+def base_config_digest(config_path: Path) -> str:
+    """Digest of the TOML files `load_config` layers under the runtime settings, read as it reads them.
+
+    It changes whenever the configured file or one of its included files is edited, added or removed.
+    """
+    resolved_config_path = config_path.expanduser().resolve()
+    base_bytes = resolved_config_path.read_bytes()
+    digest = hashlib.sha256(base_bytes)
+    for include_path in _optional_config_paths(tomllib.loads(base_bytes.decode()), resolved_config_path.parent):
+        include_bytes = include_path.read_bytes()
+        digest.update(f"\0{include_path}\0{len(include_bytes)}\0".encode())
+        digest.update(include_bytes)
+    return digest.hexdigest()
+
+
 def _validate_free_space_reserve(raw: dict[str, Any]) -> None:
     media = raw.get("media")
     if not isinstance(media, dict):
@@ -4835,15 +4850,15 @@ def _remove_empty_dirs(path: Path) -> None:
     path.rmdir()
 
 
+def _optional_config_paths(base: dict[str, Any], config_dir: Path) -> list[Path]:
+    include_paths = [(config_dir / file_name).resolve() for file_name in base.get("config", {}).get("include_files", [])]
+    return [path for path in include_paths if path.exists()]
+
+
 def _merge_optional_configs(base: dict[str, Any], config_dir: Path) -> dict[str, Any]:
     merged = copy.deepcopy(base)
-    include_files = list(base.get("config", {}).get("include_files", []))
-    for file_name in include_files:
-        include_path = (config_dir / file_name).resolve()
-        if not include_path.exists():
-            continue
-        payload = tomllib.loads(include_path.read_text())
-        _deep_merge(merged, payload)
+    for include_path in _optional_config_paths(base, config_dir):
+        _deep_merge(merged, tomllib.loads(include_path.read_text()))
     return merged
 
 

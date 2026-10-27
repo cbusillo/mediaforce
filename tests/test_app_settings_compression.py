@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 
+from mediaforce.core.config import base_config_digest
 from mediaforce.web.settings_runtime import settings_section_revision
 from test_app_settings_computers import _endpoint
 from test_app_settings_library import _json_request, library_app  # noqa: F401  (`library_app` is the fixture)
@@ -174,8 +175,29 @@ def test_compression_save_after_the_section_changed_elsewhere_is_refused(
     assert runtime_settings_path.read_bytes() == changed_elsewhere
 
 
+def test_compression_save_after_a_hand_edit_of_the_base_config_is_refused(
+        compression_app: tuple[FastAPI, Path], tmp_path: Path,
+) -> None:
+    app, runtime_settings_path = compression_app
+    config_path = tmp_path / "config" / "config.toml"
+    stale = _body(app)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace("[video]", "[video]\nmax_height = 1080"), encoding="utf-8",
+    )
+    before = runtime_settings_path.read_bytes()
+    stale["grain"] = 2
+
+    assert _save(app, stale) == (400, {"ok": False, "code": "settings_changed"})
+    assert runtime_settings_path.read_bytes() == before
+
+    fresh = _body(app)
+    fresh["grain"] = 2
+    assert _save(app, fresh)[0] == 200
+    assert json.loads(runtime_settings_path.read_text())["video"]["default_grain"] == 2
+
+
 def test_compression_facts_read_the_file_as_it_is_now_with_its_revision(
-        compression_app: tuple[FastAPI, Path],
+        compression_app: tuple[FastAPI, Path], tmp_path: Path,
 ) -> None:
     app, runtime_settings_path = compression_app
     stored = json.loads(runtime_settings_path.read_text())
@@ -185,7 +207,9 @@ def test_compression_facts_read_the_file_as_it_is_now_with_its_revision(
     facts = _facts(app)
 
     assert (facts["size_goal_mb"], facts["tallest_picture"]) == (320, 0)
-    assert facts["revision"] == settings_section_revision(stored, "compression")
+    assert facts["revision"] == settings_section_revision(
+        stored, "compression", base_config_digest=base_config_digest(tmp_path / "config" / "config.toml"),
+    )
     body = _body(app)
     body["grain"] = 2
     assert _save(app, body)[0] == 200

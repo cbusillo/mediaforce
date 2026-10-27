@@ -886,12 +886,14 @@ SETTINGS_SECTION_KEYS: dict[str, tuple[tuple[str, ...], ...]] = {
 }
 
 
-def settings_section_revision(runtime_settings: dict[str, Any], section: str) -> str:
+def settings_section_revision(runtime_settings: dict[str, Any], section: str, *, base_config_digest: str) -> str:
     """Names one stored Settings section, so a save built from it is refused once anything else has changed it.
 
     Each section hashes only the runtime settings keys it saves or shows (see `SETTINGS_SECTION_KEYS`), so saving
     one section never makes another section's open form stale. The library section covers the Plex paths kept in
-    the metadata, which its facts fall back to and a cleared Plex path removes.
+    the metadata, which its facts fall back to and a cleared Plex path removes. Every section also covers the base
+    TOML config (`base_config_digest`), whose values the tabs show where the runtime settings leave them unset, so a
+    hand edit there makes every open tab stale.
     """
     def _stored(path: tuple[str, ...]) -> Any:
         value: Any = runtime_settings
@@ -901,7 +903,9 @@ def settings_section_revision(runtime_settings: dict[str, Any], section: str) ->
 
     values = [_stored(path) for path in SETTINGS_SECTION_KEYS[section]]
     stored = values[0] if len(values) == 1 else values
-    return hashlib.sha256(json.dumps(stored, sort_keys=True, default=str).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps({"base_config": base_config_digest, "stored": stored}, sort_keys=True, default=str).encode()
+    ).hexdigest()
 
 
 def library_settings_facts(
