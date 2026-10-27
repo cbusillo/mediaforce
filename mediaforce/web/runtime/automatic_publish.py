@@ -2,12 +2,14 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable, Collection
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import insert, or_, select, update
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.core.utils import file_fingerprint, timestamp
@@ -17,26 +19,37 @@ from mediaforce.encoding.staging import PromotionRestoreError, PromotionWaiting
 from mediaforce.execution import promote_one_item, validate_one_item
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_is_missing
 from mediaforce.library.staged_integrity import staged_integrity_report
+from mediaforce.library.staged_validation import REMAKING_AFTER_FAILED_CHECK, missed_only_final_size, \
+    staged_validation_outcome
 from mediaforce.web.runtime.folder_actions import production_action_blocker
 from mediaforce.web.runtime.production_approval import (
     LoadCalibrationState,
     effective_production_approval,
     production_approval_matches,
 )
+from mediaforce.web.runtime.size_held import keep_original_after_failed_checks
 
 
 LOGGER = logging.getLogger(__name__)
 UNKNOWN_FAILURE_RETRY_LIMIT = 3
+# Copies of one source that may fail their check, the first encode included, before its original is kept.
+CHECK_FAILURE_ATTEMPT_LIMIT = 3
 PUBLISH_RETRY_DELAY_SECONDS = 30
+
+RemakeFilesFn = Callable[[str, Collection[int]], dict[str, Any]]
 
 
 def publish_checked_files_once(
     config: MediaforceConfig,
     *,
     load_calibration_state: LoadCalibrationState,
+    remake_files: RemakeFilesFn,
     stop_event: threading.Event | None = None,
 ) -> None:
-    """Check and publish each finished production file; temporary holds retry next pass."""
+    """Check and publish each finished production file; temporary holds retry next pass.
+
+    A copy that fails its check is made again through ``remake_files`` until the attempt limit, then kept original.
+    """
     with open_db(config.paths.db_path) as connection:
         item_ids = list(
             connection.execute(
@@ -67,7 +80,7 @@ def publish_checked_files_once(
                 continue
             with open_db(config.paths.db_path) as connection:
                 _try_publish_file(
-                    connection, config, item_id, load_calibration_state, stop_event
+                    connection, config, item_id, load_calibration_state, remake_files, stop_event
                 )
 
 
@@ -76,6 +89,7 @@ def _try_publish_file(
     config: MediaforceConfig,
     item_id: int,
     load_calibration_state: LoadCalibrationState,
+    remake_files: RemakeFilesFn,
     stop_event: threading.Event | None,
 ) -> None:
     failure_attempts = 0
@@ -92,7 +106,7 @@ def _try_publish_file(
             failure_attempts = int(previous.get("failure_attempts") or 0)
         except (ValueError, TypeError):
             pass
-        _publish_file(connection, config, item_id, load_calibration_state, stop_event)
+        _publish_file(connection, config, item_id, load_calibration_state, remake_files, stop_event)
     except PromotionRestoreError:
         LOGGER.exception("Automatic publish could not restore item %s", item_id)
         connection.rollback()
@@ -160,6 +174,7 @@ def _publish_file(
     config: MediaforceConfig,
     item_id: int,
     load_calibration_state: LoadCalibrationState,
+    remake_files: RemakeFilesFn,
     stop_event: threading.Event | None,
 ) -> None:
     stage = (
@@ -311,6 +326,10 @@ def _publish_file(
     )
     if report.database_truncated or record is None:
         raise RuntimeError("This file's integrity record is unavailable")
+    if record.disposition == "validation_failed" and _remake_or_keep_failed_copy(
+        connection, config, source, remake_files
+    ):
+        return
     if record.disposition not in {"unvalidated", "promotable"}:
         _record_wait(connection, item_id, "waiting", record.detail)
         return
@@ -320,6 +339,8 @@ def _publish_file(
     if record.disposition == "unvalidated":
         result = validate_one_item(connection, config, item)
         if not result["passed"]:
+            if _remake_or_keep_failed_copy(connection, config, source, remake_files):
+                return
             _record_wait(
                 connection,
                 item_id,
@@ -361,6 +382,95 @@ def _publish_file(
         )
         return
     promote_one_item(connection, config, item, force=False)
+
+
+def _remake_or_keep_failed_copy(
+    connection: DBClient,
+    config: MediaforceConfig,
+    source: DBRow,
+    remake_files: RemakeFilesFn,
+) -> bool:
+    """Make a copy that failed its check again, or keep the original once its attempts are used up.
+
+    A copy whose only failed check is its final size goal is left for the owner; False means nothing was done.
+    """
+    item_id = int(source["id"])
+    saved = connection.execute(
+        select(staged_artifacts.c.validation_json).where(
+            staged_artifacts.c.library_item_id == item_id
+        )
+    ).scalar_one_or_none()
+    if staged_validation_outcome(saved) not in {"failed", REMAKING_AFTER_FAILED_CHECK} or missed_only_final_size(
+        object_dict(json.loads(str(saved)))
+    ):
+        return False
+    connection.commit()
+    attempts = _failed_check_attempts(connection, source)
+    if attempts >= CHECK_FAILURE_ATTEMPT_LIMIT:
+        reason = keep_original_after_failed_checks(
+            config, item_id, failed_attempts=attempts, now_iso=timestamp
+        )
+        if reason:
+            _record_wait(connection, item_id, "waiting", reason)
+        return True
+    result = remake_files(str(source["rel_path"]), [item_id])
+    if item_id in result.get("queued_library_item_ids", []):
+        return True
+    refusal = next(
+        (
+            object_dict(file)
+            for file in object_list(result.get("left_out"))
+            if object_dict(file).get("library_item_id") == item_id
+        ),
+        {"reason": result.get("message")},
+    )
+    left_out = str(refusal.get("reason") or "")
+    refusals = int(
+        object_dict(object_dict(json.loads(str(saved))).get("automatic_publish")).get("failure_attempts") or 0
+    )
+    # Work still running in the season clears by itself, so only a refusal that needs someone counts toward the owner.
+    if not refusal.get("busy"):
+        refusals += 1
+    # A copy already removed but not queued, or a remake refused every time, needs the owner; it never loops unseen.
+    if item_id in result.get("removed_library_item_ids", []) or refusals >= UNKNOWN_FAILURE_RETRY_LIMIT:
+        _record_wait(
+            connection,
+            item_id,
+            "failed",
+            f"Its compressed copy didn't pass its check, and Mediaforce couldn't make it again. {left_out}".strip(),
+            failure_attempts=refusals,
+        )
+        return True
+    _record_wait(
+        connection,
+        item_id,
+        REMAKING_AFTER_FAILED_CHECK,
+        f"Its compressed copy didn't pass its check. Mediaforce will make it again when it can. {left_out}".strip(),
+        failure_attempts=refusals,
+        retry_after=time.time() + PUBLISH_RETRY_DELAY_SECONDS * max(refusals, 1),
+    )
+    return True
+
+
+def _failed_check_attempts(connection: DBClient, source: DBRow) -> int:
+    """Copies of this source that failed a check other than their size goal.
+
+    Each remake removes its copy's stage, so the count comes from the check history since the source last changed.
+    """
+    since = str(source["content_version_changed_at"] or source["discovered_at"] or "")
+    checks = connection.execute(
+        select(item_events.c.details_json).where(
+            item_events.c.library_item_id == int(source["id"]),
+            item_events.c.event_type == "validation_completed",
+            item_events.c.created_at >= since,
+        )
+    ).scalars()
+    return sum(
+        1
+        for raw in checks
+        if staged_validation_outcome(raw) == "failed"
+        and not missed_only_final_size(object_dict(json.loads(raw)))
+    )
 
 
 def _record_wait(

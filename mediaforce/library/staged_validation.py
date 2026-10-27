@@ -1,10 +1,14 @@
 """Recorded staged-file check outcomes shared by integrity and workflow projections."""
 
 import json
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from mediaforce.core.type_defs import object_dict, object_list
-from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK, encoder_final_size_miss
+from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK, FINAL_SIZE_GOAL_CHECK, encoder_final_size_miss
+
+# The automatic publisher's state for a failed copy it is making again; a new check replaces it.
+REMAKING_AFTER_FAILED_CHECK = "remaking"
 
 
 def held_size_prediction(raw_validation: Any) -> dict[str, Any] | None:
@@ -39,13 +43,26 @@ def awaits_check_after_final_size_miss(raw_validation: Any) -> bool:
     return payload.get("passed") is False and "checks" not in payload and encoder_final_size_miss(payload) is not None
 
 
-def staged_validation_outcome(raw_validation: Any) -> Literal["size_held", "failed"] | None:
-    """Whether a staged file's recorded check waits on the owner, and why; None when it does not."""
+def missed_only_final_size(validation: Mapping[str, Any]) -> bool:
+    """The file's checks ran and the only one it failed is its final size goal."""
+    failed = [str(object_dict(check).get("message") or "") for check in object_list(validation.get("checks"))
+              if object_dict(check).get("passed") is False]
+    return validation.get("passed") is False and failed == [FINAL_SIZE_GOAL_CHECK]
+
+
+def staged_validation_outcome(raw_validation: Any) -> Literal["size_held", "failed", "remaking"] | None:
+    """Whether a staged file's recorded check waits on the owner, and why; None when it does not.
+
+    "remaking" is a failed copy Mediaforce is making again by itself, so it does not wait on the owner.
+    """
     if held_size_prediction(raw_validation) is not None:
         return "size_held"
     if awaits_check_after_final_size_miss(raw_validation):
         return None
     if staged_validation_passed(raw_validation) is False:
+        payload = object_dict(json.loads(str(raw_validation)))
+        if object_dict(payload.get("automatic_publish")).get("state") == REMAKING_AFTER_FAILED_CHECK:
+            return "remaking"
         return "failed"
     return None
 

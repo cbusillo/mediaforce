@@ -211,7 +211,7 @@ from mediaforce.web.routes.queues import (
 )
 from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_child_recovery
 from mediaforce.web.runtime.size_exception import decide_size_exception
-from mediaforce.web.runtime.size_held import decide_size_held_file, staged_remake_records
+from mediaforce.web.runtime.size_held import decide_size_held_file, remake_staged_files, staged_remake_records
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
     production_approval_identity, production_calibration
@@ -686,7 +686,7 @@ def create_app(
                     kind_seasons_sweep=_queue_next_kind_season,
                     automatic_publish_sweep=lambda stop_event: publish_checked_files_once(
                         load_config(config.paths.config_path), load_calibration_state=_load_calibration_state,
-                        stop_event=stop_event,
+                        remake_files=_remake_failed_checks, stop_event=stop_event,
                     ),
                 )
                 _safe_collect_host_statuses(config)
@@ -2404,21 +2404,6 @@ def create_app(
                 only_library_item_ids=item_ids,
             )
 
-        def queue_items(prefix: str, mode: str, item_ids: Collection[int], approval: ActionPayload) -> ActionPayload:
-            try:
-                return _queue_encode_action(
-                    prefix,
-                    "Made again at the owner’s request under the current approved settings.",
-                    False,
-                    override_policy_holds=mode == HOLD_MODE_SEASON_OVERRIDE,
-                    override_older_seasons=mode == HOLD_MODE_OLDER_SEASONS,
-                    older_seasons_confirmed=mode == HOLD_MODE_OLDER_SEASONS,
-                    only_library_item_ids=tuple(item_ids),
-                    expected_approval_contract=approval,
-                )
-            except HTTPException as exc:
-                return {"ok": False, "message": str(exc.detail)}
-
         return decide_size_held_file(
             config,
             normalized_prefix,
@@ -2426,8 +2411,42 @@ def create_app(
             keep=keep,
             now_iso=_now_iso,
             validate_items=validate_items,
-            queue_items=queue_items,
+            queue_items=lambda prefix, mode, item_ids, approval: _queue_remade_files(
+                prefix, mode, item_ids, approval,
+                notes="Made again at the owner’s request under the current approved settings.",
+            ),
             current_approval=_remake_current_approval,
+        )
+
+    def _queue_remade_files(
+            prefix: str, mode: str, item_ids: Collection[int], approval: ActionPayload, *, notes: str,
+    ) -> ActionPayload:
+        try:
+            return _queue_encode_action(
+                prefix,
+                notes,
+                False,
+                override_policy_holds=mode == HOLD_MODE_SEASON_OVERRIDE,
+                override_older_seasons=mode == HOLD_MODE_OLDER_SEASONS,
+                older_seasons_confirmed=mode == HOLD_MODE_OLDER_SEASONS,
+                only_library_item_ids=tuple(item_ids),
+                expected_approval_contract=approval,
+            )
+        except HTTPException as exc:
+            return {"ok": False, "message": str(exc.detail)}
+
+    def _remake_failed_checks(prefix: str, item_ids: Collection[int]) -> ActionPayload:
+        return remake_staged_files(
+            config,
+            prefix,
+            item_ids,
+            now_iso=_now_iso,
+            queue_items=lambda run_prefix, mode, ids, approval: _queue_remade_files(
+                run_prefix, mode, ids, approval,
+                notes="Made again because its compressed copy didn't pass its check.",
+            ),
+            current_approval=_remake_current_approval,
+            retry_failed_check=True,
         )
 
     def _promote_folder_outputs_action(
