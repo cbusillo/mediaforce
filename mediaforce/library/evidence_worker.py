@@ -18,6 +18,7 @@ from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_item_evidence_state, library_items
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, reclassify_cadence_summary
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, reclassify_media_fingerprint_summary
@@ -281,17 +282,24 @@ def _run_evidence_claim(
             return
 
         process_controller.throw_if_cancelled()
-        remote_kwargs = (
+        analysis_kwargs: dict[str, Any] = (
             {"command_runner": analysis_target.command_runner}
             if analysis_target.command_runner is not None
             else {}
         )
+        if claim.evidence_kind == MEDIA_FINGERPRINT_EVIDENCE_KIND:
+            previous = parse_evidence_summary(claim.canonical_summary_json) or {}
+            previous_ranges = object_list(object_dict(previous.get("analysis")).get("ranges"))
+            if any(row.get("status") == "timeout" and (
+                    str(row.get("decoder", "")).startswith("videotoolbox-") or row.get("decoder") == "software"
+            ) for row in map(object_dict, previous_ranges)):
+                analysis_kwargs["hardware_decoding"] = False
         measurement_before = local_before
         summary = deps.analyze_evidence(
             analysis_target.source_path,
             claim.evidence_kind,
             process_controller=process_controller,
-            **remote_kwargs,
+            **analysis_kwargs,
         )
         process_controller.throw_if_cancelled()
         measurement_after = observe_file(source_path)

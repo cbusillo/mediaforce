@@ -94,6 +94,34 @@ def test_incomplete_hardware_metadata_retries_in_software() -> None:
     assert [row["yavg"] for row in result.signal_frames] == [24, 24]
 
 
+@pytest.mark.parametrize("hardware_frames, calls", [(20, 1), (19, 2)])
+def test_short_final_range_requires_expected_frames(hardware_frames: int, calls: int) -> None:
+    runner = Mock()
+    runner.tool_lineage.return_value = {"ffmpeg_version": "test"}
+    runner.run.side_effect = [_video_result(24, 120), _video_result(24, 100),
+                              _video_result(24, hardware_frames), _video_result(24, 20)]
+    summary = analyze_media_fingerprint(
+        Path("short.mkv"), video_stream={"codec_name": "h264", "pix_fmt": "yuv420p"},
+        audio_streams=[], duration_seconds=100, command_runner=runner,
+    )
+
+    assert runner.run.call_count == 2 + calls
+    assert summary["analysis"]["ranges"][-1]["sampled_frames"] == 20
+
+
+def test_software_recovery_does_not_attempt_hardware_again() -> None:
+    runner = Mock()
+    runner.run.return_value = _video_result(24, 120)
+    runner.tool_lineage.return_value = {"ffmpeg_version": "test"}
+    summary = analyze_media_fingerprint(
+        Path("episode.mkv"), video_stream={"codec_name": "h264", "pix_fmt": "yuv420p"},
+        audio_streams=[], duration_seconds=1200, hardware_decoding=False, command_runner=runner,
+    )
+
+    assert all(row["decoder"] == "software" for row in summary["analysis"]["ranges"])
+    assert runner.run.call_count == len(summary["analysis"]["ranges"])
+
+
 def test_unmapped_pixel_format_uses_full_software_pass() -> None:
     runner = Mock()
     runner.run.return_value = _video_result(24, 120)
@@ -163,6 +191,6 @@ def test_real_ffmpeg_emits_bounded_signal_and_edge_frames(tmp_path: Path) -> Non
     ranges = summary["analysis"]["ranges"]
 
     assert len(ranges) == range_count
-    assert all(row["status"] == row["edge_status"] == "measured" for row in ranges)
+    assert all(row["status"] == "measured" for row in ranges)
     assert sum(row["sampled_frames"] for row in ranges) == frame_budget
     assert summary["analysis"]["aggregate"]["edge_density_mean"] > 0

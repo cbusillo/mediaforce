@@ -912,6 +912,37 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(second["attempt_count"], 2)
         self.assertEqual(summary["status"], "completed_with_errors")
 
+    def test_video_timeout_retries_in_software_but_audio_timeout_does_not(self) -> None:
+        for index, decoder in enumerate(("videotoolbox-nv12", "software", "not_started"), 1):
+            with self.subTest(decoder=decoder):
+                item_id, _path = self._insert_item(index, cadence_summary_json=None, media_fingerprint_json=None)
+                timed_out = json.loads(self._fingerprint_summary_json())
+                timed_out["analysis"].update({
+                    "interrupted_by_timeout": True,
+                    "ranges": [{"decoder": decoder, "status": "timeout"}],
+                })
+                if decoder == "not_started":
+                    timed_out["analysis"]["ranges"].insert(0, {
+                        "decoder": "videotoolbox-nv12", "status": "measured", "audio": {"status": "timeout"},
+                    })
+                timed_out["decision"] = {"status": "unknown"}
+                analyzer = Mock(side_effect=[timed_out, json.loads(self._fingerprint_summary_json())])
+                with open_db(self.config.paths.db_path) as connection:
+                    start_evidence_work(connection, self.config, f"tv/show/item-{index}.mkv",
+                                        evidence_kinds=[MEDIA_FINGERPRINT_EVIDENCE_KIND])
+                    resume_evidence_queue(connection)
+                deps = self._deps(analyzer)
+                process_evidence_queue_once(config_path=self.config.paths.config_path, deps=deps)
+                with open_db(self.config.paths.db_path) as connection:
+                    connection.execute(update(library_item_evidence_state).where(
+                        library_item_evidence_state.c.library_item_id == item_id,
+                    ).values(retry_not_before="2000-01-01T00:00:00+00:00"))
+                process_evidence_queue_once(config_path=self.config.paths.config_path, deps=deps)
+
+                self.assertEqual(analyzer.call_count, 2)
+                self.assertNotIn("hardware_decoding", analyzer.call_args_list[0].kwargs)
+                self.assertEqual(analyzer.call_args.kwargs.get("hardware_decoding", True), decoder == "not_started")
+
     def test_cancel_terminates_active_claim_and_restores_attempt(self) -> None:
         item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
         with open_db(self.config.paths.db_path) as connection:

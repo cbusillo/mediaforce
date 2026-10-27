@@ -81,6 +81,7 @@ def analyze_media_fingerprint(
         range_count: int = DEFAULT_FINGERPRINT_RANGE_COUNT,
         timeout_seconds: float = 60.0,
         sample_fps: float = DEFAULT_FINGERPRINT_SAMPLE_FPS,
+        hardware_decoding: bool = True,
         process_controller: ManagedProcessController | None = None,
         command_runner: RemoteMediaCommands | None = None,
 ) -> dict[str, Any]:
@@ -97,7 +98,7 @@ def analyze_media_fingerprint(
     frames_per_range = max(1, max_frames // max(1, len(starts)))
     download_format = {"yuv420p": "nv12", "nv12": "nv12", "yuv420p10le": "p010le", "p010le": "p010le"}.get(
         str(stream.get("pix_fmt") or "")
-    )
+    ) if hardware_decoding else None
     ranges: list[dict[str, Any]] = []
     media_timed_out = False
     for start_seconds in starts:
@@ -109,10 +110,14 @@ def analyze_media_fingerprint(
                 failure_reason="A previous range timed out; remaining analysis was not started.",
             )
         else:
+            expected_frames = frames_per_range
+            if duration_seconds is not None and math.isfinite(duration_seconds) and duration_seconds > 0:
+                expected_frames = min(frames_per_range, max(1, math.floor(max(0, duration_seconds - start_seconds) * sample_fps)))
             video_result = _run_fingerprint_range(
                 path, ffmpeg_name=ffmpeg_name, start_seconds=start_seconds, frame_limit=frames_per_range,
                 sample_fps=sample_fps, download_format=download_format, timeout_seconds=timeout_seconds,
                 process_controller=process_controller, command_runner=command_runner,
+                expected_min_frames=expected_frames,
             )
             media_timed_out = video_result.status == "timeout"
         signal_frames = video_result.signal_frames
@@ -421,6 +426,7 @@ def _run_fingerprint_range(
         timeout_seconds: float,
         process_controller: ManagedProcessController | None,
         command_runner: RemoteMediaCommands | None,
+        expected_min_frames: int | None = None,
 ) -> FingerprintRangeResult:
     run_pass = partial(
         _run_fingerprint_pass, path, ffmpeg_name=ffmpeg_name, start_seconds=start_seconds, frame_limit=frame_limit,
@@ -432,7 +438,8 @@ def _run_fingerprint_range(
         )
         if hardware_result.status == "timeout" or (
             hardware_result.status == "measured"
-            and len(hardware_result.signal_frames) == len(hardware_result.edge_frames) == frame_limit
+            and len(hardware_result.signal_frames) == len(hardware_result.edge_frames)
+            and len(hardware_result.signal_frames) >= (expected_min_frames or frame_limit)
         ):
             return hardware_result
     return _fingerprint_range_result(run_pass(download_format=None), decoder="software")
@@ -640,7 +647,6 @@ def _range_payload(
         "frame_limit": frame_limit,
         "sampled_frames": sampled_frames,
         "status": status,
-        "edge_status": status,
         "decoder": decoder,
         "measurements": measurements,
     }

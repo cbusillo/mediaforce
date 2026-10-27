@@ -24,7 +24,11 @@ frames before copying them to CPU memory. The GPU still decodes the entire
 sampled range. Each range records its decoder; unsupported or incomplete
 hardware decoding uses the complete software pass. A timeout stops further
 analysis for that file and leaves its result unknown for the queue to retry,
-while later queue items remain free to continue. Audio and
+while later queue items remain free to continue. After a video decoder timeout,
+the next attempt uses software; an audio timeout does not change the video
+decoder. End-of-file hardware samples must contain matching signal and edge
+counts meeting the expected available frames, without reducing the decode cap.
+Audio and
 cadence retain their measurements and safety decisions.
 
 ## Durable state
