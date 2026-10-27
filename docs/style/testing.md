@@ -35,11 +35,6 @@ must not assert or depend on.
 - Keep test doubles and fixtures typed enough to stay inspection- and Ruff-clean
 - Prefer real reusable helpers over repeated ad hoc setup in each test
 
-Inspection preparation is qualified through the isolated native helper on a fresh
-worktree without a local `.venv`: a planted Python defect must return RED and
-its correction GREEN. The shared helper owns preparation tests; Mediaforce
-keeps the structured declaration and tracked profile.
-
 Development launcher behavior tests use temporary checkouts and pipe-owned
 server fixtures. The fixtures expose native PGIDs through a pinned process
 inventory command and close their lifetime pipe for independent teardown.
