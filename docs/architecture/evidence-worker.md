@@ -16,18 +16,16 @@ The web app's evidence-autostart worker runs any unpaused batch that has
 claimable work (see the just-in-time path below). Catalog scans never start
 analysis. The CLI `evidence run` pass claims bounded work and exits.
 
-Fingerprint analysis reads its three video ranges in one FFmpeg command,
-with separate inputs and one decode per range. It keeps the same uniformly
-spaced frames and computes brightness, temporal differences and edges in two
-branches. Range tags keep the measurements separate. For supported 8-bit and
-10-bit 4:2:0 formats, VideoToolbox keeps frames on the GPU until after selection;
-only retained frames reach the CPU filters. The GPU still decodes every frame
-in the sampled ranges. Each range records its decoder path. Unsupported formats or failed
-hardware decoding use the complete software pass. A failed combined software
-command retries the ranges individually so a damaged range does not erase the
-other measurements. A timed-out remote command never starts a second decode.
-Audio measurements and
-cadence analysis retain their sampling and independent safety decisions.
+Fingerprint analysis decodes each video range once, with signal and edge
+measurements in two branches of that pass. Ranges run sequentially with their
+own timeout and frame caps, retaining the same sample times, frame budgets and
+thresholds. Supported 8-bit and 10-bit 4:2:0 formats use VideoToolbox and select
+frames before copying them to CPU memory. The GPU still decodes the entire
+sampled range. Each range records its decoder; unsupported or incomplete
+hardware decoding uses the complete software pass. A timeout stops further
+analysis for that file and leaves its result unknown for the queue to retry,
+while later queue items remain free to continue. Audio and
+cadence retain their measurements and safety decisions.
 
 ## Durable state
 

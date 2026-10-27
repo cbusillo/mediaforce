@@ -95,23 +95,30 @@ def analyze_media_fingerprint(
     ffmpeg_name = "ffmpeg" if command_runner is not None else ffmpeg_binary()
     starts = _sample_starts(duration_seconds, range_count)
     frames_per_range = max(1, max_frames // max(1, len(starts)))
-    video_results = _run_fingerprint_ranges(
-        path, ffmpeg_name=ffmpeg_name, starts=starts, frame_limit=frames_per_range,
-        sample_fps=sample_fps,
-        download_format={"yuv420p": "nv12", "nv12": "nv12", "yuv420p10le": "p010le", "p010le": "p010le"}.get(
-            str(stream.get("pix_fmt") or "")
-        ),
-        timeout_seconds=timeout_seconds * len(starts), process_controller=process_controller,
-        command_runner=command_runner,
+    download_format = {"yuv420p": "nv12", "nv12": "nv12", "yuv420p10le": "p010le", "p010le": "p010le"}.get(
+        str(stream.get("pix_fmt") or "")
     )
     ranges: list[dict[str, Any]] = []
-    for start_seconds, video_result in zip(starts, video_results, strict=True):
+    media_timed_out = False
+    for start_seconds in starts:
         if process_controller is not None:
             process_controller.throw_if_cancelled()
+        if media_timed_out:
+            video_result = FingerprintRangeResult(
+                decoder="not_started", status="timeout", signal_frames=[], edge_frames=[],
+                failure_reason="A previous range timed out; remaining analysis was not started.",
+            )
+        else:
+            video_result = _run_fingerprint_range(
+                path, ffmpeg_name=ffmpeg_name, start_seconds=start_seconds, frame_limit=frames_per_range,
+                sample_fps=sample_fps, download_format=download_format, timeout_seconds=timeout_seconds,
+                process_controller=process_controller, command_runner=command_runner,
+            )
+            media_timed_out = video_result.status == "timeout"
         signal_frames = video_result.signal_frames
         edge_frames = video_result.edge_frames
         audio = None
-        if audio_probe["track_count"] > 0:
+        if audio_probe["track_count"] > 0 and not media_timed_out:
             audio_duration = min(max(frames_per_range / max(sample_fps, 0.1), 4.0), 12.0)
             audio_result = _run_audio_range(
                 path,
@@ -122,6 +129,7 @@ def analyze_media_fingerprint(
                 process_controller=process_controller,
                 command_runner=command_runner,
             )
+            media_timed_out = audio_result["status"] == "timeout"
             audio = {
                 "status": audio_result["status"],
                 "duration_seconds": round(audio_duration, 3),
@@ -151,6 +159,7 @@ def analyze_media_fingerprint(
     coverage = min(frame_coverage, range_coverage)
     analysis = {
         "sampled_frames": sampled_frames,
+        "interrupted_by_timeout": media_timed_out,
         "coverage": round(coverage, 4),
         "measured_range_count": measured_range_count,
         "max_frames": max_frames,
@@ -248,6 +257,8 @@ def classify_media_fingerprint(analysis: Mapping[str, Any] | None) -> dict[str, 
     payload = object_dict(analysis)
     sampled_frames = int_value(payload.get("sampled_frames"))
     coverage = _bounded(float_value(payload.get("coverage")))
+    if payload.get("interrupted_by_timeout") is True:
+        return _unknown_decision(coverage, "Checking this file timed out before all measurements finished.")
     if sampled_frames < MIN_FINGERPRINT_FRAMES:
         return _unknown_decision(
             coverage,
@@ -390,65 +401,48 @@ def _current_tool_version_for(envelope: Mapping[str, Any]) -> str:
     return MEDIA_FINGERPRINT_TOOL_VERSION
 
 
-def parse_fingerprint_ranges(output: str) -> dict[int, list[dict[str, float]]]:
-    ranges: dict[int, list[dict[str, float]]] = {}
-    for frame in _FRAME_RE.finditer(output):
-        tag = re.search(r"(?:^|\n)mediaforce.range=(\d+)(?:\n|$)", frame.group("body"))
-        if tag is not None:
-            ranges.setdefault(int(tag.group(1)), []).extend(parse_signalstats_metadata(frame.group()))
-    return ranges
+def _fingerprint_range_result(result: Mapping[str, str], *, decoder: str) -> FingerprintRangeResult:
+    return FingerprintRangeResult(
+        decoder=decoder, status=result["status"],
+        signal_frames=parse_signalstats_metadata(result.get("stdout", "")),
+        edge_frames=parse_signalstats_metadata(result.get("stderr", "")),
+        failure_reason=result.get("failure_reason", ""),
+    )
 
 
-def _fingerprint_range_results(result: Mapping[str, str], count: int, *, decoder: str) -> list[FingerprintRangeResult]:
-    signals = parse_fingerprint_ranges(result.get("stdout", ""))
-    edges = parse_fingerprint_ranges(result.get("stderr", ""))
-    return [
-        FingerprintRangeResult(
-            decoder=decoder, status=result["status"], signal_frames=signals.get(index, []), edge_frames=edges.get(index, []),
-            failure_reason=result.get("failure_reason", ""),
-        )
-        for index in range(count)
-    ]
-
-
-def _run_fingerprint_ranges(
+def _run_fingerprint_range(
         path: Path,
         *,
         ffmpeg_name: str,
-        starts: list[float],
+        start_seconds: float,
         frame_limit: int,
         sample_fps: float,
         download_format: str | None,
         timeout_seconds: float,
         process_controller: ManagedProcessController | None,
         command_runner: RemoteMediaCommands | None,
-) -> list[FingerprintRangeResult]:
+) -> FingerprintRangeResult:
     run_pass = partial(
-        _run_fingerprint_pass, path, ffmpeg_name=ffmpeg_name, frame_limit=frame_limit,
-        sample_fps=sample_fps, process_controller=process_controller, command_runner=command_runner,
+        _run_fingerprint_pass, path, ffmpeg_name=ffmpeg_name, start_seconds=start_seconds, frame_limit=frame_limit,
+        sample_fps=sample_fps, process_controller=process_controller, command_runner=command_runner, timeout_seconds=timeout_seconds,
     )
     if download_format is not None:
-        hardware_result = run_pass(starts=starts, timeout_seconds=timeout_seconds, download_format=download_format)
-        hardware_ranges = _fingerprint_range_results(hardware_result, len(starts), decoder=f"videotoolbox-{download_format}")
-        if hardware_result["status"] == "timeout" or (
-            hardware_result["status"] == "measured"
-            and all(len(row.signal_frames) == len(row.edge_frames) == frame_limit for row in hardware_ranges)
+        hardware_result = _fingerprint_range_result(
+            run_pass(download_format=download_format), decoder=f"videotoolbox-{download_format}",
+        )
+        if hardware_result.status == "timeout" or (
+            hardware_result.status == "measured"
+            and len(hardware_result.signal_frames) == len(hardware_result.edge_frames) == frame_limit
         ):
-            return hardware_ranges
-    software_result = run_pass(starts=starts, timeout_seconds=timeout_seconds, download_format=None)
-    if software_result["status"] != "failed" or len(starts) == 1:
-        return _fingerprint_range_results(software_result, len(starts), decoder="software")
-    return [
-        _fingerprint_range_results(run_pass(starts=[start], timeout_seconds=timeout_seconds / len(starts), download_format=None), 1, decoder="software")[0]
-        for start in starts
-    ]
+            return hardware_result
+    return _fingerprint_range_result(run_pass(download_format=None), decoder="software")
 
 
 def _run_fingerprint_pass(
         path: Path,
         *,
         ffmpeg_name: str,
-        starts: list[float],
+        start_seconds: float,
         frame_limit: int,
         sample_fps: float,
         timeout_seconds: float,
@@ -456,35 +450,19 @@ def _run_fingerprint_pass(
         command_runner: RemoteMediaCommands | None,
         download_format: str | None,
 ) -> dict[str, str]:
-    command = [ffmpeg_name, "-hide_banner", "-nostats", "-v", "quiet"]
-    filters = []
     download = f"hwdownload,format={download_format}," if download_format else ""
-    for index, start in enumerate(starts):
-        command.extend([
-            "-ss", f"{start:.3f}",
-            *(["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"] if download_format else []),
-            "-i", str(path),
-        ])
-        filters.extend([
-            f"[{index}:v:0]fps={sample_fps:.3f},trim=end_frame={frame_limit},setpts=PTS-STARTPTS,"
-            f"{download}split[signal{index}][edge{index}]",
-            f"[signal{index}]scale=320:-2:flags=bicubic,format=yuv420p,signalstats,"
-            f"metadata=add:key=mediaforce.range:value={index}[signal_stats{index}]",
-            f"[edge{index}]scale=320:-2:flags=bicubic,format=gray,"
-            f"edgedetect=low=0.08:high=0.22,signalstats,"
-            f"metadata=add:key=mediaforce.range:value={index}[edge_stats{index}]",
-        ])
-    for kind, destination in (("signal", "-"), ("edge", "'pipe\\:2'")):
-        inputs = "".join(f"[{kind}_stats{index}]" for index in range(len(starts)))
-        filters.append(
-            f"{inputs}interleave=nb_inputs={len(starts)}:duration=longest,"
-            f"setpts=N/({sample_fps * len(starts):.3f}*TB),"
-            f"metadata=print:file={destination}[{kind}_out]"
-        )
-    command.extend([
-        "-filter_complex", ";".join(filters), "-map", "[signal_out]", "-map", "[edge_out]",
-        "-an", "-sn", "-dn", "-f", "null", "-",
-    ])
+    filters = (
+        f"[0:v:0]fps={sample_fps:.3f},trim=end_frame={frame_limit},{download}split[signal][edge];"
+        "[signal]scale=320:-2:flags=bicubic,format=yuv420p,signalstats,metadata=print:file=-[signal_out];"
+        "[edge]scale=320:-2:flags=bicubic,format=gray,edgedetect=low=0.08:high=0.22,"
+        "signalstats,metadata=print:file='pipe\\:2'[edge_out]"
+    )
+    command = [
+        ffmpeg_name, "-hide_banner", "-nostats", "-v", "quiet", "-ss", f"{start_seconds:.3f}",
+        *(["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"] if download_format else []),
+        "-i", str(path), "-filter_complex", filters, "-map", "[signal_out]", "-map", "[edge_out]",
+        "-frames:v:0", str(frame_limit), "-frames:v:1", str(frame_limit), "-an", "-sn", "-dn", "-f", "null", "-",
+    ]
     return _run_bounded_media_command(
         command, timeout_seconds=timeout_seconds, process_controller=process_controller,
         command_runner=command_runner,

@@ -694,8 +694,8 @@ class RemoteEvidenceFreshnessTests(unittest.TestCase):
             "host_label": "M1 mini",
         }
         analysis_frames = "\n".join(
-            f"frame:{index} pts:{index}\nmediaforce.range={group}\nlavfi.signalstats.YAVG=60.0\nlavfi.signalstats.YDIF=2.0"
-            for group in range(3) for index in range(60)
+            f"frame:{index} pts:{index}\nlavfi.signalstats.YAVG=60.0\nlavfi.signalstats.YDIF=2.0"
+            for index in range(60)
         )
         runner.run.return_value = subprocess.CompletedProcess([], 0, analysis_frames, analysis_frames)
         summary = fingerprint.analyze_media_fingerprint(
