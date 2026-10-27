@@ -543,15 +543,22 @@ def _evidence_due_now(now_iso: str) -> Any:
     return or_(library_item_evidence_state.c.retry_not_before.is_(None), library_item_evidence_state.c.retry_not_before <= now_iso)
 
 
-def original_intake_is_runnable(connection: DBClient, *, batch_id: str, priority: int) -> bool:
-    if _claimable_batch_id(connection) != batch_id:
-        return False
-    return connection.execute(select(library_item_evidence_state.c.library_item_id).where(
+def original_intake_hold(
+    connection: DBClient, *, batch_id: str, priority: int,
+) -> Literal["cancelled", "paused", "higher_priority"] | None:
+    state = load_evidence_queue_state(connection)
+    if (state["batch_id"] != batch_id or state["cancel_requested"]
+            or state["status"] not in EVIDENCE_QUEUE_ACTIVE_STATUSES):
+        return "cancelled"
+    if background_work_is_paused(connection) or state["is_paused"]:
+        return "paused"
+    if connection.execute(select(library_item_evidence_state.c.library_item_id).where(
         library_item_evidence_state.c.work_batch_id == batch_id,
         library_item_evidence_state.c.work_status == "queued",
         library_item_evidence_state.c.work_priority < priority,
-    ).limit(1)).first() is None
-
+    ).limit(1)).first() is not None:
+        return "higher_priority"
+    return None
 
 def runnable_evidence_work_count(connection: DBClient) -> int:
     """Claimable items in the current batch, or zero when anything holds the queue back."""

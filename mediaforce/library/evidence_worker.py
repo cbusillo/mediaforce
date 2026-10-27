@@ -26,7 +26,7 @@ from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, collect
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host
 from mediaforce.library.evidence_queue import EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
     current_library_item_source_fingerprint, evidence_queue_summary, heartbeat_evidence_work, \
-    load_evidence_queue_state, load_evidence_work_claim, mark_evidence_attempt_started, original_intake_is_runnable, recover_evidence_queue, \
+    load_evidence_queue_state, load_evidence_work_claim, mark_evidence_attempt_started, original_intake_hold, recover_evidence_queue, \
     transition_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, parse_evidence_summary, \
@@ -220,15 +220,21 @@ def _run_evidence_claim(
 
             def guard_intake() -> None:
                 nonlocal last_guard_check
-                if deps.shutdown_event is not None and deps.shutdown_event.is_set():
-                    raise EvidenceWorkDeferred("Original checks will resume after the app restarts")
+                shutting_down = deps.shutdown_event is not None and deps.shutdown_event.is_set()
                 now = time.monotonic()
-                if now - last_guard_check < 1:
+                if now - last_guard_check < 1 and not shutting_down:
                     return
                 last_guard_check = now
                 with open_db(config.paths.db_path) as database:
-                    if not original_intake_is_runnable(database, batch_id=claim.batch_id, priority=claim.work_priority):
-                        raise EvidenceWorkDeferred("Original checks will resume when the queue is runnable")
+                    hold = original_intake_hold(database, batch_id=claim.batch_id, priority=claim.work_priority)
+                if hold == "cancelled":
+                    raise ProcessCancelledError("Evidence work was cancelled.")
+                if shutting_down:
+                    raise EvidenceWorkDeferred("Original checks will resume after the app restarts")
+                if hold == "paused":
+                    raise EvidenceWorkDeferred("Original checks are paused")
+                if hold == "higher_priority":
+                    raise EvidenceWorkDeferred("Waiting for a file that needs a check sooner")
 
             with process_controller.activity_guard(guard_intake):
                 assess_source_input(config, claim.library_item_id, process_controller, process_controller.throw_if_cancelled)
@@ -243,8 +249,6 @@ def _run_evidence_claim(
                         queue_decision_evidence_work(connection, config, item["rel_path"], library_item_ids=[claim.library_item_id],
                             evidence_kind=kind, work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, require_measurement=True,
                             priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, start_new_batch=True, manage_transaction=False)
-            if deps.prepare_next_original is not None:
-                deps.prepare_next_original(config, claim)
             if evidence.availability != "available" or (evidence.traits[claim.evidence_kind].tier == "probable" and claim.evidence_state == EVIDENCE_STATE_CURRENT):
                 _finish_claim(config, claim, work_status="completed", reset_attempt_state=True)
                 return
@@ -290,6 +294,8 @@ def _run_evidence_claim(
             if fingerprint_video_decode_timed_out(previous):
                 analysis_kwargs["hardware_decoding"] = False
         measurement_before = local_before
+        if original_work and deps.prepare_next_original is not None:
+            deps.prepare_next_original(config, claim)
         summary = deps.analyze_evidence(
             analysis_target.source_path,
             claim.evidence_kind,

@@ -6,6 +6,7 @@ import sys
 import threading
 import typing
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -716,6 +717,60 @@ def test_one_item_run_does_not_prepare_an_extra_original(tmp_path: Path) -> None
     ):
         run_evidence_queue_until_blocked(config_path=config.paths.config_path, config=config, deps=deps)
     assert sum(bool(call.kwargs.get("full_digest")) for call in observed.call_args_list) == 1
+
+
+@pytest.mark.parametrize("interruption", ["cancel", "cancel_shutdown", "pause", "priority", "shutdown"])
+def test_original_digest_preserves_terminal_and_resumable_interruptions(tmp_path: Path, interruption: str) -> None:
+    import mediaforce.library.source_intake as intake
+    from mediaforce.library.evidence_queue import EVIDENCE_BACKGROUND_RETRY_SECONDS, load_evidence_queue_state, pause_evidence_queue
+
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    if interruption == "priority":
+        _source(config, "urgent")
+    _discover(config)
+    stopped = threading.Event()
+    analyzer = Mock()
+
+    def observe(path: Path, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("full_digest"):
+            with open_db(config.paths.db_path) as database:
+                if interruption.startswith("cancel"):
+                    cancel_evidence_queue(database)
+                elif interruption == "pause":
+                    pause_evidence_queue(database)
+                elif interruption == "priority":
+                    database.execute(update(library_item_evidence_state).where(
+                        library_item_evidence_state.c.library_item_id != item_id,
+                    ).values(work_priority=0))
+            if interruption.endswith("shutdown"):
+                stopped.set()
+            kwargs["check_cancelled"]()
+        return observe_file(path, **kwargs)
+
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=analyzer, logger=Mock(),
+                              heartbeat_seconds=60, shutdown_event=stopped)
+    with patch.object(intake, "observe_file", side_effect=observe):
+        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps)
+    analyzer.assert_not_called()
+    with open_db(config.paths.db_path) as database:
+        row = database.execute(select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == item_id,
+        )).mappings().one()
+        state = load_evidence_queue_state(database)
+        assert row["attempt_count"] == 0
+        if interruption.startswith("cancel"):
+            assert row["work_status"] == state["status"] == "cancelled"
+            delay = datetime.fromisoformat(row["retry_not_before"]) - datetime.fromisoformat(row["updated_at"])
+            assert delay.total_seconds() == EVIDENCE_BACKGROUND_RETRY_SECONDS
+        else:
+            assert row["work_status"] == "retry_wait"
+            assert not state["cancel_requested"]
+        database.execute(update(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == item_id,
+        ).values(retry_not_before="2000-01-01T00:00:00+00:00"))
+    if interruption.startswith("cancel"):
+        assert _discover(config) == 1
 
 
 def test_background_discovery_preserves_higher_priority_reason(tmp_path: Path) -> None:

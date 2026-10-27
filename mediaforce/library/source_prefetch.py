@@ -13,7 +13,7 @@ from mediaforce.library.evidence_queue import (
     EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
     EvidenceWorkClaim,
     next_evidence_work_query,
-    original_intake_is_runnable,
+    original_intake_hold,
 )
 from mediaforce.library.source_intake import assess_source_input
 
@@ -77,7 +77,7 @@ class SourceAdmissionPrefetcher:
 
         def require_runnable(connection: DBClient) -> None:
             self._check_stopped()
-            if (not original_intake_is_runnable(connection, batch_id=claim.batch_id, priority=claim.work_priority)
+            if (original_intake_hold(connection, batch_id=claim.batch_id, priority=claim.work_priority) is not None
                     or self._next_item(connection, claim) != item_id):
                 raise ProcessCancelledError("Original admission preparation is no longer runnable")
 
