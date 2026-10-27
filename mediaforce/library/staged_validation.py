@@ -9,6 +9,8 @@ from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK, FINAL_SIZE_G
 
 # The automatic publisher's state for a failed copy it is making again; a new check replaces it.
 REMAKING_AFTER_FAILED_CHECK = "remaking"
+# The automatic publisher's state for a failed copy it could not make again, which waits on the owner.
+NOT_REMADE_AFTER_FAILED_CHECK = "failed"
 
 
 def held_size_prediction(raw_validation: Any) -> dict[str, Any] | None:
@@ -77,3 +79,17 @@ def staged_validation_passed(raw_validation: Any) -> bool | None:
     if not isinstance(payload, dict) or not isinstance(payload.get("passed"), bool):
         return None
     return bool(payload["passed"])
+
+
+def not_remade_blockers(raw_validation: Any) -> list[str] | None:
+    """Why the automatic publisher could not make a failed copy again, as codes; None when it has not given up on one.
+
+    Only a remake that was refused records blockers; a publishing attempt that failed for another reason has none.
+    """
+    try:
+        record = object_dict(object_dict(json.loads(str(raw_validation or "{}"))).get("automatic_publish"))
+    except json.JSONDecodeError:
+        return None
+    if record.get("state") != NOT_REMADE_AFTER_FAILED_CHECK or "blockers" not in record:
+        return None
+    return [str(code) for code in object_list(record["blockers"])]

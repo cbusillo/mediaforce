@@ -14,12 +14,13 @@ final class ItemTests: XCTestCase {
     }
 
     private func file(_ id: Int, stage: String, bytes: Int64, original: Int64? = nil, backup: Bool = false,
-                      validation: String? = nil, kept: String? = nil, question: String = "null") -> String {
+                      validation: String? = nil, kept: String? = nil, question: String = "null",
+                      waitReason: String = "null") -> String {
         let quoted = { (value: String?) in value.map { #""\#($0)""# } ?? "null" }
         return #"""
         {"library_item_id": \#(id), "rel_path": "tv/Futurama/Season 2/Futurama.S02E0\#(id).mkv",
          "name": "Futurama.S02E0\#(id).mkv", "episode": \#(id), "stage": "\#(stage)", "validation": \#(quoted(validation)),
-         "kept_reason": \#(quoted(kept)), "held_reason": null, "percent_complete": null, "size_question": \#(question),
+         "wait_reason": \#(waitReason), "kept_reason": \#(quoted(kept)), "held_reason": null, "percent_complete": null, "size_question": \#(question),
          "bytes": \#(bytes), "original_bytes": \#(original.map(String.init) ?? "null"), "original_backup": \#(backup)}
         """#
     }
@@ -47,6 +48,36 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(Words.fileState(season.files[0]), "Kept original: you put the original back")
         XCTAssertEqual(Words.fileState(season.files[1]), "Didn't pass its check")
         XCTAssertTrue(Words.waitingReason(season.files[1]).hasPrefix("The compressed copy didn't pass its check"))
+    }
+
+    func testEachWaitSaysWhyInPlainWords() throws {
+        let season = try facts([
+            file(1, stage: "needs_you", bytes: 1, waitReason: #"{"code": "stopped"}"#),
+            file(2, stage: "needs_you", bytes: 1, waitReason: #"{"code": "restart_stopped", "computer": "M2 MBP"}"#),
+            file(3, stage: "needs_you", bytes: 1, waitReason: #"{"code": "storage_io"}"#),
+            file(4, stage: "needs_you", bytes: 1, validation: "failed",
+                 waitReason: #"{"code": "not_made_again", "blockers": ["approval_missing", "original_unreachable"]}"#),
+            file(5, stage: "needs_you", bytes: 1, validation: "failed", waitReason: #"{"code": "not_made_again", "blockers": []}"#),
+            file(6, stage: "needs_you", bytes: 1, waitReason: #"{"code": "something_new"}"#),
+        ])
+        let words = season.files.map { (Words.fileState($0), Words.waitingReason($0)) }
+
+        XCTAssertEqual(words[0].0, "Stopped")
+        XCTAssertEqual(words[0].1, "It was stopped before it finished.")
+        XCTAssertEqual(words[1].0, "Stopped by a restart")
+        XCTAssertTrue(words[1].1.hasSuffix("Check M2 MBP."))
+        XCTAssertEqual(words[2].0, "Couldn't finish")
+        XCTAssertEqual(words[2].1, "It had trouble reading or writing the media files.")
+        XCTAssertEqual(words[3].0, "Couldn't be made again")
+        XCTAssertEqual(
+            words[3].1,
+            "The compressed copy didn't pass its check, and Mediaforce couldn't make it again: "
+                + "it needs a newly approved sample and the original file can't be reached. The original stays in the library."
+        )
+        XCTAssertTrue(words[4].1.contains("couldn't make it again after several tries."))
+        // A reason this app does not know yet keeps the general words.
+        XCTAssertEqual(words[5].0, "Needs a decision")
+        XCTAssertEqual(words[5].1, "It needs a decision from you.")
     }
 
     func testASizeQuestionNamesBothSizes() throws {

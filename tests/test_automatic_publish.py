@@ -162,6 +162,10 @@ def _no_remake(_prefix: str, _ids: Any) -> NoReturn:
     raise AssertionError("only a copy that failed a check other than its size goal is made again")
 
 
+def _queue_nothing(_prefix: str, _mode: str, _ids: Any, _approval: dict[str, Any]) -> dict[str, Any]:
+    raise AssertionError("A refused remake never reaches the queue.")
+
+
 def _remake_refused(_prefix: str, _ids: Any) -> dict[str, Any]:
     return {"ok": False, "message": "Mediaforce is still compressing here."}
 
@@ -1109,7 +1113,11 @@ def test_failed_copy_whose_remake_is_always_refused_goes_to_the_owner(config: Me
 
     def refuse(prefix: str, ids: Any) -> dict[str, Any]:
         refusals.append(ids)
-        return _remake_refused(prefix, ids)
+        # No approved sample governs the season anymore, so making it again is refused every time.
+        return size_held.remake_staged_files(
+            config, prefix, ids, now_iso=timestamp, queue_items=_queue_nothing,
+            current_approval=lambda _prefix: None, retry_failed_check=True,
+        )
 
     with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
         for attempt in range(delivery.UNKNOWN_FAILURE_RETRY_LIMIT + 2):
@@ -1123,6 +1131,24 @@ def test_failed_copy_whose_remake_is_always_refused_goes_to_the_owner(config: Me
     assert staged.exists()
     [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
     assert (episode["stage"], episode["validation"]) == ("needs_you", "failed")
+    assert episode["wait_reason"] == {"code": "not_made_again", "blockers": ["approval_missing"]}
+
+
+def test_failed_copy_removed_but_not_queued_says_so(config: MediaforceConfig) -> None:
+    item_id, _, _ = _stage(config, "tv/Show/Season 1/broken.mkv")
+
+    def removed_not_queued(_prefix: str, ids: Any) -> dict[str, Any]:
+        return {"ok": False, "removed_library_item_ids": list(ids), "left_out": [
+            {"library_item_id": item_id, "reason": "Finished copy removed, but not queued.", "codes": []},
+        ]}
+
+    with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
+        delivery.publish_checked_files_once(
+            config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=removed_not_queued
+        )
+
+    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    assert episode["wait_reason"] == {"code": "not_made_again", "blockers": ["copy_removed_not_queued"]}
 
 
 def test_failed_copy_waits_for_running_work_without_going_to_the_owner(config: MediaforceConfig) -> None:

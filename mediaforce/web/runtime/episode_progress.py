@@ -20,7 +20,7 @@ from mediaforce.library.candidate_selection import encode_candidate_decisions, w
 from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.library.media_scopes import resolve_media_scope
-from mediaforce.library.staged_validation import staged_validation_outcome
+from mediaforce.library.staged_validation import not_remade_blockers, staged_validation_outcome
 from mediaforce.library.workflow_state import ItemWorkflowState, build_folder_workflow_state
 from mediaforce.web.runtime.encode_runtime import size_exception_question, unfinished_child_reason
 
@@ -122,7 +122,12 @@ def load_season_episode_progress(
         for item_id, row in staged.items()
         if (outcome := staged_validation_outcome(row["validation_json"])) is not None
     }
-    return season_episode_progress(items, run_by_rel_path, bytes_saved, validation)
+    not_remade = {
+        item_id: blockers
+        for item_id, row in staged.items()
+        if (blockers := not_remade_blockers(row["validation_json"])) is not None
+    }
+    return season_episode_progress(items, run_by_rel_path, bytes_saved, validation, not_remade)
 
 
 def season_episode_progress(
@@ -130,15 +135,21 @@ def season_episode_progress(
         run_by_rel_path: Mapping[str, Mapping[str, Any]],
         bytes_saved: Mapping[int, int],
         validation: Mapping[int, str] | None = None,
+        not_remade: Mapping[int, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """`validation` names each staged file's check outcome: "size_held" or "failed" wait on the owner, "remaking" does not."""
+    """`validation` names each staged file's check outcome: "size_held" or "failed" wait on the owner, "remaking" does not.
+
+    `not_remade` gives, for a failed copy Mediaforce could not make again, the codes for why.
+    """
     validation = validation or {}
+    not_remade = not_remade or {}
     episodes = [
         _episode(
             item,
             run_by_rel_path.get(item.rel_path),
             bytes_saved.get(item.item_id),
             validation.get(item.item_id),
+            not_remade.get(item.item_id),
         )
         for item in items
         if item.state != "missing"
@@ -152,7 +163,9 @@ def _episode(
         run: Mapping[str, Any] | None,
         bytes_saved: int | None,
         validation: str | None,
+        not_remade: list[str] | None,
 ) -> dict[str, Any]:
+    """One episode's stage; one that waits on the owner says why in ``wait_reason``, a code for the app to word."""
     episode: dict[str, Any] = {
         "rel_path": item.rel_path,
         "stage": "not_started",
@@ -162,6 +175,7 @@ def _episode(
         "size_question": None,
         "owner_action": None,
         "validation": None,
+        "wait_reason": None,
     }
     if item.state == "complete":
         episode["stage"] = "published"
@@ -192,6 +206,7 @@ def _episode(
         elif needs_owner or run_status in _OWNER_RUN_STATUSES:
             episode["stage"] = "needs_you"
             episode["size_question"] = size_exception_question(run)
+            episode["wait_reason"] = _run_wait_reason(reason, run)
         else:
             episode["stage"] = "waiting"
         episode["detail"] = label
@@ -206,6 +221,11 @@ def _episode(
         episode["detail"] = _VALIDATION_DETAILS[validation]
         episode["validation"] = validation
         episode["owner_action"] = "keep_or_remake" if validation == "size_held" else None
+        episode["wait_reason"] = (
+            {"code": "size_held"} if validation == "size_held"
+            else {"code": "check_failed"} if not_remade is None
+            else {"code": "not_made_again", "blockers": not_remade}
+        )
         return episode
     # A finished run says nothing about now; the file's own state does.
     if item.state in {"ready_to_validate", "ready_to_promote"}:
@@ -218,7 +238,17 @@ def _episode(
     elif item.state == "blocked":
         episode["stage"] = "needs_you"
         episode["detail"] = item.blocker
+        # Its copy finished but is gone, or its library's settings leave it out of the work.
+        episode["wait_reason"] = {"code": "copy_missing" if item.status == "encoded" else "settings_block"}
     return episode
+
+
+def _run_wait_reason(reason: str, run: Mapping[str, Any]) -> dict[str, Any]:
+    """The run's reason code, with the computer a restart stopped it on as its own value when the run names one."""
+    code = reason.partition(":")[0]
+    if code != "restart_stopped":
+        return {"code": code}
+    return {"code": code, "computer": str(object_dict(run.get("host")).get("label") or "").strip() or None}
 
 
 def _staged_rows(connection: DBClient, item_ids: list[int]) -> dict[int, Mapping[str, Any]]:

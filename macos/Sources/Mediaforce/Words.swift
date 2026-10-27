@@ -1078,11 +1078,7 @@ extension Words {
 
     static func fileState(_ file: ItemFacts.File) -> String {
         switch file.stage {
-        case "needs_you":
-            if file.sizeQuestion != nil { "Needs more than its size goal" }
-            else if file.validation == "size_held" { "Much smaller than its sample" }
-            else if file.validation == "failed" { "Didn't pass its check" }
-            else { "Needs a decision" }
+        case "needs_you": file.sizeQuestion != nil ? "Needs more than its size goal" : waitLabel(file)
         case "kept_original": "\(keptOriginal): \(keptReason("motion_\(file.keptReason ?? "")"))"
         case "held": file.heldReason == "motion_pattern" ? "Kept original: Mediaforce can't convert its motion safely" : "Waiting to start"
         case "compressing": file.percentComplete.map { "Compressing, \($0)%" } ?? "Compressing"
@@ -1098,10 +1094,79 @@ extension Words {
         if let question = file.sizeQuestion {
             return "To look right it needs \(size(question.smallestQualitySafeBytes)), more than its \(size(question.goalBytes)) goal."
         }
-        return switch file.validation {
-        case "failed": "The compressed copy didn't pass its check, so the original stays in the library."
+        let computer = file.waitReason?.computer ?? "the computer"
+        return switch file.waitReason?.code ?? file.validation {
+        case "check_failed", "failed": "The compressed copy didn't pass its check, so the original stays in the library."
+        case "not_made_again": notMadeAgain(file.waitReason?.blockers ?? [])
         case "size_held": "It came out much smaller than its sample. Keep this copy, or make it again."
+        case "stopped": "It was stopped before it finished."
+        case "restart_stopped":
+            "Mediaforce restarted while \(computer) was compressing it and can't tell whether that work ended. Check \(computer)."
+        case "restart_stopped_last_attempt": "Mediaforce restarted during its last try."
+        case "quality_floor_size_conflict": "To look right it needs more space than its size goal."
+        case "final_size_target_miss": "The compressed copy didn't come out at its size goal."
+        case "controller_database_busy": "Mediaforce was too busy to keep track of it, so it stopped."
+        case "storage_io": "It had trouble reading or writing the media files."
+        case "host_unavailable": "The computer compressing it became unavailable."
+        case "ssh_transport": "Mediaforce couldn't connect to the computer compressing it."
+        case "remote_quality_timeout": "Checking its picture took too long on a computer."
+        case "needs_review": "It ran into a problem Mediaforce couldn't sort out by itself."
+        case "schedule_too_short": "It takes longer than every computer's work window. A longer work window lets it run."
+        case "plan_rebuild": "Its work needs to be set up again before it can run."
+        case "storage_repair": "The storage it's on needs to be mounted or repaired."
+        case "storage_reconnect": "The storage it's on needs to be reconnected."
+        case "copy_missing": "Its compressed copy is missing, so there's nothing to check."
+        case "settings_block": "Mediaforce can't start it with its library's current settings."
         default: "It needs a decision from you."
+        }
+    }
+
+    private static func waitLabel(_ file: ItemFacts.File) -> String {
+        switch file.waitReason?.code ?? file.validation {
+        case "check_failed", "failed": "Didn't pass its check"
+        case "not_made_again": "Couldn't be made again"
+        case "size_held": "Much smaller than its sample"
+        case "stopped": "Stopped"
+        case "restart_stopped", "restart_stopped_last_attempt": "Stopped by a restart"
+        case "quality_floor_size_conflict": "Needs more than its size goal"
+        case "final_size_target_miss": "Missed its size goal"
+        case "controller_database_busy", "storage_io", "host_unavailable", "ssh_transport", "remote_quality_timeout",
+             "needs_review": "Couldn't finish"
+        case "schedule_too_short": "Longer than every work window"
+        case "plan_rebuild": "Needs to be set up again"
+        case "storage_repair": "Storage needs a repair"
+        case "storage_reconnect": "Storage disconnected"
+        case "copy_missing": "Compressed copy missing"
+        case "settings_block": "Can't start"
+        default: "Needs a decision"
+        }
+    }
+
+    private static func notMadeAgain(_ blockers: [String]) -> String {
+        let reasons = blockers.compactMap(remakeBlocker)
+        let why = switch reasons.count {
+        case 0: " after several tries"
+        case 1: ": " + reasons[0]
+        default: ": " + reasons.dropLast().joined(separator: ", ") + " and " + reasons[reasons.count - 1]
+        }
+        return "The compressed copy didn't pass its check, and Mediaforce couldn't make it again\(why). The original stays in the library."
+    }
+
+    private static func remakeBlocker(_ code: String) -> String? {
+        switch code {
+        case "approval_changed": "its approved settings changed"
+        case "run_settings_missing": "its saved settings are missing"
+        case "approval_missing": "it needs a newly approved sample"
+        case "run_details_missing": "its saved size details are missing"
+        case "size_settings_unchanged": "it needs a sample approved with different settings"
+        case "size_checks_block": "its saved size checks still hold it back"
+        case "original_unreachable": "the original file can't be reached"
+        case "copy_points_at_original": "its compressed copy points at the original"
+        case "sampling": "a sample is still being made"
+        case "compressing": "other files here are still compressing"
+        case "queued_run": "a waiting run may still make it"
+        case "copy_removed_not_queued": "its old copy was removed, but the new one didn't start"
+        default: nil
         }
     }
 

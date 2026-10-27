@@ -19,8 +19,8 @@ from mediaforce.encoding.staging import PromotionRestoreError, PromotionWaiting
 from mediaforce.execution import promote_one_item, validate_one_item
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_is_missing
 from mediaforce.library.staged_integrity import staged_integrity_report
-from mediaforce.library.staged_validation import REMAKING_AFTER_FAILED_CHECK, missed_only_final_size, \
-    staged_validation_outcome
+from mediaforce.library.staged_validation import NOT_REMADE_AFTER_FAILED_CHECK, REMAKING_AFTER_FAILED_CHECK, \
+    missed_only_final_size, staged_validation_outcome
 from mediaforce.web.runtime.folder_actions import production_action_blocker
 from mediaforce.web.runtime.production_approval import (
     LoadCalibrationState,
@@ -432,13 +432,15 @@ def _remake_or_keep_failed_copy(
     if not refusal.get("busy"):
         refusals += 1
     # A copy already removed but not queued, or a remake refused every time, needs the owner; it never loops unseen.
-    if item_id in result.get("removed_library_item_ids", []) or refusals >= UNKNOWN_FAILURE_RETRY_LIMIT:
+    removed = item_id in result.get("removed_library_item_ids", [])
+    if removed or refusals >= UNKNOWN_FAILURE_RETRY_LIMIT:
         _record_wait(
             connection,
             item_id,
-            "failed",
+            NOT_REMADE_AFTER_FAILED_CHECK,
             f"Its compressed copy didn't pass its check, and Mediaforce couldn't make it again. {left_out}".strip(),
             failure_attempts=refusals,
+            blockers=["copy_removed_not_queued"] if removed else [str(code) for code in object_list(refusal.get("codes"))],
         )
         return True
     _record_wait(
@@ -481,7 +483,9 @@ def _record_wait(
     *,
     failure_attempts: int | None = None,
     retry_after: float | None = None,
+    blockers: list[str] | None = None,
 ) -> None:
+    """Save why a staged file is not published yet; ``blockers`` are codes for why a failed copy was not made again."""
     row = connection.execute(
         select(staged_artifacts.c.validation_json).where(
             staged_artifacts.c.library_item_id == item_id
@@ -495,11 +499,13 @@ def _record_wait(
         validation = {"passed": False, "unreadable_validation_json": row[0]}
         reason = "Its saved check results could not be read. Check this file again before replacing it."
     previous = object_dict(validation.get("automatic_publish"))
-    delivery = {"state": state, "reason": reason}
+    delivery: dict[str, Any] = {"state": state, "reason": reason}
     if failure_attempts is None and previous.get("failure_attempts") is not None:
         failure_attempts = previous["failure_attempts"]
     if failure_attempts is not None:
         delivery["failure_attempts"] = failure_attempts
+    if blockers is not None:
+        delivery["blockers"] = blockers
     if retry_after is None and state == "waiting":
         retry_after = time.time() + PUBLISH_RETRY_DELAY_SECONDS
     changed_reason = {
