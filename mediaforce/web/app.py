@@ -5345,12 +5345,19 @@ def _start_catalog_refresh_worker(config: MediaforceConfig) -> SupervisedWorkerH
 
 def _evidence_autostart_worker_loop(
         *,
-        db_path: Path,
+        config: MediaforceConfig,
         runner: BoundedEvidenceRunner,
         stop_event: threading.Event,
 ) -> None:
+    checked_hosts = False
+
     def start_when_ready() -> None:
-        start_ready_evidence_work(db_path, runner)
+        nonlocal checked_hosts
+        if not checked_hosts:
+            _refresh_host_status_cache(config)
+            checked_hosts = True
+        if not stop_event.is_set():
+            start_ready_evidence_work(config.paths.db_path, runner)
 
     run_supervised_worker_loop(
         process_once_fn=start_when_ready,
@@ -5368,7 +5375,7 @@ def _start_evidence_autostart_worker(
     stop_event = threading.Event()
     thread = threading.Thread(
         target=_evidence_autostart_worker_loop,
-        kwargs={"db_path": config.paths.db_path, "runner": runner, "stop_event": stop_event},
+        kwargs={"config": config, "runner": runner, "stop_event": stop_event},
         name="evidence-autostart-worker",
     )
     thread.start()

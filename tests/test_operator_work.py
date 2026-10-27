@@ -3,6 +3,7 @@ import os
 import tempfile
 import threading
 import unittest
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -1156,6 +1157,31 @@ class OperatorWorkTests(unittest.TestCase):
 
         self.assertEqual(exit_codes, [web_app.SCAN_FORCED_SHUTDOWN_EXIT_CODE])
         self.assertIn("stuck-scan", captured.output[0])
+
+    def test_autostart_waits_for_first_computer_check_before_claiming(self) -> None:
+        events: list[str] = []
+
+        def loop(*, process_once_fn: Callable[[], None], **_kwargs: object) -> None:
+            process_once_fn()
+            process_once_fn()
+
+        with patch("mediaforce.web.app._refresh_host_status_cache", side_effect=lambda _config: events.append("checked")), patch(
+            "mediaforce.web.app.start_ready_evidence_work", side_effect=lambda *_args: events.append("start")
+        ), patch("mediaforce.web.app.run_supervised_worker_loop", side_effect=loop):
+            web_app._evidence_autostart_worker_loop(config=self.config, runner=Mock(), stop_event=threading.Event())
+        self.assertEqual(events, ["checked", "start", "start"])
+
+    def test_shutdown_during_first_computer_check_does_not_start_work(self) -> None:
+        stop = threading.Event()
+
+        def loop(*, process_once_fn: Callable[[], None], **_kwargs: object) -> None:
+            process_once_fn()
+
+        with patch("mediaforce.web.app._refresh_host_status_cache", side_effect=lambda _config: stop.set()), patch(
+            "mediaforce.web.app.start_ready_evidence_work"
+        ) as start, patch("mediaforce.web.app.run_supervised_worker_loop", side_effect=loop):
+            web_app._evidence_autostart_worker_loop(config=self.config, runner=Mock(), stop_event=stop)
+        start.assert_not_called()
 
     def test_bounded_runner_rejects_duplicate_process_local_start(self) -> None:
         started = threading.Event()

@@ -6,14 +6,14 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.library.background_work import list_evidence_backlog, load_background_work_state, \
     summarize_evidence_inventory
-from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EVIDENCE_QUEUE_ACTIVE_STATUSES, \
-    evidence_queue_summary, runnable_evidence_work_count, evidence_queue_allows_preparation
+from mediaforce.library.evidence_queue import EVIDENCE_QUEUE_ACTIVE_STATUSES, \
+    evidence_queue_summary, recover_evidence_queue, runnable_evidence_work_count, evidence_queue_allows_preparation
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps, run_evidence_queue_until_blocked
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.metadata_sync import metadata_configuration_status
@@ -33,7 +33,6 @@ class BoundedEvidenceRunner:
         self._thread: threading.Thread | None = None
 
     def prepare_background_work(self) -> int:
-        from mediaforce.core.config import load_config
         from mediaforce.library.source_intake import queue_original_intake
 
         config = self._deps.load_config(self._config_path) if self._deps else load_config(self._config_path)
@@ -45,8 +44,8 @@ class BoundedEvidenceRunner:
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
 
-    def start(self, *, max_work_items: int) -> bool:
-        if max_work_items <= 0:
+    def start(self, *, max_work_items: int | None) -> bool:
+        if max_work_items is not None and max_work_items <= 0:
             raise ValueError("Evidence work item budget must be greater than zero.")
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -75,7 +74,7 @@ class BoundedEvidenceRunner:
                 if self._thread is thread and not thread.is_alive():
                     self._thread = None
 
-    def _run(self, *, max_work_items: int) -> None:
+    def _run(self, *, max_work_items: int | None) -> None:
         current_thread = threading.current_thread()
         try:
             run_evidence_queue_until_blocked(
@@ -101,10 +100,11 @@ def start_ready_evidence_work(db_path: Path, runner: BoundedEvidenceRunner) -> b
     except Exception:
         LOGGER.exception("Original discovery failed; queued analysis can still start")
     with open_db(db_path) as connection:
+        recover_evidence_queue(connection)
         runnable = runnable_evidence_work_count(connection)
     if runnable <= 0:
         return False
-    return runner.start(max_work_items=min(runnable, DEFAULT_EVIDENCE_BATCH_LIMIT))
+    return runner.start(max_work_items=None)
 
 
 def build_operator_work_payload(

@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from types import TracebackType
 
@@ -14,8 +15,10 @@ from mediaforce.library.evidence_queue import (
     EvidenceWorkClaim,
     next_evidence_work_query,
     original_intake_hold,
+    waiting_evidence_host_roots,
 )
 from mediaforce.library.source_intake import assess_source_input
+from mediaforce.library.evidence_hosts import remote_evidence_hosts
 
 
 class SourceAdmissionPrefetcher:
@@ -35,23 +38,25 @@ class SourceAdmissionPrefetcher:
         self.wait()
         self._executor.shutdown(wait=True)
 
-    def start(self, config: MediaforceConfig, claim: EvidenceWorkClaim) -> None:
+    def start(self, config: MediaforceConfig, claim: EvidenceWorkClaim, *, excluded_media_roots: Collection[str] = ()) -> None:
         if self._future is not None:
             return
         try:
-            self._future = self._executor.submit(self._prepare_next, config, claim)
+            self._future = self._executor.submit(self._prepare_next, config, claim, frozenset(excluded_media_roots))
         except (OSError, RuntimeError):
             self._logger.exception("Original admission preparation could not start; continuing the current file")
 
-    def _prepare_next(self, config: MediaforceConfig, claim: EvidenceWorkClaim) -> None:
+    def _prepare_next(self, config: MediaforceConfig, claim: EvidenceWorkClaim, roots: frozenset[str]) -> None:
         with open_db(config.paths.db_path) as connection:
-            item_id = self._next_item(connection, claim)
+            item_id = self._next_item(config, connection, claim, roots)
         if item_id is not None:
-            self._prepare(config, claim, item_id)
+            self._prepare(config, claim, item_id, roots)
 
     @staticmethod
-    def _next_item(connection: DBClient, claim: EvidenceWorkClaim) -> int | None:
-        candidate = connection.execute(next_evidence_work_query(claim.batch_id, timestamp()).where(
+    def _next_item(config: MediaforceConfig, connection: DBClient, claim: EvidenceWorkClaim, roots: Collection[str]) -> int | None:
+        if remote_evidence_hosts(config):
+            roots = set(roots) | waiting_evidence_host_roots(connection, batch_id=claim.batch_id)
+        candidate = connection.execute(next_evidence_work_query(claim.batch_id, timestamp(), excluded_media_roots=roots).where(
             library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
             library_item_evidence_state.c.library_item_id != claim.library_item_id,
         )).mappings().first()
@@ -73,14 +78,14 @@ class SourceAdmissionPrefetcher:
             self._logger.error("Original admission preparation failed; its queued claim will retry normally",
                                exc_info=(type(error), error, error.__traceback__))
 
-    def _prepare(self, config: MediaforceConfig, claim: EvidenceWorkClaim, item_id: int) -> None:
+    def _prepare(self, config: MediaforceConfig, claim: EvidenceWorkClaim, item_id: int, roots: frozenset[str]) -> None:
         controller = ManagedProcessController()
         last_check = 0.0
 
         def require_runnable(connection: DBClient) -> None:
             self._check_stopped()
-            if (original_intake_hold(connection, batch_id=claim.batch_id, priority=claim.work_priority) is not None
-                    or self._next_item(connection, claim) != item_id):
+            if (original_intake_hold(connection, batch_id=claim.batch_id, priority=claim.work_priority, excluded_media_roots=roots) is not None
+                    or self._next_item(config, connection, claim, roots) != item_id):
                 raise ProcessCancelledError("Original admission preparation is no longer runnable")
 
         def check_cancelled() -> None:

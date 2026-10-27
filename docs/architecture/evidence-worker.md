@@ -218,8 +218,36 @@ computer, never on the controller:
 - Unavailable roots move to `waiting_source` without consuming an attempt.
 - Tool, corrupt-media, timeout, and parse failures use exponential backoff and
   stop after three attempts by default.
-- Expired leases are reclaimed on the next worker pass (CLI or autostart). A live lease
-  is never stolen merely because another scheduler starts.
+- Expired leases are reclaimed on the next worker pass (CLI or autostart).
+  Autostart also recovers before counting ready work. An unexpired lease is
+  reclaimed only when its owner names this controller and its PID is positively
+  gone; active, foreign and unknown owners keep their leases.
+- The automatic runner keeps one worker loop and admission prefetcher alive
+  while prepared work is runnable. It discovers bounded groups of new inputs
+  between completed work and when useful work runs dry, then continues without
+  waiting for the autostart poll. Explicit manual and CLI runs retain their
+  finite item/time budgets and never discover outside their prepared scope.
+- Autostart completes its first computer-status check in its background thread
+  before claiming work. Claim selection and admission prefetch share the same
+  current eligible libraries. Queued measurement work in an unavailable library
+  becomes `waiting_host` without taking a lease or consuming attempts; urgent
+  unavailable rows therefore do not interrupt a healthy library's admission.
+  Non-original current rows and policy-only reclassification can still finish.
+  A current original needs a relevant observed receipt before it can qualify
+  without a computer; legacy summary JSON alone does not imply that receipt.
+  Prefetch includes those legacy originals when their computer is eligible.
+- An actual connection failure keeps the existing retry interval. Remote
+  workers and prefetch read that retained wait, so a stale available host check
+  cannot repeatedly admit the next files. Local runs with no encode computers
+  retain independent per-file retry behavior.
+- A missing source root similarly places source-dependent siblings in
+  `waiting_source` for the observed retry interval, including current originals
+  that still need admission. Metadata-only non-original work stays claimable.
+  Bulk marking never extends a deadline without another failed observation.
+- The measuring computer is selected again after admission, so a schedule that
+  closes during hashing prevents measurement. CLI host probes use the same raw
+  status cache as the web, while schedules are recomputed for every selection.
+  Prefetch commit guards do no host checks or network work under write locks.
 - Pause prevents new claims but does not interrupt the active safe unit.
 - The global background-work pause prevents new catalog scans, batch creation,
   queue resumes, and evidence claims. A scan or evidence update already running

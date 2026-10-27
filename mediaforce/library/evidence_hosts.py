@@ -31,6 +31,12 @@ def collect_evidence_host_rows(config: MediaforceConfig) -> list[dict[str, Any]]
     return [asdict(status) for status in collect_host_statuses(config)]
 
 
+def unmeasurable_evidence_roots(config: MediaforceConfig, host_rows: list[dict[str, Any]]) -> frozenset[str]:
+    if not remote_evidence_hosts(config):
+        return frozenset()
+    return frozenset(root for root in config.source_root_map if select_evidence_host(config, host_rows, media_root=root) is None)
+
+
 def select_evidence_host(
         config: MediaforceConfig,
         host_rows: list[dict[str, Any]],

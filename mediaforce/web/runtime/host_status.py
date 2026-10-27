@@ -47,6 +47,16 @@ def refresh_host_status_cache(config: MediaforceConfig) -> list[HostStatus]:
     return list(statuses)
 
 
+def current_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
+    _complete_host_status_refresh_if_ready()
+    cache_key = _host_status_cache_key(config)
+    with _HOST_STATUS_CACHE_LOCK:
+        if (_HOST_STATUS_CACHE_KEY == cache_key and _HOST_STATUS_CACHE_VALUE
+                and time.monotonic() - _HOST_STATUS_CACHE_FETCHED_AT < _HOST_STATUS_CACHE_TTL_SECONDS):
+            return list(_HOST_STATUS_CACHE_VALUE)
+    return refresh_host_status_cache(config)
+
+
 def safe_collect_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
     _complete_host_status_refresh_if_ready()
     cache_key = _host_status_cache_key(config)
