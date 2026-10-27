@@ -45,6 +45,8 @@ logger = logging.getLogger(__name__)
 
 NOT_HELD_MESSAGE = "This file is no longer waiting for a decision about its size."
 CHECK_FAILED_KEEP_REASON = "check_failed"
+# The copy passed every check but its size: the same settings make the same file, so its original is kept (Q948).
+OVER_SIZE_KEEP_REASON = "over_size"
 
 ValidateItemsFn = Callable[[str, Collection[int]], dict[str, Any]]
 CurrentApprovalFn = Callable[[str], dict[str, Any] | None]
@@ -270,6 +272,7 @@ def _refusal_codes(recovery: Mapping[str, Any] | None) -> list[str]:
 
 def keep_original_after_failed_checks(
         config: MediaforceConfig, library_item_id: int, *, failed_attempts: int, now_iso: Callable[[], str],
+        reason_code: str = CHECK_FAILED_KEEP_REASON,
 ) -> str:
     """Keep the original of a file whose copies kept failing their check, then remove its last copy.
 
@@ -293,7 +296,7 @@ def keep_original_after_failed_checks(
         ).scalar_one_or_none()
         if stored != fingerprint:
             now = now_iso()
-            keep = {"source_fingerprint": fingerprint, "reason_code": CHECK_FAILED_KEEP_REASON,
+            keep = {"source_fingerprint": fingerprint, "reason_code": reason_code,
                     "prefix": str(source["parent_dir"]), "kept_at": now}
             connection.execute(
                 sqlite_insert(motion_keep_decisions)

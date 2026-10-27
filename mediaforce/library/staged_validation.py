@@ -4,7 +4,7 @@ import json
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from mediaforce.core.type_defs import object_dict, object_list
+from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK, FINAL_SIZE_GOAL_CHECK, encoder_final_size_miss
 
 # The automatic publisher's state for a failed copy it is making again; a new check replaces it.
@@ -50,6 +50,12 @@ def missed_only_final_size(validation: Mapping[str, Any]) -> bool:
     failed = [str(object_dict(check).get("message") or "") for check in object_list(validation.get("checks"))
               if object_dict(check).get("passed") is False]
     return validation.get("passed") is False and failed == [FINAL_SIZE_GOAL_CHECK]
+
+
+def missed_only_over_final_size(validation: Mapping[str, Any]) -> bool:
+    """The file's only failed check is its final size goal, and it came out over the most that goal allows."""
+    upper_bound = int_value(object_dict(validation.get("final_size_goal")).get("upper_bound_bytes"))
+    return missed_only_final_size(validation) and 0 < upper_bound < int_value(validation.get("staged_size_bytes"))
 
 
 def staged_validation_outcome(raw_validation: Any) -> Literal["size_held", "failed", "remaking"] | None:

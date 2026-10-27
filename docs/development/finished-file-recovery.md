@@ -9,8 +9,13 @@ settings history is missing. It uses the existing per-file
 When the encoder stops retrying and keeps a copy that missed its final size, it
 records only that size miss. That copy counts as not yet checked, so automatic
 publishing runs its normal check like any other finished file. If the size
-goal is the only failed check, the file then asks **Keep this file** or
-**Make again** with no other action. Any other failed check stays a failure.
+goal is the only failed check and the copy came out over the most the goal
+allows (Settings › Compression › "Allowed over the goal"), automatic publishing
+keeps the original and removes the copy, with the reason `over_size`, and
+nothing waits on the owner: the same settings make the same file (Director
+decision Q948, #1083). A copy that missed only by coming out under the goal
+asks **Keep this file** or **Make again** with no other action. Any other
+failed check stays a failure.
 The encoder's size miss counts as the size result on every later check, even
 when the run's saved plan has no size band, so only the owner's keep of that
 exact copy lets it publish.
