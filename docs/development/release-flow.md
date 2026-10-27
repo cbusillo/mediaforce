@@ -24,7 +24,9 @@ release directly. Service commands run from a development checkout address the
 installed controller rather than changing it to the caller's checkout.
 
 The deploy script excludes retention cleanup while preparing and switching
-runtime ownership, serializes deploys, checks the existing paused/idle dashboard
+runtime ownership, serializes deploys, waits up to ten minutes for a running
+cleanup or deploy to finish (the pause request itself can start the hourly
+cleanup), checks the existing paused/idle dashboard
 gate, refuses a dirty previous runtime, and prepares the candidate before
 stopping the service. It rechecks the gate, stops the login item, verifies port
 8777 closes, takes an online SQLite backup and runs `pragma quick_check`, then

@@ -338,3 +338,31 @@ def test_release_commands_cannot_inherit_disposable_project_targets(tmp_path: Pa
         assert "UV_PROJECT" not in invoked_environment and "UV_WORKING_DIR" not in invoked_environment
     else:
         assert not any(key.startswith("GIT_") for key in invoked_environment)
+
+
+def test_a_deploy_waits_for_the_cleanup_its_own_pause_started(tmp_path: Path) -> None:
+    import threading
+
+    database = tmp_path / "support" / "library.sqlite3"
+    started, finish = threading.Event(), threading.Event()
+
+    def cleanup() -> None:
+        with runtime_install.runtime_activity(database.parent, cleanup=True) as acquired:
+            assert acquired
+            started.set()
+            finish.wait(5)
+
+    def deploy() -> None:
+        controller_deploy.deploy(tmp_path, "main", tmp_path / "stage", tmp_path, "http://test", database=database)
+
+    holder = threading.Thread(target=cleanup)
+    holder.start()
+    started.wait(5)
+    with patch.object(controller_deploy, "_deploy") as deployed:
+        with patch.object(controller_deploy, "DEPLOY_LOCK_WAIT_SECONDS", 0.2), pytest.raises(RuntimeError, match="stayed active"):
+            deploy()
+        deployed.assert_not_called()
+        threading.Timer(0.3, finish.set).start()
+        deploy()
+    holder.join()
+    deployed.assert_called_once()

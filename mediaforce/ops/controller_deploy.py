@@ -23,6 +23,7 @@ from mediaforce.ops.runtime_install import (
 
 
 DEFAULT_STARTUP_TIMEOUT = 180
+DEPLOY_LOCK_WAIT_SECONDS = 600
 MAC_APP_NAME = "Mediaforce.app"
 APPLICATIONS = Path("/Applications")
 
@@ -123,9 +124,10 @@ def deploy(
     source: Path, target: str, stage: Path, home: Path, base_url: str,
     *, database: Path, config_path: Path | None = None, startup_timeout: int = DEFAULT_STARTUP_TIMEOUT,
 ) -> None:
-    with runtime_activity(database.parent) as acquired:
+    # The release flow's own pause request can start the hourly cleanup, so the deploy waits for it (#1109).
+    with runtime_activity(database.parent, wait_seconds=DEPLOY_LOCK_WAIT_SECONDS) as acquired:
         if not acquired:
-            raise RuntimeError("cleanup or another deploy is active; retry after it finishes")
+            raise RuntimeError(f"cleanup or another deploy stayed active for {DEPLOY_LOCK_WAIT_SECONDS // 60} minutes; retry after it finishes")
         _deploy(source, target, stage, home, base_url, database=database, config_path=config_path, startup_timeout=startup_timeout)
 
 
