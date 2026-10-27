@@ -32,7 +32,7 @@ from mediaforce.library.evidence_queue import (
 )
 from mediaforce.library.evidence_state import EvidenceKind, rebuild_library_item_evidence_states
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps, process_evidence_queue_once
-from mediaforce.library.source_evidence import load_source_evidence, observe_file
+from mediaforce.library.source_evidence import load_source_evidence, observe_file, record_current_measurement
 from mediaforce.library.source_intake import assess_readable_source, commit_readable_source, queue_original_intake
 from test_source_evidence import connection, _config, _insert_item
 import test_evidence_worker as worker_fixtures
@@ -158,6 +158,30 @@ def test_original_assessment_is_final_and_measurements_use_one_queue(tmp_path: P
         assert runnable_evidence_work_count(database) == 0
         assert database.execute(select(func.count()).select_from(source_admissions)).scalar_one() == before
         assert database.execute(select(library_items.c.source_revision)).scalar_one() == revision
+
+
+@pytest.mark.parametrize("prior_success", [True, False])
+def test_unknown_fingerprint_never_replaces_successful_original_traits(tmp_path: Path, prior_success: bool) -> None:
+    config = _config(tmp_path)
+    item_id, path = _source(config)
+    assert _discover(config) == 1
+    unknown = _summary("media_fingerprint")
+    unknown["analysis"]["interrupted_by_timeout"] = True
+    unknown["decision"] = {"status": "unknown"}
+    def analyzer(_path: Path, kind: str, **_kwargs: object) -> dict[str, Any]:
+        return unknown if kind == "media_fingerprint" and not prior_success else _summary(kind)
+    assert _work(config, analyzer, max_attempts=1)
+    assert _work(config, analyzer, max_attempts=1)
+    with open_db(config.paths.db_path) as database:
+        earlier = load_source_evidence(database, item_id).traits["media_fingerprint"]
+        item = cast(dict[str, Any], dict(database.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()))
+        observation = observe_file(path)
+        record_current_measurement(database, item, kind="media_fingerprint", summary=unknown, binding="observed",
+                                   provenance={"before": observation, "after": observation})
+        selected = load_source_evidence(database, item_id).traits["media_fingerprint"]
+
+    assert selected == earlier
+    assert selected.tier == ("probable" if prior_success else "unknown")
 
 
 def test_fresh_queue_receipts_are_frozen_and_not_reanalyzed(tmp_path: Path) -> None:

@@ -125,6 +125,7 @@ def probe_evidence(
         *,
         process_controller: ManagedProcessController | None = None,
         command_runner: "RemoteMediaCommands | None" = None,
+        hardware_decoding: bool = True,
 ) -> dict[str, object]:
     """Measure one kind of evidence; with a command runner, every command runs on that encode computer."""
     payload = _probe_payload(path, process_controller=process_controller, command_runner=command_runner)
@@ -149,6 +150,7 @@ def probe_evidence(
             duration_seconds=duration_seconds,
             process_controller=process_controller,
             command_runner=command_runner,
+            hardware_decoding=hardware_decoding,
         )
     raise ValueError(f"Unsupported evidence kind: {evidence_kind}")
 

@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import time
@@ -18,7 +19,7 @@ from mediaforce.core.db_tables import library_item_evidence_state, library_items
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence, reclassify_cadence_summary, \
     unavailable_cadence_summary
-from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
+from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, analyze_media_fingerprint
 from mediaforce.library.evidence_queue import cancel_evidence_queue, claim_next_evidence_work, \
     evidence_queue_summary, mark_evidence_attempt_started, pause_evidence_queue, recover_evidence_queue, \
     queue_decision_evidence_work, resume_evidence_queue, start_evidence_work
@@ -911,6 +912,37 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(second["work_status"], "failed")
         self.assertEqual(second["attempt_count"], 2)
         self.assertEqual(summary["status"], "completed_with_errors")
+
+    def test_video_timeout_retries_in_software_but_audio_timeout_does_not(self) -> None:
+        for index, phase in enumerate(("hardware", "software", "audio"), 1):
+            with self.subTest(phase=phase):
+                item_id, _path = self._insert_item(index, cadence_summary_json=None, media_fingerprint_json=None)
+                runner = Mock()
+                runner.tool_lineage.return_value = {"ffmpeg_version": "fixture"}
+                metadata_text = "frame:0 pts:0\nlavfi.signalstats.YAVG=24"
+                video = subprocess.CompletedProcess([], 0, metadata_text, metadata_text)
+                runner.run.side_effect = [*([video] if phase == "audio" else []), subprocess.TimeoutExpired([], 1)]
+                timed_out = analyze_media_fingerprint(
+                    Path("fixture.mkv"), video_stream={"codec_name": "h264", "pix_fmt": "yuv420p"},
+                    audio_streams=[{"channels": 2}], duration_seconds=1200, max_frames=3,
+                    hardware_decoding=phase != "software", command_runner=runner,
+                )
+                analyzer = Mock(side_effect=[timed_out, json.loads(self._fingerprint_summary_json())])
+                with open_db(self.config.paths.db_path) as connection:
+                    start_evidence_work(connection, self.config, f"tv/show/item-{index}.mkv",
+                                        evidence_kinds=[MEDIA_FINGERPRINT_EVIDENCE_KIND])
+                    resume_evidence_queue(connection)
+                deps = self._deps(analyzer)
+                process_evidence_queue_once(config_path=self.config.paths.config_path, deps=deps)
+                with open_db(self.config.paths.db_path) as connection:
+                    connection.execute(update(library_item_evidence_state).where(
+                        library_item_evidence_state.c.library_item_id == item_id,
+                    ).values(retry_not_before="2000-01-01T00:00:00+00:00"))
+                process_evidence_queue_once(config_path=self.config.paths.config_path, deps=deps)
+
+                self.assertEqual(analyzer.call_count, 2)
+                self.assertNotIn("hardware_decoding", analyzer.call_args_list[0].kwargs)
+                self.assertEqual(analyzer.call_args.kwargs.get("hardware_decoding", True), phase == "audio")
 
     def test_cancel_terminates_active_claim_and_restores_attempt(self) -> None:
         item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
