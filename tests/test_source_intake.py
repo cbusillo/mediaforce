@@ -95,6 +95,15 @@ def _work(
         return process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps)
 
 
+def _measure_source_traits(config: MediaforceConfig) -> None:
+    with open_db(config.paths.db_path) as database:
+        rebuild_library_item_evidence_states(database)
+        start_evidence_work(database, config, "tv/source.mkv")
+        resume_evidence_queue(database)
+    assert _work(config)
+    assert _work(config)
+
+
 def _discover(config: MediaforceConfig) -> int:
     with open_db(config.paths.db_path) as database:
         return queue_original_intake(database, config)
@@ -148,13 +157,15 @@ def test_outputs_never_become_probable(connection: DBClient, tmp_path: Path, pro
 
 def test_no_computer_waits_before_reading_an_original_digest(tmp_path: Path) -> None:
     config = _config(tmp_path)
+    config.raw["remote_hosts"] = [{"host": "offline.example", "mode": "ssh", "source_roots": {"tv": str(config.source_root_map["tv"])}}]
     item_id, _path = _source(config)
     _discover(config)
-    with patch("mediaforce.library.evidence_worker._analysis_target", return_value=None), patch(
+    with patch("mediaforce.encoding.remote_media.run_remote_command", side_effect=AssertionError("no real SSH")), patch(
         "mediaforce.library.source_intake._probe_payload"
     ) as probe:
         assert process_evidence_queue_once(config_path=config.paths.config_path, config=config,
-            deps=EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock()))
+            deps=EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
+                evidence_host_rows=lambda _config: [{"key": "offline.example", "available": False}]))
     with open_db(config.paths.db_path) as db:
         state = db.execute(select(library_item_evidence_state).where(
             library_item_evidence_state.c.library_item_id == item_id)).mappings().one()
@@ -162,6 +173,69 @@ def test_no_computer_waits_before_reading_an_original_digest(tmp_path: Path) -> 
         assert state["attempt_count"] == 0
         assert db.execute(select(source_admissions)).first() is None
     probe.assert_not_called()
+
+
+def test_computer_schedule_is_checked_again_after_original_admission(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.raw["remote_hosts"] = [{"host": "computer.example", "mode": "ssh", "source_roots": {"tv": str(config.source_root_map["tv"])}}]
+    item_id, _path = _source(config)
+    _discover(config)
+    rows = [{"key": "computer.example", "available": True, "capabilities": ["encode_queue"], "schedule_open": opened}
+            for opened in (True, False)]
+    analyze = Mock(side_effect=AssertionError("closed schedule"))
+    with patch("mediaforce.encoding.remote_media.run_remote_command", side_effect=AssertionError("no real SSH")), patch(
+        "mediaforce.library.source_intake._probe_payload", return_value=_probe()
+    ):
+        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config,
+            deps=EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock(),
+                evidence_host_rows=Mock(side_effect=[[row] for row in rows])))
+    with open_db(config.paths.db_path) as db:
+        state = db.execute(select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == item_id,
+            library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
+        assert state["work_status"] == "waiting_host"
+        assert state["attempt_count"] == 0
+        assert db.execute(select(source_admissions)).first() is not None
+    analyze.assert_not_called()
+
+
+def test_current_original_receipts_finish_without_a_computer(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    _measure_source_traits(config)
+    assert _discover(config) == 1
+    with patch("mediaforce.library.evidence_worker._analysis_target", side_effect=AssertionError("stored result needs no computer")), patch(
+        "mediaforce.library.source_intake._probe_payload", return_value=_probe()
+    ):
+        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config,
+            deps=EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock()))
+    with open_db(config.paths.db_path) as db:
+        state = db.execute(select(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item_id,
+            library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
+        assert state["work_status"] == "completed"
+
+
+def test_prefetch_skips_libraries_waiting_for_a_computer(tmp_path: Path) -> None:
+    from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher
+    config = _config(tmp_path)
+    config.raw["media"]["source_roots"]["movies"] = str(config.source_root_map["tv"])
+    blocked, _ = _source(config, "blocked")
+    current, _ = _source(config, "current")
+    ready, _ready_path = _source(config, "ready")
+    _discover(config)
+    with open_db(config.paths.db_path) as db:
+        db.execute(update(library_items).where(library_items.c.id.in_([current, ready])).values(media_root="movies"))
+    with open_db(config.paths.db_path) as db:
+        claim = claim_next_evidence_work(db, worker_id="test", lease_seconds=60, excluded_media_roots={"tv"})
+    assert claim is not None and claim.library_item_id == current
+    with patch("mediaforce.library.source_intake._probe_payload", return_value=_probe()), SourceAdmissionPrefetcher(
+        stop_event=None, logger=Mock(), excluded_media_roots={"tv"}
+    ) as prefetch:
+        prefetch.start(config, claim)
+        prefetch.wait()
+    with open_db(config.paths.db_path) as db:
+        assert load_source_evidence(db, ready).availability == "available"
+        assert load_source_evidence(db, blocked).availability != "available"
 
 
 def test_original_assessment_is_final_and_measurements_use_one_queue(tmp_path: Path) -> None:
@@ -207,12 +281,7 @@ def test_unknown_fingerprint_never_replaces_successful_original_traits(tmp_path:
 def test_fresh_queue_receipts_are_frozen_and_not_reanalyzed(tmp_path: Path) -> None:
     config = _config(tmp_path)
     item_id, _path = _source(config)
-    with open_db(config.paths.db_path) as database:
-        rebuild_library_item_evidence_states(database)
-        start_evidence_work(database, config, "tv/source.mkv")
-        resume_evidence_queue(database)
-    assert _work(config)
-    assert _work(config)
+    _measure_source_traits(config)
     with open_db(config.paths.db_path) as database:
         receipts = set(database.execute(select(source_measurements.c.measurement_id)).scalars())
     assert _discover(config) == 1

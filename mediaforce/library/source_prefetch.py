@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from types import TracebackType
 
@@ -19,7 +20,8 @@ from mediaforce.library.source_intake import assess_source_input
 
 
 class SourceAdmissionPrefetcher:
-    def __init__(self, *, stop_event: threading.Event | None, logger: logging.Logger, deadline: float | None = None) -> None:
+    def __init__(self, *, stop_event: threading.Event | None, logger: logging.Logger, deadline: float | None = None, excluded_media_roots: Collection[str] = ()) -> None:
+        self._excluded_media_roots = excluded_media_roots
         self._stop_event = stop_event
         self._closed = threading.Event()
         self._deadline = deadline
@@ -49,9 +51,8 @@ class SourceAdmissionPrefetcher:
         if item_id is not None:
             self._prepare(config, claim, item_id)
 
-    @staticmethod
-    def _next_item(connection: DBClient, claim: EvidenceWorkClaim) -> int | None:
-        candidate = connection.execute(next_evidence_work_query(claim.batch_id, timestamp()).where(
+    def _next_item(self, connection: DBClient, claim: EvidenceWorkClaim) -> int | None:
+        candidate = connection.execute(next_evidence_work_query(claim.batch_id, timestamp(), excluded_media_roots=self._excluded_media_roots).where(
             library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
             library_item_evidence_state.c.library_item_id != claim.library_item_id,
         )).mappings().first()

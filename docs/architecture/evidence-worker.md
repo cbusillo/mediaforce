@@ -223,12 +223,18 @@ computer, never on the controller:
   reclaimed only when its owner names this controller and its PID is positively
   gone; active, foreign and unknown owners keep their leases.
 - The background runner continues immediately after reaching a chunk budget
-  when prepared work remains runnable. It stops on a blocked queue, pause,
-  cancellation or shutdown, and discovers new inputs between continued chunks.
+  when prepared work remains runnable, recalculating the next chunk's budget.
+  Autostart also discovers inputs after a completed chunk and continues when
+  new work is ready. An explicit manual run stays within its prepared batch.
+  Pause, cancellation, shutdown and a pass waiting only for computers stop it.
 - Autostart completes the first computer-status check in its background thread
   before claiming work. Missing computers defer one file per library per pass;
   other libraries and stored-result reclassification can still continue.
-  Original admission starts only after a measuring computer is selected.
+  Unmeasured originals wait before their full admission read when no computer
+  is eligible. Selection is checked again after admission, so a schedule that
+  closes during hashing prevents measurement. Existing receipts can finish
+  without a computer. Admission prefetch uses the same library exclusions as
+  claims, keeping its one preparation slot available to runnable libraries.
 - Pause prevents new claims but does not interrupt the active safe unit.
 - The global background-work pause prevents new catalog scans, batch creation,
   queue resumes, and evidence claims. A scan or evidence update already running

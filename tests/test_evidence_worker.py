@@ -265,7 +265,7 @@ class EvidenceWorkerTests(unittest.TestCase):
             )
         runner.prepare_background_work.side_effect = RuntimeError("discovery unavailable")
         self.assertTrue(start_ready_evidence_work(self.config.paths.db_path, runner))
-        runner.start.assert_called_once_with(max_work_items=1)
+        runner.start.assert_called_once_with(max_work_items=1, auto_discover=True)
 
         runner.reset_mock()
         runner.active = True
@@ -607,6 +607,22 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(states[available]["work_status"], "completed")
         analyzer.assert_called_once()
 
+    def test_automatic_runner_stops_instead_of_deferring_every_offline_file(self) -> None:
+        from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner
+        self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+        self._insert_item(2, cadence_summary_json=None, media_fingerprint_json=None)
+        self.config.raw["remote_hosts"] = [{"host": "offline.example", "mode": "ssh", "source_roots": {"tv": str(self.media_root)}}]
+        deps = self._deps(Mock(side_effect=AssertionError("offline computer")))
+        deps.evidence_host_rows = lambda _config: [{"key": "offline.example", "available": False}]
+        runner = BoundedEvidenceRunner(self.config.paths.config_path, deps=deps)
+        runner.prepare_background_work()
+        with patch("mediaforce.encoding.remote_media.run_remote_command", side_effect=AssertionError("no real SSH")):
+            runner._run(max_work_items=25, auto_discover=True)
+        with open_db(self.config.paths.db_path) as db:
+            statuses = list(db.execute(select(library_item_evidence_state.c.work_status)).scalars())
+        self.assertEqual(statuses.count("waiting_host"), 1)
+        self.assertEqual(statuses.count("queued"), 1)
+
     def test_restart_reclaims_only_a_positively_dead_local_owner(self) -> None:
         self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
         now = datetime.now(UTC)
@@ -662,7 +678,7 @@ class EvidenceWorkerTests(unittest.TestCase):
             )
             resume_evidence_queue(connection)
         with open_db(self.config.paths.db_path) as connection:
-            claim = claim_next_evidence_work(connection, worker_id="worker-a", lease_seconds=30)
+            claim = claim_next_evidence_work(connection, worker_id="worker-a", lease_seconds=30, excluded_media_roots={"tv"})
 
         self.assertIsNotNone(claim)
         self.assertNotEqual(analysis_item_id, classification_item_id)

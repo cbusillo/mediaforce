@@ -15,7 +15,7 @@ from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, scan_runs
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.library.background_work import set_background_work_paused
-from mediaforce.library.evidence_queue import EvidenceQueueConflict, claim_next_evidence_work, resume_evidence_queue, \
+from mediaforce.library.evidence_queue import EvidenceQueueConflict, cancel_evidence_queue, claim_next_evidence_work, evidence_queue_summary, resume_evidence_queue, \
     start_evidence_work
 from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps
@@ -1189,9 +1189,40 @@ class OperatorWorkTests(unittest.TestCase):
         runner.prepare_background_work = Mock(return_value=0)
         with patch("mediaforce.web.runtime.operator_work.run_evidence_queue_until_blocked",
                    side_effect=[{"stop_reason": "item_budget"}, {"stop_reason": "blocked"}]) as run, patch("mediaforce.web.runtime.operator_work.runnable_evidence_work_count", return_value=7):
-            runner._run(max_work_items=5)
-        self.assertEqual(run.call_count, 2)
+            runner._run(max_work_items=5, auto_discover=True)
+        self.assertEqual([call.kwargs["max_work_items"] for call in run.call_args_list], [5, 7])
         runner.prepare_background_work.assert_called_once()
+
+    def test_automatic_discovery_continues_after_a_completed_chunk(self) -> None:
+        deps = EvidenceWorkerDeps(load_config=lambda _path: self.config, analyze_evidence=Mock(), logger=Mock())
+        runner = BoundedEvidenceRunner(self.config.paths.config_path, deps=deps)
+        runner.prepare_background_work = Mock()
+        with patch("mediaforce.web.runtime.operator_work.run_evidence_queue_until_blocked",
+            side_effect=[{"stop_reason": "blocked", "processed_count": 2, "status": "completed"},
+                         {"stop_reason": "blocked", "processed_count": 0}]) as run, patch(
+            "mediaforce.web.runtime.operator_work.runnable_evidence_work_count", return_value=3
+        ):
+            runner._run(max_work_items=1, auto_discover=True)
+        self.assertEqual([call.kwargs["max_work_items"] for call in run.call_args_list], [1, 3])
+
+    def test_automatic_discovery_does_not_resurrect_a_cancelled_batch(self) -> None:
+        self._insert_item()
+        with open_db(self.config.paths.db_path) as db:
+            start_evidence_work(db, self.config, "tv", limit=1)
+            resume_evidence_queue(db)
+        deps = EvidenceWorkerDeps(load_config=lambda _path: self.config, analyze_evidence=Mock(), logger=Mock())
+        runner = BoundedEvidenceRunner(self.config.paths.config_path, deps=deps)
+
+        def finish_cancelled(**_kwargs: object) -> dict[str, object]:
+            with open_db(self.config.paths.db_path) as database:
+                cancel_evidence_queue(database)
+                return {**evidence_queue_summary(database), "stop_reason": "blocked", "processed_count": 1}
+
+        with patch("mediaforce.web.runtime.operator_work.run_evidence_queue_until_blocked", side_effect=finish_cancelled) as run:
+            runner._run(max_work_items=1, auto_discover=True)
+        self.assertEqual(run.call_count, 1)
+        with open_db(self.config.paths.db_path) as db:
+            self.assertEqual(evidence_queue_summary(db)["status"], "cancelled")
 
     def test_runner_does_not_restart_after_pause_completion_or_shutdown(self) -> None:
         for reason in ("blocked", "shutdown", "time_budget"):

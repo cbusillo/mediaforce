@@ -45,7 +45,7 @@ class BoundedEvidenceRunner:
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
 
-    def start(self, *, max_work_items: int) -> bool:
+    def start(self, *, max_work_items: int, auto_discover: bool = False) -> bool:
         if max_work_items <= 0:
             raise ValueError("Evidence work item budget must be greater than zero.")
         with self._lock:
@@ -53,7 +53,7 @@ class BoundedEvidenceRunner:
                 return False
             thread = threading.Thread(
                 target=self._run,
-                kwargs={"max_work_items": max_work_items},
+                kwargs={"max_work_items": max_work_items, "auto_discover": auto_discover},
                 name="bounded-evidence-runner",
             )
             self._thread = thread
@@ -75,7 +75,7 @@ class BoundedEvidenceRunner:
                 if self._thread is thread and not thread.is_alive():
                     self._thread = None
 
-    def _run(self, *, max_work_items: int) -> None:
+    def _run(self, *, max_work_items: int, auto_discover: bool = False) -> None:
         current_thread = threading.current_thread()
         try:
             while self._stop_event is None or not self._stop_event.is_set():
@@ -85,18 +85,24 @@ class BoundedEvidenceRunner:
                     max_work_items=max_work_items,
                     stop_event=self._stop_event,
                 )
-                if (not result or result["stop_reason"] != "item_budget"
+                if (not result or result["stop_reason"] not in {"item_budget", "blocked"}
                         or (self._stop_event is not None and self._stop_event.is_set())):
                     break
-
+                if result.get("is_paused") or result.get("cancel_requested") or result.get("status") in {"paused", "cancelled", "cancel_requested"}:
+                    break
+                if result["stop_reason"] == "blocked" and (not auto_discover or not result.get("processed_count")):
+                    break
+                if auto_discover:
+                    try:
+                        self.prepare_background_work()
+                    except (OSError, RuntimeError, ValueError, SQLAlchemyError):
+                        LOGGER.exception("Original discovery failed; continuing the prepared analysis")
                 config = self._deps.load_config(self._config_path) if self._deps else load_config(self._config_path)
                 with open_db(config.paths.db_path) as connection:
-                    if runnable_evidence_work_count(connection) <= 0:
-                        break
-                try:
-                    self.prepare_background_work()
-                except (OSError, RuntimeError, ValueError, SQLAlchemyError):
-                    LOGGER.exception("Original discovery failed; continuing the prepared analysis")
+                    runnable = runnable_evidence_work_count(connection)
+                if runnable <= 0:
+                    break
+                max_work_items = min(runnable, DEFAULT_EVIDENCE_BATCH_LIMIT)
         except Exception:
             LOGGER.exception("Bounded evidence work failed")
         finally:
@@ -118,7 +124,7 @@ def start_ready_evidence_work(db_path: Path, runner: BoundedEvidenceRunner) -> b
         runnable = runnable_evidence_work_count(connection)
     if runnable <= 0:
         return False
-    return runner.start(max_work_items=min(runnable, DEFAULT_EVIDENCE_BATCH_LIMIT))
+    return runner.start(max_work_items=min(runnable, DEFAULT_EVIDENCE_BATCH_LIMIT), auto_discover=True)
 
 
 def build_operator_work_payload(

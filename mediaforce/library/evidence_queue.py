@@ -687,8 +687,8 @@ def cancel_evidence_queue(connection: DBClient, *, updated_at: str | None = None
     return evidence_queue_summary(connection)
 
 
-def next_evidence_work_query(batch_id: str, now_iso: str) -> Any:
-    return (
+def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_roots: Collection[str] = ()) -> Any:
+    query = (
         select(library_item_evidence_state.c.library_item_id, library_item_evidence_state.c.evidence_kind)
         .where(
             library_item_evidence_state.c.work_batch_id == batch_id,
@@ -704,6 +704,15 @@ def next_evidence_work_query(batch_id: str, now_iso: str) -> Any:
         )
         .limit(1)
     )
+
+    if excluded_media_roots:
+        unavailable_items = select(library_items.c.id).where(library_items.c.media_root.in_(excluded_media_roots))
+        query = query.where(or_(
+            library_item_evidence_state.c.library_item_id.not_in(unavailable_items),
+            (library_item_evidence_state.c.state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED)
+            & (func.coalesce(library_item_evidence_state.c.work_reason, "") != EVIDENCE_WORK_REASON_ORIGINAL_SOURCE),
+        ))
+    return query
 
 
 def claim_next_evidence_work(
@@ -739,15 +748,9 @@ def claim_next_evidence_work(
             return None
         # A check queued before its file was kept original would only measure what no one will encode.
         _release_kept_motion_work(connection, batch_id=batch_id, updated_at=now_iso)
-        candidate_query = next_evidence_work_query(batch_id, now_iso)
-        if excluded_media_roots:
-            unavailable_items = select(library_items.c.id).where(library_items.c.media_root.in_(excluded_media_roots))
-            candidate_query = candidate_query.where(or_(
-                library_item_evidence_state.c.library_item_id.not_in(unavailable_items),
-                (library_item_evidence_state.c.state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED)
-                & (func.coalesce(library_item_evidence_state.c.work_reason, "") != EVIDENCE_WORK_REASON_ORIGINAL_SOURCE),
-            ))
-        candidate = connection.execute(candidate_query).mappings().fetchone()
+        candidate = connection.execute(next_evidence_work_query(
+            batch_id, now_iso, excluded_media_roots=excluded_media_roots,
+        )).mappings().fetchone()
         if candidate is None:
             _refresh_evidence_queue_state(connection, batch_id=batch_id, updated_at=now_iso)
             connection.commit()
