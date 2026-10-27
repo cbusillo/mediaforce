@@ -285,7 +285,7 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
             )
 
         state, _summary = self._stored(config, item_id)
-        self.assertTrue(processed)
+        self.assertFalse(processed)
         analyzer.assert_not_called()
         remote.assert_not_called()
         self.assertEqual(state["work_status"], "waiting_host")
@@ -309,7 +309,7 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
         with open_db(config.paths.db_path) as connection:
             summary = evidence_queue_summary(connection)
             backlog = list_evidence_backlog(connection, work_status="waiting_host")
-            early_claim = claim_next_evidence_work(connection, worker_id="worker-a", lease_seconds=5)
+            early_claim = claim_next_evidence_work(connection, worker_id="worker-a", lease_seconds=5, excluded_media_roots={"tv"})
         with open_db(config.paths.db_path) as connection:
             later_claim = claim_next_evidence_work(
                 connection,
@@ -450,7 +450,6 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(state["attempt_count"], 0)
 
     def test_cli_runs_skip_a_computer_whose_encode_schedule_is_closed(self) -> None:
-        self.mini["schedule_profile"] = "never"
         config = self._config([self.mbp, self.mini])
         statuses = [
             HostStatus(
@@ -466,10 +465,13 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
             for host in (self.mbp, self.mini)
         ]
 
-        with patch("mediaforce.cli.collect_host_statuses", return_value=statuses):
+        with patch("mediaforce.web.runtime.host_status.collect_host_statuses", return_value=statuses) as probe:
+            first = _schedule_aware_evidence_host_rows(config)
+            self.assertEqual(select_evidence_host(config, first, media_root="tv"), self.mini)
+            self.mini["schedule_profile"] = "never"
             rows = _schedule_aware_evidence_host_rows(config)
-
         self.assertEqual(select_evidence_host(config, rows, media_root="tv"), self.mbp)
+        probe.assert_called_once()
 
     def test_without_encode_computers_measures_locally_as_before(self) -> None:
         config = self._config([])

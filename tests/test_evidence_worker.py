@@ -265,7 +265,7 @@ class EvidenceWorkerTests(unittest.TestCase):
             )
         runner.prepare_background_work.side_effect = RuntimeError("discovery unavailable")
         self.assertTrue(start_ready_evidence_work(self.config.paths.db_path, runner))
-        runner.start.assert_called_once_with(max_work_items=1, auto_discover=True)
+        runner.start.assert_called_once_with(max_work_items=None)
 
         runner.reset_mock()
         runner.active = True
@@ -588,21 +588,25 @@ class EvidenceWorkerTests(unittest.TestCase):
             start_evidence_work(db, self.config, "tv/show", evidence_kinds=[CADENCE_EVIDENCE_KIND])
             resume_evidence_queue(db)
             db.execute(update(library_items).where(library_items.c.id == available).values(media_root="movies"))
+        self.config.raw["remote_hosts"] = [{"host": "movies.example", "mode": "ssh", "allowed_libraries": ["movies"],
+            "source_roots": {"movies": str(self.media_root)}}]
         analyzer = Mock(return_value=json.loads(self._cadence_summary_json()))
+        deps = self._deps(analyzer)
+        deps.evidence_host_rows = lambda _config: [{"key": "movies.example", "available": True, "capabilities": ["encode_queue"]}]
 
         def target(_config: MediaforceConfig, claim: EvidenceWorkClaim, path: Path, *_args: object) -> SimpleNamespace | None:
             return SimpleNamespace(source_path=path, command_runner=None) if claim.media_root == "movies" else None
 
         with patch("mediaforce.library.evidence_worker._analysis_target", side_effect=target):
             result = run_evidence_queue_until_blocked(config_path=self.config.paths.config_path,
-                config=self.config, deps=self._deps(analyzer), max_work_items=25)
+                config=self.config, deps=deps, max_work_items=25)
         with open_db(self.config.paths.db_path) as db:
             states = {row["library_item_id"]: row for row in db.execute(
                 select(library_item_evidence_state).where(library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND)
             ).mappings()}
-        self.assertEqual(result["processed_count"], 2)
+        self.assertEqual(result["processed_count"], 1)
         self.assertEqual(states[first]["work_status"], "waiting_host")
-        self.assertEqual(states[second]["work_status"], "queued")
+        self.assertEqual(states[second]["work_status"], "waiting_host")
         self.assertEqual(states[second]["attempt_count"], 0)
         self.assertEqual(states[available]["work_status"], "completed")
         analyzer.assert_called_once()
@@ -617,11 +621,11 @@ class EvidenceWorkerTests(unittest.TestCase):
         runner = BoundedEvidenceRunner(self.config.paths.config_path, deps=deps)
         runner.prepare_background_work()
         with patch("mediaforce.encoding.remote_media.run_remote_command", side_effect=AssertionError("no real SSH")):
-            runner._run(max_work_items=25, auto_discover=True)
+            runner._run(max_work_items=None)
         with open_db(self.config.paths.db_path) as db:
             statuses = list(db.execute(select(library_item_evidence_state.c.work_status)).scalars())
-        self.assertEqual(statuses.count("waiting_host"), 1)
-        self.assertEqual(statuses.count("queued"), 1)
+        self.assertEqual(statuses.count("waiting_host"), 2)
+        self.assertNotIn("queued", statuses)
 
     def test_restart_reclaims_only_a_positively_dead_local_owner(self) -> None:
         self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)

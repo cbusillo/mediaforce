@@ -29,7 +29,6 @@ from mediaforce.library.content_kinds import season_kind_report
 from mediaforce.library.evidence_state import EVIDENCE_KINDS
 from mediaforce.library.evidence_worker import default_evidence_worker_deps, run_evidence_queue_until_blocked
 from mediaforce.library.source_evidence_backfill import restore_published_source_evidence
-from mediaforce.remote import collect_host_statuses
 from mediaforce.library.planner import recommend_item
 from mediaforce.library.run_manifests import build_run_manifest as build_db_run_manifest, \
     select_candidates as select_run_manifest_candidates, \
@@ -623,11 +622,10 @@ def _run_locked_command(
 
 
 def _schedule_aware_evidence_host_rows(config: MediaforceConfig) -> list[dict[str, Any]]:
-    """Fresh host checks, filtered through the encode queue's schedules like the web app's evidence runs."""
-    # Imported here so other commands do not load the web app.
     from mediaforce.web.app import evidence_host_rows
+    from mediaforce.web.runtime.host_status import current_host_statuses
 
-    return evidence_host_rows(config, collect_statuses=collect_host_statuses)
+    return evidence_host_rows(config, collect_statuses=current_host_statuses)
 
 
 def _run_evidence_command(config: MediaforceConfig, args: argparse.Namespace) -> int:

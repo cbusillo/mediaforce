@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Sequence
 
-from sqlalchemy import bindparam, case, func, or_, select, update
+from sqlalchemy import and_, bindparam, case, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
@@ -20,6 +20,7 @@ from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.evidence_acquisition import DEFAULT_UNCERTAINTY_FRONTIER_LIMIT, \
     FingerprintAcquisitionPlan, load_fingerprint_acquisition_items, plan_fingerprint_acquisition
+from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, EvidenceKind
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
@@ -35,6 +36,8 @@ EVIDENCE_WORK_PRIORITY_OPERATOR = 50
 EVIDENCE_WORK_PRIORITY_REPRESENTATIVE = 70
 EVIDENCE_WORK_REASON_ORIGINAL_SOURCE = "original_source_measurement"
 EVIDENCE_BACKGROUND_RETRY_SECONDS = 15 * 60
+
+SOURCE_ROOT_WAIT_REASON = "Source root is unavailable; evidence work will resume without consuming an attempt."
 
 EVIDENCE_QUEUE_ACTIVE_STATUSES = ("queued", "running", "paused", "cancel_requested")
 EVIDENCE_WORK_CLAIMABLE_STATUSES = ("queued", "retry_wait", "waiting_source", "waiting_host")
@@ -705,14 +708,61 @@ def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_root
         .limit(1)
     )
 
-    if excluded_media_roots:
-        unavailable_items = select(library_items.c.id).where(library_items.c.media_root.in_(excluded_media_roots))
-        query = query.where(or_(
-            library_item_evidence_state.c.library_item_id.not_in(unavailable_items),
-            (library_item_evidence_state.c.state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED)
-            & (func.coalesce(library_item_evidence_state.c.work_reason, "") != EVIDENCE_WORK_REASON_ORIGINAL_SOURCE),
-        ))
-    return query
+    blocked_items = select(library_items.c.id).where(library_items.c.media_root.in_(excluded_media_roots))
+    source_waiting_items = select(library_items.c.id).where(
+        library_items.c.media_root.in_(_waiting_roots_query(batch_id, now_iso, "waiting_source"))
+    )
+    return query.where(
+        or_(~_evidence_requires_computer(), library_item_evidence_state.c.library_item_id.not_in(blocked_items)),
+        or_(~_evidence_requires_source(), library_item_evidence_state.c.library_item_id.not_in(source_waiting_items)),
+    )
+
+
+def _evidence_requires_computer() -> Any:
+    return and_(
+        library_item_evidence_state.c.state != EVIDENCE_STATE_CURRENT,
+        or_(library_item_evidence_state.c.state != EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
+            func.coalesce(library_item_evidence_state.c.work_reason, "") == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE),
+    )
+
+
+def _evidence_requires_source() -> Any:
+    return or_(
+        func.coalesce(library_item_evidence_state.c.work_reason, "") == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
+        library_item_evidence_state.c.state.not_in((EVIDENCE_STATE_CURRENT, EVIDENCE_STATE_CLASSIFICATION_REQUIRED)),
+    )
+
+
+def _waiting_roots_query(batch_id: str, now_iso: str, work_status: str) -> Any:
+    waits = library_item_evidence_state.alias("resource_waits")
+    items = library_items.alias("waiting_items")
+    return select(items.c.media_root).select_from(items.join(waits, waits.c.library_item_id == items.c.id)).where(
+        waits.c.work_batch_id == batch_id,
+        waits.c.work_status == work_status,
+        waits.c.retry_not_before > now_iso,
+    ).distinct()
+
+
+def waiting_evidence_host_roots(connection: DBClient, *, batch_id: str | None = None) -> frozenset[str]:
+    batch = batch_id if batch_id is not None else str(load_evidence_queue_state(connection).get("batch_id") or "")
+    return frozenset(connection.execute(_waiting_roots_query(batch, timestamp(), "waiting_host")).scalars())
+
+
+def _mark_unavailable_evidence_work(connection: DBClient, batch_id: str, now_iso: str, roots: Collection[str]) -> None:
+    source_roots = frozenset(connection.execute(_waiting_roots_query(batch_id, now_iso, "waiting_source")).scalars())
+    for blocked, status, required, reason in (
+        (roots, "waiting_host", _evidence_requires_computer(), EVIDENCE_HOST_WAIT_REASON),
+        (source_roots, "waiting_source", _evidence_requires_source(), SOURCE_ROOT_WAIT_REASON),
+    ):
+        if not blocked:
+            continue
+        blocked_items = select(library_items.c.id).where(library_items.c.media_root.in_(blocked))
+        connection.execute(update(library_item_evidence_state).where(
+            library_item_evidence_state.c.work_batch_id == batch_id,
+            library_item_evidence_state.c.work_status == "queued",
+            library_item_evidence_state.c.library_item_id.in_(blocked_items),
+            required,
+        ).values(work_status=status, last_error=reason, updated_at=now_iso))
 
 
 def claim_next_evidence_work(
@@ -746,6 +796,7 @@ def claim_next_evidence_work(
         if running_count:
             connection.rollback()
             return None
+        _mark_unavailable_evidence_work(connection, batch_id, now_iso, excluded_media_roots)
         # A check queued before its file was kept original would only measure what no one will encode.
         _release_kept_motion_work(connection, batch_id=batch_id, updated_at=now_iso)
         candidate = connection.execute(next_evidence_work_query(

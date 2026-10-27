@@ -927,3 +927,16 @@ def test_a_standing_storage_question_survives_a_failed_check(config: MediaforceC
         assert current["first_failure_at"] == first["first_failure_at"]
         assert current["reason"] == failed.message
         assert not current["network_absent"]
+
+
+def test_synchronous_raw_status_cache_starts_with_real_results_and_refreshes(config: MediaforceConfig) -> None:
+    with patch_attr(host_status, "collect_host_statuses", return_value=[status()]) as probe, patch_attr(
+        host_status.time, "monotonic", return_value=100.0,
+    ) as clock:
+        assert not host_status.current_host_statuses(config)[0].available
+        assert not host_status.current_host_statuses(config)[0].available
+        probe.assert_called_once()
+        clock.return_value += host_status._HOST_STATUS_CACHE_TTL_SECONDS + 1
+        probe.return_value = [status(available=True)]
+        assert host_status.current_host_statuses(config)[0].available
+        assert probe.call_count == 2
