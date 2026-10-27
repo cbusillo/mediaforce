@@ -34,22 +34,21 @@ Local checks apply before committing. CI checks apply before ready or merge.
 - JetBrains inspection uses language-owned lanes from `.github/github.json`.
   PyCharm is the required Python lane. WebStorm runs as a non-blocking frontend
   lane while its Svelte signal is qualified against the native checks.
-- Linked-worktree Python IDE state, frontend dependencies, Svelte generated
-  state, and the named `Mediaforce` inspection profile are produced by
-  `scripts/prepare-jetbrains-inspection.sh`. Generated state stays ignored and
-  must not be committed. Frontend dependencies are reinstalled only when the
-  committed npm manifests change, preventing preparation from invalidating an
-  IDE snapshot on every inspection run. A missing npm lock marker forces repair;
-  required Svelte generation runs without the package lifecycle's error fallback
-  and must succeed before the dependency stamp is written. Preparation creates one pyproject-owned
-  exact-root Python module with a provisional worktree SDK name. The locked
-  development group supplies pytest so test imports resolve in that SDK. Duplicate
-  suffixed modules are preserved and stop preparation for review. Preparation
-  does not register the SDK: the inspection step verifies registration and may
-  perform its bounded first-open readiness retry. The named profile is copied
-  into both project roots and explicitly requested by the inspection helper;
-  WebStorm opens
-  `frontend/` through its lane `projectPath`.
+- Native PyCharm prepares Python from `qualityGate.inspection.prepare.python`
+  inside its private snapshot. It creates the declared Python environment and
+  test roots and runs locked uv sync, including the development group for pytest.
+  A fresh source worktree needs no `.venv` or generated `.idea` files. The helper
+  registers a temporary SDK in the isolated worker and retires it after the run.
+  The tracked `config/jetbrains/Mediaforce.xml` is requested directly; no profile
+  copies or local preparation script are needed.
+- The former shell preparation script and its state helper are retired: their
+  only production caller was the inspection metadata. Native preparation owns
+  the Python model, so desktop module normalization and duplicate-module checks
+  are unnecessary. `requiredGeneratedState` is ignored by the native helper and
+  is removed. Frontend dependencies and Svelte state come from the frontend's
+  own npm gates. The nested WebStorm lane remains non-blocking and UNKNOWN;
+  Svelte coverage stays UNKNOWN without a Svelte plugin, per the Director's
+  decision on [codex-skills#2803](https://github.com/cbusillo/codex-skills/issues/2803).
 - `npm --prefix frontend run check` is the semantic authority for Svelte files,
   with `npm --prefix frontend run lint` covering ESLint and formatting policy.
 - A clean WebStorm lane does not replace the frontend checks. WebStorm findings
@@ -60,8 +59,7 @@ Local checks apply before committing. CI checks apply before ready or merge.
   style/proofreading findings proven noisy by the bounded probe. It explicitly
   keeps ESLint, missing-alt, and unused-symbol inspections enabled; changes to
   that baseline require another clean/defect qualification.
-- A changed-file inspection with no required Python files returns the helper's
-  explicit `no_required_lane_files` result rather than claiming PyCharm covered
-  frontend source.
+- Frontend-only selections stay UNKNOWN on the native helper while the nested
+  WebStorm model is unsupported; they do not claim PyCharm coverage.
 - Browser validation remains required for user-visible frontend changes even
   when all static checks pass.

@@ -49,18 +49,15 @@
     },
     "inspection": {
       "scopePreference": ["changed_files", "directory", "whole_project"],
-      "profile": "Mediaforce",
-      "prepare": "bash scripts/prepare-jetbrains-inspection.sh",
-      "requiredGeneratedState": [
-        ".venv",
-        ".idea/mediaforce.iml",
-        ".idea/modules.xml",
-        ".idea/misc.xml",
-        ".idea/inspectionProfiles/Mediaforce.xml",
-        "frontend/.idea/inspectionProfiles/Mediaforce.xml",
-        "frontend/node_modules",
-        "frontend/.svelte-kit"
-      ],
+      "profile": "config/jetbrains/Mediaforce.xml",
+      "prepare": {
+        "python": {
+          "version": "3.13",
+          "moduleName": "mediaforce",
+          "testRoots": ["tests"],
+          "sync": true
+        }
+      },
       "lanes": [
         {
           "id": "python",

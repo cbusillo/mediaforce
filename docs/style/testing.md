@@ -35,10 +35,10 @@ must not assert or depend on.
 - Keep test doubles and fixtures typed enough to stay inspection- and Ruff-clean
 - Prefer real reusable helpers over repeated ad hoc setup in each test
 
-Inspection preparation uses Python tests with pinned UV, npm and Node stubs for
-orchestration, profile byte preservation and dependency-cache invalidation.
-The existing Vitest lane exercises the actual JavaScript module normalization
-and manifest digest, including its CLI, using temporary inputs.
+Inspection preparation is qualified through the isolated native helper on a fresh
+worktree without a local `.venv`: a planted Python defect must return RED and
+its correction GREEN. The shared helper owns preparation tests; Mediaforce
+keeps the structured declaration and tracked profile.
 
 Development launcher behavior tests use temporary checkouts and pipe-owned
 server fixtures. The fixtures expose native PGIDs through a pinned process
