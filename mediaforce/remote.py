@@ -434,6 +434,7 @@ def run_remote_command(
         *,
         idle_timeout: float | None = None,
         wake_before_connect: bool = True,
+        control_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``command`` on ``host``; with ``idle_timeout``, a run silent that long is stopped."""
     return run_remote_command_impl(
@@ -444,6 +445,7 @@ def run_remote_command(
         process_controller=process_controller,
         idle_timeout=idle_timeout,
         wake_before_connect=wake_before_connect,
+        control_path=control_path,
         ssh_target_for_host=ssh_target_for_host,
         remote_shell_path_export_line=remote_shell_path_export_line,
         run_remote_ssh=_run_remote_ssh,
@@ -576,6 +578,7 @@ def _run_remote_ssh(
         wake_before_connect: bool = True,
         process_controller: ManagedProcessController | None = None,
         idle_timeout: float | None = None,
+        control_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return _run_remote_ssh_impl(
         host,
@@ -587,6 +590,7 @@ def _run_remote_ssh(
         wake_before_connect=wake_before_connect,
         process_controller=process_controller,
         idle_timeout=idle_timeout,
+        control_path=control_path,
         ensure_remote_awake_for_ssh=_ensure_remote_awake_for_ssh,
         ssh_client_options_func=ssh_client_options,
         subprocess_run=_run_subprocess_text,

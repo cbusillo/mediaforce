@@ -2,6 +2,9 @@ import inspect
 import json
 import math
 import subprocess
+import tempfile
+from copy import deepcopy
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 from mediaforce.core import utils
@@ -38,11 +41,15 @@ class RemoteMediaCommands:
     bounded number of frames or seconds, so whatever is left there finishes on its own shortly after.
     """
 
-    def __init__(self, host: dict[str, object]) -> None:
-        self.host = dict(host)
+    def __init__(self, host: dict[str, object], *, control_path: Path | None = None) -> None:
+        self.host = deepcopy(host)
         self.host_key = ssh_target_for_host(self.host)
         self.host_label = str(self.host.get("label") or "").strip() or self.host_key
         self._ffmpeg_version: str | None = None
+        self.control_path = control_path
+
+    def begin_claim(self) -> None:
+        self._ffmpeg_version = None
 
     def run(
             self,
@@ -56,8 +63,9 @@ class RemoteMediaCommands:
             command,
             math.ceil(timeout_seconds) + REMOTE_CONNECT_ALLOWANCE_SECONDS,
             process_controller=process_controller,
+            **({"control_path": self.control_path} if self.control_path is not None else {}),
         )
-        if ssh_connection_lost(result.returncode, result.stderr):
+        if (self.control_path is not None and result.returncode == 255) or ssh_connection_lost(result.returncode, result.stderr):
             # A lost connection says nothing about the file, so it must not be recorded as a failed measurement.
             raise RemoteMediaHostUnavailableError(f"The connection to {self.host_label} was lost.")
         return result
@@ -72,6 +80,7 @@ class RemoteMediaCommands:
                 ["ffmpeg", "-version"],
                 REMOTE_FFMPEG_VERSION_TIMEOUT_SECONDS,
                 process_controller=process_controller,
+                **({"control_path": self.control_path} if self.control_path is not None else {}),
             )
         except ProcessCancelledError:
             raise
@@ -110,3 +119,33 @@ class RemoteMediaCommands:
             "host_label": self.host_label,
         }
 
+
+class RemoteMediaConnections(AbstractContextManager):
+    """Own only this worker's short-lived SSH masters; never use the user's control sockets."""
+
+    def __init__(self) -> None:
+        self._connections: list[tuple[RemoteMediaCommands, tempfile.TemporaryDirectory[str]]] = []
+
+    def runner(self, host: dict[str, object]) -> RemoteMediaCommands:
+        for runner, _directory in self._connections:
+            if runner.host == host:
+                runner.begin_claim()
+                return runner
+        directory = tempfile.TemporaryDirectory(prefix="mf-ssh-", dir="/tmp")
+        runner = RemoteMediaCommands(host, control_path=Path(directory.name) / "control")
+        self._connections.append((runner, directory))
+        return runner
+
+    def __exit__(self, *_exc: object) -> None:
+        for runner, directory in self._connections:
+            try:
+                if runner.control_path is None or not runner.control_path.exists():
+                    continue
+                subprocess.run(["ssh", "-o", "BatchMode=yes", "-S", str(runner.control_path), "-O", "exit", runner.host_key],
+                               capture_output=True, text=True, timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                # The owned master also expires after 30 idle seconds if it cannot answer.
+                pass
+            finally:
+                directory.cleanup()
+        self._connections.clear()

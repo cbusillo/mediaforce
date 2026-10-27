@@ -31,6 +31,16 @@ counts meeting the expected available frames, without reducing the decode cap.
 Audio and
 cadence retain their measurements and safety decisions.
 
+The worker reuses an SSH master per unchanged encode-computer configuration
+within its run. Sockets live in private short temporary directories and expire
+after 30 idle seconds; the worker closes only its own masters when the run ends.
+An existing socket avoids repeating the wake probe, while each command still
+holds its wake assertion and enforces the current schedule deadline. Host
+eligibility and ffmpeg's version are refreshed for every claim. Source checks
+before and after measurement are unchanged. A multiplexed status 255, including
+one with empty stderr, is ambiguous between a remote exit and a lost master;
+the file waits for its computer and retries rather than storing bad evidence.
+
 ## Durable state
 
 `library_item_evidence_state` owns one independent work unit for each

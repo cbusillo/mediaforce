@@ -424,6 +424,26 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(state["work_status"], "cancelled")
         self.assertEqual(state["attempt_count"], 0)
 
+    def test_silent_multiplexed_disconnect_defers_without_a_bad_receipt(self) -> None:
+        config = self._config([self.mini])
+        item_id = self._prepare_cadence_item(config)
+        remote = FakeEncodeComputers(controller_source=self._source_path(),
+                                     idet_result=subprocess.CompletedProcess(["ffmpeg"], 255, "", ""))
+        deps = self._deps(config, probe_evidence, host_rows=[_row(self.mini)])
+        deps.remote_commands = lambda host: RemoteMediaCommands(host, control_path=self.project_root / "owned-control")
+
+        def shared_remote(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            kwargs.pop("control_path")
+            return remote(*args, **kwargs)
+
+        with self._no_local_media_commands(), patch("mediaforce.encoding.remote_media.run_remote_command", shared_remote):
+            process_evidence_queue_once(config_path=config.paths.config_path, deps=deps)
+        state, summary = self._stored(config, item_id)
+        self.assertIsNone(summary)
+        self.assertEqual(state["work_status"], "waiting_host")
+        self.assertEqual(state["attempt_count"], 0)
+        self.assertIsNone(state["lease_expires_at"])
+
     def test_lost_connection_waits_for_the_computer_instead_of_failing_the_file(self) -> None:
         config = self._config([self.mini])
         item_id = self._prepare_cadence_item(config)
