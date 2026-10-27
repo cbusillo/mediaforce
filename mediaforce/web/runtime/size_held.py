@@ -4,19 +4,22 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow, open_db
-from mediaforce.core.db_tables import encode_jobs, item_events, library_items, run_manifests, staged_artifacts
+from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, \
+    run_manifests, staged_artifacts
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding.encode_queue import load_active_encode_jobs_for_prefix
-from mediaforce.encoding.staging import FINAL_SIZE_GOAL_CHECK, partial_output_path
+from mediaforce.encoding.staging import partial_output_path
+from mediaforce.library.evidence_state import library_item_source_fingerprint
 from mediaforce.library.media_scopes import path_matches_scope
 from mediaforce.library.remake_intents import (
     INTENT_KEY,
@@ -26,7 +29,7 @@ from mediaforce.library.remake_intents import (
     save_remake_intent,
     stored_validation as _stored_validation,
 )
-from mediaforce.library.staged_validation import staged_validation_outcome
+from mediaforce.library.staged_validation import missed_only_final_size, staged_validation_outcome
 from mediaforce.tuning.calibration_jobs import EXECUTION_ACTIVE_JOB_STATUSES, load_latest_job
 from mediaforce.web.runtime.encode_runtime import (
     remove_stale_staging_path, staged_output_cleanup_blocker, staged_output_cleanup_target,
@@ -35,10 +38,12 @@ from mediaforce.web.runtime.ambiguous_motion import _legacy_queue_mode
 from mediaforce.web.runtime.folder_actions import _final_size_requeue_contract_blocker, staged_requeue_size_blocker, \
     staged_run_items
 from mediaforce.web.runtime.manifest_reads import ManifestReader, read_manifest
+from mediaforce.web.runtime.motion_keep import KEPT_ORIGINAL_EVENT
 
 logger = logging.getLogger(__name__)
 
 NOT_HELD_MESSAGE = "This file is no longer waiting for a decision about its size."
+CHECK_FAILED_KEEP_REASON = "check_failed"
 
 ValidateItemsFn = Callable[[str, Collection[int]], dict[str, Any]]
 CurrentApprovalFn = Callable[[str], dict[str, Any] | None]
@@ -81,7 +86,7 @@ def decide_size_held_file(
         ):
             return {"ok": False, "message": NOT_HELD_MESSAGE}
         held = staged_validation_outcome(row["validation_json"]) == "size_held"
-        final_size_miss = _missed_only_final_size(validation)
+        final_size_miss = missed_only_final_size(validation)
         if not held and not final_size_miss:
             return {"ok": False, "message": NOT_HELD_MESSAGE}
         intent = remake_intent(row)
@@ -123,8 +128,12 @@ def remake_staged_files(
         now_iso: Callable[[], str],
         queue_items: QueueItemsFn,
         current_approval: CurrentApprovalFn,
+        retry_failed_check: bool = False,
 ) -> dict[str, Any]:
-    """Recheck requested files independently and queue compatible remakes together."""
+    """Recheck requested files independently and queue compatible remakes together.
+
+    ``retry_failed_check`` lets the automatic publisher remake a copy that failed a check other than its size goal.
+    """
     groups: dict[tuple[str, str, str], list[int]] = {}
     left_out: list[dict[str, Any]] = []
     removed: list[int] = []
@@ -141,14 +150,17 @@ def remake_staged_files(
                 recovery = None
                 if row is not None and path_matches_scope(str(row["rel_path"] or ""), prefix):
                     recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval,
-                                                    manifest_reader=manifest_reader)
+                                                    manifest_reader=manifest_reader, retry_failed_check=retry_failed_check)
                 reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
                 if recovery is None or reason:
-                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
+                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
+                                     "busy": bool(recovery and recovery["busy"])})
                     continue
                 intent = remake_intent(row)
                 if intent.get("state") != "removed" and (reason := staged_output_cleanup_blocker(connection, config, row)):
-                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
+                    # Something still owns the copy's paths; that clears once its work ends.
+                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
+                                     "busy": True})
                     continue
                 if not intent or requested_copy_is_present(row):
                     run_prefix, mode, _available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
@@ -161,18 +173,20 @@ def remake_staged_files(
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
                 row = _load_remake_row(connection, item_id)
                 recovery = staged_remake_details(connection, row, prefix, current_approval=current_approval,
-                                                manifest_reader=manifest_reader)
+                                                manifest_reader=manifest_reader, retry_failed_check=retry_failed_check)
                 reason = NOT_HELD_MESSAGE if recovery is None else str(recovery["blocked_reason"])
                 if not reason and remake_intent(row) != intent:
                     reason = "This file’s saved request changed. Refresh it before retrying."
                 if not reason and recovery is not None and recovery["approval"] != intent["approval"]:
                     reason = "The approved settings changed before removal. Refresh before retrying. Nothing was removed."
+                busy = bool(recovery and recovery["busy"])
                 if not reason and intent.get("state") != "removed" and not _remove_finished_output(config, row):
-                    reason = "Mediaforce could not remove the finished copy yet. Try again."
+                    reason, busy = "Mediaforce could not remove the finished copy yet. Try again.", True
                 if recovery is None or reason:
                     if request_saved and remake_intent(row) == intent:
                         save_remake_intent(connection, row, {}, now=now_iso())
-                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason})
+                    left_out.append({"library_item_id": item_id, "name": names[item_id], "reason": reason,
+                                     "busy": busy})
                     continue
                 removed.append(item_id)
                 run_prefix, mode = str(intent["prefix"]), str(intent["mode"])
@@ -235,10 +249,52 @@ def remake_staged_files(
     }
 
 
-def _missed_only_final_size(validation: Mapping[str, Any]) -> bool:
-    failed = [str(object_dict(check).get("message") or "") for check in object_list(validation.get("checks"))
-              if object_dict(check).get("passed") is False]
-    return validation.get("passed") is False and failed == [FINAL_SIZE_GOAL_CHECK]
+def keep_original_after_failed_checks(
+        config: MediaforceConfig, library_item_id: int, *, failed_attempts: int, now_iso: Callable[[], str],
+) -> str:
+    """Keep the original of a file whose copies kept failing their check, then remove its last copy.
+
+    The keep is bound to the current source like any other, so a changed source lapses it. Returns why the
+    failed copy is still there when it cannot be removed yet; the caller tries again on a later pass.
+    """
+    with open_db(config.paths.db_path) as connection:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        row = _load_remake_row(connection, library_item_id)
+        source = connection.execute(
+            select(library_items).where(library_items.c.id == library_item_id)
+        ).mappings().fetchone()
+        if row is None or source is None or row["promoted_at"] is not None:
+            return ""
+        fingerprint = library_item_source_fingerprint(cast(dict[str, Any], dict(source)))
+        if not fingerprint:
+            return "Mediaforce can't identify the source of this file, so it can't keep the original."
+        stored = connection.execute(
+            select(motion_keep_decisions.c.source_fingerprint)
+            .where(motion_keep_decisions.c.library_item_id == library_item_id)
+        ).scalar_one_or_none()
+        if stored != fingerprint:
+            now = now_iso()
+            keep = {"source_fingerprint": fingerprint, "reason_code": CHECK_FAILED_KEEP_REASON,
+                    "prefix": str(source["parent_dir"]), "kept_at": now}
+            connection.execute(
+                sqlite_insert(motion_keep_decisions)
+                .values(library_item_id=library_item_id, **keep)
+                .on_conflict_do_update(index_elements=[motion_keep_decisions.c.library_item_id], set_=keep)
+            )
+            connection.execute(item_events.insert().values(
+                library_item_id=library_item_id, created_at=now, event_type=KEPT_ORIGINAL_EVENT,
+                details_json=json.dumps({**keep, "rel_path": source["rel_path"], "failed_attempts": failed_attempts},
+                                        sort_keys=True),
+            ))
+    if not _remove_finished_output(config, row):
+        return "The original is kept, but Mediaforce could not remove the failed copy yet. It will try again."
+    with open_db(config.paths.db_path) as connection:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        connection.execute(delete(staged_artifacts).where(
+            staged_artifacts.c.library_item_id == library_item_id, staged_artifacts.c.promoted_at.is_(None)))
+        connection.execute(update(library_items).where(library_items.c.id == library_item_id)
+                           .values(status="discovered", updated_at=now_iso()))
+    return ""
 
 
 def staged_remake_details(
@@ -249,8 +305,9 @@ def staged_remake_details(
         current_approval: CurrentApprovalFn,
         settings_history: Collection[int] | None = None,
         manifest_reader: ManifestReader = read_manifest,
+        retry_failed_check: bool = False,
 ) -> dict[str, Any] | None:
-    """Offer recovery only for a size-only failure or missing settings history.
+    """Offer recovery only for a size-only failure or missing settings history, or a failed check when retrying it.
 
     The action calls this again under its write lock before removing the output.
     """
@@ -262,14 +319,16 @@ def staged_remake_details(
     if requested_copy_is_present(row):
         intent = {}
     validation = _stored_validation(row)
-    held = staged_validation_outcome(row["validation_json"]) == "size_held"
-    final_size = _missed_only_final_size(validation)
+    outcome = staged_validation_outcome(row["validation_json"])
+    held = outcome == "size_held"
+    final_size = missed_only_final_size(validation)
+    failed_check = retry_failed_check and outcome in {"failed", "remaking"} and not final_size
     item_id = int(row["library_item_id"])
     missing_policy = validation.get("passed") is True and item_id not in (
         settings_history if settings_history is not None
         else staged_run_items(connection, {item_id}, manifest_reader=manifest_reader)
     )
-    if not (held or final_size or missing_policy or intent):
+    if not (held or final_size or missing_policy or intent or failed_check):
         return None
     run_prefix, _mode, context_available = _run_context(connection, row, prefix, manifest_reader=manifest_reader)
     blocked_reasons: list[str] = []
@@ -315,6 +374,8 @@ def staged_remake_details(
         blocked_reasons.append(
             "The compressed copy points at the original. Check this file’s paths before making it again."
         )
+    # Work still running here clears by itself; every other blocker needs someone to act.
+    lasting_blockers = len(blocked_reasons)
     sample = load_latest_job(connection, run_prefix)
     if sample and sample.get("status") in EXECUTION_ACTIVE_JOB_STATUSES:
         blocked_reasons.append("Mediaforce is still sampling here. Make this file again once that sample finishes.")
@@ -325,8 +386,11 @@ def staged_remake_details(
         busy_ids = _queued_run_item_ids(active_jobs, manifest_reader=manifest_reader)
         if busy_ids is None or int(row["library_item_id"]) in busy_ids:
             blocked_reasons.append("A queued run may still make this file. Wait for it before making this file again.")
-    return {"reason": intent.get("reason") or ("size_held" if held else "final_size" if final_size else "settings_history"),
-            "blocked_reason": " ".join(blocked_reasons), "approval": approval}
+    reason = ("size_held" if held else "final_size" if final_size else "check_failed" if failed_check
+              else "settings_history")
+    return {"reason": intent.get("reason") or reason,
+            "blocked_reason": " ".join(blocked_reasons), "approval": approval,
+            "busy": not lasting_blockers and len(blocked_reasons) > lasting_blockers}
 
 
 def _queued_run_item_ids(jobs: list[dict[str, Any]], *, manifest_reader: ManifestReader) -> set[int] | None:

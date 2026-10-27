@@ -712,7 +712,7 @@ def promote_one_item(
     # The owner's choice to keep the original wins over any copy made before or despite it, even forced.
     if library_item_ids_kept_original(connection, [int(item["library_item_id"])]):
         raise PromotionWaiting(
-            "You chose to keep this file original for its motion pattern. Undo that on its page to publish this copy.",
+            "This file is kept original. Undo that on its page to publish this copy.",
             reason_code="kept_original",
         )
     validation = json.loads(stage_row["validation_json"] or "{}")

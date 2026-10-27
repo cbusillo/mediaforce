@@ -287,6 +287,11 @@ def derive_item_workflow_state(
     elif status == "encoding":
         state = "encoding"
         lane = "processing"
+    elif validation == "remaking":
+        # Mediaforce remakes a failed copy by itself; that is encoding work, not a question for the owner.
+        state = "encode_candidate"
+        lane = "encode"
+        blocker = "Its compressed copy didn't pass its check, so Mediaforce is making it again."
     elif validation is not None:
         state = "blocked"
         lane = "blocked"
