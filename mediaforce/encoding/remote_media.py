@@ -222,6 +222,7 @@ class _EvidenceSSHMaster:
         self.control_path.unlink(missing_ok=True)
         self.directory.rmdir()
         self.closed = True
+        self.check_failure()
 
 
 class RemoteMediaConnections(AbstractContextManager):

@@ -1,6 +1,7 @@
 import subprocess
 import time
 import unittest
+from contextlib import suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -55,7 +56,8 @@ class EvidenceConnectionTests(unittest.TestCase):
         finally:
             # The unproven controller is a fixture; no command was started.
             connection.controller = original
-            connection.close()
+            with suppress(ProcessDeadlineEnforcementError):
+                connection.close()
 
     def test_version_check_does_not_turn_containment_failure_into_host_wait(self) -> None:
         error = ProcessDeadlineEnforcementError('fixture unknown cleanup')
@@ -109,7 +111,29 @@ class EvidenceConnectionTests(unittest.TestCase):
             self.assertTrue(connection.control_path.parent.exists())
         finally:
             connection.controller = original
-            pool.__exit__(None, None, None)
+            with suppress(ProcessDeadlineEnforcementError):
+                pool.__exit__(None, None, None)
+
+    def test_containment_failure_recorded_during_join_is_reported_by_close(self) -> None:
+        pool = RemoteMediaConnections()
+        runner = pool.runner({'host': 'fixture.invalid', 'label': 'old'})
+        connection = runner.connection
+        assert connection is not None
+        original = connection.controller
+        error = ProcessDeadlineEnforcementError('fixture status failed while closing')
+        connection.controller = Mock(cleanup_unproven=False)
+        connection.thread = Mock(is_alive=Mock(return_value=False),
+            join=Mock(side_effect=lambda **_: setattr(connection, 'error', error)))
+        try:
+            with self.assertRaises(ProcessDeadlineEnforcementError) as caught:
+                pool.runner({'host': 'fixture.invalid', 'label': 'new'})
+            self.assertIs(caught.exception, error)
+            self.assertTrue(connection.closed)
+            self.assertFalse(connection.control_path.parent.exists())
+        finally:
+            connection.controller = original
+            with suppress(ProcessDeadlineEnforcementError):
+                pool.__exit__(None, None, None)
 
     def test_tool_version_is_refreshed_between_claims(self) -> None:
         runner = RemoteMediaCommands({'host': 'fixture.invalid'})
