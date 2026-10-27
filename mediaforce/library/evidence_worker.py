@@ -16,7 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db
-from mediaforce.core.db_tables import library_item_evidence_state, library_items
+from mediaforce.core.db_tables import library_items
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, reclassify_cadence_summary
@@ -26,14 +26,14 @@ from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, collect
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host
 from mediaforce.library.evidence_queue import EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
     current_library_item_source_fingerprint, evidence_queue_summary, heartbeat_evidence_work, \
-    load_evidence_queue_state, load_evidence_work_claim, mark_evidence_attempt_started, recover_evidence_queue, \
+    load_evidence_queue_state, load_evidence_work_claim, mark_evidence_attempt_started, original_intake_hold, recover_evidence_queue, \
     transition_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, parse_evidence_summary, \
     sync_library_item_evidence_state
 from mediaforce.library.probe import probe_evidence
-from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.source_evidence import load_source_evidence, observe_file, pending_source_operation, record_current_measurement
+from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher
 
 EVIDENCE_JOB_LEASE_SECONDS = 45
 EVIDENCE_JOB_HEARTBEAT_SECONDS = 5.0
@@ -65,6 +65,7 @@ class EvidenceWorkerDeps:
     source_retry_delay_seconds: int = EVIDENCE_SOURCE_RETRY_DELAY_SECONDS
     evidence_host_rows: Callable[[MediaforceConfig], list[dict[str, Any]]] = collect_evidence_host_rows
     shutdown_event: threading.Event | None = None
+    prepare_next_original: Callable[[MediaforceConfig, EvidenceWorkClaim], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,23 +128,27 @@ def run_evidence_queue_until_blocked(
     processed = 0
     started_at = time.monotonic()
     stop_reason = "blocked"
-    while processed < max_work_items:
-        if stop_event is not None:
-            if stop_event.is_set():
+    stop_requested = stop_event.is_set if stop_event is not None else lambda: False
+    with SourceAdmissionPrefetcher(stop_event=stop_event, logger=runtime_deps.logger,
+                                 deadline=started_at + max_seconds if max_seconds is not None else None) as prefetch:
+        while processed < max_work_items:
+            if stop_requested():
                 stop_reason = "shutdown"
                 break
-        if max_seconds is not None and time.monotonic() - started_at >= max_seconds:
-            stop_reason = "time_budget"
-            break
-        if not process_evidence_queue_once(
-            config_path=config_path,
-            config=current_config,
-            deps=runtime_deps,
-        ):
-            break
-        processed += 1
-        if processed >= max_work_items:
-            stop_reason = "item_budget"
+            if max_seconds is not None and time.monotonic() - started_at >= max_seconds:
+                stop_reason = "time_budget"
+                break
+            runtime_deps = replace(runtime_deps, prepare_next_original=prefetch.start if processed + 1 < max_work_items else None)
+            if not process_evidence_queue_once(
+                config_path=config_path,
+                config=current_config,
+                deps=runtime_deps,
+            ):
+                break
+            prefetch.wait()
+            processed += 1
+            if processed >= max_work_items:
+                stop_reason = "item_budget"
     with open_db(current_config.paths.db_path) as connection:
         summary = evidence_queue_summary(connection)
     summary["processed_count"] = processed
@@ -215,23 +220,21 @@ def _run_evidence_claim(
 
             def guard_intake() -> None:
                 nonlocal last_guard_check
-                if deps.shutdown_event is not None and deps.shutdown_event.is_set():
-                    raise EvidenceWorkDeferred("Original checks will resume after the app restarts")
+                shutting_down = deps.shutdown_event is not None and deps.shutdown_event.is_set()
                 now = time.monotonic()
-                if now - last_guard_check < 1:
+                if now - last_guard_check < 1 and not shutting_down:
                     return
                 last_guard_check = now
                 with open_db(config.paths.db_path) as database:
-                    state = load_evidence_queue_state(database)
-                    if background_work_is_paused(database) or (state["is_paused"] and state["status"] in {"paused", "running", "queued"}):
-                        raise EvidenceWorkDeferred("Original checks are paused")
-                    priority = database.execute(select(library_item_evidence_state.c.library_item_id).where(
-                        library_item_evidence_state.c.work_batch_id == claim.batch_id,
-                        library_item_evidence_state.c.work_status == "queued",
-                        library_item_evidence_state.c.work_priority < claim.work_priority,
-                    ).limit(1)).first()
-                    if priority:
-                        raise EvidenceWorkDeferred("Waiting for higher priority analysis")
+                    hold = original_intake_hold(database, batch_id=claim.batch_id, priority=claim.work_priority)
+                if hold == "cancelled":
+                    raise ProcessCancelledError("Evidence work was cancelled.")
+                if shutting_down:
+                    raise EvidenceWorkDeferred("Original checks will resume after the app restarts")
+                if hold == "paused":
+                    raise EvidenceWorkDeferred("Original checks are paused")
+                if hold == "higher_priority":
+                    raise EvidenceWorkDeferred("Waiting for a file that needs a check sooner")
 
             with process_controller.activity_guard(guard_intake):
                 assess_source_input(config, claim.library_item_id, process_controller, process_controller.throw_if_cancelled)
@@ -291,6 +294,8 @@ def _run_evidence_claim(
             if fingerprint_video_decode_timed_out(previous):
                 analysis_kwargs["hardware_decoding"] = False
         measurement_before = local_before
+        if original_work and deps.prepare_next_original is not None:
+            deps.prepare_next_original(config, claim)
         summary = deps.analyze_evidence(
             analysis_target.source_path,
             claim.evidence_kind,

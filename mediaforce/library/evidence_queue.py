@@ -543,6 +543,23 @@ def _evidence_due_now(now_iso: str) -> Any:
     return or_(library_item_evidence_state.c.retry_not_before.is_(None), library_item_evidence_state.c.retry_not_before <= now_iso)
 
 
+def original_intake_hold(
+    connection: DBClient, *, batch_id: str, priority: int,
+) -> Literal["cancelled", "paused", "higher_priority"] | None:
+    state = load_evidence_queue_state(connection)
+    if (state["batch_id"] != batch_id or state["cancel_requested"]
+            or state["status"] not in EVIDENCE_QUEUE_ACTIVE_STATUSES):
+        return "cancelled"
+    if background_work_is_paused(connection) or state["is_paused"]:
+        return "paused"
+    if connection.execute(select(library_item_evidence_state.c.library_item_id).where(
+        library_item_evidence_state.c.work_batch_id == batch_id,
+        library_item_evidence_state.c.work_status == "queued",
+        library_item_evidence_state.c.work_priority < priority,
+    ).limit(1)).first() is not None:
+        return "higher_priority"
+    return None
+
 def runnable_evidence_work_count(connection: DBClient) -> int:
     """Claimable items in the current batch, or zero when anything holds the queue back."""
     batch_id = _claimable_batch_id(connection)
@@ -667,6 +684,25 @@ def cancel_evidence_queue(connection: DBClient, *, updated_at: str | None = None
     return evidence_queue_summary(connection)
 
 
+def next_evidence_work_query(batch_id: str, now_iso: str) -> Any:
+    return (
+        select(library_item_evidence_state.c.library_item_id, library_item_evidence_state.c.evidence_kind)
+        .where(
+            library_item_evidence_state.c.work_batch_id == batch_id,
+            library_item_evidence_state.c.work_status.in_(EVIDENCE_WORK_CLAIMABLE_STATUSES),
+            _evidence_due_now(now_iso),
+        )
+        .order_by(
+            library_item_evidence_state.c.work_priority,
+            case((library_item_evidence_state.c.work_status == "queued", 0), else_=1),
+            case((library_item_evidence_state.c.state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED, 0), else_=1),
+            library_item_evidence_state.c.library_item_id,
+            library_item_evidence_state.c.evidence_kind,
+        )
+        .limit(1)
+    )
+
+
 def claim_next_evidence_work(
         connection: DBClient,
         *,
@@ -699,28 +735,7 @@ def claim_next_evidence_work(
             return None
         # A check queued before its file was kept original would only measure what no one will encode.
         _release_kept_motion_work(connection, batch_id=batch_id, updated_at=now_iso)
-        candidate = connection.execute(
-            select(
-                library_item_evidence_state.c.library_item_id,
-                library_item_evidence_state.c.evidence_kind,
-            )
-            .where(
-                library_item_evidence_state.c.work_batch_id == batch_id,
-                library_item_evidence_state.c.work_status.in_(EVIDENCE_WORK_CLAIMABLE_STATUSES),
-                _evidence_due_now(now_iso),
-            )
-            .order_by(
-                library_item_evidence_state.c.work_priority,
-                case((library_item_evidence_state.c.work_status == "queued", 0), else_=1),
-                case(
-                    (library_item_evidence_state.c.state == EVIDENCE_STATE_CLASSIFICATION_REQUIRED, 0),
-                    else_=1,
-                ),
-                library_item_evidence_state.c.library_item_id,
-                library_item_evidence_state.c.evidence_kind,
-            )
-            .limit(1)
-        ).mappings().fetchone()
+        candidate = connection.execute(next_evidence_work_query(batch_id, now_iso)).mappings().fetchone()
         if candidate is None:
             _refresh_evidence_queue_state(connection, batch_id=batch_id, updated_at=now_iso)
             connection.commit()
@@ -820,7 +835,7 @@ def load_evidence_work_claim(
         evidence_kind=normalized_kind,
         evidence_state=str(row["state"]),
         evidence_reason=str(row["reason"]) if row["reason"] is not None else None,
-        work_priority=int(row["work_priority"] or EVIDENCE_WORK_PRIORITY_OPERATOR),
+        work_priority=int(row["work_priority"] if row["work_priority"] is not None else EVIDENCE_WORK_PRIORITY_OPERATOR),
         work_reason=str(row["work_reason"]) if row["work_reason"] is not None else None,
         source_path=str(row["source_path"]),
         rel_path=str(row["rel_path"]),
