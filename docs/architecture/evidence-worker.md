@@ -21,8 +21,12 @@ with separate inputs and one decode per range. It keeps the same uniformly
 spaced frames and computes brightness, temporal differences and edges in two
 branches. Range tags keep the measurements separate. For supported 8-bit and
 10-bit 4:2:0 formats, VideoToolbox keeps frames on the GPU until after selection;
-only retained frames reach the CPU filters. Unsupported formats or failed
-hardware decoding use the complete software pass. Audio measurements and
+only retained frames reach the CPU filters. The GPU still decodes every frame
+in the sampled ranges. Each range records its decoder path. Unsupported formats or failed
+hardware decoding use the complete software pass. A failed combined software
+command retries the ranges individually so a damaged range does not erase the
+other measurements. A timed-out remote command never starts a second decode.
+Audio measurements and
 cadence analysis retain their sampling and independent safety decisions.
 
 ## Durable state

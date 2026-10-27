@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import copy
-from functools import lru_cache
+from dataclasses import dataclass
+from functools import lru_cache, partial
 import math
 import os
 from pathlib import Path
@@ -32,6 +33,15 @@ _SIGNALSTAT_RE = re.compile(
     r"lavfi\.signalstats\.(?P<key>[A-Z0-9]+)=(?P<value>[-+]?(?:\d+(?:\.\d*)?|\.\d+))"
 )
 _AUDIO_NUMBER_RE = re.compile(r"([-+]?(?:\d+(?:\.\d*)?|\.\d+))")
+
+
+@dataclass(frozen=True)
+class FingerprintRangeResult:
+    decoder: str
+    status: str
+    signal_frames: list[dict[str, float]]
+    edge_frames: list[dict[str, float]]
+    failure_reason: str
 
 
 def media_fingerprint_policy_snapshot() -> dict[str, Any]:
@@ -85,7 +95,7 @@ def analyze_media_fingerprint(
     ffmpeg_name = "ffmpeg" if command_runner is not None else ffmpeg_binary()
     starts = _sample_starts(duration_seconds, range_count)
     frames_per_range = max(1, max_frames // max(1, len(starts)))
-    video_result = _run_fingerprint_ranges(
+    video_results = _run_fingerprint_ranges(
         path, ffmpeg_name=ffmpeg_name, starts=starts, frame_limit=frames_per_range,
         sample_fps=sample_fps,
         download_format={"yuv420p": "nv12", "nv12": "nv12", "yuv420p10le": "p010le", "p010le": "p010le"}.get(
@@ -94,14 +104,12 @@ def analyze_media_fingerprint(
         timeout_seconds=timeout_seconds * len(starts), process_controller=process_controller,
         command_runner=command_runner,
     )
-    signal_ranges = parse_fingerprint_ranges(video_result.get("stdout", ""))
-    edge_ranges = parse_fingerprint_ranges(video_result.get("stderr", ""))
     ranges: list[dict[str, Any]] = []
-    for index, start_seconds in enumerate(starts):
+    for start_seconds, video_result in zip(starts, video_results, strict=True):
         if process_controller is not None:
             process_controller.throw_if_cancelled()
-        signal_frames = signal_ranges.get(index, [])
-        edge_frames = edge_ranges.get(index, [])
+        signal_frames = video_result.signal_frames
+        edge_frames = video_result.edge_frames
         audio = None
         if audio_probe["track_count"] > 0:
             audio_duration = min(max(frames_per_range / max(sample_fps, 0.1), 4.0), 12.0)
@@ -127,10 +135,11 @@ def analyze_media_fingerprint(
                 start_seconds=start_seconds,
                 frame_limit=frames_per_range,
                 sample_fps=sample_fps,
-                video_status=str(video_result["status"]),
+                video_status=video_result.status,
+                decoder=video_result.decoder,
                 signal_frames=signal_frames,
                 edge_frames=edge_frames,
-                failure_reason=str(video_result.get("failure_reason") or ""),
+                failure_reason=video_result.failure_reason,
                 audio=audio,
             )
         )
@@ -390,6 +399,18 @@ def parse_fingerprint_ranges(output: str) -> dict[int, list[dict[str, float]]]:
     return ranges
 
 
+def _fingerprint_range_results(result: Mapping[str, str], count: int, *, decoder: str) -> list[FingerprintRangeResult]:
+    signals = parse_fingerprint_ranges(result.get("stdout", ""))
+    edges = parse_fingerprint_ranges(result.get("stderr", ""))
+    return [
+        FingerprintRangeResult(
+            decoder=decoder, status=result["status"], signal_frames=signals.get(index, []), edge_frames=edges.get(index, []),
+            failure_reason=result.get("failure_reason", ""),
+        )
+        for index in range(count)
+    ]
+
+
 def _run_fingerprint_ranges(
         path: Path,
         *,
@@ -401,20 +422,26 @@ def _run_fingerprint_ranges(
         timeout_seconds: float,
         process_controller: ManagedProcessController | None,
         command_runner: RemoteMediaCommands | None,
-) -> dict[str, str]:
-    if download_format is not None:
-        hardware_result = _run_fingerprint_pass(
-            path, ffmpeg_name=ffmpeg_name, starts=starts, frame_limit=frame_limit,
-            sample_fps=sample_fps, timeout_seconds=timeout_seconds, process_controller=process_controller,
-            command_runner=command_runner, download_format=download_format,
-        )
-        if hardware_result["status"] == "measured":
-            return hardware_result
-    return _run_fingerprint_pass(
-        path, ffmpeg_name=ffmpeg_name, starts=starts, frame_limit=frame_limit,
-        sample_fps=sample_fps, timeout_seconds=timeout_seconds, process_controller=process_controller,
-        command_runner=command_runner, download_format=None,
+) -> list[FingerprintRangeResult]:
+    run_pass = partial(
+        _run_fingerprint_pass, path, ffmpeg_name=ffmpeg_name, frame_limit=frame_limit,
+        sample_fps=sample_fps, process_controller=process_controller, command_runner=command_runner,
     )
+    if download_format is not None:
+        hardware_result = run_pass(starts=starts, timeout_seconds=timeout_seconds, download_format=download_format)
+        hardware_ranges = _fingerprint_range_results(hardware_result, len(starts), decoder=f"videotoolbox-{download_format}")
+        if hardware_result["status"] == "timeout" or (
+            hardware_result["status"] == "measured"
+            and all(len(row.signal_frames) == len(row.edge_frames) == frame_limit for row in hardware_ranges)
+        ):
+            return hardware_ranges
+    software_result = run_pass(starts=starts, timeout_seconds=timeout_seconds, download_format=None)
+    if software_result["status"] != "failed" or len(starts) == 1:
+        return _fingerprint_range_results(software_result, len(starts), decoder="software")
+    return [
+        _fingerprint_range_results(run_pass(starts=[start], timeout_seconds=timeout_seconds / len(starts), download_format=None), 1, decoder="software")[0]
+        for start in starts
+    ]
 
 
 def _run_fingerprint_pass(
@@ -429,7 +456,7 @@ def _run_fingerprint_pass(
         command_runner: RemoteMediaCommands | None,
         download_format: str | None,
 ) -> dict[str, str]:
-    command = [ffmpeg_name, "-hide_banner", "-nostats", "-v", "error"]
+    command = [ffmpeg_name, "-hide_banner", "-nostats", "-v", "quiet"]
     filters = []
     download = f"hwdownload,format={download_format}," if download_format else ""
     for index, start in enumerate(starts):
@@ -617,6 +644,7 @@ def _range_payload(
         frame_limit: int,
         sample_fps: float,
         video_status: str,
+        decoder: str,
         signal_frames: list[dict[str, float]],
         edge_frames: list[dict[str, float]],
         failure_reason: str,
@@ -635,6 +663,7 @@ def _range_payload(
         "sampled_frames": sampled_frames,
         "status": status,
         "edge_status": status,
+        "decoder": decoder,
         "measurements": measurements,
     }
     if failure_reason or not complete:
