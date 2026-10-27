@@ -16,6 +16,21 @@ The web app's evidence-autostart worker runs any unpaused batch that has
 claimable work (see the just-in-time path below). Catalog scans never start
 analysis. The CLI `evidence run` pass claims bounded work and exits.
 
+Fingerprint analysis decodes each video range once, with signal and edge
+measurements in two branches of that pass. Ranges run sequentially with their
+own timeout and frame caps, retaining the same sample times, frame budgets and
+thresholds. Supported 8-bit and 10-bit 4:2:0 formats use VideoToolbox and select
+frames before copying them to CPU memory. The GPU still decodes the entire
+sampled range. Each range records its decoder; unsupported or incomplete
+hardware decoding uses the complete software pass. A timeout stops further
+analysis for that file and leaves its result unknown for the queue to retry,
+while later queue items remain free to continue. After a video decoder timeout,
+the next attempt uses software; an audio timeout does not change the video
+decoder. End-of-file hardware samples must contain matching signal and edge
+counts meeting the expected available frames, without reducing the decode cap.
+Audio and
+cadence retain their measurements and safety decisions.
+
 ## Durable state
 
 `library_item_evidence_state` owns one independent work unit for each

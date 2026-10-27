@@ -20,7 +20,7 @@ from mediaforce.core.db_tables import library_item_evidence_state, library_items
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, reclassify_cadence_summary
-from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, reclassify_media_fingerprint_summary
+from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, fingerprint_video_decode_timed_out, reclassify_media_fingerprint_summary
 from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaHostUnavailableError
 from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, \
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host
@@ -281,17 +281,21 @@ def _run_evidence_claim(
             return
 
         process_controller.throw_if_cancelled()
-        remote_kwargs = (
+        analysis_kwargs: dict[str, Any] = (
             {"command_runner": analysis_target.command_runner}
             if analysis_target.command_runner is not None
             else {}
         )
+        if claim.evidence_kind == MEDIA_FINGERPRINT_EVIDENCE_KIND:
+            previous = parse_evidence_summary(claim.canonical_summary_json) or {}
+            if fingerprint_video_decode_timed_out(previous):
+                analysis_kwargs["hardware_decoding"] = False
         measurement_before = local_before
         summary = deps.analyze_evidence(
             analysis_target.source_path,
             claim.evidence_kind,
             process_controller=process_controller,
-            **remote_kwargs,
+            **analysis_kwargs,
         )
         process_controller.throw_if_cancelled()
         measurement_after = observe_file(source_path)
