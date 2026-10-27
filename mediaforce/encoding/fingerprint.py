@@ -269,7 +269,7 @@ def classify_media_fingerprint(analysis: Mapping[str, Any] | None) -> dict[str, 
     payload = object_dict(analysis)
     sampled_frames = int_value(payload.get("sampled_frames"))
     coverage = _bounded(float_value(payload.get("coverage")))
-    if payload.get("interrupted_by_timeout") is True:
+    if payload.get("interrupted_by_timeout"):
         return _unknown_decision(coverage, "Checking this file timed out before all measurements finished.")
     if sampled_frames < MIN_FINGERPRINT_FRAMES:
         return _unknown_decision(
