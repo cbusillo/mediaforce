@@ -20,14 +20,14 @@ from mediaforce.execution import promote_one_item, validate_one_item
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_is_missing
 from mediaforce.library.staged_integrity import staged_integrity_report
 from mediaforce.library.staged_validation import NOT_REMADE_AFTER_FAILED_CHECK, REMAKING_AFTER_FAILED_CHECK, \
-    missed_only_final_size, staged_validation_outcome
+    missed_only_final_size, missed_only_over_final_size, staged_validation_outcome
 from mediaforce.web.runtime.folder_actions import production_action_blocker
 from mediaforce.web.runtime.production_approval import (
     LoadCalibrationState,
     effective_production_approval,
     production_approval_matches,
 )
-from mediaforce.web.runtime.size_held import keep_original_after_failed_checks
+from mediaforce.web.runtime.size_held import OVER_SIZE_KEEP_REASON, keep_original_after_failed_checks
 
 
 LOGGER = logging.getLogger(__name__)
@@ -392,7 +392,9 @@ def _remake_or_keep_failed_copy(
 ) -> bool:
     """Make a copy that failed its check again, or keep the original once its attempts are used up.
 
-    A copy whose only failed check is its final size goal is left for the owner; False means nothing was done.
+    A copy whose only failed check is coming out over its size goal keeps its original at once: the same settings
+    make the same file. One that missed only by coming out under it is left for the owner; False means nothing was
+    done.
     """
     item_id = int(source["id"])
     saved = connection.execute(
@@ -400,9 +402,18 @@ def _remake_or_keep_failed_copy(
             staged_artifacts.c.library_item_id == item_id
         )
     ).scalar_one_or_none()
-    if staged_validation_outcome(saved) not in {"failed", REMAKING_AFTER_FAILED_CHECK} or missed_only_final_size(
-        object_dict(json.loads(str(saved)))
-    ):
+    if staged_validation_outcome(saved) not in {"failed", REMAKING_AFTER_FAILED_CHECK}:
+        return False
+    validation = object_dict(json.loads(str(saved)))
+    if missed_only_over_final_size(validation):
+        connection.commit()
+        reason = keep_original_after_failed_checks(
+            config, item_id, failed_attempts=1, now_iso=timestamp, reason_code=OVER_SIZE_KEEP_REASON
+        )
+        if reason:
+            _record_wait(connection, item_id, "waiting", reason)
+        return True
+    if missed_only_final_size(validation):
         return False
     connection.commit()
     attempts = _failed_check_attempts(connection, source)

@@ -969,11 +969,11 @@ def _remake_reason(config: MediaforceConfig, item_id: int) -> str | None:
 
 
 @pytest.mark.parametrize("band_in_plan", [True, False], ids=["band_in_plan", "no_band_in_plan"])
-def test_encoder_size_only_miss_is_checked_then_asks_keep_or_make_again(
+def test_encoder_copy_only_under_its_size_goal_is_checked_then_asks_keep_or_make_again(
     config: MediaforceConfig, band_in_plan: bool
 ) -> None:
     item_id, item = _encoder_size_record(
-        config, "tv/Show/Season 1/too-big.mkv", lower=1, upper=2, band_in_plan=band_in_plan
+        config, "tv/Show/Season 1/too-small.mkv", lower=10, upper=20, band_in_plan=band_in_plan
     )
 
     _run(config)
@@ -991,6 +991,24 @@ def test_encoder_size_only_miss_is_checked_then_asks_keep_or_make_again(
     assert result["ok"], result
     _run(config)
     assert _status(config, item_id) == "promoted"
+
+
+@pytest.mark.parametrize("band_in_plan", [True, False], ids=["band_in_plan", "no_band_in_plan"])
+def test_copy_only_over_its_size_keeps_the_original_without_asking(
+    config: MediaforceConfig, band_in_plan: bool
+) -> None:
+    item_id, item = _encoder_size_record(
+        config, "tv/Show/Season 1/too-big.mkv", lower=1, upper=2, band_in_plan=band_in_plan
+    )
+    staged = Path(config.media["staging_root"]) / item["rel_path"]
+
+    _run(config)
+
+    assert _kept_reason(config, item_id) == size_held.OVER_SIZE_KEEP_REASON
+    assert not staged.exists()
+    assert Path(item["source_path"]).read_bytes() == b"original media file"
+    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    assert (episode["stage"], episode["owner_action"]) == ("kept_original", None)
 
 
 def test_encoder_size_miss_with_another_failure_stays_failed(config: MediaforceConfig) -> None:
