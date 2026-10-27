@@ -196,8 +196,6 @@ Keyboard refresh returns focus to the workspace heading.
   may continue past the normal close time.
 - Episode longer than every compatible work window: `Waiting for a longer work window`. Route
   the user to widen a work window or intentionally bypass the schedule.
-- The shipped labels live in `scheduleLabels`
-  (`frontend/src/lib/hosts/schedule.ts`); keep this list in step with it.
 - Computer setup missing: `Needs setup`. The computer needs setup before it
   can run work.
 - Queue paused: `Paused`. Mediaforce will not start new processing work.
@@ -324,6 +322,6 @@ or `archive_cleanup.has_cleanup` in visible UI.
 
 Use this file for product language and workflow-state naming only. It does not
 validate the old route structure, old component hierarchy, or previous
-issue-backed cleanup plan. During the frontend reset, prefer these terms when
+issue-backed cleanup plan. Prefer these terms when
 they clarify the user's next safe decision, and revise them when the clean
 workstation contract exposes a better product noun.

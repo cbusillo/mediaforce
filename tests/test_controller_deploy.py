@@ -16,9 +16,6 @@ def _independent_clone(root: Path) -> None:
     program.parent.mkdir(parents=True)
     program.write_text("#!/bin/sh\n")
     program.chmod(0o755)
-    frontend = root / "frontend/build/index.html"
-    frontend.parent.mkdir(parents=True)
-    frontend.write_text("frontend")
 
 
 def test_prepare_release_installs_outside_source_worktree(tmp_path: Path) -> None:

@@ -40,12 +40,10 @@ struct SampleFacts: Decodable, Sendable {
     enum Action: Hashable {
         case approve, makeAgain, makeSample, chooseSize, tryAnotherSize, startCompressing
         case checkFiles, replaceOriginals, retryUnfinished, decideMotion
-        case openInBrowser
     }
 
     static let seasonPageActions: Set<Action> = [.checkFiles, .replaceOriginals, .retryUnfinished, .decideMotion]
     static let inProgressStates: Set<String> = ["making_test", "sample_waiting", "making_season"]
-    static let browserStates: Set<String> = ["finish_blocked", "ready_to_check", "ready_to_finish", "motion_held"]
 
     var isInProgress: Bool { state.map(Self.inProgressStates.contains) ?? false }
 
@@ -63,11 +61,10 @@ struct SampleFacts: Decodable, Sendable {
         case "queue_encode": return [.startCompressing]
         case "retry_encode": return [.retryUnfinished]
         case "validate_outputs": return [.checkFiles]
-        // A blocked file (a failed check or a missing copy) has no step that settles it yet (#1083).
-        case "review_files": return [.openInBrowser]
         case "promote_outputs": return [.replaceOriginals]
         case "decide_motion": return [.decideMotion]
-        default: return state.map(Self.browserStates.contains) == true ? [.openInBrowser] : []
+        // A blocked file (a failed check or a missing copy) and a state with no native step show no action yet (#1088, #1140).
+        default: return []
         }
     }
 }
@@ -87,7 +84,7 @@ struct SampleActionResult: Decodable, Sendable {
     let compressing: Bool?
     let reason: String?
 
-    static let browserReasons: Set<String> = ["confirm_legacy_size", "confirm_compression_goal", "approval_needs_fresh_sample"]
+    static let choiceReasons: Set<String> = ["confirm_legacy_size", "confirm_compression_goal", "approval_needs_fresh_sample"]
 
-    var needsBrowser: Bool { reason.map(Self.browserReasons.contains) ?? false }
+    var needsChoice: Bool { reason.map(Self.choiceReasons.contains) ?? false }
 }

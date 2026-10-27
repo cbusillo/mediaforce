@@ -1,8 +1,6 @@
 # Package Builds
 
-`uv build` creates the Mediaforce wheel and source distribution. The wheel
-build regenerates `frontend/`; neither archive may depend on stale local
-`frontend/build/` output.
+`uv build` creates the Mediaforce wheel and source distribution.
 
 The sdist uses an explicit source allowlist in `pyproject.toml`. User
 runtime config, including root `config/defaults.toml` and
@@ -36,7 +34,7 @@ The verifier requires:
 - no oversized scannable text or traversal path
 
 Package verification complements the normal acceptance gate; it does not
-replace backend, frontend, CLI, or PyCharm checks.
+replace backend, Mac app, CLI, or PyCharm checks.
 
 The CI `tests` job runs the package build and verifier, and the required
 `acceptance` check passes only when it does, so package privacy

@@ -14,7 +14,6 @@
     "style": [
       "docs/style/index.md",
       "docs/style/python.md",
-      "docs/style/frontend.md",
       "docs/style/testing.md",
       "docs/style/workstation-ui.md"
     ],
@@ -27,25 +26,16 @@
   "qualityGate": {
     "test": {
       "local": "uv run --with pytest pytest {test_paths}",
-      "ci": "uv run --with pytest pytest -q --durations=20 && npm --prefix frontend test",
+      "ci": "uv run --with pytest pytest -q --durations=20",
       "fileIntegrityMacos": "uv run --with pytest pytest -q tests/test_file_integrity.py tests/test_db_connection_custody.py tests/test_db_connection_checkpoint.py tests/test_db_runtime.py",
-      "frontendLocal": "npm --prefix frontend test -- {test_paths}",
       "macApp": "bash scripts/build-mac-app.sh test"
     },
-    "lint": {
-      "frontend": "npm --prefix frontend run lint"
-    },
-    "typecheck": {
-      "frontend": "npm --prefix frontend run check"
-    },
     "build": {
-      "frontend": "npm --prefix frontend run build",
       "package": "uv build",
       "packageContents": "uv run python scripts/verify_package_contents.py dist/*.whl dist/*.tar.gz"
     },
     "smoke": {
-      "cli": "uv run mediaforce --help",
-      "web": "npm --prefix frontend run smoke:web"
+      "cli": "uv run mediaforce --help"
     },
     "inspection": {
       "scopePreference": ["changed_files", "directory", "whole_project"],
@@ -69,28 +59,6 @@
             "mediaforce/**/*.py",
             "scripts/**/*.py",
             "tests/**/*.py"
-          ]
-        },
-        {
-          "id": "frontend",
-          "ide": "WebStorm",
-          "required": false,
-          "projectPath": "frontend",
-          "include": [
-            "frontend/**/*.svelte",
-            "frontend/**/*.ts",
-            "frontend/**/*.js",
-            "frontend/**/*.mjs",
-            "frontend/**/*.cjs",
-            "frontend/**/*.css",
-            "frontend/**/*.html",
-            "frontend/package.json",
-            "frontend/tsconfig.json"
-          ],
-          "exclude": [
-            "frontend/build/**",
-            "frontend/.svelte-kit/**",
-            "frontend/node_modules/**"
           ]
         }
       ]

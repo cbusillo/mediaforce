@@ -104,7 +104,7 @@ class PackageContentsTests(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text("[config]\ninclude_files=[]\n")
         (project / "pyproject.toml").touch()
-        (project / "hatch_build.py").touch()
+        (project / "alembic.ini").touch()
         with patch.object(config_module, "_SOURCE_PROJECT_ROOT", project), patch(
             "mediaforce.core.config.resources.files", return_value=self.root / "packaged"
         ) as packaged:
@@ -138,7 +138,7 @@ class PackageContentsTests(unittest.TestCase):
 
         self.assertIsNone(_source_checkout_default_config_path(project_root))
         (project_root / "pyproject.toml").write_text("[project]\nname='mediaforce'\n")
-        (project_root / "hatch_build.py").write_text("")
+        (project_root / "alembic.ini").write_text("")
         self.assertEqual(_source_checkout_default_config_path(project_root), config_path)
 
     def _wheel(self, files: dict[str, bytes] | list[tuple[str, bytes]], *, name: str = "mediaforce.whl") -> Path:

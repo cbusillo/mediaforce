@@ -757,7 +757,7 @@ def _history_detail_summary(value: object, max_chars: int = HISTORY_DETAIL_MAX_C
 
 
 def _size_text(size_bytes: int | None) -> str:
-    """Decimal sizes with the same rounding as the frontend's formatFileSize."""
+    """Decimal sizes, rounded the way people read file sizes."""
     value = float(size_bytes or 0)
     units = ("B", "KB", "MB", "GB", "TB", "PB")
     index = 0

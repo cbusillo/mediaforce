@@ -39,8 +39,6 @@ struct SampleWork: View {
     @State private var refreshes = 0
     @State private var approval: SampleApproval?
     @State private var confirming: String?
-    @State private var browserNotice: ActionNotice?
-    @Environment(\.openURL) private var openURL
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -61,7 +59,6 @@ struct SampleWork: View {
                 SampleFactsGrid(facts: facts)
                 SampleActions(
                     facts: facts, working: working, approve: startApproval, make: { make(size: $0) }, compress: compress,
-                    openInBrowser: { openURL(model.client.seasonPage(prefix)) },
                     openItem: { openItem(prefix) }
                 )
             } else if unreadable {
@@ -84,16 +81,6 @@ struct SampleWork: View {
             Button(Words.cancel, role: .cancel) {}
         } message: { code in
             Text(Words.sampleConfirmation(code)?.message ?? "")
-        }
-        .alert(
-            browserNotice?.title ?? "",
-            isPresented: Binding(get: { browserNotice != nil }, set: { if !$0 { browserNotice = nil } }),
-            presenting: browserNotice
-        ) { _ in
-            Button(Words.openInBrowser) { openURL(model.client.seasonPage(prefix)) }
-            Button(Words.cancel, role: .cancel) {}
-        } message: { notice in
-            Text(notice.message)
         }
     }
 
@@ -154,9 +141,7 @@ struct SampleWork: View {
 
     private func compressingNotice(_ result: SampleActionResult) -> ActionNotice? {
         if result.compressing == true { return nil }
-        guard result.needsBrowser else { return .approvedNotCompressing }
-        browserNotice = .finishInBrowser
-        return nil
+        return result.needsChoice ? .compressNeedsChoice : .approvedNotCompressing
     }
 
     private func make(size: String?) {
@@ -164,9 +149,7 @@ struct SampleWork: View {
             let result = try await $0.makeSample(prefix, size: size)
             if result.ok { return nil }
             switch result.code {
-            case "choose_balance":
-                browserNotice = .chooseBalance
-                return nil
+            case "choose_balance": return .chooseBalance
             case "choose_size": return .chooseSize
             default: return .sampleRefused
             }
@@ -212,7 +195,6 @@ struct SampleActions: View {
     let approve: () -> Void
     let make: (String?) -> Void
     let compress: () -> Void
-    let openInBrowser: () -> Void
     let openItem: () -> Void
 
     var body: some View {
@@ -234,10 +216,6 @@ struct SampleActions: View {
                 }
                 if actions.contains(.startCompressing) {
                     Button(Words.startCompressing, action: compress)
-                        .buttonStyle(.borderedProminent)
-                }
-                if actions.contains(.openInBrowser) {
-                    Button(Words.openInBrowser, action: openInBrowser)
                         .buttonStyle(.borderedProminent)
                 }
                 // Checking, replacing, retrying and motion choices live on the season's page.

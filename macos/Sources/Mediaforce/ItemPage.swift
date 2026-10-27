@@ -15,11 +15,32 @@ struct ItemPage: View {
     @State private var selected: ItemFacts.File.ID?
     @State private var notice: ActionNotice?
     @State private var confirming: WorkAction?
-    @State private var browserNotice: ActionNotice?
     @State private var working = false
-    @Environment(\.openURL) private var openURL
 
     var body: some View {
+        page
+            .background(Color(nsColor: .textBackgroundColor))
+            // Until its facts arrive, the page is named by its folder.
+            .navigationTitle(facts.map(Words.itemTitle) ?? prefix.split(separator: "/").last.map(String.init) ?? prefix)
+            // A season names its show; a show's own page is already named by it.
+            .navigationSubtitle(facts.flatMap { $0.kind == "tv_series" ? nil : $0.show } ?? "")
+            .task(id: prefix) { await watch() }
+            .alert(item: $notice) { notice in
+                Alert(title: Text(notice.title), message: Text(notice.message))
+            }
+            .confirmationDialog(
+                confirming.map(Words.workQuestion) ?? "",
+                isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
+                presenting: confirming
+            ) { action in
+                Button(Words.workButton(action)) { Task { await run(action, facts) } }
+                Button(Words.cancel, role: .cancel) {}
+            } message: { action in
+                Text(Words.workDetail(action))
+            }
+    }
+
+    private var page: some View {
         Group {
             if let facts {
                 HStack(alignment: .top, spacing: 0) {
@@ -69,41 +90,11 @@ struct ItemPage: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
-        // Until its facts arrive, the page is named by its folder.
-        .navigationTitle(facts.map(Words.itemTitle) ?? prefix.split(separator: "/").last.map(String.init) ?? prefix)
-        // A season names its show; a show's own page is already named by it.
-        .navigationSubtitle(facts.flatMap { $0.kind == "tv_series" ? nil : $0.show } ?? "")
-        .task(id: prefix) { await watch() }
-        .alert(item: $notice) { notice in
-            Alert(title: Text(notice.title), message: Text(notice.message))
-        }
-        .alert(
-            browserNotice?.title ?? "",
-            isPresented: Binding(get: { browserNotice != nil }, set: { if !$0 { browserNotice = nil } }),
-            presenting: browserNotice
-        ) { _ in
-            Button(Words.openInBrowser) { openURL(model.client.seasonPage(prefix)) }
-            Button(Words.cancel, role: .cancel) {}
-        } message: { notice in
-            Text(notice.message)
-        }
-        .confirmationDialog(
-            confirming.map(Words.workQuestion) ?? "",
-            isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
-            presenting: confirming
-        ) { action in
-            Button(Words.workButton(action)) { Task { await run(action, facts) } }
-            Button(Words.cancel, role: .cancel) {}
-        } message: { action in
-            Text(Words.workDetail(action))
-        }
     }
 
     private func perform(_ action: SampleFacts.Action, _ facts: ItemFacts) {
         switch action {
         case .approve, .makeAgain, .makeSample, .chooseSize, .tryAnotherSize: openSample(prefix)
-        case .openInBrowser: openURL(model.client.seasonPage(prefix))
         case .replaceOriginals: confirming = .replaceOriginals
         case .decideMotion: confirming = .keepMotionOriginals
         case .startCompressing: Task { await run(.startCompressing, facts) }
@@ -116,7 +107,8 @@ struct ItemPage: View {
         working = true
         defer { working = false }
         do {
-            if let result = try await send(action, facts), !result.ok {
+            let result = try await send(action, facts)
+            if !result.ok {
                 notice = ActionNotice(title: Words.workRefused(action), message: result.message ?? ActionNotice.sampleRefused.message)
             }
         } catch {
@@ -125,18 +117,14 @@ struct ItemPage: View {
         await refresh()
     }
 
-    /// The server's answer, or nil when the step needs a choice made on the web page first.
-    private func send(_ action: WorkAction, _ facts: ItemFacts?) async throws -> ItemActionResult? {
+    private func send(_ action: WorkAction, _ facts: ItemFacts?) async throws -> ItemActionResult {
         let client = model.client
         switch action {
         case .startCompressing:
-            // Started only when it says it is compressing; some reasons need a choice made on the web page.
+            // Started only when it says it is compressing; some reasons need a choice made first.
             let started = try await client.compressSeason(prefix)
-            if started.needsBrowser {
-                browserNotice = .finishInBrowser
-                return nil
-            }
-            return started.compressing == true ? .done : .refused(ActionNotice.approvedNotCompressing.message)
+            if started.compressing == true { return .done }
+            return .refused((started.needsChoice ? ActionNotice.compressNeedsChoice : .approvedNotCompressing).message)
         case .checkFiles: return try await client.checkFiles(prefix)
         case .replaceOriginals: return try await client.replaceOriginals(prefix)
         case .retryUnfinished: return try await client.retryUnfinished(prefix)
