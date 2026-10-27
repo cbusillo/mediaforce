@@ -400,12 +400,15 @@ def test_a_kind_offers_each_shows_biggest_season_to_sample_and_names_the_one_bei
         sample_job("tv/Crime/Season 2", "pending_review", "2026-10-26T03:00:00+00:00")
         sample_job("tv/Drama/Season 2", "running", "2026-10-26T04:00:00+00:00")
         making = kind_facts()
+        # A sample that stopped stays on the page until it is made again, so its trouble and choices show.
+        sample_job("tv/Drama/Season 2", "failed", "2026-10-26T05:00:00+00:00")
+        failed = kind_facts()
     engine.dispose()
 
     assert [(show["prefix"], show["sample_season"]) for show in before["shows"]] == [
         ("tv/Drama", "tv/Drama/Season 2"), ("tv/Crime", "tv/Crime/Season 1")]
     assert before["sample_season"] is None and settled["sample_season"] is None
-    assert making["sample_season"] == "tv/Drama/Season 2"
+    assert making["sample_season"] == "tv/Drama/Season 2" and failed["sample_season"] == "tv/Drama/Season 2"
 
 
 def _keep_original_backup(connection: Any, item_id: int) -> None:

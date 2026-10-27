@@ -31,10 +31,11 @@ from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.content_kinds import evidence_stamp, season_evidence, season_grouping, season_kind_report, \
     season_stamp
 from mediaforce.library.source_evidence import SourceEvidenceContext
-from mediaforce.tuning.calibration_jobs import ACTIVE_JOB_STATUSES, load_latest_jobs_for_prefixes
+from mediaforce.tuning.calibration_jobs import load_latest_jobs_for_prefixes
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
     effective_production_approval, holds_approval, production_approval_contract
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
+from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 from mediaforce.web.runtime.production_holds import approval_identity
 
 APPROVABLE_KINDS = ("darker_live_action", "bright_live_action")
@@ -396,13 +397,17 @@ def _lent_settings(
     return sorted(settings, key=lambda setting: (setting["library_item_id"] is None, setting["show"]))
 
 
+SAMPLE_IN_HAND_STATUSES = SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES | SAMPLE_FAILED_STATUSES | {"pending_review"}
+
+
 def _season_with_sample(connection: DBClient, seasons: list[str]) -> str | None:
-    """The season of a kind whose sample is being made or waits to be watched, the newest when there are several.
+    """The season of a kind whose sample is being made, waits to be watched, or stopped and needs making again, the
+    newest when there are several. A season's newest sample decides, as on its own page.
 
     Approving a sample gives its show a folder approval, so that season leaves the kind and the page offers its setting.
     """
     jobs = [job for job in load_latest_jobs_for_prefixes(connection, seasons).values()
-            if job.get("lane") == "sample" and job.get("status") in ACTIVE_JOB_STATUSES]
+            if job.get("lane") == "sample" and job.get("status") in SAMPLE_IN_HAND_STATUSES]
     return str(max(jobs, key=lambda job: str(job.get("created_at") or ""))["prefix"]) if jobs else None
 
 

@@ -177,7 +177,7 @@ Guidance:
       by show with the show's biggest season where its sample would be made,
       its approval, the shows already approved on a season of the kind with
       an episode to compare, the season whose sample is being made or waits
-      to be watched, and the seasons no kind covers;
+      to be watched or needs making again, and the seasons no kind covers;
       approving extends a folder's own current
       approval (`POST /api/app/kinds/{kind}/approve`), and stopping removes it
   - `production_approval.py`
