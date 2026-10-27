@@ -372,19 +372,19 @@ def test_a_kind_offers_each_shows_biggest_season_to_sample_and_names_the_one_bei
     with engine.connect() as connection:
         metadata.create_all(connection)
         # Each season measures darker from a published episode's original; the rest of its files wait.
-        for season, waiting in [("tv/Drama/Season 1", 1), ("tv/Drama/Season 2", 2), ("tv/Crime/Season 1", 1),
-                                ("tv/Crime/Season 2", 1)]:
-            published = _content_item(connection, f"{season}/e00.mkv", status="promoted", codec="av1", current_dark=0.0)
+        for measured, waiting in [("tv/Drama/Season 1", 1), ("tv/Drama/Season 2", 2), ("tv/Crime/Season 1", 1),
+                                  ("tv/Crime/Season 2", 1)]:
+            published = _content_item(connection, f"{measured}/e00.mkv", status="promoted", codec="av1", current_dark=0.0)
             _admit_historical_original(connection, published, dark=0.5)
             for episode in range(1, waiting + 1):
-                _content_item(connection, f"{season}/e0{episode}.mkv", status="discovered", codec="h264", current_dark=0.0)
+                _content_item(connection, f"{measured}/e0{episode}.mkv", status="discovered", codec="h264", current_dark=0.0)
         for show in ["tv/Drama", "tv/Crime"]:
             connection.execute(series_metadata.insert().values(series_prefix=show, tmdb_genres_json='["Drama"]',
                                                                updated_at="now"))
         load = _loader({}, {})
 
         def kind_facts() -> dict[str, Any]:
-            facts = kinds_payload(connection, config, load_calibration_state=load, kind_of=lambda _config, season: None)
+            facts = kinds_payload(connection, config, load_calibration_state=load, kind_of=lambda _config, _season: None)
             return next(kind for kind in facts["kinds"] if kind["kind"] == DARKER)
 
         def sample_job(season: str, status: str, created_at: str, lane: str = "sample") -> None:
