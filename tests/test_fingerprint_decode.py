@@ -139,13 +139,14 @@ def _frame_metadata(group: int, luma: int) -> str:
 def test_hardware_timeout_does_not_start_another_decode() -> None:
     runner = Mock()
     runner.run.side_effect = subprocess.TimeoutExpired([], 1)
-    results = _run_fingerprint_ranges(
-        Path("episode.mkv"), ffmpeg_name="ffmpeg", starts=[120], frame_limit=1,
-        sample_fps=2, download_format="nv12", timeout_seconds=1,
-        process_controller=None, command_runner=runner,
+    runner.tool_lineage.return_value = {"ffmpeg_version": "test"}
+    summary = analyze_media_fingerprint(
+        Path("episode.mkv"), video_stream={"codec_name": "h264", "pix_fmt": "yuv420p"}, audio_streams=[],
+        duration_seconds=1200, timeout_seconds=1, command_runner=runner,
     )
     assert runner.run.call_count == 1
-    assert results[0].status == "timeout"
+    assert all(row["status"] == "timeout" for row in summary["analysis"]["ranges"])
+
 
 
 def test_incomplete_hardware_metadata_retries_all_ranges_in_software() -> None:

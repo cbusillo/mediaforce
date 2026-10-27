@@ -653,7 +653,7 @@ def _range_payload(
     measurements = _range_measurements(signal_frames, edge_frames)
     sampled_frames = len(signal_frames)
     complete = len(edge_frames) == sampled_frames > 0
-    status = video_status if complete else "failed"
+    status = "failed" if video_status == "measured" and not complete else video_status
     payload: dict[str, Any] = {
         "start_seconds": round(start_seconds, 3),
         "end_seconds": round(start_seconds + (sampled_frames / max(sample_fps, 0.1)), 3)
