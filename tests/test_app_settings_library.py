@@ -212,6 +212,36 @@ def test_save_after_the_library_section_changed_elsewhere_is_refused(library_app
     assert runtime_settings_path.read_bytes() == changed_elsewhere
 
 
+@pytest.mark.parametrize("hand_edit", ["base", "included"])
+def test_save_after_a_hand_edit_of_the_base_config_is_refused(
+        library_app: tuple[FastAPI, Path], tmp_path: Path, hand_edit: str,
+) -> None:
+    app, runtime_settings_path = library_app
+    config_path = tmp_path / "config" / "config.toml"
+    config_path.write_text(
+        '[config]\ninclude_files = ["local.toml"]\n' + config_path.read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    stale = _facts_body(app)
+    if hand_edit == "base":
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8").replace("[media]", "[media]\ncatalog_refresh_hours = 12"),
+            encoding="utf-8",
+        )
+    else:
+        (tmp_path / "config" / "local.toml").write_text("[media]\ncatalog_refresh_hours = 12\n", encoding="utf-8")
+    before = runtime_settings_path.read_bytes()
+    stale["libraries"][0]["name"] = "Television"
+
+    assert _save(app, stale) == (400, {"ok": False, "code": "settings_changed"})
+    assert runtime_settings_path.read_bytes() == before
+
+    fresh = _facts_body(app)
+    fresh["libraries"][0]["name"] = "Television"
+    status, result = _save(app, fresh)
+    assert status == 200 and result["ok"] is True
+    assert json.loads(runtime_settings_path.read_text())["media"]["libraries"][0]["label"] == "Television"
+
+
 def test_new_library_never_takes_the_key_of_one_removed_in_the_same_save(
         library_app: tuple[FastAPI, Path], tmp_path: Path,
 ) -> None:

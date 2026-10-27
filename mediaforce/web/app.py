@@ -46,9 +46,9 @@ from mediaforce.tuning.target_default_context import (
     load_target_default_evidence,
     unavailable_target_default_evidence,
 )
-from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, load_runtime_settings, \
-    migrate_config_state, set_runtime_folder_audio_preset, update_runtime_settings, update_runtime_folder_policy_values, \
-    upsert_runtime_folder_policy_override
+from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, base_config_digest, load_config, \
+    load_runtime_settings, migrate_config_state, set_runtime_folder_audio_preset, update_runtime_settings, \
+    update_runtime_folder_policy_values, upsert_runtime_folder_policy_override
 from mediaforce.web.runtime.audio_preset_runtime import dismiss_suggestion, series_genres, show_audio_preset_payload, \
     tv_show_prefix
 from mediaforce.web.runtime.automatic_publish import publish_checked_files_once
@@ -1022,6 +1022,12 @@ def create_app(
             } if isinstance(media.get("source_roots"), dict) else {},
         }
 
+    def _section_revision(runtime_settings: dict[str, Any], section: str) -> str:
+        """The stored `section` revision over these runtime settings and the base TOML config as it is now."""
+        return _settings_section_revision(
+            runtime_settings, section, base_config_digest=base_config_digest(config.paths.config_path),
+        )
+
     def _apply_settings_payload(
             payload: dict[str, Any],
             *,
@@ -1050,7 +1056,7 @@ def create_app(
 
         def _apply_runtime_settings(existing_runtime_settings: dict[str, Any]) -> dict[str, Any]:
             nonlocal catalog_refresh_needed
-            if section is not None and _settings_section_revision(existing_runtime_settings, section) != revision:
+            if section is not None and _section_revision(existing_runtime_settings, section) != revision:
                 raise SettingsValidationError("Settings changed since they were loaded.", "settings_changed")
             merged_runtime_settings = _merge_runtime_settings_payload(existing_runtime_settings, payload)
             merged_runtime_settings = _without_plex_library_roots(merged_runtime_settings, cleared_plex_roots)
@@ -1108,9 +1114,9 @@ def create_app(
         """
         runtime_settings_path = config.paths.runtime_settings_path
         for _attempt in range(SETTINGS_SNAPSHOT_ATTEMPTS):
-            revision = _settings_section_revision(load_runtime_settings(runtime_settings_path), section)
+            revision = _section_revision(load_runtime_settings(runtime_settings_path), section)
             snapshot = load_config(config.paths.config_path)
-            if _settings_section_revision(load_runtime_settings(runtime_settings_path), section) == revision:
+            if _section_revision(load_runtime_settings(runtime_settings_path), section) == revision:
                 return snapshot, revision
         raise SettingsValidationError("Settings kept changing while they were read.", "settings_changed")
 
