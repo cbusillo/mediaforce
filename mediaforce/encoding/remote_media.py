@@ -150,7 +150,7 @@ class _EvidenceSSHMaster:
         try:
             result = run_command([
                 "ssh", *ssh_client_options(), "-M", "-N", "-n", "-o", "ControlPersist=no", "-o", "ForkAfterAuthentication=no",
-                "-o", "ServerAliveInterval=3", "-o", "ServerAliveCountMax=1",
+                "-o", "ServerAliveInterval=3", "-o", "ServerAliveCountMax=3",
                 "-o", f"ControlPath={self.control_path}", ssh_target_for_host(self.host),
             ], process_controller=self.controller)
             if result.returncode:
@@ -158,18 +158,23 @@ class _EvidenceSSHMaster:
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             self.error = exc
 
-    def ensure_started(self, controller: ManagedProcessController | None) -> None:
-        if self.closed:
-            raise RemoteMediaHostUnavailableError("The measurement connection is closed.")
+    def check_failure(self) -> None:
+        if isinstance(self.error, ProcessDeadlineEnforcementError):
+            raise self.error
         if self.controller.cleanup_unproven:
             raise ProcessDeadlineEnforcementError("Measurement connection cleanup is unproven.")
+
+    def ensure_started(self, controller: ManagedProcessController | None) -> None:
+        self.check_failure()
+        if self.closed:
+            raise RemoteMediaHostUnavailableError("The measurement connection is closed.")
         if controller is not None:
             controller.throw_if_cancelled()
         if self.thread is not None:
             if self.thread.is_alive() and self.control_path.exists():
                 return
             raise RemoteMediaHostUnavailableError("The measurement connection ended; this file will retry.")
-        _ensure_remote_awake_for_ssh(self.host)
+        _ensure_remote_awake_for_ssh({**self.host, "host": ssh_target_for_host(self.host)})
         if controller is not None:
             controller.throw_if_cancelled()
         master_thread = threading.Thread(target=self._run, name="evidence-ssh-master", daemon=True)
@@ -185,12 +190,14 @@ class _EvidenceSSHMaster:
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.01)
+            self.check_failure()
             raise RemoteMediaHostUnavailableError("The measurement connection could not be opened.") from self.error
         except BaseException:
             self.close()
             raise
 
     def alive(self, controller: ManagedProcessController | None) -> bool:
+        self.check_failure()
         try:
             result = run_command([
                 "ssh", "-o", "BatchMode=yes", "-S", str(self.control_path), "-O", "check", ssh_target_for_host(self.host),
@@ -202,11 +209,16 @@ class _EvidenceSSHMaster:
     def close(self) -> None:
         if self.closed:
             return
-        self.controller.cancel()
+        cancellation_failure = None
+        try:
+            self.controller.cancel()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            cancellation_failure = exc
         if self.thread is not None:
             self.thread.join(timeout=10)
-        if (self.thread is not None and self.thread.is_alive()) or self.controller.cleanup_unproven:
-            raise ProcessDeadlineEnforcementError("Measurement connection cleanup is unproven.")
+        if cancellation_failure is not None or (self.thread is not None and self.thread.is_alive()) or self.controller.cleanup_unproven:
+            self.error = ProcessDeadlineEnforcementError("Measurement connection cleanup is unproven.")
+            raise self.error from cancellation_failure
         self.control_path.unlink(missing_ok=True)
         self.directory.rmdir()
         self.closed = True
@@ -221,7 +233,10 @@ class RemoteMediaConnections(AbstractContextManager):
 
     def runner(self, host: dict[str, object]) -> RemoteMediaCommands:
         for runner in self._connections:
-            if runner.connection is None or runner.connection.closed:
+            if runner.connection is None:
+                continue
+            runner.connection.check_failure()
+            if runner.connection.closed:
                 continue
             if runner.host_key == ssh_target_for_host(host) and runner.host != host:
                 runner.connection.close()
