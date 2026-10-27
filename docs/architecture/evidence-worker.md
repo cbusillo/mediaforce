@@ -32,14 +32,18 @@ Audio and
 cadence retain their measurements and safety decisions.
 
 The worker reuses an SSH master per unchanged encode-computer configuration
-within its run. Sockets live in private short temporary directories and expire
-after 30 idle seconds; the worker closes only its own masters when the run ends.
-An existing socket avoids repeating the wake probe, while each command still
-holds its wake assertion and enforces the current schedule deadline. Host
+within its run. Sockets live in private short temporary directories. The worker starts a
+foreground master as its own resource and closes it when the run ends. Individual
+managed commands use that master without spawning a background descendant,
+preserving command-containment proof.
+Every command retains its wake probe, wake assertion and current schedule
+deadline. The master sends bounded keepalives so a sleeping or lost computer
+does not leave its socket looking usable indefinitely. Host
 eligibility and ffmpeg's version are refreshed for every claim. Source checks
 before and after measurement are unchanged. A multiplexed status 255, including
-one with empty stderr, is ambiguous between a remote exit and a lost master;
-the file waits for its computer and retries rather than storing bad evidence.
+one with empty stderr, triggers a local master-liveness check. A lost master
+defers the file for its computer; a live master preserves ordinary per-file
+failure handling so one bad file cannot indefinitely hold its library.
 
 ## Durable state
 

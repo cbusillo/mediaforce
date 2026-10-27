@@ -1,17 +1,21 @@
+from __future__ import annotations
+
 import inspect
 import json
 import math
 import subprocess
 import tempfile
+import time
+import threading
 from copy import deepcopy
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, ExitStack
 from pathlib import Path
 
 from mediaforce.core import utils
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ProcessDeadlineEnforcementError, run_command
 from mediaforce.hosts.config import ssh_target_for_host
 from mediaforce.hosts.transport import ssh_connection_lost
-from mediaforce.remote import run_remote_command
+from mediaforce.remote import _ensure_remote_awake_for_ssh, run_remote_command, ssh_client_options
 
 REMOTE_FFMPEG_VERSION_TIMEOUT_SECONDS = 20
 REMOTE_STAT_TIMEOUT_SECONDS = 20
@@ -41,12 +45,12 @@ class RemoteMediaCommands:
     bounded number of frames or seconds, so whatever is left there finishes on its own shortly after.
     """
 
-    def __init__(self, host: dict[str, object], *, control_path: Path | None = None) -> None:
+    def __init__(self, host: dict[str, object], *, connection: _EvidenceSSHMaster | None = None) -> None:
         self.host = deepcopy(host)
         self.host_key = ssh_target_for_host(self.host)
         self.host_label = str(self.host.get("label") or "").strip() or self.host_key
         self._ffmpeg_version: str | None = None
-        self.control_path = control_path
+        self.connection = connection
 
     def begin_claim(self) -> None:
         self._ffmpeg_version = None
@@ -58,14 +62,22 @@ class RemoteMediaCommands:
             timeout_seconds: float,
             process_controller: ManagedProcessController | None,
     ) -> subprocess.CompletedProcess[str]:
-        result = run_remote_command(
-            self.host,
-            command,
-            math.ceil(timeout_seconds) + REMOTE_CONNECT_ALLOWANCE_SECONDS,
-            process_controller=process_controller,
-            **({"control_path": self.control_path} if self.control_path is not None else {}),
-        )
-        if (self.control_path is not None and result.returncode == 255) or ssh_connection_lost(result.returncode, result.stderr):
+        if self.connection is not None:
+            self.connection.ensure_started(process_controller)
+        try:
+            result = run_remote_command(
+                self.host,
+                command,
+                math.ceil(timeout_seconds) + REMOTE_CONNECT_ALLOWANCE_SECONDS,
+                process_controller=process_controller,
+                **({"control_path": self.connection.control_path} if self.connection is not None else {}),
+            )
+        except subprocess.TimeoutExpired as exc:
+            if self.connection is not None and not self.connection.alive(process_controller):
+                raise RemoteMediaHostUnavailableError(f"The connection to {self.host_label} was lost.") from exc
+            raise
+        if (self.connection is not None and result.returncode == 255
+                and not self.connection.alive(process_controller)) or ssh_connection_lost(result.returncode, result.stderr):
             # A lost connection says nothing about the file, so it must not be recorded as a failed measurement.
             raise RemoteMediaHostUnavailableError(f"The connection to {self.host_label} was lost.")
         return result
@@ -75,14 +87,16 @@ class RemoteMediaCommands:
         if self._ffmpeg_version is not None:
             return self._ffmpeg_version
         try:
+            if self.connection is not None:
+                self.connection.ensure_started(process_controller)
             result = run_remote_command(
                 self.host,
                 ["ffmpeg", "-version"],
                 REMOTE_FFMPEG_VERSION_TIMEOUT_SECONDS,
                 process_controller=process_controller,
-                **({"control_path": self.control_path} if self.control_path is not None else {}),
+                **({"control_path": self.connection.control_path} if self.connection is not None else {}),
             )
-        except ProcessCancelledError:
+        except (ProcessCancelledError, ProcessDeadlineEnforcementError):
             raise
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             raise RemoteMediaHostUnavailableError(f"{self.host_label} could not be reached.") from exc
@@ -120,32 +134,112 @@ class RemoteMediaCommands:
         }
 
 
+class _EvidenceSSHMaster:
+    """A foreground control process owned by the worker, outside individual command containment."""
+
+    def __init__(self, host: dict[str, object]) -> None:
+        self.host = deepcopy(host)
+        self.directory = Path(tempfile.mkdtemp(prefix="mf-ssh-", dir="/tmp"))
+        self.control_path = self.directory / "control"
+        self.closed = False
+        self.controller = ManagedProcessController()
+        self.thread: threading.Thread | None = None
+        self.error: Exception | None = None
+
+    def _run(self) -> None:
+        try:
+            result = run_command([
+                "ssh", *ssh_client_options(), "-M", "-N", "-n", "-o", "ControlPersist=no", "-o", "ForkAfterAuthentication=no",
+                "-o", "ServerAliveInterval=3", "-o", "ServerAliveCountMax=1",
+                "-o", f"ControlPath={self.control_path}", ssh_target_for_host(self.host),
+            ], process_controller=self.controller)
+            if result.returncode:
+                self.error = RemoteMediaHostUnavailableError("The measurement connection ended.")
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            self.error = exc
+
+    def ensure_started(self, controller: ManagedProcessController | None) -> None:
+        if self.closed:
+            raise RemoteMediaHostUnavailableError("The measurement connection is closed.")
+        if self.controller.cleanup_unproven:
+            raise ProcessDeadlineEnforcementError("Measurement connection cleanup is unproven.")
+        if controller is not None:
+            controller.throw_if_cancelled()
+        if self.thread is not None:
+            if self.thread.is_alive() and self.control_path.exists():
+                return
+            raise RemoteMediaHostUnavailableError("The measurement connection ended; this file will retry.")
+        _ensure_remote_awake_for_ssh(self.host)
+        if controller is not None:
+            controller.throw_if_cancelled()
+        master_thread = threading.Thread(target=self._run, name="evidence-ssh-master", daemon=True)
+        self.thread = master_thread
+        master_thread.start()
+        deadline = time.monotonic() + 10
+        try:
+            while master_thread.is_alive():
+                if controller is not None:
+                    controller.throw_if_cancelled()
+                if self.control_path.exists():
+                    return
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+            raise RemoteMediaHostUnavailableError("The measurement connection could not be opened.") from self.error
+        except BaseException:
+            self.close()
+            raise
+
+    def alive(self, controller: ManagedProcessController | None) -> bool:
+        try:
+            result = run_command([
+                "ssh", "-o", "BatchMode=yes", "-S", str(self.control_path), "-O", "check", ssh_target_for_host(self.host),
+            ], process_controller=controller, timeout=5)
+        except subprocess.TimeoutExpired:
+            return False
+        return result.returncode == 0
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.controller.cancel()
+        if self.thread is not None:
+            self.thread.join(timeout=10)
+        if (self.thread is not None and self.thread.is_alive()) or self.controller.cleanup_unproven:
+            raise ProcessDeadlineEnforcementError("Measurement connection cleanup is unproven.")
+        self.control_path.unlink(missing_ok=True)
+        self.directory.rmdir()
+        self.closed = True
+
+
 class RemoteMediaConnections(AbstractContextManager):
-    """Own only this worker's short-lived SSH masters; never use the user's control sockets."""
+    """Own only this worker's SSH masters; never use the user's control sockets."""
 
     def __init__(self) -> None:
-        self._connections: list[tuple[RemoteMediaCommands, tempfile.TemporaryDirectory[str]]] = []
+        self._connections: list[RemoteMediaCommands] = []
+        self._resources = ExitStack()
 
     def runner(self, host: dict[str, object]) -> RemoteMediaCommands:
-        for runner, _directory in self._connections:
+        for runner in self._connections:
+            if runner.connection is None or runner.connection.closed:
+                continue
+            if runner.host_key == ssh_target_for_host(host) and runner.host != host:
+                runner.connection.close()
+                continue
             if runner.host == host:
-                runner.begin_claim()
-                return runner
-        directory = tempfile.TemporaryDirectory(prefix="mf-ssh-", dir="/tmp")
-        runner = RemoteMediaCommands(host, control_path=Path(directory.name) / "control")
-        self._connections.append((runner, directory))
+                thread = runner.connection.thread
+                if thread is None or thread.is_alive():
+                    runner.begin_claim()
+                    return runner
+                runner.connection.close()
+        connection = _EvidenceSSHMaster(host)
+        self._resources.callback(connection.close)
+        runner = RemoteMediaCommands(host, connection=connection)
+        self._connections.append(runner)
         return runner
 
     def __exit__(self, *_exc: object) -> None:
-        for runner, directory in self._connections:
-            try:
-                if runner.control_path is None or not runner.control_path.exists():
-                    continue
-                subprocess.run(["ssh", "-o", "BatchMode=yes", "-S", str(runner.control_path), "-O", "exit", runner.host_key],
-                               capture_output=True, text=True, timeout=5)
-            except (OSError, subprocess.SubprocessError):
-                # The owned master also expires after 30 idle seconds if it cannot answer.
-                pass
-            finally:
-                directory.cleanup()
-        self._connections.clear()
+        try:
+            self._resources.close()
+        finally:
+            self._connections.clear()

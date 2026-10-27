@@ -60,6 +60,7 @@ __all__ = [
     "SVT_AV1_REQUIRED_ISSUE",
     "VIDEOTOOLBOX_REQUIRED_ISSUE",
     "_classify_ssh_failure",
+    "_ensure_remote_awake_for_ssh",
     "collect_host_statuses",
     "copy_remote_file_to_local",
     "execution_mode_for_host",

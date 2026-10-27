@@ -15,7 +15,7 @@ from sqlalchemy import select
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items
-from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.core.process_control import ManagedProcessController, ProcessDeadlineEnforcementError
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding import fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence
@@ -32,7 +32,7 @@ from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, 
     EVIDENCE_REASON_TOOL_CHANGED, load_library_item_evidence_states, project_evidence_state, \
     rebuild_library_item_evidence_states
 from mediaforce.library.evidence_worker import REMOTE_SOURCE_MISMATCH_ERROR, EvidenceWorkerDeps, \
-    process_evidence_queue_once
+    process_evidence_queue_once, run_evidence_queue_until_blocked
 from mediaforce.library.probe import probe_evidence
 from mediaforce.library.source_evidence import observe_file
 
@@ -424,13 +424,70 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(state["work_status"], "cancelled")
         self.assertEqual(state["attempt_count"], 0)
 
+    def test_containment_failure_stops_without_recording_bad_media_or_host_wait(self) -> None:
+        config = self._config([self.mini])
+        item_id = self._prepare_cadence_item(config)
+        deps = self._deps(config, probe_evidence, host_rows=[_row(self.mini)])
+        deps.remote_commands = Mock(side_effect=ProcessDeadlineEnforcementError('fixture unknown cleanup'))
+        with self.assertRaises(ProcessDeadlineEnforcementError):
+            process_evidence_queue_once(config_path=config.paths.config_path, deps=deps)
+        state, summary = self._stored(config, item_id)
+        self.assertIsNone(summary)
+        self.assertEqual(state["work_status"], "running")
+        self.assertEqual(state["attempt_count"], 0)
+
+    def test_worker_loop_reuses_runner_and_refreshes_lineage_across_claims(self) -> None:
+        config = self._config([self.mini])
+        first_id = self._prepare_cadence_item(config)
+        second_source = self.media_root / "show/item-2.mkv"
+        second_source.write_bytes(b"fixture")
+        with open_db(config.paths.db_path) as connection:
+            row = dict(connection.execute(select(library_items).where(library_items.c.id == first_id)).mappings().one())
+            row.pop("id")
+            row.update(source_path=str(second_source), rel_path="tv/show/item-2.mkv", file_name="item-2.mkv",
+                       mtime_ns=second_source.stat().st_mtime_ns,
+                       fingerprint=file_fingerprint(second_source, second_source.stat(), 60.0),
+                       content_version_fingerprint=content_version_fingerprint(second_source, second_source.stat()))
+            second_id = int(connection.execute(library_items.insert().values(**row).returning(library_items.c.id)).scalar_one())
+            rebuild_library_item_evidence_states(connection, library_item_ids=[second_id])
+            cancel_evidence_queue(connection)
+            start_evidence_work(connection, config, "tv/show", evidence_kinds=[CADENCE_EVIDENCE_KIND])
+            resume_evidence_queue(connection)
+        remote = FakeEncodeComputers(controller_source=self._source_path())
+        runners = []
+        real_factory = RemoteMediaCommands
+
+        def commands(host: dict[str, object], **kwargs: Any) -> RemoteMediaCommands:
+            # This test exercises worker/pool wiring; transport lifecycle is tested separately.
+            kwargs["connection"].ensure_started = Mock()
+            runner = real_factory(host, **kwargs)
+            runners.append(runner)
+            return runner
+
+        def shared_remote(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            kwargs.pop("control_path")
+            return remote(*args, **kwargs)
+
+        with self._no_local_media_commands(), \
+             patch("mediaforce.encoding.remote_media.RemoteMediaCommands", side_effect=commands), \
+             patch("mediaforce.encoding.remote_media.run_remote_command", shared_remote):
+            result = run_evidence_queue_until_blocked(config_path=config.paths.config_path,
+                deps=self._deps(config, probe_evidence, host_rows=[_row(self.mini)]), max_work_items=2)
+        self.assertEqual(result["processed_count"], 2)
+        self.assertEqual(len(runners), 1)
+        self.assertEqual(len([call for call in remote.calls if call["command"] == ["ffmpeg", "-version"]]), 2)
+        self.assertEqual(self._stored(config, first_id)[0]["work_status"], "completed")
+        self.assertEqual(self._stored(config, second_id)[0]["work_status"], "completed")
+        assert runners[0].connection is not None
+        self.assertFalse(runners[0].connection.control_path.parent.exists())
+
     def test_silent_multiplexed_disconnect_defers_without_a_bad_receipt(self) -> None:
         config = self._config([self.mini])
         item_id = self._prepare_cadence_item(config)
         remote = FakeEncodeComputers(controller_source=self._source_path(),
                                      idet_result=subprocess.CompletedProcess(["ffmpeg"], 255, "", ""))
         deps = self._deps(config, probe_evidence, host_rows=[_row(self.mini)])
-        deps.remote_commands = lambda host: RemoteMediaCommands(host, control_path=self.project_root / "owned-control")
+        deps.remote_commands = lambda host: RemoteMediaCommands(host, connection=Mock(control_path=self.project_root / "owned-control", alive=Mock(return_value=False)))
 
         def shared_remote(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
             kwargs.pop("control_path")

@@ -127,7 +127,7 @@ def _run_remote_ssh(
         ssh_client_options_func: Callable[..., list[str]],
         subprocess_run: Callable[..., subprocess.CompletedProcess[str]],
 ) -> subprocess.CompletedProcess[str]:
-    if wake_before_connect and not (control_path is not None and control_path.exists()):
+    if wake_before_connect:
         ensure_remote_awake_for_ssh(host)
     ssh_host = str(host.get("host") or "").strip()
     cmd = ["ssh"]
@@ -135,7 +135,7 @@ def _run_remote_ssh(
         cmd.extend(["-i", str(identity_file), "-o", "IdentitiesOnly=yes"])
     cmd.extend(ssh_client_options_func(batch_mode=batch_mode))
     if control_path is not None:
-        cmd.extend(["-o", "ControlMaster=auto", "-o", "ControlPersist=30", "-o", f"ControlPath={control_path}"])
+        cmd.extend(["-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ForkAfterAuthentication=no", "-o", f"ControlPath={control_path}"])
     cmd.append(ssh_host)
     if remote_args:
         cmd.append(shlex.join([str(arg) for arg in remote_args]))

@@ -18,7 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_items
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ProcessDeadlineEnforcementError
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, reclassify_cadence_summary
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, fingerprint_video_decode_timed_out, reclassify_media_fingerprint_summary
@@ -370,6 +370,8 @@ def _run_evidence_claim(
         heartbeat.stop()
         _defer_for_encode_computer(config, claim, deps, restore_attempt=attempt_started)
         return
+    except ProcessDeadlineEnforcementError:
+        raise
     except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError, SQLAlchemyError) as exc:
         heartbeat.stop()
         source_availability, _current_fingerprint = _source_fingerprint(config, claim, source_path)
