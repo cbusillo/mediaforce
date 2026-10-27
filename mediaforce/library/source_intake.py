@@ -116,18 +116,25 @@ def assess_readable_source(
     }
 
 
+def _matches_scanned_identity(item: Mapping[str, Any], identity: Mapping[str, Any]) -> bool:
+    return (item["size_bytes"] == identity["size_bytes"]
+            and item["content_version_fingerprint"] == identity["sample_fingerprint"]
+            and item["mtime_ns"] == identity["stat"][3])
+
+
 def commit_readable_source(
-    connection: DBClient, item: Mapping[str, Any], identity: Mapping[str, Any], probe: Mapping[str, Any]
+    connection: DBClient, item: Mapping[str, Any], identity: Mapping[str, Any], probe: Mapping[str, Any],
+    *, before_commit: Callable[[DBClient], None] | None = None,
 ) -> str:
     connection.commit()
     connection.exec_driver_sql("BEGIN IMMEDIATE")
+    if before_commit is not None:
+        before_commit(connection)
     current = connection.execute(select(library_items).where(library_items.c.id == item["id"])).mappings().one()
     if (
         current["source_revision"] != item["source_revision"]
         or pending_source_operation(connection, int(item["id"]))
-        or current["size_bytes"] != identity["size_bytes"]
-        or current["content_version_fingerprint"] != identity["sample_fingerprint"]
-        or current["mtime_ns"] != identity["stat"][3]
+        or not _matches_scanned_identity(current, identity)
         or _history_present(connection, int(item["id"]))
     ):
         raise RuntimeError("The file changed since its library scan; scan it again before checking the original")
@@ -217,7 +224,8 @@ def commit_readable_source(
 
 
 def assess_source_input(
-    config: MediaforceConfig, item_id: int, controller: ManagedProcessController, check_cancelled: Callable[[], None]
+    config: MediaforceConfig, item_id: int, controller: ManagedProcessController, check_cancelled: Callable[[], None],
+    *, before_commit: Callable[[DBClient], None] | None = None,
 ) -> None:
     with open_db(config.paths.db_path) as connection:
         item = cast(
@@ -243,7 +251,12 @@ def assess_source_input(
             .one_or_none()
         )
     path = Path(item["source_path"])
+    root = config.source_root_map.get(item["media_root"])
+    if root is None or not root.is_dir():
+        raise RuntimeError("The original's library is unavailable")
     before = observe_file(path)
+    if not _matches_scanned_identity(item, before):
+        raise RuntimeError("The file changed since its library scan; scan it again before checking the original")
     saved = json.loads(active["identity_json"]) if active else {}
     if (
         admission
@@ -260,8 +273,11 @@ def assess_source_input(
         with open_db(config.paths.db_path) as connection:
             connection.commit()
             connection.exec_driver_sql("BEGIN IMMEDIATE")
+            if before_commit is not None:
+                before_commit(connection)
             current = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
-            if current["source_revision"] != item["source_revision"] or pending_source_operation(connection, item_id):
+            if (current["source_revision"] != item["source_revision"] or pending_source_operation(connection, item_id)
+                    or not _matches_scanned_identity(current, before)):
                 raise RuntimeError("The file changed before its content check could be recorded")
             active_id = ensure_active_source_version(connection, current)
             version = connection.execute(select(source_versions).where(source_versions.c.version_id == active_id)).mappings().one()
@@ -293,7 +309,7 @@ def assess_source_input(
         raise RuntimeError("The file changed while checking its original; the check will retry")
     check_cancelled()
     with open_db(config.paths.db_path) as connection:
-        commit_readable_source(connection, item, before, probe)
+        commit_readable_source(connection, item, before, probe, before_commit=before_commit)
 
 
 def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, limit: int = 25) -> int:

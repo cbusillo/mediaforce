@@ -350,11 +350,11 @@ def test_assessment_commit_failure_retries_once_without_a_second_admission_attem
     original_commit = intake.commit_readable_source
     attempts = []
 
-    def fail_first(db: DBClient, item: dict[str, Any], identity: dict[str, Any], probe: dict[str, Any]) -> str:
+    def fail_first(db: DBClient, item: dict[str, Any], identity: dict[str, Any], probe: dict[str, Any], **kwargs: Any) -> str:
         attempts.append(item["id"])
         if item["id"] == first_id:
             raise RuntimeError("file changed before commit")
-        return original_commit(db, item, identity, probe)
+        return original_commit(db, item, identity, probe, **kwargs)
 
     with patch.object(intake, "commit_readable_source", side_effect=fail_first):
         _work(config)
@@ -569,12 +569,153 @@ def test_shutdown_interrupts_prefetched_digest_without_admission_or_queue_transi
     with patch.object(intake, "observe_file", side_effect=observe):
         with SourceAdmissionPrefetcher(stop_event=stopped, logger=Mock()) as prefetch:
             prefetch.start(config, claim)
+            prefetch.wait()
     assert stopped.is_set()
     with open_db(config.paths.db_path) as database:
         assert database.execute(select(func.count()).select_from(source_admissions)).scalar_one() == 0
         assert database.execute(select(library_item_evidence_state.c.work_status).where(
             library_item_evidence_state.c.library_item_id == second_id,
         )).scalars().all() == ["queued"]
+
+
+@pytest.mark.parametrize("interruption", ["pause", "cancel", "priority", "other_runner"])
+def test_prefetch_rechecks_runnability_under_commit_lock(tmp_path: Path, interruption: str) -> None:
+    import mediaforce.library.source_intake as intake
+    from mediaforce.core.db_tables import source_versions
+    from mediaforce.library.evidence_queue import pause_evidence_queue, transition_evidence_work
+    from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher
+
+    config = _config(tmp_path)
+    _source(config, "first")
+    second_id, second_path = _source(config, "second")
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        claim = claim_next_evidence_work(database, worker_id="first-runner", lease_seconds=60)
+        versions_before = database.execute(select(func.count()).select_from(source_versions)).scalar_one()
+    assert claim is not None
+    interrupted = threading.Event()
+
+    def observe(path: Path, **kwargs: Any) -> dict[str, Any]:
+        result = observe_file(path, **kwargs)
+        if path == second_path and kwargs.get("full_digest"):
+            with open_db(config.paths.db_path) as database:
+                if interruption == "pause":
+                    pause_evidence_queue(database)
+                elif interruption == "cancel":
+                    cancel_evidence_queue(database)
+                elif interruption == "priority":
+                    database.execute(update(library_item_evidence_state).where(
+                        library_item_evidence_state.c.library_item_id == second_id,
+                    ).values(work_priority=claim.work_priority - 1))
+                else:
+                    transition_evidence_work(database, claim, work_status="completed")
+                    database.commit()
+                    assert claim_next_evidence_work(database, worker_id="second-runner", lease_seconds=60) is not None
+            interrupted.set()
+        return result
+
+    with patch.object(intake, "observe_file", side_effect=observe):
+        with SourceAdmissionPrefetcher(stop_event=None, logger=Mock()) as prefetch:
+            prefetch.start(config, claim)
+            prefetch.wait()
+    assert interrupted.is_set()
+    with open_db(config.paths.db_path) as database:
+        assert database.execute(select(func.count()).select_from(source_versions)).scalar_one() == versions_before
+        assert database.execute(select(func.count()).select_from(source_admissions)).scalar_one() == 0
+
+
+def test_prefetch_does_not_record_bytes_changed_since_scan(tmp_path: Path) -> None:
+    from mediaforce.core.db_tables import source_versions
+    from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher
+
+    config = _config(tmp_path)
+    _source(config, "first")
+    _second_id, path = _source(config, "second")
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        claim = claim_next_evidence_work(database, worker_id="fixture", lease_seconds=60)
+        before = database.execute(select(func.count()).select_from(source_versions)).scalar_one()
+    assert claim is not None
+    path.write_bytes(b"replacement bytes")
+    with SourceAdmissionPrefetcher(stop_event=None, logger=Mock()) as prefetch:
+        prefetch.start(config, claim)
+        prefetch.wait()
+    with open_db(config.paths.db_path) as database:
+        assert database.execute(select(func.count()).select_from(source_versions)).scalar_one() == before
+        assert database.execute(select(func.count()).select_from(source_admissions)).scalar_one() == 0
+
+
+def test_prefetch_setup_failure_does_not_fail_current_file(tmp_path: Path) -> None:
+    from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher
+
+    config = _config(tmp_path)
+    _source(config)
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        claim = claim_next_evidence_work(database, worker_id="fixture", lease_seconds=60)
+    assert claim is not None
+    logger = Mock()
+    with patch("mediaforce.library.source_prefetch.open_db", side_effect=RuntimeError("fixture setup failed")):
+        with SourceAdmissionPrefetcher(stop_event=None, logger=logger) as prefetch:
+            prefetch.start(config, claim)
+    logger.exception.assert_called_once()
+    with open_db(config.paths.db_path) as database:
+        assert database.execute(select(library_item_evidence_state.c.attempt_count)).scalar_one() == 0
+
+
+def test_prefetch_exit_interrupts_its_digest_after_unexpected_runner_error(tmp_path: Path) -> None:
+    import mediaforce.library.source_intake as intake
+    from mediaforce.core.process_control import ProcessCancelledError
+    from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher
+
+    config = _config(tmp_path)
+    _source(config, "first")
+    _source(config, "second")
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        claim = claim_next_evidence_work(database, worker_id="fixture", lease_seconds=60)
+    assert claim is not None
+    started = threading.Event()
+    interrupted = threading.Event()
+
+    def observe(path: Path, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("full_digest"):
+            started.set()
+            try:
+                for _ in range(100):
+                    kwargs["check_cancelled"]()
+                    interrupted.wait(.01)
+            except ProcessCancelledError:
+                interrupted.set()
+                raise
+        return observe_file(path, **kwargs)
+
+    with patch.object(intake, "observe_file", side_effect=observe):
+        with pytest.raises(RuntimeError):
+            with SourceAdmissionPrefetcher(stop_event=None, logger=Mock()) as prefetch:
+                prefetch.start(config, claim)
+                assert started.wait(5)
+                raise RuntimeError("unexpected runner failure")
+    assert interrupted.is_set()
+
+
+def test_one_item_run_does_not_prepare_an_extra_original(tmp_path: Path) -> None:
+    import mediaforce.library.source_intake as intake
+    from mediaforce.library.evidence_worker import run_evidence_queue_until_blocked
+
+    config = _config(tmp_path)
+    _source(config, "first")
+    _source(config, "second")
+    _discover(config)
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=lambda _path, kind, **_kw: _summary(kind), logger=Mock())
+    with (
+        patch.object(intake, "observe_file", wraps=observe_file) as observed,
+        patch.object(intake, "_probe_payload", return_value=_probe()),
+        patch("mediaforce.library.evidence_worker._analysis_target",
+              side_effect=lambda _config, _claim, path, *_args: SimpleNamespace(source_path=path, command_runner=None)),
+    ):
+        run_evidence_queue_until_blocked(config_path=config.paths.config_path, config=config, deps=deps)
+    assert sum(bool(call.kwargs.get("full_digest")) for call in observed.call_args_list) == 1
 
 
 def test_background_discovery_preserves_higher_priority_reason(tmp_path: Path) -> None:
