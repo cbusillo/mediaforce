@@ -16,7 +16,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.encode_queue import encode_run_rel_paths, list_child_encode_jobs_for_parents
 from mediaforce.library.staged_validation import not_remade_blockers, staged_validation_outcome
 from mediaforce.library.workflow_state import ItemWorkflowState
-from mediaforce.web.runtime.encode_runtime import size_exception_question, unfinished_child_reason
+from mediaforce.web.runtime.encode_runtime import KEPT_ORIGINAL_TERMINAL_REASON, size_exception_question, unfinished_child_reason
 
 # Stages in the order the owner reads them: their part first, then work under way, then what is done.
 EPISODE_STAGES = (
@@ -167,7 +167,8 @@ def _episode(
         episode["stage"] = "needs_you"
         episode["wait_reason"] = {"code": f"publish_{publish_stopped}"}
         return episode
-    if run is not None and run_status in _OWNER_RUN_STATUSES | {"queued", "retry_backoff"}:
+    if (run is not None and run_status in _OWNER_RUN_STATUSES | {"queued", "retry_backoff"}
+            and run.get("terminal_reason") != KEPT_ORIGINAL_TERMINAL_REASON):
         reason, label, needs_owner = unfinished_child_reason(run)
         owner_run = reason != "size_exception_declined" and (needs_owner or run_status in _OWNER_RUN_STATUSES)
         # A run that waits on the owner says less than the copy it left, once that copy has been checked.

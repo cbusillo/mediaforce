@@ -14,29 +14,33 @@ import os
 import tempfile
 import threading
 from dataclasses import dataclass
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import literal_column, select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
-from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, load_queue_state
+from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RECENT_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, \
+    encode_run_manifest_files, load_queue_state
 from mediaforce.core.type_defs import object_dict
 from mediaforce.library.candidate_selection import season_identity
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
+from mediaforce.library.media_scopes import path_matches_scope
+from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
 from mediaforce.library.content_kinds import evidence_stamp, season_evidence, season_grouping, season_kind_report, \
     season_stamp
 from mediaforce.library.source_evidence import SourceEvidenceContext
 from mediaforce.tuning.calibration_jobs import load_latest_jobs_for_prefixes
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    effective_production_approval, holds_approval, production_approval_contract
+    effective_production_approval, holds_approval, production_approval_contract, production_calibration
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 from mediaforce.web.runtime.production_holds import approval_identity
+from mediaforce.web.runtime.encode_runtime import encode_writer_cleanup_pending, retained_encode_writer_filter, unfinished_child_reason
 
 APPROVABLE_KINDS = ("darker_live_action", "bright_live_action")
 KIND_IS_ONE_TIME_CODE = "kind_is_one_time"
@@ -175,20 +179,24 @@ class KindAwareLoader:
         return EffectiveApproval(season, calibration, production_approval_contract(calibration), kind=kind)
 
 
-# A run that ended badly leaves its season for the Director; the background queue never retries it.
-_UNSETTLED_RUN_STATUSES = ("failed", "stopped", "needs_attention")
 KIND_QUEUE_WAITS_CODE = "kind_queue_waits"
 # A refused season is tried again after this long, in case what refused it (such as free space) has cleared.
 KIND_RETRY_SECONDS = 6 * 3600.0
 
 
-def background_queue_blocker(connection: DBClient) -> dict[str, Any] | None:
+def background_queue_blocker(
+        connection: DBClient, *, library_item_ids: Collection[int] | None = None, config: MediaforceConfig | None = None,
+) -> dict[str, Any] | None:
     """Why the background queue waits: the owner paused work, or a production run is queued or running."""
     active = connection.execute(select(encode_jobs.c.job_id).where(
         encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES), encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS),
     ).limit(1)).first()
     if load_queue_state(connection).get("is_paused") or active is not None:
         return {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
+    if library_item_ids is not None:
+        files = _waiting_files(connection, library_item_ids=library_item_ids)
+        if set(library_item_ids) != {int(item["id"]) for item in files} or _files_waiting_for_owner(connection, files, config=config):
+            return {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
     return None
 
 
@@ -197,15 +205,12 @@ def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tup
 
     Files the owner chose to keep original are finished, so they never bring a season back.
     """
-    rows = [item for item in connection.execute(select(
-        library_items.c.id, library_items.c.rel_path, library_items.c.video_codec, library_items.c.size_bytes,
-    ).where(LIBRARY_ITEM_PRESENT, library_items.c.status != "promoted")).mappings()
-        if str(item["video_codec"] or "").casefold() != "av1"]
-    kept = library_item_ids_kept_original(connection, [int(item["id"]) for item in rows])
+    rows = _waiting_files(connection)
+    blocked = _files_waiting_for_owner(connection, rows, config=config)
     waiting: dict[str, tuple[int, list[int]]] = {}
     for item in rows:
         season = season_prefix_of(config, str(item["rel_path"]))
-        if season is None or int(item["id"]) in kept or not str(item["rel_path"]).startswith(f"{season}/"):
+        if season is None or int(item["id"]) in blocked or not str(item["rel_path"]).startswith(f"{season}/"):
             continue
         size, ids = waiting.get(season, (0, []))
         waiting[season] = (size + int(item["size_bytes"] or 0), [*ids, int(item["id"])])
@@ -213,11 +218,67 @@ def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tup
                   key=lambda entry: (-entry[1], entry[0]))
 
 
-def _latest_run_unsettled(connection: DBClient, season: str) -> bool:
-    status = connection.execute(
-        select(encode_jobs.c.status).where(encode_jobs.c.prefix == season).order_by(encode_jobs.c.created_at.desc()).limit(1)
-    ).scalar_one_or_none()
-    return status in _UNSETTLED_RUN_STATUSES
+def _waiting_files(connection: DBClient, *, library_item_ids: Collection[int] | None = None) -> list[dict[str, Any]]:
+    query = select(
+        library_items.c.id, library_items.c.id.label("item_id"), library_items.c.rel_path, library_items.c.video_codec, library_items.c.size_bytes,
+        library_items.c.status, staged_artifacts.c.library_item_id.label("staged_library_item_id"),
+        staged_artifacts.c.staging_path, staged_artifacts.c.promoted_at, staged_artifacts.c.validation_json,
+    ).select_from(library_items.outerjoin(staged_artifacts, staged_artifacts.c.library_item_id == library_items.c.id)).where(
+        LIBRARY_ITEM_PRESENT, library_items.c.status.in_(ENCODE_CANDIDATE_STATUSES),
+    )
+    if library_item_ids is not None:
+        query = query.where(library_items.c.id.in_(library_item_ids))
+    rows: list[dict[str, Any]] = []
+    for row in connection.execute(query).mappings():
+        item = {str(key): value for key, value in row.items()}
+        if str(item["video_codec"] or "").casefold() != "av1" and derive_item_workflow_state(item).lane == "encode":
+            rows.append(item)
+    kept = library_item_ids_kept_original(connection, [int(item["id"]) for item in rows])
+    return [item for item in rows if int(item["id"]) not in kept]
+
+
+def _files_waiting_for_owner(
+        connection: DBClient, files: list[dict[str, Any]], *, config: MediaforceConfig | None = None,
+) -> frozenset[int]:
+    if not files:
+        return frozenset()
+    all_files = {int(item["id"]): str(item["rel_path"]) for item in files}
+    remaining = dict(all_files)
+    blocked: set[int] = set()
+    parents = set(connection.execute(select(encode_jobs.c.parent_job_id).where(
+        encode_jobs.c.parent_job_id.is_not(None),
+    )).scalars())
+    rows = connection.execute(select(encode_jobs, retained_encode_writer_filter().label("retained_writer")).where(
+        encode_jobs.c.status.in_(RECENT_ENCODE_JOB_STATUSES),
+    ).order_by(
+        encode_jobs.c.created_at.desc(), literal_column("rowid").desc(),
+    )).mappings()
+    for row in rows:
+        if row["job_kind"] == "folder" and row["job_id"] in parents:
+            continue
+        if not remaining and not row["retained_writer"]:
+            continue
+        job = {**row, "progress": json.loads(row["progress_json"] or "{}"),
+               "manifest_indexes": json.loads(row["manifest_indexes_json"]) if row["manifest_indexes_json"] else None,
+               "host": object_dict(json.loads(row["host_json"] or "{}"))}
+        custody_hold = bool(row["retained_writer"]) and encode_writer_cleanup_pending(config, job)
+        reason, _label, needs_owner = unfinished_child_reason(job) if job["status"] != "completed" else ("", "", False)
+        held = custody_hold or needs_owner or reason == "size_exception_declined"
+        references = encode_run_manifest_files(job, strict_indexes=True)
+        if not references and not held:
+            continue
+        candidates = all_files if custody_hold else remaining
+        if references:
+            referenced_ids = {item.library_item_id for item in references if item.library_item_id > 0}
+            legacy_paths = {item.rel_path for item in references if item.library_item_id <= 0}
+            affected = {item_id for item_id, path in candidates.items() if item_id in referenced_ids or path in legacy_paths}
+        else:
+            affected = {item_id for item_id, path in candidates.items() if path_matches_scope(path, str(job["prefix"] or ""))}
+        for item_id in affected:
+            remaining.pop(item_id, None)
+            if held:
+                blocked.add(item_id)
+    return frozenset(blocked)
 
 
 def _attempts_file(config: MediaforceConfig) -> Path:
@@ -235,7 +296,7 @@ def _load_attempts(config: MediaforceConfig) -> dict[str, Any]:
 @dataclass(frozen=True, slots=True)
 class KindSeason:
     season: str
-    kind: str
+    kind: str | None
     waiting_bytes: int
     approval: str
     files: tuple[int, ...]
@@ -269,21 +330,18 @@ def next_kind_season(
         load_calibration_state: LoadCalibrationState,
         now: float,
 ) -> KindSeason | None:
-    """The next waiting season a current kind approval covers, to queue on its own, largest first.
-
-    None while the background queue waits (see background_queue_blocker), so seasons go one at a time. A season
-    already tried under the same approval with the same waiting files is skipped, a refused one until it is retried
-    after KIND_RETRY_SECONDS, and a season whose last run ended badly waits for the Director.
-    """
-    if not approved_kinds(config) or background_queue_blocker(connection) is not None:
+    if background_queue_blocker(connection) is not None:
         return None
     attempts = _load_attempts(config)
     for season, waiting_bytes, files in _waiting_seasons(connection, config):
         approval = effective_production_approval(config, season, load_calibration_state)
-        if approval is None or approval.kind is None or not approval.current:
+        if approval is None or not approval.current:
+            continue
+        sample_prefix, _sample = production_calibration(config, season, load_calibration_state)
+        if sample_prefix != approval.prefix:
             continue
         chosen = KindSeason(season, approval.kind, waiting_bytes, approval_identity(approval.calibration, approval.contract), files)
-        if _attempted(attempts.get(season), chosen, now) or _latest_run_unsettled(connection, season):
+        if _attempted(attempts.get(season), chosen, now):
             continue
         return chosen
     return None

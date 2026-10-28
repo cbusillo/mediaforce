@@ -10,6 +10,7 @@ import pytest
 from mediaforce import state_cleanup
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db
+from mediaforce.core.db_tables import encode_jobs
 from mediaforce.library.run_manifests import build_run_manifest, write_manifest
 
 DAY = 86400
@@ -117,6 +118,20 @@ def test_old_run_plan_without_source_traits_is_removed(config: MediaforceConfig)
     _sweep(config)
 
     assert not path.exists()
+
+
+@pytest.mark.parametrize("status", ["failed", "stopped"])
+def test_retained_problem_jobs_keep_their_file_membership_evidence(config: MediaforceConfig, status: str) -> None:
+    path = _old_run_plan(config)
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.insert().values(
+            job_id="retained-question", prefix="tv/Show", status=status, job_kind="shard", manifest_path=str(path),
+            host_json="{}", created_at="before-cleanup", updated_at="before-cleanup",
+        ))
+
+    _sweep(config)
+
+    assert path.exists()
 
 
 @pytest.mark.parametrize("contents", [b"{broken", b"\xff", b"[]", b'{"items": [null]}'])

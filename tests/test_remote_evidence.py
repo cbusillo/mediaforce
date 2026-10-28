@@ -23,6 +23,7 @@ from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, MED
     analyze_media_fingerprint, media_fingerprint_manifest_payload, media_fingerprint_staleness
 from mediaforce.encoding.remote_media import RemoteMediaCommands
 from mediaforce.cli import _schedule_aware_evidence_host_rows
+from mediaforce.web.app import evidence_host_rows
 from mediaforce.hosts.types import FFMPEG_MISSING_ISSUE, HostStatus
 from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, select_evidence_host
 from mediaforce.library.evidence_queue import cancel_evidence_queue, claim_next_evidence_work, \
@@ -546,6 +547,30 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
             rows = _schedule_aware_evidence_host_rows(config)
         self.assertEqual(select_evidence_host(config, rows, media_root="tv"), self.mbp)
         probe.assert_called_once()
+
+    def test_measuring_uses_each_computers_own_window_at_its_close(self) -> None:
+        studio = _host("studio.example", "Studio", priority=10, schedule_profile="night")
+        mini = {**self.mini, "schedule_profile": "day"}
+        config = self._config([studio, mini])
+        config.raw["encode_queue"] = {"schedule_profiles": [
+            {"key": "night", "mode": "night", "start_hour": 0, "end_hour": 5, "timezone": "host_local"},
+            {"key": "day", "mode": "night", "start_hour": 0, "end_hour": 15, "timezone": "host_local"},
+        ]}
+        statuses = [HostStatus(
+            key=host["host"], label=host["label"], mode="ssh", priority=host["priority"],
+            capabilities=["encode_queue"], available=True, message="Ready", missing_paths=[],
+            schedule_timezone="America/New_York",
+        ) for host in (studio, mini)]
+        for stamp, expected in [
+            ("2026-10-28T08:59:59+00:00", studio),
+            ("2026-10-28T09:00:00+00:00", mini),
+            ("2026-10-28T18:59:59+00:00", mini),
+            ("2026-10-28T19:00:00+00:00", None),
+        ]:
+            with self.subTest(stamp=stamp), patch("mediaforce.web.app.datetime", wraps=datetime) as clock:
+                clock.now.return_value = datetime.fromisoformat(stamp)
+                rows = evidence_host_rows(config, collect_statuses=lambda _config: statuses)
+                self.assertEqual(select_evidence_host(config, rows, media_root="tv"), expected)
 
     def test_without_encode_computers_measures_locally_as_before(self) -> None:
         config = self._config([])
