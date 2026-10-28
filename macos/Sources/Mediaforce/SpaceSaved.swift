@@ -114,7 +114,7 @@ struct SpotCheck: View {
             .frame(maxWidth: 760)
             switch loaded {
             case .episode(_, let season, let file):
-                ItemPlayer(file: file, client: model.client) {
+                FilePlayer(file: file, model: model) {
                     Task { await putOriginalBack(season, file) }
                 }
                 .id("\(file.id) \(file.stage) \(file.originalBackup)")

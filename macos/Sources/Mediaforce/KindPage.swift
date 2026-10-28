@@ -1,4 +1,3 @@
-import AVKit
 import SwiftUI
 
 /// One kind of content, opened from under "How it should look" in the sidebar: the player leads, the decision is one
@@ -12,7 +11,7 @@ struct KindPage: View {
     let openSample: (String) -> Void
     let openLeftOut: () -> Void
     @State private var chosen: String?
-    @State private var players = ItemPlayers()
+    @State private var players = ComparePlayers()
     @State private var sample: SampleFacts?
     @State private var asking = false
 
@@ -33,9 +32,9 @@ struct KindPage: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(asking)
                 } else if let episode = setting?.libraryItemId {
-                    KindPlayer(players: players, model: model)
+                    ComparePlayer(players: players, model: model)
                         .task(id: episode) {
-                            players.opensAt = KindPlayer.moments[0]
+                            players.opensAt = ComparePlayer.moments[0]
                             players.load(episode, compressed: true, originalBackup: true, client: model.client)
                         }
                 } else if setting != nil {
@@ -229,246 +228,5 @@ struct KindShows: View {
                         .padding(6)
                 }
             }
-    }
-}
-
-enum KindPlayerLayout: String, CaseIterable, Identifiable {
-    case sideBySide, wipe, oneAtATime
-    var id: String { rawValue }
-}
-
-/// The original and the compressed episode on one clock: side by side, a wipe dragged across one picture, or one at
-/// a time. Three moments to jump between, whose sound to hear, frame stepping, actual size and full screen.
-struct KindPlayer: View {
-    // Where each moment falls, as a share of the episode.
-    static let moments = [0.2, 0.5, 0.8]
-
-    let players: ItemPlayers
-    let model: MainWindowModel
-    @AppStorage("kindPlayerLayout") private var layout = KindPlayerLayout.wipe
-    @State private var view = KindPictureView()
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            KindPicture(players: players, layout: layout, view: $view)
-            HStack(spacing: 10) {
-                Button(players.playing ? Words.pause : Words.play, systemImage: players.playing ? "pause.fill" : "play.fill") {
-                    players.toggle()
-                }
-                .keyboardShortcut(.space, modifiers: [])
-                Button(Words.backOneFrame, systemImage: "backward.frame") { players.step(by: -1) }
-                    .keyboardShortcut(",", modifiers: [])
-                    .help(Words.backOneFrameHelp)
-                Button(Words.forwardOneFrame, systemImage: "forward.frame") { players.step(by: 1) }
-                    .keyboardShortcut(".", modifiers: [])
-                    .help(Words.forwardOneFrameHelp)
-                Slider(value: Binding(get: { players.position }, set: { players.seek(to: $0) }), in: 0...max(players.duration, 1))
-                Text(Words.playTime(players.position, players.duration))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                Button(Words.fullScreen, systemImage: "arrow.up.left.and.arrow.down.right") {
-                    model.theater = Theater(players: players, layout: layout)
-                    openWindow(id: TheaterWindow.id)
-                }
-                .keyboardShortcut("f", modifiers: [])
-                .help(Words.fullScreenHelp)
-            }
-            .labelStyle(.iconOnly)
-            .disabled(players.preparing || players.failed)
-            HStack(spacing: 14) {
-                Picker(Words.viewLabel, selection: $layout) {
-                    ForEach(KindPlayerLayout.allCases) { Text(Words.playerLayout($0)).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-                // Buttons, not a selection, so the moment the picture is nearest to can be jumped back to.
-                HStack(spacing: 4) {
-                    Text(Words.momentChoice)
-                    ForEach(Self.moments.indices, id: \.self) { index in
-                        let at = (players.duration * Self.moments[index]).rounded(.down)
-                        Button(Words.momentTime(at)) { players.seek(to: at) }
-                            .buttonStyle(.bordered)
-                            .tint(index == currentMoment ? .accentColor : nil)
-                    }
-                }
-                Picker(Words.hear, selection: Bindable(players).hearOriginal) {
-                    Text(Words.original).tag(true)
-                    Text(Words.compressed).tag(false)
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                Spacer()
-                Toggle(Words.actualSize, isOn: $view.actualSize)
-                    .toggleStyle(.button)
-                    .help(Words.actualSizeHelp)
-            }
-            .controlSize(.small)
-            .disabled(players.preparing || players.failed)
-        }
-    }
-
-    // The moment the picture is nearest to, so the choice follows the timeline.
-    private var currentMoment: Int {
-        guard players.duration > 0 else { return 0 }
-        let share = players.position / players.duration
-        return Self.moments.indices.min { abs(Self.moments[$0] - share) < abs(Self.moments[$1] - share) } ?? 0
-    }
-}
-
-/// How the picture is looked at: where the wipe sits, which side shows one at a time, and actual size.
-struct KindPictureView: Equatable {
-    var split: CGFloat = 0.5
-    var showingOriginal = false
-    var actualSize = false
-}
-
-/// The picture itself in the chosen layout. In actual size every pixel shows, and both sides pan together.
-struct KindPicture: View {
-    let players: ItemPlayers
-    let layout: KindPlayerLayout
-    @Binding var view: KindPictureView
-    @State private var pan = ScrollPosition()
-    @State private var otherPan = ScrollPosition()
-    // Where the picture was last panned to, by either side.
-    @State private var panned = CGPoint.zero
-
-    var body: some View {
-        Group {
-            switch layout {
-            case .sideBySide:
-                HStack(spacing: 8) {
-                    framed(Words.original) { pannable(position: $pan, follows: $otherPan) { PlayerSurface(player: players.original) } }
-                    framed(Words.compressed) { pannable(position: $otherPan, follows: $pan) { PlayerSurface(player: players.main) } }
-                }
-            case .wipe:
-                framed(nil) { pannable(position: $pan, follows: nil) { wipe } }
-            case .oneAtATime:
-                framed(view.showingOriginal ? Words.original : Words.compressed) {
-                    pannable(position: $pan, follows: nil) {
-                        PlayerSurface(player: view.showingOriginal ? players.original : players.main)
-                    }
-                }
-                .onTapGesture { view.showingOriginal.toggle() }
-                .help(Words.oneAtATimeHelp)
-            }
-        }
-        .overlay {
-            if players.failed {
-                Text(Words.couldNotPlayEpisode).foregroundStyle(.white)
-            } else if players.preparing {
-                ProgressView(Words.gettingEpisodeReady)
-                    .padding(12)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-            }
-        }
-    }
-
-    private var wipe: some View {
-        GeometryReader { geometry in
-            let width = geometry.size.width
-            ZStack(alignment: .leading) {
-                PlayerSurface(player: players.main)
-                PlayerSurface(player: players.original)
-                    .mask(alignment: .leading) { Rectangle().frame(width: width * view.split) }
-                Rectangle().fill(.white).frame(width: 2).offset(x: width * view.split - 1).shadow(radius: 2)
-                Circle().fill(.white).frame(width: 22, height: 22)
-                    .overlay(Image(systemName: "arrow.left.and.right").font(.system(size: 10, weight: .bold)).foregroundStyle(.black))
-                    .offset(x: width * view.split - 11)
-                HStack {
-                    FrameLabel(text: Words.original)
-                    Spacer()
-                    FrameLabel(text: Words.compressed)
-                }
-                .padding(10)
-                .frame(maxHeight: .infinity, alignment: .top)
-            }
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                view.split = min(max(value.location.x / width, 0), 1)
-            })
-        }
-    }
-
-    private func framed(_ label: String?, @ViewBuilder _ content: () -> some View) -> some View {
-        content()
-            .overlay(alignment: .topLeading) {
-                if let label { FrameLabel(text: label).padding(10) }
-            }
-            .aspectRatio(16 / 9, contentMode: .fit)
-            .frame(maxWidth: .infinity)
-            .background(Color.black)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-
-    /// Fits the picture to its frame, or in actual size shows it pixel for pixel in a view that pans; a second
-    /// view following it keeps both sides on the same spot.
-    @ViewBuilder
-    private func pannable(position: Binding<ScrollPosition>, follows: Binding<ScrollPosition>?,
-                          @ViewBuilder _ content: () -> some View) -> some View {
-        if view.actualSize, players.videoSize.width > 0 {
-            ScrollView([.horizontal, .vertical]) {
-                content().frame(width: players.videoSize.width, height: players.videoSize.height)
-            }
-            .scrollPosition(position)
-            .defaultScrollAnchor(.center)
-            .onScrollGeometryChange(for: CGPoint.self) { $0.contentOffset } action: { _, offset in
-                // The follower reports the spot it was moved to; ignoring that echo keeps a scroll's momentum.
-                guard abs(offset.x - panned.x) > 0.5 || abs(offset.y - panned.y) > 0.5 else { return }
-                panned = offset
-                follows?.wrappedValue.scrollTo(point: offset)
-            }
-            .scrollIndicators(.never)
-        } else {
-            content()
-        }
-    }
-}
-
-/// What the full-screen player shows: the page's own players, so it continues where the page was.
-struct Theater {
-    let players: ItemPlayers
-    let layout: KindPlayerLayout
-}
-
-/// The player alone, full screen. Escape or closing it returns to the page, still on the same moment.
-struct TheaterWindow: View {
-    static let id = "theater"
-
-    let model: MainWindowModel
-    @State private var view = KindPictureView()
-    @Environment(\.dismissWindow) private var dismissWindow
-
-    var body: some View {
-        ZStack {
-            Color.black
-            if let theater = model.theater {
-                KindPicture(players: theater.players, layout: theater.layout, view: $view)
-                    .padding(theater.layout == .sideBySide ? 12 : 0)
-                Button(Words.pause) { theater.players.toggle() }
-                    .keyboardShortcut(.space, modifiers: [])
-                    .hidden()
-            }
-            Button(Words.exitFullScreen) { dismissWindow(id: Self.id) }
-                .keyboardShortcut(.cancelAction)
-                .hidden()
-        }
-        .background(FullScreenOnOpen())
-        .onDisappear { model.theater = nil }
-    }
-}
-
-/// Puts its window into full screen as soon as the window exists.
-struct FullScreenOnOpen: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { Opener() }
-    func updateNSView(_ view: NSView, context: Context) {}
-
-    final class Opener: NSView {
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            guard let window, !window.styleMask.contains(.fullScreen) else { return }
-            DispatchQueue.main.async { window.toggleFullScreen(nil) }
-        }
     }
 }

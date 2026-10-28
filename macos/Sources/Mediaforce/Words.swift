@@ -447,7 +447,6 @@ extension Words {
     static let sample = "Sample"
     static let play = "Play"
     static let pause = "Pause"
-    static let startOver = "Start over"
     static let hear = "Hear"
     static let momentChoice = "Moment"
     static let sampleCoverageUnknown = "Coverage was not recorded for this sample."
@@ -1235,7 +1234,7 @@ extension Words {
 
     static func playerCaption(_ file: ItemFacts.File, comparing: Bool) -> String {
         if comparing, let before = file.originalBytes {
-            return "\(fileName(file)): \(beforeAfter(before, file.bytes)). Drag across the picture to compare."
+            return "\(fileName(file)): \(beforeAfter(before, file.bytes))."
         }
         if file.compressed { return "\(fileName(file)): \(size(file.bytes)). Its original backup is deleted." }
         return "\(fileName(file)): \(size(file.bytes)), as it is now."
@@ -1369,8 +1368,12 @@ extension Words {
     static let exitFullScreen = "Exit full screen"
     static let actualSize = "Actual size"
     static let actualSizeHelp = "Show every pixel. Both sides pan together."
-    static let oneAtATimeHelp = "Click the picture to switch between the original and the compressed episode"
+    static func oneAtATimeHelp(_ other: String) -> String {
+        "Click the picture to switch between the original and the \(other.lowercased())"
+    }
     static let couldNotPlayEpisode = "Couldn't play this episode."
+    static let couldNotPlaySample = "Couldn't play this moment of the sample."
+    static let gettingSampleReady = "Getting the sample ready to play"
     static let gettingEpisodeReady = "Getting the episode ready to play"
     static let seasonsWithoutKindTitle = "Seasons that don't fit a kind"
     static let showEverything = "Show Everything"
@@ -1451,7 +1454,7 @@ extension Words {
         code == "mixed" ? "mixed kinds" : "not measured yet"
     }
 
-    static func playerLayout(_ layout: KindPlayerLayout) -> String {
+    static func playerLayout(_ layout: CompareLayout) -> String {
         switch layout {
         case .sideBySide: "Side by side"
         case .wipe: "Wipe"
