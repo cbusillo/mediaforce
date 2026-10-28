@@ -69,7 +69,6 @@ struct SampleWork: View {
                     Picker(Words.sampleBalance, selection: Binding(
                         get: {
                             selectedBalance ?? facts.balanceChoices.first(where: \.selected)?.key
-                                ?? facts.balanceChoices.first(where: { $0.key == "balanced" })?.key
                         },
                         set: { selectedBalance = $0 }
                     )) {
@@ -169,14 +168,15 @@ struct SampleWork: View {
         if result.compressing == true { return nil }
         if result.needsChoice && facts?.sizeChoices.isEmpty == false {
             askingSize = true
-            return nil
         }
         return result.needsChoice ? .compressNeedsChoice : .approvedNotCompressing
     }
 
     private func make(size: String?) {
         act {
-            let result = try await $0.makeSample(prefix, size: size, balance: selectedBalance)
+            let current = facts?.balanceChoices.first(where: \.selected)?.key
+            let changedBalance = selectedBalance == current ? nil : selectedBalance
+            let result = try await $0.makeSample(prefix, size: size, balance: changedBalance)
             if result.ok { selectedBalance = nil }
             askingSize = result.code == "choose_size" && facts?.sizeChoices.isEmpty == false
             if result.ok || askingSize { return nil }

@@ -56,7 +56,7 @@ def _folder(**fields: Any) -> dict[str, Any]:
                                  "predicted_total_size_bytes": 400_000_000, "predicted_to_budget_ratio": 1.36},
         "resolved_operator_intent": {
             "size_goal": {"target_size_bytes": 293_736_333},
-            "request": {"schema_version": 2, "size_goal": {"mode": "normalized", "value_mb": 300.0}},
+            "request": _option("current", 293.736)["operator_intent"],
         },
         "size_goal_options": [_option("recommended", 293.736), _option("smaller", 220.3), _option("legacy", 100, mode="ambiguous")],
         "compression_intent_options": [
@@ -237,10 +237,13 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert calls.pop()[4]["compression_intent"] == {
         "schema_version": 1, "level": "reference", "confirmed": True,
     }
-    for remake_folder in (_folder(), _folder(resolved_operator_intent={})):
-        assert make(remake_folder, _status("ready_to_compare", "review_sample"), None, "reference")["ok"] is True
-        _kind, _prefix, note, _host, intent, _token = calls.pop()
-        assert intent["compression_intent"]["level"] == "reference"
+    assert make(_folder(), _status(), None, "reference")["ok"] is True
+    _kind, _prefix, note, _host, intent, _token = calls.pop()
+    assert intent["compression_intent"]["level"] == "reference"
+    assert intent["size_goal"] == _folder()["resolved_operator_intent"]["request"]["size_goal"]
+    assert make(_folder(resolved_operator_intent={}), _status(), None, "reference") == {
+        "ok": False, "code": "choose_size",
+    }
 
     assert make(_folder(), _status(), "smaller", "not-offered") == {"ok": False, "code": "choose_balance"}
     assert calls == []
@@ -283,8 +286,18 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert [call[0] for call in calls] == ["retry", "new"]
     calls.clear()
 
-    assert make(_folder(), _status("needs_help", "retry_sample"), None, "reference")["ok"] is True
-    assert calls.pop()[4]["compression_intent"]["level"] == "reference"
+    failed = {
+        **_status("needs_help", "retry_sample"),
+        "retryable_sample_job": {"policy": {"video": {
+            "size_goal_schema_version": 1, "size_goal_mode": "absolute", "size_goal_source": "operator",
+            "target_size_mb": 225, "resolution_intent_mode": "max_height", "max_height": 720,
+        }}, "sample_item": {"duration_seconds": 1800}},
+    }
+    assert make(_folder(), failed, None, "reference")["ok"] is True
+    intent = calls.pop()[4]
+    assert intent["compression_intent"]["level"] == "reference"
+    assert intent["size_goal"]["value_mb"] == failed["retryable_sample_job"]["policy"]["video"]["target_size_mb"]
+    assert intent["resolution"]["max_height"] == failed["retryable_sample_job"]["policy"]["video"]["max_height"]
 
     def computer_gone(*_args: Any) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="That computer is gone.")

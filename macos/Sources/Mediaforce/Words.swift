@@ -561,7 +561,7 @@ extension ActionNotice {
 
     static let compressNeedsChoice = ActionNotice(
         title: "Compressing needs a choice first",
-        message: "The sample is approved, but this season needs a choice Mediaforce can't ask for here yet, so it isn't compressing."
+        message: "Compression did not start. Open this season's sample and make a fresh sample at a chosen size."
     )
 
 }
