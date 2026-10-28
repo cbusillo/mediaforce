@@ -268,3 +268,21 @@ def test_saved_night_window_reaches_dispatch_for_only_the_selected_computer(
             closes_at = datetime.fromisoformat(rows[0]["schedule_closes_at"])
             assert closes_at == datetime.fromisoformat(day).replace(hour=5, tzinfo=ZoneInfo("America/New_York"))
             assert (_selected_encode_schedule_close_deadline({"item_count": 1}, rows[0]) is None) is finish_current_file
+
+
+@pytest.mark.parametrize("submitted", [None, False])
+def test_older_computers_save_preserves_the_close_option_unless_explicitly_changed(
+    computers_app: tuple[FastAPI, Path], submitted: bool | None,
+) -> None:
+    app, runtime_settings_path = computers_app
+    stored = json.loads(runtime_settings_path.read_text())
+    stored["encode_queue"]["schedule_profiles"][0]["finish_current_file"] = True
+    runtime_settings_path.write_text(json.dumps(stored))
+    body = _body(app)
+    if submitted is None:
+        body["schedules"][0].pop("finish_current_file")
+    else:
+        body["schedules"][0]["finish_current_file"] = submitted
+
+    assert _save(app, body)[0] == 200
+    assert _facts(app)["schedules"][0]["finish_current_file"] is (submitted is None)

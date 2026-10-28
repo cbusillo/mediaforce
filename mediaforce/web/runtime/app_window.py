@@ -553,8 +553,10 @@ def _computer_state(row: Mapping[str, Any]) -> str:
     if not row.get("available"):
         return _unavailable_computer_state(row)
     if int(row.get("active_encode_count") or 0):
-        if (row.get("finish_current_file") and not row.get("schedule_open")
-                and not any(job.get("bypass_schedule") for job in row.get("running_jobs") or [])):
+        if not row.get("schedule_open") and any(
+            not job.get("bypass_schedule") and not job.get("schedule_close_deadline_at")
+            for job in row.get("running_jobs") or []
+        ):
             return "finishing_file"
         return "busy"
     if "encode_queue" not in {str(capability).lower() for capability in row.get("capabilities") or []}:

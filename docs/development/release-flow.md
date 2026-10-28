@@ -196,7 +196,7 @@ Settings → Computers:
 
 - Add a separate work window named `Night window`, every day, From
   `12 AM`, Until `5 AM`, with no all-day exception days.
-- Enable `Finish the current file when the window closes`. Its API field is
+- Allow the current file to finish when the window closes. Its API field is
   `finish_current_file: true`; the hours are `start_hour: 0`, `end_hour: 5`.
 - Assign it only to the existing M4 Mac Studio computer. Do not identify it
   by a guessed address or replace a schedule other computers still use.

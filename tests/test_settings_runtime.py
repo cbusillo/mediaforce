@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from mediaforce.web.settings_runtime import SettingsValidationError, build_runtime_settings_payload
+from mediaforce.web.settings_runtime import SettingsValidationError, build_runtime_computer_settings, \
+    build_runtime_settings_payload, merge_runtime_settings_payload
 
 
 class SettingsRuntimeTests(unittest.TestCase):
@@ -33,6 +34,32 @@ class SettingsRuntimeTests(unittest.TestCase):
         for value in ("-1", "8761", "nan", "inf"):
             with self.subTest(value=value), self.assertRaises(SettingsValidationError):
                 self._payload(value)
+
+
+    def test_schedule_close_option_merge_uses_the_current_saved_value_when_omitted(self) -> None:
+        cases = [
+            (True, False, None, True),
+            (False, True, None, False),
+            (None, True, None, True),
+            (True, False, False, False),
+            (False, False, True, True),
+        ]
+        for saved, default, submitted, expected in cases:
+            with self.subTest(saved=saved, default=default, submitted=submitted):
+                profile: dict[str, Any] = {"key": "night", "start_hour": 0, "end_hour": 5}
+                if submitted is not None:
+                    profile["finish_current_file"] = submitted
+                updates = build_runtime_computer_settings(
+                    remote_hosts=[], encode_queue_scheduler={"mode": "anytime"},
+                    schedule_profiles=[profile], known_library_keys=set(),
+                )
+                existing = {} if saved is None else {
+                    "encode_queue": {"schedule_profiles": [{"key": "night", "finish_current_file": saved}]},
+                }
+                merged = merge_runtime_settings_payload(
+                    existing, updates, schedule_defaults=[{"name": "night", "finish_current_file": default}],
+                )
+                self.assertIs(merged["encode_queue"]["schedule_profiles"][0]["finish_current_file"], expected)
 
 
 if __name__ == "__main__":

@@ -264,6 +264,8 @@ def _running_encode_jobs_for_hosts(connection: DBClient, *, format_eta_seconds: 
             encode_jobs.c.job_id,
             encode_jobs.c.prefix,
             encode_jobs.c.item_count,
+            encode_jobs.c.bypass_schedule,
+            encode_jobs.c.schedule_close_deadline_at,
             encode_jobs.c.progress_json,
             _running_job_host_key_sql().label("host_key"),
         )
@@ -281,6 +283,8 @@ def _running_encode_jobs_for_hosts(connection: DBClient, *, format_eta_seconds: 
                 "job_id": str(row["job_id"]),
                 "prefix": str(row["prefix"]),
                 "item_count": int(row["item_count"] or 0),
+                "bypass_schedule": bool(row["bypass_schedule"]),
+                "schedule_close_deadline_at": row["schedule_close_deadline_at"],
                 "host_key": str(row["host_key"] or "").strip(),
                 "progress": decorated_progress,
                 "scheduler_status_copy": "running now",
