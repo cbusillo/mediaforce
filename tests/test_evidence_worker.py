@@ -424,7 +424,7 @@ class EvidenceWorkerTests(unittest.TestCase):
         from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner
 
         items = [self._insert_item(index, cadence_summary_json=None, media_fingerprint_json=None)
-                 for index in range(1, MAX_CONCURRENT_EVIDENCE_FILES + 1)]
+                 for index in range(1, MAX_CONCURRENT_EVIDENCE_FILES + 2)]
         self._queue_unpaused_analysis([items[0][0]])
         empty = threading.Event()
         all_started = threading.Event()
@@ -436,27 +436,29 @@ class EvidenceWorkerTests(unittest.TestCase):
         def analyze(path: Path, kind: str, **_kwargs: object) -> dict[str, object]:
             with lock:
                 seen.add(path)
-                if len(seen) == len(items):
+                if len(seen) == len(items) - 1:
                     all_started.set()
             if not release.wait(10):
                 raise RuntimeError("The test did not release external work")
             return json.loads(self._cadence_summary_json() if kind == CADENCE_EVIDENCE_KIND else self._fingerprint_summary_json())
-
-        def discover() -> int:
-            self._queue_unpaused_analysis([item_id for item_id, _path in items[1:]])
-            return len(items) - 1
 
         deps = replace(self._deps(analyze), lease_seconds=EVIDENCE_JOB_LEASE_SECONDS,
                        heartbeat_seconds=EVIDENCE_JOB_HEARTBEAT_SECONDS)
         runner = BoundedEvidenceRunner(self.config.paths.config_path, deps=deps)
         with patch("mediaforce.library.evidence_worker.process_evidence_queue_once", side_effect=process), patch(
             "mediaforce.library.evidence_worker._discover_originals", return_value=0
-        ), patch.object(runner, "prepare_background_work", side_effect=discover):
+        ):
             runner.start(max_work_items=None)
             try:
                 self.assertTrue(empty.wait(5))
+                self._queue_unpaused_analysis([item_id for item_id, _path in items[1:-1]])
                 self.assertFalse(start_ready_evidence_work(self.config.paths.db_path, runner))
                 self.assertTrue(all_started.wait(3), "External requests should use the idle file slots")
+                with open_db(self.config.paths.db_path) as db:
+                    unrequested = db.execute(select(library_item_evidence_state.c.work_status).where(
+                        library_item_evidence_state.c.library_item_id == items[-1][0])).scalars().all()
+                self.assertTrue(all(status is None for status in unrequested),
+                    "An active autostart poll must not expand the original batch")
             finally:
                 release.set()
                 runner.join()

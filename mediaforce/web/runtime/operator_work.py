@@ -104,12 +104,12 @@ class BoundedEvidenceRunner:
 
 def start_ready_evidence_work(db_path: Path, runner: BoundedEvidenceRunner) -> bool:
     """Run evidence work that is queued and unpaused but has no runner, such as checks production waits on."""
+    if runner.wake():
+        return False
     try:
         runner.prepare_background_work()
     except Exception:
         LOGGER.exception("Original discovery failed; queued analysis can still start")
-    if runner.wake():
-        return False
     with open_db(db_path) as connection:
         recover_evidence_queue(connection)
         runnable = runnable_evidence_work_count(connection)
