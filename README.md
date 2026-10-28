@@ -93,6 +93,12 @@ Completed calibration jobs also clean up their own temporary manifest and
 scratch encode directory right away after compare clips are generated, so only
 the review clips and saved calibration summary remain.
 
+The Mac sample page shows the coverage saved with the sample beside its size
+facts and approval controls: how many files were tested and which seasons or
+picture formats were not. It uses that sample's record, even when today's
+remaining files differ. Older samples without recorded coverage say so.
+Every production file still passes its own quality and final-output checks.
+
 ## Layout
 
 - CLI entry points: `mediaforce`, `mediaforce-web`
