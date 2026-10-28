@@ -363,6 +363,7 @@ def settings_schedule_profile_rows_for_config(config: MediaforceConfig, *, min_r
                     "all_day_days_of_week": list(normalized["all_day_days_of_week"]),
                     "start_hour": str(normalized["start_hour"]),
                     "end_hour": str(normalized["end_hour"]),
+                    "finish_current_file": normalized["finish_current_file"],
                 }
             )
     return index_schedule_profile_rows(rows, min_rows=min_rows)
@@ -380,6 +381,7 @@ def index_schedule_profile_rows(rows: list[dict[str, Any]], *, min_rows: int = 1
             ),
             "start_hour": row.get("start_hour", str(DEFAULT_SCHEDULER_POLICY["start_hour"])),
             "end_hour": row.get("end_hour", str(DEFAULT_SCHEDULER_POLICY["end_hour"])),
+            "finish_current_file": row.get("finish_current_file") is True,
         }
         for index, row in enumerate(rows)
     ]
@@ -449,6 +451,7 @@ def schedule_profile_options(*, schedule_profiles: list[dict[str, Any]]) -> list
                 "all_day_days_of_week": row.get("all_day_days_of_week"),
                 "start_hour": row.get("start_hour"),
                 "end_hour": row.get("end_hour"),
+                "finish_current_file": row.get("finish_current_file"),
             }
         )
         options.append(
@@ -644,6 +647,7 @@ def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, An
     normalized = {
         "mode": mode,
         "timezone": timezone,
+        "finish_current_file": payload.get("finish_current_file") is True,
         "start_hour": start_hour,
         "end_hour": end_hour,
         "days_of_week": days_of_week,
@@ -1223,6 +1227,7 @@ def computer_settings_facts(
                 "all_day_days": list(row.get("all_day_days_of_week") or []),
                 "start_hour": _whole(row.get("start_hour"), int(str(DEFAULT_SCHEDULER_POLICY["start_hour"]))),
                 "end_hour": _whole(row.get("end_hour"), int(str(DEFAULT_SCHEDULER_POLICY["end_hour"]))),
+                "finish_current_file": row.get("finish_current_file") is True,
             }
             for row in schedule_rows
         ],
@@ -1286,6 +1291,7 @@ def computer_section_settings(
             "all_day_days_of_week": _strings(item.get("all_day_days")),
             "start_hour": start_hour,
             "end_hour": end_hour,
+            "finish_current_file": item.get("finish_current_file") is True,
         })
 
     remote_rows: list[dict[str, Any]] = []
@@ -1530,6 +1536,7 @@ def build_runtime_computer_settings(
                 "all_day_days_of_week": all_day_days_of_week,
                 "start_hour": start_hour_text,
                 "end_hour": end_hour_text,
+                "finish_current_file": row.get("finish_current_file"),
             }
         )
         normalized_profiles.append(
@@ -1542,6 +1549,7 @@ def build_runtime_computer_settings(
                 "all_day_days_of_week": list(normalized["all_day_days_of_week"]),
                 "start_hour": normalized["start_hour"],
                 "end_hour": normalized["end_hour"],
+                "finish_current_file": normalized["finish_current_file"],
             }
         )
         seen_profile_keys.add(key_text)

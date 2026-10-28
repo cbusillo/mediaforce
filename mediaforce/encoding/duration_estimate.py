@@ -224,6 +224,8 @@ def estimate_fits_before_schedule_close(
         *,
         now: datetime,
 ) -> bool:
+    if host.get("finish_current_file"):
+        return True
     closes_at = parse_schedule_close_deadline(host.get("schedule_closes_at"))
     if closes_at is None:
         return True

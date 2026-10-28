@@ -204,7 +204,7 @@ def max_encode_schedule_window_seconds(
         host_payload: dict[str, Any] | None = None,
 ) -> float | None:
     mode = str(policy.get("mode") or "anytime")
-    if mode == "anytime":
+    if mode == "anytime" or policy.get("finish_current_file") is True:
         return None
     if mode == "never":
         return 0.0

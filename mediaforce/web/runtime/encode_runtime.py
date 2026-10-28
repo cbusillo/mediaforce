@@ -3282,7 +3282,7 @@ def _selected_encode_schedule_close_deadline(
         job: dict[str, Any],
         host_payload: dict[str, Any],
 ) -> str | None:
-    if bool(job.get("bypass_schedule")):
+    if bool(job.get("bypass_schedule")) or host_payload.get("finish_current_file") is True:
         return None
     deadline = parse_schedule_close_deadline(host_payload.get("schedule_closes_at"))
     return deadline.isoformat(timespec="seconds") if deadline is not None else None

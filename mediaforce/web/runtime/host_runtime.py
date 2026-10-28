@@ -164,6 +164,7 @@ def host_runtime_rows(
                 **status_payload,
                 **runtime_host_payload,
                 "schedule_profile": schedule_profile,
+                "finish_current_file": policy.get("finish_current_file") is True,
                 "schedule_profile_label": str(policy.get("label") or "Always"),
                 "scheduler_summary": str(policy["summary"]),
                 "schedule_detail": schedule_detail,

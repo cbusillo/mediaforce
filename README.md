@@ -676,6 +676,13 @@ operating system exposes one, use fixed UTC offsets only as a compatibility
 fallback, and publish exact UTC close and next-open transitions for runtime
 enforcement and user surfaces.
 
+Work windows can instead allow the current file to finish: enable **Finish the
+current file when the window closes** in Settings → Computers → Work windows.
+A file admitted before closing finishes its encode, checks and normal publication;
+no next file starts until the window opens again. This avoids throwing away a
+partial encode on a computer used for other work during the day. Manual
+`Bypass scheduler` requests still explicitly override the work window.
+
 Bounded host schedules are hard execution windows. A non-bypassed quality
 search or episode encode receives the selected host's absolute UTC close
 deadline; controller-side cancellation and a host-side watchdog stop encode
