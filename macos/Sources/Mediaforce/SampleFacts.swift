@@ -9,6 +9,7 @@ struct SampleFacts: Decodable, Sendable {
     let action: String?
     let failure: String?
     let moments: [Moment]
+    let coverageSummary: String?
     let episodeBytes: Int64
     let estimatedEpisodeBytes: Int64
     let seasonBytes: Int64
