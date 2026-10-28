@@ -235,7 +235,7 @@ def _load_attempts(config: MediaforceConfig) -> dict[str, Any]:
 @dataclass(frozen=True, slots=True)
 class KindSeason:
     season: str
-    kind: str
+    kind: str | None
     waiting_bytes: int
     approval: str
     files: tuple[int, ...]
@@ -269,18 +269,12 @@ def next_kind_season(
         load_calibration_state: LoadCalibrationState,
         now: float,
 ) -> KindSeason | None:
-    """The next waiting season a current kind approval covers, to queue on its own, largest first.
-
-    None while the background queue waits (see background_queue_blocker), so seasons go one at a time. A season
-    already tried under the same approval with the same waiting files is skipped, a refused one until it is retried
-    after KIND_RETRY_SECONDS, and a season whose last run ended badly waits for the Director.
-    """
-    if not approved_kinds(config) or background_queue_blocker(connection) is not None:
+    if background_queue_blocker(connection) is not None:
         return None
     attempts = _load_attempts(config)
     for season, waiting_bytes, files in _waiting_seasons(connection, config):
         approval = effective_production_approval(config, season, load_calibration_state)
-        if approval is None or approval.kind is None or not approval.current:
+        if approval is None or not approval.current:
             continue
         chosen = KindSeason(season, approval.kind, waiting_bytes, approval_identity(approval.calibration, approval.contract), files)
         if _attempted(attempts.get(season), chosen, now) or _latest_run_unsettled(connection, season):

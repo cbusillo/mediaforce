@@ -534,3 +534,34 @@ def test_the_kind_routes_report_refusals_as_conflicts() -> None:
     assert asyncio.run(approve("cartoon", _json_request({"from_prefix": "tv/Toon"}))).status_code == 409
     assert _route_endpoint(app, "/api/app/kinds/{kind}/stop", "POST")(DARKER).status_code == 200
     assert calls == [(DARKER, "tv/Drama"), ("cartoon", "tv/Toon"), (DARKER,)]
+
+
+@pytest.mark.parametrize("scope", [SEASON, "tv/Thriller"])
+def test_a_current_folder_approval_automatically_offers_its_waiting_season(tmp_path: Path, scope: str) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    load = _loader({scope: _approved(config)}, {})
+
+    chosen = _next(config, load)
+
+    assert chosen is not None and chosen.season == SEASON and chosen.kind is None
+    record_kind_attempt(config, chosen, {"ok": True}, at=0.0)
+    assert _next(config, load) is None
+
+
+@pytest.mark.parametrize("state", ["unapproved", "stale", "paused", "active"])
+def test_automatic_folder_admission_preserves_approval_and_queue_guards(tmp_path: Path, state: str) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    approval = _approved(config)
+    if state == "unapproved":
+        approval = {key: value for key, value in approval.items() if not key.startswith("accepted_")}
+    if state == "stale":
+        approval["policy"]["video"]["preset"] = 3
+    if state == "paused":
+        with open_db(config.paths.db_path) as connection:
+            save_queue_state(connection, {"queue_name": DEFAULT_QUEUE_NAME, "is_paused": True, "updated_at": "now"})
+    if state == "active":
+        _encode_job(config, OTHER_SEASON, "running")
+
+    assert _next(config, _loader({SEASON: approval}, {})) is None

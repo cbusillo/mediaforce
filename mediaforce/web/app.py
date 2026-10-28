@@ -1859,13 +1859,13 @@ def create_app(
             return
         try:
             result = _queue_encode_action(
-                chosen.season, "Queued under its kind of content's approval.", False,
+                chosen.season, "Queued under its current approval.", False,
                 admission_blocker=background_queue_blocker,
             )
         except HTTPException as refusal:
             result = {"ok": False, "message": str(refusal.detail)}
         record_kind_attempt(config, chosen, result, at=wall_time())
-        LOGGER.info("Kind of content %s, %s: %s", chosen.kind, chosen.season, result.get("message") or result.get("code") or result.get("ok"))
+        LOGGER.info("Approved season %s: %s", chosen.season, result.get("message") or result.get("code") or result.get("ok"))
 
     def _remake_waiting_samples() -> None:
         with open_db(config.paths.db_path) as connection:
