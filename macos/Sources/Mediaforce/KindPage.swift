@@ -218,8 +218,7 @@ struct KindShows: View {
     }
 
     private func poster(_ prefix: String, name: String, watchable: Bool) -> some View {
-        MediaPoster(row: MediaRow(id: prefix, name: name, kind: .tv, detail: "", bytes: 0, saved: nil, state: .readyToCompress),
-                    posters: posters, width: Self.width)
+        MediaPoster(titlePrefix: prefix, name: name, kind: .tv, posters: posters, width: Self.width)
             .overlay {
                 if prefix == playing {
                     RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Color.accentColor, lineWidth: 3)
