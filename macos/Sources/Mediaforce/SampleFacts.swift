@@ -38,12 +38,14 @@ struct SampleFacts: Decodable, Sendable {
     }
 
     enum Action: Hashable {
-        case approve, makeAgain, makeSample, chooseSize, tryAnotherSize, startCompressing
+        case approve, makeAgain, makeSample, chooseSize, tryAnotherSize, openSample, startCompressing
         case checkFiles, replaceOriginals, retryUnfinished, decideMotion
     }
 
     static let seasonPageActions: Set<Action> = [.checkFiles, .replaceOriginals, .retryUnfinished, .decideMotion]
     static let inProgressStates: Set<String> = ["making_test", "sample_waiting", "making_season"]
+    // A sample being made, or waiting for a computer, already has its page to follow it on.
+    static let sampleMakingStates: Set<String> = ["making_test", "sample_waiting"]
 
     var isInProgress: Bool { state.map(Self.inProgressStates.contains) ?? false }
 
@@ -53,6 +55,7 @@ struct SampleFacts: Decodable, Sendable {
     }
 
     var actions: [Action] {
+        if action == nil, state.map(Self.sampleMakingStates.contains) == true { return [.openSample] }
         let others: [Action] = sizeChoices.isEmpty ? [] : [.tryAnotherSize]
         switch action {
         case "review_sample": return [.approve, .makeAgain] + others

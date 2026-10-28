@@ -67,7 +67,9 @@ struct TVShowsFacts: Decodable, Sendable {
         var folder: String { prefix.split(separator: "/").last.map(String.init) ?? prefix }
 
         var opensSample: Bool {
-            ["ready_to_compare", "needs_test", "ready_to_make"].contains(state) || (state == "needs_help" && action.map(Self.sampleActions.contains) == true)
+            ["ready_to_compare", "needs_test", "ready_to_make"].contains(state)
+                || state.map(SampleFacts.sampleMakingStates.contains) == true
+                || (state == "needs_help" && action.map(Self.sampleActions.contains) == true)
         }
     }
 }
