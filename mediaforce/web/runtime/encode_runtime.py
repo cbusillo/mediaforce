@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import shlex
 import socket
 import subprocess
@@ -1166,7 +1165,6 @@ def _remove_stale_staging_path(
         path: Path,
         *,
         host: dict[str, Any] | None = None,
-        prefer_remote: bool = True,
         ownership_check: Callable[[], None] | None = None,
 ) -> _StagingPathCleanupResult:
     if ownership_check is not None:
@@ -1227,12 +1225,10 @@ def remove_stale_staging_path(
         path: Path,
         *,
         host: dict[str, Any] | None = None,
-        prefer_remote: bool = True,
         ownership_check: Callable[[], None] | None = None,
 ) -> bool:
     return (
-        _remove_stale_staging_path(path, host=host, prefer_remote=prefer_remote,
-                                   ownership_check=ownership_check).outcome
+        _remove_stale_staging_path(path, host=host, ownership_check=ownership_check).outcome
         is _StagingPathCleanupOutcome.CLEANED
     )
 
@@ -5116,7 +5112,6 @@ def _cleanup_encode_retry_artifacts_locked(
                 partial_cleanup_result = _remove_stale_staging_path(
                     partial_path,
                     host=host,
-                    prefer_remote=False,
                     ownership_check=(lambda: _assert_cleanup_ownership(
                         connection, int(library_item_id), protected_path=partial_path,
                     )) if library_item_id is not None else None,
@@ -5141,7 +5136,6 @@ def _cleanup_encode_retry_artifacts_locked(
             cleanup_result = _remove_stale_staging_path(
                 staging_path,
                 host=host,
-                prefer_remote=False,
                 ownership_check=(lambda: _assert_cleanup_ownership(
                     connection, int(library_item_id), protected_path=staging_path,
                 )) if library_item_id is not None else None,
