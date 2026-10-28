@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// What the work's state in the title bar means, when it needs saying, and the last change.
+/// What the work's state in the title bar means, when it needs saying, and the last change, which opens its season.
 struct WorkStatus: View {
     let facts: MainWindowFacts
+    let open: (Place) -> Void
     private var lastChange: MainWindowFacts.Event? { facts.lastChange }
 
     var body: some View {
@@ -14,9 +15,16 @@ struct WorkStatus: View {
                     .frame(maxWidth: 640, alignment: .leading)
             }
             if let lastChange {
-                Text("Last change: \(Words.event(lastChange)), \(Words.moment(lastChange.at))")
-                    .font(.callout)
-                    .foregroundStyle(.tertiary)
+                let line = "Last change: \(Words.event(lastChange)), \(Words.moment(lastChange.at))"
+                Group {
+                    if let season = lastChange.season {
+                        Button(line) { open(.item(season.prefix)) }
+                            .buttonStyle(QuietLinkStyle())
+                    } else {
+                        Text(line).foregroundStyle(.tertiary)
+                    }
+                }
+                .font(.callout)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -79,8 +87,8 @@ struct StorageBar: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
 
                 ZStack(alignment: .topLeading) {
-                    Text("\(facts.spaceSaved.episodeCount) episodes")
-                        .foregroundStyle(.secondary)
+                    Button("\(facts.spaceSaved.episodeCount) episodes") { open(.spaceSaved) }
+                        .buttonStyle(QuietLinkStyle())
                     VStack(alignment: .leading, spacing: 3) {
                         Path { path in
                             path.move(to: CGPoint(x: 0.5, y: 0))
@@ -95,9 +103,13 @@ struct StorageBar: View {
                             .fixedSize()
                     }
                     .offset(x: savedWidth + 1)
-                    Text("\(facts.library.tv.showCount) shows, \(facts.library.tv.seasonCount) seasons, \(facts.library.tv.episodeCount.formatted()) episodes in all")
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    // Drawn over the saved episodes when little is saved; the link under it keeps its clicks.
+                    .allowsHitTesting(false)
+                    Button("\(facts.library.tv.showCount) shows, \(facts.library.tv.seasonCount) seasons, \(facts.library.tv.episodeCount.formatted()) episodes in all") {
+                        open(.media)
+                    }
+                    .buttonStyle(QuietLinkStyle())
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                 }
                 .font(.caption)
                 .monospacedDigit()

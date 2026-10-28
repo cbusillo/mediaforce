@@ -205,7 +205,7 @@ struct MainWindow: View {
                     Group {
                         switch place {
                         case .spaceSaved:
-                            SpaceSavedPage(facts: facts, model: model)
+                            SpaceSavedPage(facts: facts, model: model) { place = .item($0) }
                                 // Deleting backups changes what the page shows, so it reads its facts again at once.
                                 .id(facts.originalBackups.count)
                         // A new page for each prefix, so none shows the last one's name or facts while its own loads.

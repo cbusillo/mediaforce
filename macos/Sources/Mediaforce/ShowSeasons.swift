@@ -13,7 +13,8 @@ struct ShowSeasons: View {
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 18, verticalSpacing: 8) {
                 ForEach(show.seasons) { season in
                     GridRow {
-                        Text(Words.seasonName(season))
+                        Button(Words.seasonName(season)) { openItem(season.prefix) }
+                            .buttonStyle(QuietLinkStyle(primary: true))
                         Text(Words.count(season.episodeCount, "episode"))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()

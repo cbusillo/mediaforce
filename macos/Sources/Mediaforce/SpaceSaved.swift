@@ -7,6 +7,7 @@ struct SpaceSavedPage: View {
 
     let facts: MainWindowFacts
     let model: MainWindowModel
+    let openItem: (String) -> Void
 
     var body: some View {
         // Around the page, so it reaches the page's own scroll view.
@@ -17,7 +18,7 @@ struct SpaceSavedPage: View {
                     Text(Words.noBackupsToCheck)
                         .foregroundStyle(.secondary)
                 } else {
-                    SpotCheck(shows: saved.shows, model: model)
+                    SpotCheck(shows: saved.shows, model: model, openItem: openItem)
                         .id(Self.spotCheckID)
                 }
                 SpaceSavedBar(
@@ -85,6 +86,8 @@ struct SpaceSavedFacts: Sendable {
 struct SpotCheck: View {
     let shows: [SpaceSavedFacts.Show]
     let model: MainWindowModel
+    // Opens the season the episode being checked belongs to.
+    let openItem: (String) -> Void
     @State private var showPrefix: String?
     @State private var loaded = Loaded.loading
     // Each load takes the next number; only the latest one may change what the player shows.
@@ -108,7 +111,8 @@ struct SpotCheck: View {
                 Text(Words.spotCheckFirst).font(.headline)
                 Spacer()
                 if case .episode(_, let season, let file) = loaded {
-                    Text(Words.spotCheckFile(season, file)).foregroundStyle(.secondary)
+                    Button(Words.spotCheckFile(season, file)) { openItem(season) }
+                        .buttonStyle(QuietLinkStyle())
                 }
             }
             .frame(maxWidth: 760)
