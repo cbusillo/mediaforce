@@ -1,5 +1,4 @@
 import subprocess
-import asyncio
 import tempfile
 import unittest
 from collections.abc import Callable
@@ -13,8 +12,10 @@ from sqlalchemy import select
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
-from mediaforce.core.db_tables import scan_runs
+from mediaforce.core.db_tables import evidence_queue_state, scan_runs
+from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
 from mediaforce.library.background_work import background_work_is_paused, set_background_work_paused
+from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_QUEUE_NAME, load_evidence_queue_state
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import tool_capabilities
 
@@ -187,16 +188,34 @@ class ReadPathPurityTests(unittest.TestCase):
         scan_thread_mock.assert_not_called()
         host_refresh_mock.assert_not_called()
 
-    def test_legacy_background_pause_can_be_resumed(self) -> None:
+    def test_native_resume_clears_saved_background_and_encode_pauses(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
-            set_background_work_paused(connection, is_paused=True)
-        with patch("mediaforce.web.app.load_config", return_value=self.config):
-            app = web_app.create_app(self.config.paths.config_path)
-        endpoint = self._endpoint(app, "/api/background-work/resume", "api_resume_background_work")
-        response = asyncio.run(endpoint())
-        self.assertEqual(response.status_code, 200)
-        with open_db(self.config.paths.db_path) as connection:
-            self.assertFalse(background_work_is_paused(connection))
+            connection.execute(evidence_queue_state.insert().values(
+                queue_name=DEFAULT_EVIDENCE_QUEUE_NAME, batch_id="owner-paused-batch", status="queued",
+                is_paused=1, updated_at="2026-10-28T12:00:00Z",
+            ))
+        for encode_paused in (False, True):
+            with self.subTest(encode_paused=encode_paused):
+                with open_db(self.config.paths.db_path) as connection:
+                    set_background_work_paused(connection, is_paused=True)
+                    state = load_queue_state(connection)
+                    state.update({"is_paused": encode_paused, "stop_requested": True,
+                                  "updated_at": "2026-10-28T12:00:00Z"})
+                    save_queue_state(connection, state)
+                with patch("mediaforce.web.app.load_config", return_value=self.config):
+                    app = web_app.create_app(self.config.paths.config_path)
+                with open_db(self.config.paths.db_path) as connection:
+                    self.assertTrue(background_work_is_paused(connection))
+                    self.assertEqual(load_queue_state(connection)["is_paused"], encode_paused)
+                endpoint = self._endpoint(app, "/api/encode-queue/resume", "api_resume_encode_queue")
+                response = endpoint()
+                self.assertEqual(response.status_code, 200)
+                with open_db(self.config.paths.db_path) as connection:
+                    self.assertFalse(background_work_is_paused(connection))
+                    state = load_queue_state(connection)
+                    self.assertFalse(state["is_paused"])
+                    self.assertFalse(state["stop_requested"])
+                    self.assertTrue(load_evidence_queue_state(connection)["is_paused"])
 
     @staticmethod
     def _endpoint(app: FastAPI, path: str, name: str) -> Callable[..., Any]:

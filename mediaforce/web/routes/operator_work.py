@@ -12,17 +12,11 @@ def register_operator_work_routes(
     app: FastAPI,
     *,
     refresh_catalog_action: Callable[[], dict[str, Any]],
-    resume_background_work_action: Callable[[], dict[str, Any]],
 ) -> None:
 
     @app.post("/api/catalog/refresh")
     async def api_refresh_catalog() -> JSONResponse:
         return JSONResponse(await _run_action(refresh_catalog_action))
-
-    @app.post("/api/background-work/resume")
-    async def api_resume_background_work() -> JSONResponse:
-        return JSONResponse(await _run_action(resume_background_work_action))
-
 
 async def _run_action(action: Callable[..., dict[str, Any]], *args: Any) -> dict[str, Any]:
     try:

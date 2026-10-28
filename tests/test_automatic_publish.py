@@ -784,7 +784,7 @@ def test_manual_publish_waiting_for_encode_rechecks_validation(config: Mediaforc
 
 
 @pytest.mark.parametrize("rel_path", ["movies/Title.avi", "tv/Show/Episode 01.avi"])
-def test_loose_file_rollback_counts_and_selected_cleanup_follow_owner(config: MediaforceConfig, rel_path: str) -> None:
+def test_loose_file_rollback_counts_and_cleanup_follow_owner(config: MediaforceConfig, rel_path: str) -> None:
     _, item, _ = _stage(config, rel_path)
     archive = config.archive_root / item["rel_path"]
     archive.parent.mkdir(parents=True, exist_ok=True)
@@ -866,7 +866,7 @@ def test_owner_cleanup_preserves_an_original_during_publication(config: Mediafor
         thread.start()
         try:
             assert moved.wait(5)
-            result = (clear_archive_cleanup_action(config))
+            result = clear_archive_cleanup_action(config)
             assert result["ok"] is False
             assert result["removed_count"] == 0
         finally:
@@ -893,7 +893,7 @@ def test_cleanup_keeps_originals_needed_by_an_unpublished_sibling(config: Mediaf
     retained.write_bytes(b"previous original")
     with open_db(config.paths.db_path) as connection:
         delivery._record_wait(connection, item_id, "unsafe", "Inspect and restore this file.")
-    result = (clear_archive_cleanup_action(config))
+    result = clear_archive_cleanup_action(config)
     assert result["removed_count"] == 1
     assert result["preserved_count"] == 2
     assert "Inspect and restore" in result["message"]

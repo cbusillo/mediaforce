@@ -21,7 +21,6 @@ def register_host_routes(
         body = await request.json()
         return JSONResponse(start_host_action(str(body.get("host_key", "")).strip()))
 
-
     @app.post("/api/hosts/prepare")
     async def api_host_prepare(request: Request) -> JSONResponse:
         body = await request.json()
@@ -32,12 +31,10 @@ def register_host_routes(
             )
         )
 
-
     @app.post("/api/hosts/reset-trust")
     async def api_host_reset_trust(request: Request) -> JSONResponse:
         body = await request.json()
         return JSONResponse(reset_host_trust_action(str(body.get("host_key", "")).strip()))
-
 
     @app.post("/api/hosts/retry-connection")
     async def api_host_retry_connection(request: Request) -> JSONResponse:
@@ -45,7 +42,6 @@ def register_host_routes(
         host_key = str(body.get("host_key", "")).strip()
         # A connection attempt can take a while; keep it off the event loop.
         return JSONResponse(await run_in_threadpool(retry_host_connection_action, host_key))
-
 
     @app.get("/api/hosts")
     def api_hosts(compact: int = 0) -> JSONResponse:

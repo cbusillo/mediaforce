@@ -70,12 +70,12 @@ from mediaforce.execution import (
 )
 from mediaforce.library.evidence_worker import default_evidence_worker_deps
 from mediaforce.library.folder_profiles import inspect_prefix
-from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state, set_background_work_paused
+from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state
 from mediaforce.library.evidence_queue import EvidenceQueueConflict, \
     ensure_evidence_queue_state
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import media_group_scope_for_rel_path, resolve_media_scope, resolve_media_scopes, \
-    scope_rel_path_filter, series_context_for_prefix, tv_series_scope_for_rel_path
+    scope_rel_path_filter, series_context_for_prefix
 from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.other_library import load_other_library_payload, load_other_scope_payload, \
@@ -688,7 +688,6 @@ def create_app(
         name="review_media",
     )
 
-
     @app.middleware("http")
     async def ensure_review_media_root(
             request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -699,7 +698,6 @@ def create_app(
 
     app.state.config = config
     app.state.evidence_runner = evidence_runner
-
 
     @app.middleware("http")
     async def periodic_cleanup(
@@ -1275,15 +1273,9 @@ def create_app(
             ),
         }
 
-    def _resume_background_work_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            set_background_work_paused(connection, is_paused=False)
-        return {"ok": True, "message": "Background work can start again."}
-
     register_operator_work_routes(
         app,
         refresh_catalog_action=_refresh_catalog_action,
-        resume_background_work_action=_resume_background_work_action,
     )
 
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:
@@ -2578,32 +2570,11 @@ def _list_folder_cards(
     return _attach_page_states(connection, config, _attach_media_scopes(connection, config, cards))
 
 
-def _list_series_folder_cards(
-        config: MediaforceConfig,
-        connection: DBClient,
-        *,
-        candidate_decisions: list[CandidateDecision] | None = None,
-) -> list[FolderCard]:
-    library_types = config.library_type_map
-    return _folder_cards_for_group(
-        config,
-        connection,
-        folder_group=lambda rel_path: _tv_series_folder_group(
-            rel_path,
-            library_types=library_types,
-        ),
-        aggregate_badges=True,
-        media_roots={root for root, library_type in config.library_type_map.items() if library_type == "tv"},
-        candidate_decisions=candidate_decisions,
-    )
-
-
 def _folder_cards_for_group(
         config: MediaforceConfig,
         connection: DBClient,
         *,
         folder_group: Any,
-        aggregate_badges: bool = False,
         minimum_recommended_savings_bytes: int | None = MIN_RECOMMENDED_SAVINGS_BYTES,
         rel_path_root: str | None = None,
         media_roots: set[str] | None = None,
@@ -2621,14 +2592,6 @@ def _folder_cards_for_group(
             needs_attention_badges = _folder_needs_attention_badges(connection)
         if calibration_job_badges is None:
             calibration_job_badges = _folder_calibration_job_badges(connection)
-        if aggregate_badges:
-            aggregated_badge = _aggregated_folder_review_badge(
-                prefix,
-                needs_attention_badges=needs_attention_badges,
-                calibration_job_badges=calibration_job_badges,
-            )
-            if aggregated_badge is not None:
-                return aggregated_badge
         return _folder_review_badge(
             config,
             prefix,
@@ -2962,26 +2925,6 @@ def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, 
             ),
         }
     return badges
-
-
-def _aggregated_folder_review_badge(
-        prefix: str,
-        *,
-        needs_attention_badges: dict[str, dict[str, str | None]],
-        calibration_job_badges: dict[str, dict[str, str | None]],
-) -> dict[str, str | None] | None:
-    for badges in (needs_attention_badges, calibration_job_badges):
-        exact_badge = badges.get(prefix)
-        if exact_badge is not None:
-            return exact_badge
-        descendant_badges = [
-            badge
-            for badge_prefix, badge in badges.items()
-            if badge_prefix.startswith(f"{prefix}/")
-        ]
-        if descendant_badges:
-            return descendant_badges[0]
-    return None
 
 
 def _folder_calibration_job_badges(connection: DBClient) -> dict[str, dict[str, str | None]]:
@@ -3869,15 +3812,6 @@ def _movie_folder_group(
     if scope is None or scope.domain != "movie":
         return None
     return scope.group_tuple()
-
-
-def _tv_series_folder_group(
-        rel_path: str,
-        *,
-        library_types: Mapping[str, str] | None = None,
-) -> tuple[str, str, str, str] | None:
-    scope = tv_series_scope_for_rel_path(rel_path, library_types=library_types)
-    return scope.group_tuple() if scope is not None else None
 
 
 def _tv_season_folder_group(

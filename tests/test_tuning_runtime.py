@@ -61,14 +61,14 @@ from mediaforce.tuning.tuning_memory import (
 from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view, \
     with_quality_risk_intent
 from mediaforce.tuning.calibration_jobs import list_queue_summary, load_job, \
-    load_latest_failed_target_size_sample_job, save_job, update_job_telemetry
+    load_latest_failed_target_size_sample_job, sample_failures_in_a_row, save_job, update_job_telemetry
 from mediaforce.tuning.compression_intent import CompressionIntentV1
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web.app import _build_multimodal_review_pack, _build_seed_policy_payload, _maybe_seed_baseline_policy, _build_tuning_runtime_toolbelt, _folder_display_policy, _request_triggers_periodic_cleanup, _run_periodic_cleanup, _multimodal_review_pack_public_view, _operator_requested_experiment, _planned_audio_review_context, _review_pack_dir, _upsert_override
 from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, calibration_completion_status, \
     run_calibration_job
-from mediaforce.web.runtime.completed_runtime import ORIGINALS_REMOVED_EVENT, completed_page_payload
+from mediaforce.web.runtime.completed_runtime import ORIGINALS_REMOVED_EVENT, completed_page_payload, record_deleted_original_backups
 from mediaforce.web.runtime.dashboard_payloads import dashboard_summary_payload, reconcile_pending_review_samples
 from mediaforce.library.media_scopes import MediaScopeConflict
 from mediaforce.web.runtime.folder_ai_tuning import (
@@ -1525,6 +1525,51 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(result["removed_size_bytes"], 0)
         self.assertEqual(result["archive_cleanup"]["archive_root"], "")
         self.assertFalse(result["archive_cleanup"]["has_cleanup"])
+
+    def test_deleting_backups_records_removal_so_the_folder_is_cleaned(self) -> None:
+        from mediaforce.web import app as web_app
+
+        for episode in ("Episode 01.mkv", "Episode 02.mkv"):
+            self._insert_promoted_artifact(
+                rel_path=f"tv/Example Show/Season 1/{episode}",
+                promoted_at="2026-04-10T10:00:00+00:00",
+                archived_size_bytes=3,
+                bytes_saved=12,
+            )
+        removed_paths: list[Path] = []
+
+        result = clear_archive_cleanup_action(
+            self.config,
+            on_removed=removed_paths.append,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            recorded = record_deleted_original_backups(
+                connection, removed_paths, folder_group=web_app._folder_group,
+            )
+            repeated = record_deleted_original_backups(
+                connection, removed_paths, folder_group=web_app._folder_group,
+            )
+            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+
+        self.assertEqual(result["removed_count"], 2)
+        self.assertEqual((recorded, repeated), (2, 0))
+        self.assertEqual(payload["folders"][0]["cleanup_state"], "cleaned")
+        self.assertEqual(payload["folders"][0]["originals_removed_count"], 2)
+
+
+    def test_failures_in_a_row_count_only_the_newest_unbroken_run_of_samples(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertEqual(sample_failures_in_a_row(connection, "tv/Show", limit=3), 0)
+            for minute, (job_id, status, lane) in enumerate((
+                ("old-failure", "failed", "sample"), ("made", "completed", "sample"),
+                ("stopped", "stopped", "sample"), ("full", "completed", "full"), ("failed", "failed", "sample"),
+            )):
+                save_job(connection, {
+                    "job_id": job_id, "prefix": "tv/Show", "status": status, "lane": lane,
+                    "created_at": f"2026-10-01T00:0{minute}:00Z", "updated_at": "2026-10-01T01:00:00Z",
+                })
+            self.assertEqual(sample_failures_in_a_row(connection, "tv/Show", limit=3), 2)
+            self.assertEqual(sample_failures_in_a_row(connection, "tv/Show", limit=1), 1)
 
     def test_completed_page_payload_groups_promoted_folders_and_active_backups(self) -> None:
         from mediaforce.web import app as web_app

@@ -339,12 +339,9 @@ its file while other eligible work continues.
 Explicit bounded analysis remains available through the CLI commands below.
 Queue pause, resume and cancellation retain their existing durable state.
 
-A global background pause saved by the retired web page remains respected.
-For an installation carrying that pause, the supported recovery is
-`POST /api/background-work/resume` on its existing Mediaforce server. This
-clears only that global pause; an explicitly paused evidence batch stays
-paused until resumed through the CLI. The endpoint is retained for this
-recovery, rather than silently clearing the saved choice on startup.
+A global background pause saved by the retired web page appears as paused in
+the Mac app. Resume clears that pause along with the encode-queue pause;
+explicitly paused evidence batches remain paused until resumed through the CLI.
 
 Create a paused folder pilot:
 

@@ -4043,6 +4043,24 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             },
         )
 
+    def test_releasing_a_computer_leaves_the_later_finished_run_newest(self) -> None:
+        prefix = "tv/show/Season 9"
+        now = datetime.now(tz=UTC)
+        with open_db(self.config.paths.db_path) as connection:
+            source = self._create_source_file("Season 9/episode-1.mkv")
+            item_id = self._insert_library_item(
+                connection, source, status="encoded", rel_path=f"{prefix}/episode-1.mkv",
+            )
+            self._insert_staged_artifact(connection, item_id, self._staging_path("Season 9/episode-1.mkv"))
+            self._season_run(connection, "job-season-failed", prefix, status="needs_attention", at=now - timedelta(hours=2))
+            self._season_run(connection, "job-season-finished", prefix, status="completed", at=now - timedelta(hours=1))
+
+            released = encode_runtime.release_host_cooldowns(connection, {"key": "remote-a"})
+            workflow = workflow_state_runtime.build_folder_workflow_state(connection, prefix)
+
+        self.assertEqual(released, 1)
+        self.assertEqual(workflow.state, "ready_to_validate")
+
     def test_cleanup_on_a_share_that_stopped_answering_is_deferred_not_crashed(self) -> None:
         staging_path = self._staging_path("episode-dead-mount.mkv")
 
@@ -6477,106 +6495,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "tv/show/Season 2": 2,
             },
         )
-
-    def test_series_folder_cards_group_tv_items_by_show(self) -> None:
-        first = self._create_source_file("season-one.mkv")
-        second = self._create_source_file("season-two.mkv")
-
-        with open_db(self.config.paths.db_path) as connection:
-            first_id = self._insert_library_item(connection, first)
-            second_id = self._insert_library_item(connection, second)
-            for item_id, rel_path in (
-                    (first_id, "tv/show/Season 1/episode-1.mkv"),
-                    (second_id, "tv/show/Season 2/episode-1.mkv"),
-            ):
-                connection.execute(
-                    update(library_items)
-                    .where(library_items.c.id == item_id)
-                    .values(rel_path=rel_path, parent_dir=rel_path.rsplit("/", 1)[0], size_bytes=2 * 1024 ** 3)
-                )
-
-            web_app._reset_folder_card_cache()
-            season_cards = web_app._list_folder_cards(self.config, connection)
-            series_cards = web_app._list_series_folder_cards(self.config, connection)
-
-        self.assertEqual({card.prefix for card in season_cards}, {"tv/show/Season 1", "tv/show/Season 2"})
-        matching_series = [card for card in series_cards if card.prefix == "tv/show"]
-        self.assertEqual(len(matching_series), 1)
-        self.assertEqual(matching_series[0].title, "show")
-        self.assertEqual(matching_series[0].scope_label, "Series")
-        self.assertEqual(matching_series[0].item_count, 2)
-        self.assertEqual(matching_series[0].pending_count, 2)
-
-    def test_series_folder_cards_aggregate_descendant_encode_attention_badges(self) -> None:
-        source = self._create_source_file("episode-series-attention.mkv")
-        manifest_path = self._write_manifest("manifest-series-attention.json", [{"library_item_id": 1}])
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source)
-            connection.execute(
-                update(library_items)
-                .where(library_items.c.id == item_id)
-                .values(
-                    size_bytes=2 * 1024 * 1024 * 1024,
-                    rel_path="tv/show/Season 2/episode-series-attention.mkv",
-                    parent_dir="tv/show/Season 2",
-                )
-            )
-            self._save_job(
-                connection,
-                job_id="series-child-attention",
-                manifest_name=manifest_path.name,
-                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
-                status="needs_attention",
-                attempt_count=1,
-            )
-            connection.execute(
-                update(encode_jobs)
-                .where(encode_jobs.c.job_id == "series-child-attention")
-                .values(prefix="tv/show/Season 2", error="Error: child season failed")
-            )
-
-            series_cards = web_app._list_series_folder_cards(self.config, connection)
-
-        series_card = next(card for card in series_cards if card.prefix == "tv/show")
-        self.assertEqual(series_card.review_badge_label, "Needs attention")
-        self.assertEqual(series_card.review_badge_tone, "warning")
-        self.assertEqual(series_card.review_badge_detail, plain_failure_summary("Error: child season failed"))
-
-    def test_series_folder_cards_aggregate_descendant_calibration_badges(self) -> None:
-        source = self._create_source_file("episode-series-calibration.mkv")
-        now = web_app._now_iso()
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source)
-            connection.execute(
-                update(library_items)
-                .where(library_items.c.id == item_id)
-                .values(
-                    size_bytes=2 * 1024 * 1024 * 1024,
-                    rel_path="tv/show/Season 2/episode-series-calibration.mkv",
-                    parent_dir="tv/show/Season 2",
-                )
-            )
-            connection.execute(
-                calibration_jobs.insert().values(
-                    job_id="series-child-calibration",
-                    prefix="tv/show/Season 2",
-                    status="running",
-                    lane="sample",
-                    action="sample",
-                    host_json="{}",
-                    policy_json="{}",
-                    sample_item_json="{}",
-                    created_at=now,
-                    started_at=now,
-                    updated_at=now,
-                )
-            )
-
-            series_cards = web_app._list_series_folder_cards(self.config, connection)
-
-        series_card = next(card for card in series_cards if card.prefix == "tv/show")
-        self.assertEqual(series_card.review_badge_label, "Sample running")
-        self.assertEqual(series_card.review_badge_tone, "attention")
 
     def test_folder_studio_series_context_and_encode_candidate_count_follow_manifest_selection(self) -> None:
         pending = self._create_source_file("pending.mkv")

@@ -8,7 +8,6 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 def register_poster_routes(app: FastAPI, *, title_poster: Callable[[str], Path | None]) -> None:
     """A show's or movie's poster for the Mac app, by its title prefix ("tv/Show" or "movies/Title (Year)")."""
 
-
     @app.get("/api/app/posters/{title_prefix:path}")
     def api_app_title_poster(title_prefix: str) -> Response:
         poster = title_poster(title_prefix)

@@ -117,7 +117,6 @@ class QueueNeedsChoice(HTTPException):
 
 
 _FINAL_SIZE_RECOVERY_BLOCKER_CODE = "final_size_recovery_contract_unchanged"
-KIND_APPROVAL_RECOVERY_CODE = "kind_approval_recovery"
 _FINAL_SIZE_RECOVERY_BLOCKER_MESSAGE = (
     "The latest production encode missed its approved final-size target under the same reviewed settings. "
     "Run and approve a fresh representative sample with a changed size, compression, quality, resolution, "

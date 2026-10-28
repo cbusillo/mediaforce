@@ -9,6 +9,7 @@ import pytest
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
+from mediaforce.library.background_work import background_work_is_paused, set_background_work_paused
 from mediaforce.web.runtime import host_status
 from mediaforce.web.runtime.app_window import app_window_payload, tv_shows_payload
 
@@ -319,6 +320,17 @@ def test_work_says_whether_it_is_paused_and_why_it_stopped(
     )["work"]
 
     assert (work["state"], work["paused_by_owner"], work["stop_reasons"]) == (expected_state, paused, expected_reasons)
+
+
+def test_saved_background_pause_is_visible_and_preserved_by_native_reads(connection: DBClient) -> None:
+    set_background_work_paused(connection, is_paused=True)
+    connection.commit()
+
+    for _ in range(2):
+        work = _payload(connection)["work"]
+        assert work["state"] == "paused"
+        assert work["paused_by_owner"] is True
+        assert background_work_is_paused(connection)
 
 
 def test_work_names_each_season_being_compressed_once(connection: DBClient) -> None:
