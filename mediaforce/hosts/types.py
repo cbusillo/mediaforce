@@ -110,5 +110,6 @@ __all__ = [
     "SOURCE_ROOT_READ_MISSING_ISSUE",
     "STAGING_ROOT_WRITE_MISSING_ISSUE",
     "VMAF_MODEL_MISSING_ISSUE",
+    "is_storage_io_failure",
     "is_vmaf_model_load_failure",
 ]
