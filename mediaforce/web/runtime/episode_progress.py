@@ -47,7 +47,7 @@ def load_season_episode_progress(
         item_states: Iterable[ItemWorkflowState],
         *, config: MediaforceConfig | None = None,
 ) -> list[dict[str, Any]]:
-    """Each episode takes its own newest run, so re-running one file never hides another's question."""
+    """Show current work and every unresolved hold without replacing one with the other."""
     items = [item for item in item_states if item.state != "missing"]
     if not items:
         return []
@@ -74,7 +74,21 @@ def load_season_episode_progress(
         for item_id, row in staged.items()
         if (state := _stopped_publish_state(row["validation_json"])) is not None
     }
-    return season_episode_progress(items, run_by_rel_path, bytes_saved, validation, not_remade, publish_stopped)
+    episodes = season_episode_progress(items, run_by_rel_path, bytes_saved, validation, not_remade, publish_stopped)
+    outcomes_by_path = {item.rel_path: outcomes[item.item_id] for item in items if item.item_id in outcomes}
+    for episode in episodes:
+        outcome = outcomes_by_path.get(episode["rel_path"])
+        if outcome is None:
+            continue
+        reasons = episode["additional_wait_reasons"]
+        for job in outcome.hold_jobs:
+            reason, _label, needs_owner = unfinished_child_reason(job)
+            if not needs_owner:
+                continue
+            wait_reason = _run_wait_reason(reason, job)
+            if wait_reason != episode["wait_reason"] and wait_reason not in reasons:
+                reasons.append(wait_reason)
+    return episodes
 
 
 def season_episode_progress(
@@ -127,6 +141,7 @@ def _episode(
         "owner_action": None,
         "validation": None,
         "wait_reason": None,
+        "additional_wait_reasons": [],
     }
     if item.state == "complete":
         episode["stage"] = "published"

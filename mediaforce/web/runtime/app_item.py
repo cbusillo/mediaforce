@@ -110,6 +110,7 @@ def item_payload(
             "stage": episode.get("stage") or "not_started",
             "validation": episode.get("validation"),
             "wait_reason": episode.get("wait_reason"),
+            "additional_wait_reasons": episode.get("additional_wait_reasons", []),
             "kept_reason": kept.get(item.item_id),
             "held_reason": "motion_pattern" if item.motion_held else None,
             "percent_complete": episode.get("percent_complete"),

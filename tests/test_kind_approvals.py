@@ -748,6 +748,43 @@ def test_a_newer_completion_does_not_reconcile_an_earlier_restart_stopped_writer
     assert chosen is not None and chosen.files == (item_id,)
 
 
+@pytest.mark.parametrize("status,stage", [("running", "compressing"), ("queued", "waiting"), ("needs_attention", "needs_you")])
+def test_retained_writer_does_not_hide_current_work_or_its_size_question(tmp_path: Path, status: str, stage: str) -> None:
+    config = _config(tmp_path)
+    item_id = _waiting_episode(config, EPISODE, 1_000)
+    _stored_folder_run(config, "tv/Thriller", {item_id: EPISODE},
+                       {item_id: ("stopped", CONTROLLER_RESTART_STOP_REASON)})
+    children = _stored_folder_run(config, SEASON, {item_id: EPISODE}, {item_id: (status, None)}, name="current",
+                                  created_at="2026-10-27T00:00:00+00:00")
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == children[item_id]).values(progress_json=json.dumps({
+            "progress_state": "encoding", "percent_complete": 37,
+            "failure_analysis": {"kind": "quality_floor_size_conflict", "retry_strategy": "needs_operator_approval",
+                "target_size_bytes": 500, "proposed_target_size_bytes": 900, "item_rel_path": EPISODE},
+        })))
+    episode = _displayed_episode(config, item_id, EPISODE)
+    assert episode["stage"] == stage
+    assert {reason["code"] for reason in episode["additional_wait_reasons"]} == {"restart_stopped"}
+    if status == "running":
+        assert episode["percent_complete"] == 37
+    if status == "needs_attention":
+        assert episode["size_question"]["job_id"] == children[item_id]
+
+
+def test_unknown_held_membership_is_visible_for_every_file_it_holds(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    first = _waiting_episode(config, EPISODE, 1_000)
+    sibling_path = f"{SEASON}/e02.mkv"
+    sibling = _waiting_episode(config, sibling_path, 1_000)
+    job_id = _encode_job(config, SEASON, "needs_attention")
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == job_id).values(
+            progress_json=json.dumps({"current_item_rel_path": EPISODE})))
+    assert _next(config, _loader({SEASON: _approved(config)}, {})) is None
+    assert [_displayed_episode(config, item, path)["stage"] for item, path in ((first, EPISODE), (sibling, sibling_path))] == [
+        "needs_you", "needs_you"]
+
+
 @pytest.mark.parametrize("status,failure_kind", [
     ("stopped", None), ("needs_attention", "worker_restart"), ("needs_attention", "stale_lease"),
 ])

@@ -260,8 +260,13 @@ Guidance:
   - `file_encode_outcomes.py`
     - automatic admission and episode pages share each file's newest outcome,
       using saved item IDs with legacy path fallback and strict file selection
-    - an earlier attempt still awaiting writer cleanup remains visible behind
-      a later completion; unknown completed membership cannot clear a question
+    - retained writer holds remain separate from current work, so an older
+      attempt cannot hide a running file or its newer size question; every
+      unresolved reason appears in the existing file waiting box
+    - unknown held membership covers its whole saved scope on the page as well
+      as in admission; progress is a display hint only for work with no hold
+    - unknown completed membership cannot clear a question, and historical
+      progress and computer data is decoded only after membership can match
   - `folder_tuning_helpers.py`
   - `folder_tuning_advice.py`
   - `folder_tuning_runtime.py`

@@ -19,8 +19,11 @@ from mediaforce.web.runtime.encode_runtime import encode_writer_cleanup_pending,
 @dataclass(frozen=True, slots=True)
 class FileEncodeOutcome:
     job: dict[str, Any]
-    holds_file: bool
-    writer_cleanup_pending: bool
+    hold_jobs: tuple[dict[str, Any], ...]
+
+    @property
+    def holds_file(self) -> bool:
+        return bool(self.hold_jobs)
 
 
 def file_encode_outcomes(
@@ -29,44 +32,56 @@ def file_encode_outcomes(
 ) -> dict[int, FileEncodeOutcome]:
     if not files:
         return {}
-    remaining = dict(files)
-    outcomes: dict[int, FileEncodeOutcome] = {}
+    remaining = set(files)
+    current: dict[int, tuple[dict[str, Any], bool]] = {}
+    holds: dict[int, list[dict[str, Any]]] = {}
     parents = set(connection.execute(select(encode_jobs.c.parent_job_id).where(
         encode_jobs.c.parent_job_id.is_not(None),
-    )).scalars())
+    ).distinct()).scalars())
     rows = connection.execute(select(encode_jobs, retained_encode_writer_filter().label("retained_writer")).where(
         encode_jobs.c.status.in_((*ACTIVE_ENCODE_JOB_STATUSES, *RECENT_ENCODE_JOB_STATUSES)),
     ).order_by(encode_jobs.c.created_at.desc(), literal_column("rowid").desc())).mappings()
     for row in rows:
         if row["job_kind"] == "folder" and row["job_id"] in parents:
             continue
-        if not remaining and not row["retained_writer"]:
-            continue
-        job = {**row, "progress": json.loads(row["progress_json"] or "{}"),
-               "manifest_indexes": json.loads(row["manifest_indexes_json"]) if row["manifest_indexes_json"] else None,
-               "host": object_dict(json.loads(row["host_json"] or "{}"))}
-        custody_hold = bool(row["retained_writer"]) and encode_writer_cleanup_pending(config, job)
-        reason, _label, needs_owner = unfinished_child_reason(job) if job["status"] != "completed" else ("", "", False)
-        held = custody_hold or needs_owner or reason == "size_exception_declined"
+        job = {**row, "manifest_indexes": json.loads(row["manifest_indexes_json"]) if row["manifest_indexes_json"] else None}
         references = encode_run_manifest_files(job, strict_indexes=True)
-        display_paths = (encode_run_rel_paths(job) if display_progress_fallback and not references
-                         and job["status"] != "completed" else [])
-        if not references and not held and not display_paths:
-            continue
-        candidates = files if custody_hold else remaining
         if references:
             referenced_ids = {item.library_item_id for item in references if item.library_item_id > 0}
             legacy_paths = {item.rel_path for item in references if item.library_item_id <= 0}
-            affected = {item_id for item_id, path in candidates.items() if item_id in referenced_ids or path in legacy_paths}
-        elif display_paths:
-            # A page may show the file named by an unfinished attempt's progress. That hint cannot
-            # narrow a safety hold when automatic admission cannot prove its saved membership.
-            affected = {item_id for item_id, path in candidates.items() if path in display_paths}
+            affected = {item_id for item_id, path in files.items() if item_id in referenced_ids or path in legacy_paths}
+            if not affected:
+                continue
         else:
-            affected = {item_id for item_id, path in candidates.items() if path_matches_scope(path, str(job["prefix"] or ""))}
+            if job["status"] == "completed":
+                continue
+            affected = {item_id for item_id, path in files.items() if path_matches_scope(path, str(job["prefix"] or ""))}
+            if not affected and not display_progress_fallback:
+                continue
+        # Most historical runs cannot match this page. Decode their state only after membership can match.
+        job.update(progress=json.loads(row["progress_json"] or "{}"), host=object_dict(json.loads(row["host_json"] or "{}")))
+        custody_hold = bool(row["retained_writer"]) and encode_writer_cleanup_pending(config, job)
+        reason, _label, needs_owner = (unfinished_child_reason(job) if job["status"] not in {"completed", "running"}
+                                      else ("", "", False))
+        held = custody_hold or needs_owner or reason == "size_exception_declined"
+        display_paths = (encode_run_rel_paths(job) if display_progress_fallback and not references and not held
+                         and job["status"] != "completed" else [])
+        if not references and not held and not display_paths:
+            continue
+        admission_affected = affected if references or held else set()
+        for item_id in admission_affected:
+            if (item_id in remaining and held) or custody_hold:
+                holds.setdefault(item_id, []).append(job)
+            remaining.discard(item_id)
+        if display_paths:
+            # Progress can identify visible activity, but cannot narrow a held scope.
+            affected = {item_id for item_id, path in files.items() if path in display_paths}
+        specific = bool(references or display_paths)
         for item_id in affected:
-            remaining.pop(item_id, None)
-            # Retained custody survives a later completion; among those holds keep the newest one.
-            if item_id not in outcomes or not outcomes[item_id].writer_cleanup_pending:
-                outcomes[item_id] = FileEncodeOutcome(job, held, custody_hold)
-    return outcomes
+            previous = current.get(item_id)
+            if (previous is None
+                    or (not previous[1] and specific and (job["status"] in ACTIVE_ENCODE_JOB_STATUSES or held))
+                    or (custody_hold and previous[0]["status"] == "completed")):
+                current[item_id] = (job, specific)
+    return {item_id: FileEncodeOutcome(job, tuple(holds.get(item_id, ())))
+            for item_id, (job, _specific) in current.items()}
