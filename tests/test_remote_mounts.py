@@ -651,6 +651,7 @@ case "$1" in
       # Start the job's program the way launchd would, from the arguments plutil recorded.
       set -- $(cat "$3.args")
       IN_LAUNCHD_JOB=1 "$@" >/dev/null 2>&1 &
+      printf '%s\\n' "$!" >>"$STUB_DIR/job.pids"
     fi
     exit 0 ;;
   bootout)
@@ -686,11 +687,21 @@ exit 1
 """
 
 
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 class GeneratedMountScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
+        # Cleanups run last-first: a job the stub started still writes into the folder until it exits.
+        self.addCleanup(self._wait_for_started_jobs)
         self.stubs = self.root / "stubs"
         self.stubs.mkdir()
         (self.root / "home").mkdir()
@@ -711,6 +722,16 @@ class GeneratedMountScriptTests(unittest.TestCase):
             path = self.stubs / name
             path.write_text(body)
             path.chmod(0o755)
+
+    def _wait_for_started_jobs(self) -> None:
+        pids_file = self.root / "job.pids"
+        pids = [int(pid) for pid in pids_file.read_text().split()] if pids_file.exists() else []
+        deadline = time.monotonic() + 10
+        for pid in pids:
+            while _process_exists(pid):
+                if time.monotonic() >= deadline:
+                    self.fail(f"the job the stub started (pid {pid}) was left running")
+                time.sleep(0.05)
 
     def _stubbed(self, shell_text: str) -> str:
         for system_path in ("/bin/launchctl", "/sbin/mount", "/usr/bin/stat", "/usr/bin/base64",
@@ -885,14 +906,10 @@ class GeneratedMountScriptTests(unittest.TestCase):
         self.assertTrue(result.uncertain, "no confirmed result: review before another request")
         pid = int((self.root / "osascript.pid").read_text())
         deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
+        while _process_exists(pid):
+            if time.monotonic() >= deadline:
+                self.fail("the no-UI request was left running")
             time.sleep(0.1)
-        else:
-            self.fail("the no-UI request was left running")
 
     def _launchctl_calls(self, verb: str) -> list[str]:
         log = self.root / "launchctl.log"
