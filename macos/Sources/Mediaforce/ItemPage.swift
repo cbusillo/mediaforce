@@ -69,7 +69,7 @@ struct ItemPage: View {
                                 .id("\(file.id) \(file.stage) \(file.bytes) \(file.originalBackup)")
                             }
                             if facts.sound != nil || facts.stillAiring != nil {
-                                ShowChoices(facts: facts) { change in Task { await save(change) } }
+                                ShowChoices(facts: facts, openShow: openItem) { change in Task { await save(change) } }
                             }
                         }
                         .padding(.horizontal, 28)
@@ -374,12 +374,21 @@ struct FilePlayer: View {
 
 struct ShowChoices: View {
     let facts: ItemFacts
+    // On a season's page the heading names the show, so it opens the show's page.
+    let openShow: (String) -> Void
     let save: (ShowChoice) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(Words.forEverySeason(facts.show ?? facts.title))
-                .font(.headline)
+            Group {
+                if facts.kind != "tv_series", let showPrefix = facts.showPrefix {
+                    Button(Words.forEverySeason(facts.show ?? facts.title)) { openShow(showPrefix) }
+                        .buttonStyle(QuietLinkStyle(primary: true))
+                } else {
+                    Text(Words.forEverySeason(facts.show ?? facts.title))
+                }
+            }
+            .font(.headline)
             Form {
                 if let sound = facts.sound, let showPrefix = sound.showPrefix {
                     Picker(Words.soundLabel, selection: Binding(
