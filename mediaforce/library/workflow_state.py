@@ -14,6 +14,7 @@ from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, encode_ru
     unfinished_breakdown_groups, unfinished_breakdown_summary
 from mediaforce.encoding.plain_failure import plain_failure_summary
 from mediaforce.library.item_presence import library_item_is_missing
+from mediaforce.library.motion_keep_state import kept_original_clause
 from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, normalize_scope_prefix, \
     path_matches_scope, resolve_media_scope, resolve_media_scopes, scope_rel_path_filter, scopes_overlap
 from mediaforce.library.remake_intents import remake_intent
@@ -23,7 +24,7 @@ WorkflowItemState = Literal[
     "missing",
     "encode_candidate",
     "held",
-    # The owner chose to keep it original for its motion pattern; it is settled, not work.
+    # Its original is kept, by the owner's choice or after its copies failed; it is settled, not work.
     "kept_original",
     "encoding",
     "ready_to_validate",
@@ -287,6 +288,11 @@ def derive_item_workflow_state(
     elif status == "encoding":
         state = "encoding"
         lane = "processing"
+    elif kept_original or row.get("kept_original"):
+        # A recorded keep settles the file even while its failed copy still waits to be removed.
+        state = "kept_original"
+        lane = "none"
+        blocker = policy_blocker
     elif validation == "remaking":
         # Mediaforce remakes a failed copy by itself; that is encoding work, not a question for the owner.
         state = "encode_candidate"
@@ -300,10 +306,6 @@ def derive_item_workflow_state(
             if validation == "size_held"
             else "A finished file didn't pass its check."
         )
-    elif kept_original:
-        state = "kept_original"
-        lane = "none"
-        blocker = policy_blocker
     elif not encode_eligible:
         state = "blocked" if encode_blocked else "held"
         lane = "blocked" if encode_blocked else "none"
@@ -369,6 +371,7 @@ def _item_rows_query() -> Select[Any]:
             staged_artifacts.c.validated_at,
             staged_artifacts.c.validation_json,
             staged_artifacts.c.promoted_at,
+            kept_original_clause(library_items.c.id).label("kept_original"),
         )
         .select_from(
             library_items.outerjoin(

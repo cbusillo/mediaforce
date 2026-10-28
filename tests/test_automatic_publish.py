@@ -1058,6 +1058,33 @@ def _restage(config: MediaforceConfig, item_id: int, item: dict[str, Any]) -> No
         connection.commit()
 
 
+@pytest.mark.parametrize("reason", [size_held.OVER_SIZE_KEEP_REASON, size_held.CHECK_FAILED_KEEP_REASON])
+def test_kept_original_settles_the_file_while_its_failed_copy_cannot_be_removed(
+    config: MediaforceConfig, reason: str
+) -> None:
+    with patch.object(size_held, "_remove_finished_output", return_value=False):
+        if reason == size_held.OVER_SIZE_KEEP_REASON:
+            item_id, item = _encoder_size_record(config, "tv/Show/Season 1/too-big.mkv", lower=1, upper=2)
+            _run(config)
+        else:
+            item_id, item, _ = _stage(config, "tv/Show/Season 1/broken.mkv")
+            with patch("mediaforce.execution.probe_media", return_value=replace(_probe(), video_codec="h264")):
+                delivery.publish_checked_files_once(
+                    config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=_no_remake
+                )
+            assert size_held.keep_original_after_failed_checks(
+                config, item_id, failed_attempts=delivery.CHECK_FAILURE_ATTEMPT_LIMIT, now_iso=timestamp
+            )
+
+    assert _kept_reason(config, item_id) == reason
+    assert (Path(config.media["staging_root"]) / item["rel_path"]).exists()
+    assert Path(item["source_path"]).read_bytes() == b"original media file"
+    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    assert (episode["stage"], episode["owner_action"], episode["wait_reason"]) == ("kept_original", None, None)
+    assert _remake_reason(config, item_id) is None
+    assert not _keep(config, item_id, item)["ok"]
+
+
 def _kept_reason(config: MediaforceConfig, item_id: int) -> str | None:
     with open_db(config.paths.db_path) as connection:
         if not library_item_ids_kept_original(connection, [item_id]):

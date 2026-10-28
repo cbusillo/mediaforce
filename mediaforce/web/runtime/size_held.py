@@ -21,6 +21,7 @@ from mediaforce.encoding.encode_queue import load_active_encode_jobs_for_prefix
 from mediaforce.encoding.staging import partial_output_path
 from mediaforce.library.evidence_state import library_item_source_fingerprint
 from mediaforce.library.media_scopes import path_matches_scope
+from mediaforce.library.motion_keep_state import kept_original_clause
 from mediaforce.library.remake_intents import (
     INTENT_KEY,
     finish_remake_intents,
@@ -76,7 +77,8 @@ def decide_size_held_file(
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         row = connection.execute(
             select(staged_artifacts, library_items.c.rel_path,
-                   library_items.c.source_path.label("original_source_path"))
+                   library_items.c.source_path.label("original_source_path"),
+                   kept_original_clause(library_items.c.id).label("kept_original"))
             .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
             .where(staged_artifacts.c.library_item_id == int(library_item_id))
         ).mappings().fetchone()
@@ -85,6 +87,7 @@ def decide_size_held_file(
         if (
                 row is None
                 or row["promoted_at"] is not None
+                or row["kept_original"]
                 or not path_matches_scope(str(row["rel_path"] or ""), prefix)
         ):
             return {"ok": False, "message": NOT_HELD_MESSAGE}
@@ -333,7 +336,8 @@ def staged_remake_details(
 
     The action calls this again under its write lock before removing the output.
     """
-    if row is None or row["promoted_at"] is not None:
+    # A kept original settles the file; its leftover copy only waits to be removed.
+    if row is None or row["promoted_at"] is not None or row.get("kept_original"):
         return None
     if not path_matches_scope(str(row.get("rel_path") or ""), prefix) and "rel_path" in row:
         return None
@@ -457,7 +461,8 @@ def staged_remake_records(
     manifest_reader = cache(read_manifest)
     ids = [int(record["item_id"]) for record in records if record.get("item_id") is not None]
     rows = {int(row["library_item_id"]): row for row in connection.execute(
-        select(staged_artifacts, library_items.c.source_path.label("original_source_path"))
+        select(staged_artifacts, library_items.c.source_path.label("original_source_path"),
+               kept_original_clause(library_items.c.id).label("kept_original"))
         .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
         .where(staged_artifacts.c.library_item_id.in_(ids))
     ).mappings()}
@@ -501,6 +506,7 @@ def _load_remake_row(connection: DBClient, item_id: int) -> DBRow | None:
     return connection.execute(
         select(staged_artifacts, library_items.c.rel_path,
                library_items.c.source_path.label("original_source_path"),
+               kept_original_clause(library_items.c.id).label("kept_original"),
                func.coalesce(func.nullif(encode_jobs.c.last_host_json, "{}"),
                              encode_jobs.c.host_json).label("saved_host_json"))
         .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id)
