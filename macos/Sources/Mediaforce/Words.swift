@@ -1275,7 +1275,7 @@ extension Words {
 extension Words {
     static func workAction(_ action: SampleFacts.Action) -> String {
         switch action {
-        case .approve, .makeAgain, .makeSample, .chooseSize, .tryAnotherSize: "Watch the Sample"
+        case .approve, .makeAgain, .makeSample, .chooseSize, .tryAnotherSize, .openSample: "Watch the Sample"
         case .startCompressing: startCompressing
         case .checkFiles: "Check New Files"
         case .replaceOriginals: "Replace Originals…"

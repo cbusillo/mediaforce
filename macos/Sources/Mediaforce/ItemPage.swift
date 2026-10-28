@@ -94,7 +94,7 @@ struct ItemPage: View {
 
     private func perform(_ action: SampleFacts.Action, _ facts: ItemFacts) {
         switch action {
-        case .approve, .makeAgain, .makeSample, .chooseSize, .tryAnotherSize: openSample(prefix)
+        case .approve, .makeAgain, .makeSample, .chooseSize, .tryAnotherSize, .openSample: openSample(prefix)
         case .replaceOriginals: confirming = .replaceOriginals
         case .decideMotion: confirming = .keepMotionOriginals
         case .startCompressing: Task { await run(.startCompressing, facts) }
@@ -155,7 +155,8 @@ struct ItemPage: View {
             refreshFailed = true
         }
         // The season's own next step, read the same way the sample page reads it; none for a plain folder.
-        work = try? await model.client.sample(prefix)
+        // A show is sampled season by season, so its page leaves each season's step to its row.
+        work = facts?.kind == "tv_series" ? nil : try? await model.client.sample(prefix)
         // A whole show's page lists its seasons, each with its own next step.
         if facts?.kind == "tv_series" {
             show = (try? await model.client.tvShows())?.shows.first { $0.showPrefix == prefix } ?? show
