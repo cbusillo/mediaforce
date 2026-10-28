@@ -26,6 +26,8 @@ struct PageFrame<Content: View>: View {
 struct RefreshingPage<Facts: Sendable, Content: View>: View {
     let title: String
     var subtitle = ""
+    // A subtitle that counts what the facts hold; the plain subtitle stands until they arrive.
+    var factsSubtitle: ((Facts) -> String)?
     let load: @MainActor () async throws -> Facts
     @ViewBuilder let content: (Facts) -> Content
     @State private var facts: Facts?
@@ -33,7 +35,7 @@ struct RefreshingPage<Facts: Sendable, Content: View>: View {
     @State private var lastHeard: Date?
 
     var body: some View {
-        PageFrame(title: title, subtitle: subtitle) {
+        PageFrame(title: title, subtitle: facts.flatMap { factsSubtitle?($0) } ?? subtitle) {
             if let facts {
                 if refreshFailed {
                     StaleNotice(connection: .failing, lastHeard: lastHeard)

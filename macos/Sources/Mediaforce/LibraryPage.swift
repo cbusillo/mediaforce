@@ -36,5 +36,6 @@ struct LibraryPage: View {
         .scrollBounceBehavior(.basedOnSize)
         .background(Color(nsColor: .textBackgroundColor))
         .navigationTitle("Library")
+        .navigationSubtitle(Words.workHeadline(facts))
     }
 }

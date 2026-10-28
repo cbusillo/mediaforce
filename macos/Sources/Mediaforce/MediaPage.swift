@@ -15,8 +15,12 @@ struct MediaPage: View {
 
     var body: some View {
         RefreshingPage(title: onlySeasons == nil ? Words.media : Words.seasonsWithoutKindTitle,
+                       factsSubtitle: { loaded in
+                           let rows = listed(loaded)
+                           return Words.shown(visibleRows(rows).count, of: rows.count, onlySeasons == nil ? "item" : "season")
+                       },
                        load: { try await MediaRow.load(model.client) }) { (loaded: [MediaRow]) in
-            let rows = onlySeasons.map { MediaRow.seasons($0, shows: loaded) } ?? loaded
+            let rows = listed(loaded)
             let visible = visibleRows(rows)
             HStack(spacing: 12) {
                 Picker(Words.kindLabel, selection: $kind) {
@@ -38,14 +42,8 @@ struct MediaPage: View {
                 .labelsHidden()
                 .fixedSize()
             }
-            HStack(spacing: 10) {
-                Text(Words.shown(visible.count, of: rows.count, onlySeasons == nil ? "item" : "season"))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                if onlySeasons != nil {
-                    Button(Words.showEverything, action: showEverything).buttonStyle(.link).font(.callout)
-                }
+            if onlySeasons != nil {
+                Button(Words.showEverything, action: showEverything).buttonStyle(.link).font(.callout)
             }
             if rows.contains(where: \.listCutShort) && (kind == .everything || kind == .other) {
                 Text(Words.otherMediaTruncated)
@@ -60,6 +58,10 @@ struct MediaPage: View {
                 MediaTable(rows: visible, posters: model.posters, open: openItem)
             }
         }
+    }
+
+    private func listed(_ loaded: [MediaRow]) -> [MediaRow] {
+        onlySeasons.map { MediaRow.seasons($0, shows: loaded) } ?? loaded
     }
 
     private func visibleRows(_ rows: [MediaRow]) -> [MediaRow] {
