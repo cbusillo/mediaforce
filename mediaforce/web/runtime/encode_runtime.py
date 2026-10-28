@@ -1645,6 +1645,8 @@ def unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str, bool]:
         if computer:
             return f"waiting_for_computer:{computer}", f"waiting for {computer} to be available", False
         return "retrying", _UNFINISHED_REASON_LABELS["retrying"], False
+    if status == "stopped" and child.get("terminal_reason") == KEPT_ORIGINAL_TERMINAL_REASON:
+        return KEPT_ORIGINAL_TERMINAL_REASON, _UNFINISHED_REASON_LABELS["size_exception_declined"], False
     if status == "stopped" and child.get("terminal_reason") == CONTROLLER_RESTART_STOP_REASON:
         # Still stopped after a restart: its earlier encode is not confirmed ended, or it was on its
         # last attempt. Each computer gets its own line so the owner knows where to look.
@@ -1731,7 +1733,7 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
                 "count": 0,
                 "needs_owner": needs_owner,
                 # The owner already answered for these files; they are listed, not waiting.
-                "owner_choice": reason == "size_exception_declined",
+                "owner_choice": reason in {"size_exception_declined", KEPT_ORIGINAL_TERMINAL_REASON},
                 "items": [],
             },
         )

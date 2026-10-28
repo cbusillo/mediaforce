@@ -1857,10 +1857,12 @@ def create_app(
             chosen = next_kind_season(connection, config, load_calibration_state=_load_calibration_state, now=wall_time())
         if chosen is None:
             return
+        selected_files = chosen.files
         try:
             result = _queue_encode_action(
                 chosen.season, "Queued under its current approval.", False,
-                admission_blocker=background_queue_blocker,
+                only_library_item_ids=selected_files,
+                admission_blocker=lambda queue_connection: background_queue_blocker(queue_connection, library_item_ids=selected_files),
             )
         except HTTPException as refusal:
             result = {"ok": False, "message": str(refusal.detail)}

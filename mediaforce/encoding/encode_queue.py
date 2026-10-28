@@ -1,7 +1,7 @@
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 from sqlalchemy import delete
 from sqlalchemy import func
@@ -621,21 +621,36 @@ def _loads_host_payload_for_repair(raw_payload: Any) -> tuple[dict[str, Any], bo
     return payload, False
 
 
-def encode_run_manifest_rel_paths(run: Mapping[str, Any]) -> list[str]:
+class EncodeRunFile(NamedTuple):
+    library_item_id: int
+    rel_path: str
+
+
+def encode_run_manifest_rel_paths(run: Mapping[str, Any], *, strict_indexes: bool = False) -> list[str]:
     """Every file a run encodes, from its manifest only; empty when the manifest cannot be read."""
-    manifest_rel_paths = _manifest_rel_paths(Path(str(run.get("manifest_path") or "")).expanduser())
-    if not manifest_rel_paths:
+    return [item.rel_path for item in encode_run_manifest_files(run, strict_indexes=strict_indexes) if item.rel_path]
+
+
+def encode_run_manifest_files(run: Mapping[str, Any], *, strict_indexes: bool = False) -> list[EncodeRunFile]:
+    files = _manifest_files(Path(str(run.get("manifest_path") or "")).expanduser())
+    if not files:
         return []
     indexes = run.get("manifest_indexes")
+    if strict_indexes:
+        if not isinstance(indexes, list) and (run.get("job_kind") == "shard" or indexes is not None):
+            return []
+        if isinstance(indexes, list) and (not indexes or any(
+            not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(files)
+            or not (files[index].library_item_id > 0 or files[index].rel_path) for index in indexes
+        )):
+            return []
+        if indexes is None and any(not (item.library_item_id > 0 or item.rel_path) for item in files):
+            return []
     if isinstance(indexes, list):
-        chosen = [
-            manifest_rel_paths[index]
-            for index in indexes
-            if isinstance(index, int) and 0 <= index < len(manifest_rel_paths)
-        ]
+        chosen = [files[index] for index in indexes if isinstance(index, int) and 0 <= index < len(files)]
         if chosen:
-            return [rel_path for rel_path in chosen if rel_path]
-    return [rel_path for rel_path in manifest_rel_paths if rel_path]
+            return chosen
+    return list(files)
 
 
 def encode_run_rel_paths(run: Mapping[str, Any]) -> list[str]:
@@ -652,19 +667,25 @@ def encode_run_rel_paths(run: Mapping[str, Any]) -> list[str]:
     return [rel_path] if rel_path else []
 
 
-def _manifest_rel_paths(path: Path) -> tuple[str, ...]:
+def _manifest_files(path: Path) -> tuple[EncodeRunFile, ...]:
     try:
         stat = path.stat()
     except OSError:
         return ()
-    return _read_manifest_rel_paths(str(path), stat.st_mtime_ns, stat.st_size)
+    return _read_manifest_files(str(path), stat.st_mtime_ns, stat.st_size)
 
 
 # Keyed on the file's modification time and size, so a rewritten manifest is read again.
 @lru_cache(maxsize=256)
-def _read_manifest_rel_paths(path: str, _mtime_ns: int, _size: int) -> tuple[str, ...]:
+def _read_manifest_files(path: str, _mtime_ns: int, _size: int) -> tuple[EncodeRunFile, ...]:
     try:
         payload = object_dict(json.loads(Path(path).read_text()))
     except (OSError, json.JSONDecodeError):
         return ()
-    return tuple(str(object_dict(item).get("rel_path") or "").strip() for item in object_list(payload.get("items")))
+    files: list[EncodeRunFile] = []
+    for raw in object_list(payload.get("items")):
+        item = object_dict(raw)
+        item_id = item.get("library_item_id")
+        stable_id = int(item_id) if isinstance(item_id, int) and not isinstance(item_id, bool) and item_id > 0 else 0
+        files.append(EncodeRunFile(stable_id, str(item.get("rel_path") or "").strip()))
+    return tuple(files)

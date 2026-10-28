@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import Collection
 from typing import Any
 from unittest.mock import patch
 
@@ -14,13 +15,14 @@ from sqlalchemy import create_engine
 from test_content_kinds import _admit_historical_original, _item as _content_item
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, upsert_runtime_folder_policy_override
-from mediaforce.core.db import open_db, reset_engine_cache
-from mediaforce.core.db_tables import calibration_jobs, encode_jobs, library_items, metadata, series_metadata, source_admissions, source_generations, \
+from mediaforce.core.db import DBClient, open_db, reset_engine_cache
+from mediaforce.core.db_tables import calibration_jobs, encode_jobs, library_items, metadata, motion_keep_decisions, series_metadata, source_admissions, source_generations, \
     source_transitions, staged_artifacts
-from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
+from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, clear_terminal_encode_jobs_for_prefix, encode_run_manifest_files, \
+    encode_run_manifest_rel_paths, load_encode_job, save_encode_job, save_queue_state
 from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
-from mediaforce.web.runtime.encode_runtime import CONTROLLER_RESTART_STOP_REASON, KEPT_ORIGINAL_TERMINAL_REASON
+from mediaforce.web.runtime.encode_runtime import CONTROLLER_RESTART_STOP_REASON, KEPT_ORIGINAL_TERMINAL_REASON, unfinished_child_reason
 from mediaforce.library.content_kinds import season_evidence, season_grouping
 from mediaforce.library.source_evidence import append_version
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
@@ -184,13 +186,18 @@ def _insert_episode(config: MediaforceConfig) -> int:
     return _waiting_episode(config, EPISODE, 1_000_000_000)
 
 
-def _queue(config: MediaforceConfig, prefix: str, load: KindAwareLoader) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    item_id = _insert_episode(config)
+def _queue(
+        config: MediaforceConfig, prefix: str, load: KindAwareLoader, *, only_library_item_ids: Collection[int] | None = None,
+        persist_jobs: bool = False,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    item_ids = [_insert_episode(config)] if only_library_item_ids is None else list(only_library_item_ids)
     manifests: list[dict[str, Any]] = []
 
-    def create_manifest(_connection: object, manifest_config: MediaforceConfig, **_kwargs: object) -> tuple[dict[str, Any], Path]:
-        manifest = {"items": [{"library_item_id": item_id, "rel_path": EPISODE,
-                               "resolved_policy": manifest_config.resolve_policy(EPISODE)}]}
+    def create_manifest(connection: DBClient, manifest_config: MediaforceConfig, **kwargs: Any) -> tuple[dict[str, Any], Path]:
+        included = kwargs.get("include_library_item_ids", item_ids)
+        items = connection.execute(library_items.select().where(library_items.c.id.in_(included))).mappings().all()
+        manifest = {"items": [{"library_item_id": item["id"], "rel_path": item["rel_path"],
+                               "resolved_policy": manifest_config.resolve_policy(item["rel_path"])} for item in items]}
         manifests.append(manifest)
         return manifest, config.paths.run_manifest_dir / "run.json"
 
@@ -203,10 +210,12 @@ def _queue(config: MediaforceConfig, prefix: str, load: KindAwareLoader) -> tupl
         try:
             result = queue_folder_encode_action(
                 config, prefix, "", False, now_iso=lambda: "2026-10-26T00:00:00+00:00",
+                only_library_item_ids=only_library_item_ids,
                 load_job_state=lambda *_args: None, load_calibration_state=load, review_gate=review_gate,
                 upsert_override=upsert_runtime_folder_policy_override, load_active_encode_job_for_prefix_fn=lambda *_args: None,
-                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args: None,
-                prepare_terminal_encode_job_for_requeue_fn=lambda *_args: None, save_encode_job=lambda *_args: None,
+                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix if persist_jobs else lambda *_args: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args: None,
+                save_encode_job=save_encode_job if persist_jobs else lambda *_args: None,
                 load_advice_state=lambda *_args: {}, reserve_preflight=lambda *_args: ReservePreflight(True, None, {}),
             )
         finally:
@@ -590,42 +599,211 @@ def test_a_new_season_sample_waits_for_review_instead_of_retrying_the_show_appro
     assert _next(config, _loader({"tv/Thriller": _approved(config), SEASON: pending}, {})) is None
 
 
-def test_a_file_problem_in_a_show_run_does_not_hold_other_seasons(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    _waiting_episode(config, EPISODE, 1_000)
-    _encode_job(config, "tv/Thriller", "needs_attention")
 
-    assert _next(config, _loader({"tv/Thriller": _approved(config)}, {})) is not None
+def _stored_folder_run(
+        config: MediaforceConfig, prefix: str, items: dict[int, str], outcomes: dict[int, tuple[str, str | None]], *,
+        name: str = "old", created_at: str = "2026-10-26T00:00:00+00:00",
+) -> dict[int, str]:
+    config.paths.run_manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = config.paths.run_manifest_dir / f"{name}.json"
+    manifest_path.write_text(json.dumps({"items": [{"library_item_id": item_id, "rel_path": rel_path}
+                                                for item_id, rel_path in items.items()]}))
+    parent = _encode_job(config, prefix, "needs_attention", job_id=name, job_kind="folder", created_at=created_at)
+    children: dict[int, str] = {}
+    for index, item_id in enumerate(items):
+        status, reason = outcomes.get(item_id, ("completed", None))
+        child = _encode_job(config, prefix, status, job_id=f"{name}-{item_id}", parent_job_id=parent,
+                            job_kind="shard", terminal_reason=reason, created_at=created_at)
+        children[item_id] = child
+        with open_db(config.paths.db_path) as connection:
+            connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == child).values(
+                manifest_path=str(manifest_path), manifest_indexes_json=json.dumps([index]),
+            ))
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == parent).values(manifest_path=str(manifest_path)))
+    return children
 
 
 @pytest.mark.parametrize("scope", [SEASON, "tv/Thriller", "tv", ""])
-@pytest.mark.parametrize("reason", [KEPT_ORIGINAL_TERMINAL_REASON, CONTROLLER_RESTART_STOP_REASON])
-def test_a_parent_stopped_by_one_file_does_not_hold_other_files(tmp_path: Path, scope: str, reason: str) -> None:
+@pytest.mark.parametrize("status,reason", [
+    ("needs_attention", None), ("failed", None), ("stopped", CONTROLLER_RESTART_STOP_REASON), ("stopped", None),
+])
+def test_a_problem_file_stays_held_while_other_files_and_seasons_are_offered(
+        tmp_path: Path, scope: str, status: str, reason: str | None,
+) -> None:
     config = _config(tmp_path)
-    _waiting_episode(config, EPISODE, 1_000)
-    parent = _encode_job(config, scope, "stopped", job_kind="folder", terminal_reason=reason)
-    _encode_job(config, scope, "completed", job_id="completed-child", parent_job_id=parent, job_kind="shard")
-    _encode_job(config, scope, "stopped", job_id="stopped-child", parent_job_id=parent, job_kind="shard", terminal_reason=reason)
+    problem = _waiting_episode(config, EPISODE, 1_000)
+    sibling_path = f"{SEASON}/e02.mkv"
+    sibling = _waiting_episode(config, sibling_path, 100)
+    elsewhere_path = f"{OTHER_SEASON}/e01.mkv"
+    elsewhere = _waiting_episode(config, elsewhere_path, 10)
+    _stored_folder_run(config, scope, {problem: EPISODE, sibling: sibling_path}, {problem: (status, reason)})
+    load = _loader({SEASON: _approved(config), OTHER_SEASON: _approved(config)}, {})
 
-    assert _next(config, _loader({SEASON: _approved(config)}, {})) is not None
+    chosen = _next(config, load)
+
+    assert chosen is not None and chosen.season == SEASON and chosen.files == (sibling,) and chosen.waiting_bytes == 100
+    record_kind_attempt(config, chosen, {"ok": True}, at=0.0)
+    next_season = _next(config, load)
+    assert next_season is not None and next_season.files == (elsewhere,)
 
 
-def test_an_owner_stopped_child_is_not_hidden_by_another_childs_derived_stop_reason(tmp_path: Path) -> None:
+def test_a_newer_completion_only_settles_the_same_files_old_question(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    _waiting_episode(config, EPISODE, 1_000)
-    scope = "tv/Thriller"
-    parent = _encode_job(config, scope, "stopped", job_kind="folder", terminal_reason=KEPT_ORIGINAL_TERMINAL_REASON)
-    _encode_job(config, scope, "stopped", job_id="kept-child", parent_job_id=parent, job_kind="shard",
-                terminal_reason=KEPT_ORIGINAL_TERMINAL_REASON)
-    _encode_job(config, scope, "stopped", job_id="owner-child", parent_job_id=parent, job_kind="shard")
+    problem = _waiting_episode(config, EPISODE, 1_000)
+    sibling_path = f"{SEASON}/e02.mkv"
+    sibling = _waiting_episode(config, sibling_path, 100)
+    _stored_folder_run(config, "tv/Thriller", {problem: EPISODE, sibling: sibling_path},
+                       {problem: ("needs_attention", None)})
+    _stored_folder_run(config, "tv/Thriller", {sibling: sibling_path}, {}, name="new-sibling",
+                       created_at="2026-10-27T00:00:00+00:00")
+    load = _loader({SEASON: _approved(config)}, {})
+    chosen = _next(config, load)
+    assert chosen is not None and chosen.files == (sibling,)
+
+    _stored_folder_run(config, "tv/Thriller", {problem: EPISODE}, {}, name="new-problem",
+                       created_at="2026-10-28T00:00:00+00:00")
+    chosen = _next(config, load)
+    assert chosen is not None and set(chosen.files) == {problem, sibling}
+
+
+def test_a_new_problem_between_selection_and_queueing_keeps_admission_waiting(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    item_id = _waiting_episode(config, EPISODE, 1_000)
+    _stored_folder_run(config, "tv/Thriller", {item_id: EPISODE}, {item_id: ("stopped", CONTROLLER_RESTART_STOP_REASON)})
+
+    with open_db(config.paths.db_path) as connection:
+        assert background_queue_blocker(connection, library_item_ids=[item_id]) == {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
+
+
+def test_completed_files_waiting_for_publication_are_not_offered_again(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    staged = _waiting_episode(config, EPISODE, 1_000, status="validated")
+    sibling_path = f"{SEASON}/e02.mkv"
+    sibling = _waiting_episode(config, sibling_path, 100)
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(staged_artifacts.insert().values(
+            library_item_id=staged, manifest_run_id="finished", staging_path="finished.mkv", source_path="original.mkv",
+            staging_size_bytes=100, validated_at="now", updated_at="now",
+        ))
+
+    chosen = _next(config, _loader({SEASON: _approved(config)}, {}))
+
+    assert chosen is not None and chosen.files == (sibling,)
+
+
+@pytest.mark.parametrize("scope", [SEASON, "tv/Thriller"])
+def test_automatic_subset_queue_preserves_the_problem_files_custody_record(tmp_path: Path, scope: str) -> None:
+    config = _config(tmp_path)
+    problem = _waiting_episode(config, EPISODE, 1_000)
+    sibling_path = f"{SEASON}/e02.mkv"
+    sibling = _waiting_episode(config, sibling_path, 100)
+    children = _stored_folder_run(config, scope, {problem: EPISODE, sibling: sibling_path},
+                                  {problem: ("stopped", CONTROLLER_RESTART_STOP_REASON)})
+    load = _loader({SEASON: _approved(config)}, {})
+    chosen = _next(config, load)
+    assert chosen is not None
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == children[problem]).values(
+            last_host_json=json.dumps({"key": "retained-computer", "mode": "ssh"}),
+        ))
+        before = load_encode_job(connection, children[problem])
+
+    result, manifests = _queue(config, chosen.season, load, only_library_item_ids=chosen.files, persist_jobs=True)
+
+    assert result["ok"], result
+    assert {item["library_item_id"] for manifest in manifests for item in manifest["items"]} == {sibling}
+    with open_db(config.paths.db_path) as connection:
+        after = load_encode_job(connection, children[problem])
+    assert before is not None and after is not None
+    custody_fields = ("job_id", "status", "terminal_reason", "manifest_path", "manifest_indexes", "last_host", "worker_id", "process_pid")
+    assert {field: after[field] for field in custody_fields} == {field: before[field] for field in custody_fields}
+
+
+def test_a_newer_completion_does_not_reconcile_an_earlier_restart_stopped_writer(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    item_id = _waiting_episode(config, EPISODE, 1_000)
+    children = _stored_folder_run(config, "tv/Thriller", {item_id: EPISODE},
+                                  {item_id: ("stopped", CONTROLLER_RESTART_STOP_REASON)})
+    _stored_folder_run(config, SEASON, {item_id: EPISODE}, {}, name="later-completion",
+                       created_at="2026-10-27T00:00:00+00:00")
+    load = _loader({SEASON: _approved(config)}, {})
+
+    assert _next(config, load) is None
+
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == children[item_id]).values(status="completed"))
+    chosen = _next(config, load)
+    assert chosen is not None and chosen.files == (item_id,)
+
+
+def test_a_catalog_path_change_does_not_hide_a_stopped_writer_for_the_same_item(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    item_id = _waiting_episode(config, EPISODE, 1_000)
+    _stored_folder_run(config, "tv/Thriller", {item_id: EPISODE}, {item_id: ("stopped", CONTROLLER_RESTART_STOP_REASON)})
+    renamed = f"{OTHER_SEASON}/renamed.mkv"
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(library_items.update().where(library_items.c.id == item_id).values(rel_path=renamed, parent_dir=OTHER_SEASON))
+
+    assert _next(config, _loader({OTHER_SEASON: _approved(config)}, {})) is None
+
+
+@pytest.mark.parametrize("indexes", [None, [], [99], [0, 99], "0"])
+def test_unknown_shard_membership_cannot_clear_an_older_question(tmp_path: Path, indexes: Any) -> None:
+    config = _config(tmp_path)
+    item_id = _waiting_episode(config, EPISODE, 1_000)
+    _stored_folder_run(config, "tv/Thriller", {item_id: EPISODE}, {item_id: ("needs_attention", None)})
+    children = _stored_folder_run(config, SEASON, {item_id: EPISODE}, {}, name="new",
+                                  created_at="2026-10-27T00:00:00+00:00")
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == children[item_id]).values(
+            manifest_indexes_json=json.dumps(indexes) if indexes is not None else None,
+        ))
+        child = load_encode_job(connection, children[item_id])
+    assert child is not None
+    assert encode_run_manifest_files(child, strict_indexes=True) == []
+    assert encode_run_manifest_rel_paths(child)
+    assert _next(config, _loader({SEASON: _approved(config)}, {})) is None
+
+
+def test_an_undone_keep_original_is_not_held_by_its_old_backstop_stop(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    item_id = _waiting_episode(config, EPISODE, 1_000)
+    children = _stored_folder_run(config, SEASON, {item_id: EPISODE}, {item_id: ("stopped", KEPT_ORIGINAL_TERMINAL_REASON)})
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(motion_keep_decisions.insert().values(
+            library_item_id=item_id, source_fingerprint=EPISODE, reason_code="mixed_motion", prefix=SEASON, kept_at="now",
+        ))
+        child = load_encode_job(connection, children[item_id])
+    load = _loader({SEASON: _approved(config)}, {})
+    assert _next(config, load) is None
+    assert child is not None and not unfinished_child_reason(child)[2]
+
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(motion_keep_decisions.delete().where(motion_keep_decisions.c.library_item_id == item_id))
+    chosen = _next(config, load)
+    assert chosen is not None and chosen.files == (item_id,)
+
+
+def test_a_declined_size_exception_is_not_automatically_asked_again(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    item_id = _waiting_episode(config, EPISODE, 1_000)
+    children = _stored_folder_run(config, SEASON, {item_id: EPISODE}, {item_id: ("needs_attention", None)})
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == children[item_id]).values(
+            progress_json=json.dumps({"failure_analysis": {"owner_size_decision": {"answer": "keep_original"}}}),
+        ))
 
     assert _next(config, _loader({SEASON: _approved(config)}, {})) is None
 
 
-def test_a_newer_containing_run_supersedes_an_older_season_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize("identity", [None, True, False, 0, -1, "not-an-item-id"])
+def test_legacy_or_malformed_item_identity_uses_its_recorded_path(tmp_path: Path, identity: Any) -> None:
     config = _config(tmp_path)
-    _waiting_episode(config, EPISODE, 1_000)
-    _encode_job(config, SEASON, "needs_attention", created_at="2026-10-25T00:00:00+00:00")
-    _encode_job(config, "tv/Thriller", "completed")
+    _waiting_episode(config, f"{OTHER_SEASON}/unrelated.mkv", 100)
+    item_id = _waiting_episode(config, EPISODE, 1_000)
+    _stored_folder_run(config, SEASON, {item_id: EPISODE}, {item_id: ("stopped", CONTROLLER_RESTART_STOP_REASON)})
+    manifest = config.paths.run_manifest_dir / "old.json"
+    manifest.write_text(json.dumps({"items": [{"library_item_id": identity, "rel_path": EPISODE}]}))
 
-    assert _next(config, _loader({SEASON: _approved(config)}, {})) is not None
+    assert _next(config, _loader({SEASON: _approved(config)}, {})) is None

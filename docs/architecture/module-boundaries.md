@@ -165,12 +165,16 @@ Guidance:
     - the background choice of the next waiting season a current folder, show,
       or kind approval covers,
       largest first and one at a time: never while work is paused or a run is
-      queued or running (checked again inside the queueing transaction). The
-      newest containing-scope parent run governs: an owner Stop still waits,
-      while a child stopped for a kept original or controller restart does not
-      hold its siblings. A failed or attention-needed run on the exact season
-      waits until a newer containing run supersedes it. Selection does not
-      repeat a season already
+      queued or running (checked again inside the queueing transaction). Each
+      file follows its newest runnable-job outcome across scopes, using saved
+      manifest IDs and indexes, with paths for legacy manifests. A question or
+      Stop holds that file while its siblings continue. A newer completion
+      settles only that file's older question; retained restart-stopped writer
+      custody still waits for its own reconciliation. Unknown membership holds
+      the overlapping scope. Only eligible IDs join a new run, leaving prior
+      question and custody records intact; admission rechecks those IDs inside
+      its transaction. Finished staged files follow their existing workflow
+      lane instead of being remade. Selection does not repeat a season already
       tried under the same approval with the same waiting files; attempts are
       kept beside the kind approvals, and a refused season is retried after
       six hours
