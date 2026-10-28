@@ -57,7 +57,7 @@ struct ItemPage: View {
                                 ShowSeasons(show: show, openSample: openSample, openItem: openItem)
                             }
                             if !facts.waiting.isEmpty {
-                                WaitingBox(files: facts.waiting) { file, action in
+                                WaitingFiles(files: facts.waiting) { file, action in
                                     Task { await act(action, file) }
                                 }
                             }
@@ -268,7 +268,7 @@ struct ItemHeader: View {
     }
 }
 
-/// The mark a file waiting for the Director carries, in the box above the player and in the list.
+/// The mark a file waiting for the Director carries, in its line above the player and in the list.
 struct WaitingMark: View {
     var body: some View {
         Image(systemName: "exclamationmark.circle.fill")
@@ -277,24 +277,20 @@ struct WaitingMark: View {
     }
 }
 
-struct WaitingBox: View {
+/// Each file waiting for the Director as one plain line, the way a kind's decision reads, with its buttons beside it.
+struct WaitingFiles: View {
     let files: [ItemFacts.File]
     let act: (ItemFacts.File, ItemAction) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             ForEach(files) { file in
-                HStack(spacing: 12) {
-                    WaitingMark()
-                        .font(.title3)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(Words.fileName(file))
-                            .font(.headline)
-                        Text(Words.waitingReason(file))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                DecisionLine {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        WaitingMark()
+                        Text("\(Words.fileName(file)): \(Words.waitingReason(file))")
                     }
-                    Spacer()
+                } buttons: {
                     if let question = file.sizeQuestion {
                         Button(Words.keepTheOriginal) { act(file, .keepOriginal) }
                         Button(Words.allowLarger(question)) { act(file, .allowLarger) }
@@ -305,8 +301,6 @@ struct WaitingBox: View {
                 }
             }
         }
-        .padding(12)
-        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
