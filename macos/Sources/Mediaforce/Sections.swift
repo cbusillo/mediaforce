@@ -21,7 +21,7 @@ struct WorkStatus: View {
                         Button(line) { open(.item(season.prefix)) }
                             .buttonStyle(QuietLinkStyle())
                     } else {
-                        Text(line).foregroundStyle(.secondary)
+                        Text(line).foregroundStyle(.tertiary)
                     }
                 }
                 .font(.callout)
@@ -103,6 +103,8 @@ struct StorageBar: View {
                             .fixedSize()
                     }
                     .offset(x: savedWidth + 1)
+                    // Drawn over the saved episodes when little is saved; the link under it keeps its clicks.
+                    .allowsHitTesting(false)
                     Button("\(facts.library.tv.showCount) shows, \(facts.library.tv.seasonCount) seasons, \(facts.library.tv.episodeCount.formatted()) episodes in all") {
                         open(.media)
                     }
