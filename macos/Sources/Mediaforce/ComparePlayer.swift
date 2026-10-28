@@ -58,35 +58,26 @@ struct ComparePlayer: View {
             }
             .labelStyle(.iconOnly)
             .disabled(unplayable)
-            HStack(spacing: 14) {
-                Group {
-                    if players.comparing {
-                        Picker(Words.viewLabel, selection: $layout) {
-                            ForEach(CompareLayout.allCases) { Text(Words.playerLayout($0)).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .fixedSize()
+            // One row when it fits; on a narrower page the sound and size choices drop to a second row.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 14) {
+                    layoutPicker
+                    momentButtons
+                    hearPicker
+                    Spacer(minLength: 0)
+                    actualSize
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 14) {
+                        layoutPicker
+                        momentButtons
+                    }
+                    HStack(spacing: 14) {
+                        hearPicker
+                        Spacer(minLength: 0)
+                        actualSize
                     }
                 }
-                .disabled(unplayable)
-                // A sample's other clips stay open to choose when one of them can't play.
-                momentButtons.disabled(moments == .episode && unplayable)
-                Group {
-                    if players.comparing {
-                        Picker(Words.hear, selection: Bindable(players).hearOriginal) {
-                            Text(names.original).tag(true)
-                            Text(names.compressed).tag(false)
-                        }
-                        .pickerStyle(.segmented)
-                        .fixedSize()
-                    }
-                    Spacer()
-                    Toggle(Words.actualSize, isOn: $view.actualSize)
-                        .toggleStyle(.button)
-                        .help(Words.actualSizeHelp)
-                }
-                .disabled(unplayable)
             }
             .controlSize(.small)
         }
@@ -98,6 +89,40 @@ struct ComparePlayer: View {
         .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification).receive(on: RunLoop.main)) { note in
             if (note.object as? AVPlayerItem) === players.main.currentItem { players.pause() }
         }
+    }
+
+    @ViewBuilder
+    private var layoutPicker: some View {
+        if players.comparing {
+            Picker(Words.viewLabel, selection: $layout) {
+                ForEach(CompareLayout.allCases) { Text(Words.playerLayout($0)).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .disabled(unplayable)
+        }
+    }
+
+    @ViewBuilder
+    private var hearPicker: some View {
+        if players.comparing {
+            Picker(Words.hear, selection: Bindable(players).hearOriginal) {
+                Text(names.original).tag(true)
+                Text(names.compressed).tag(false)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            .disabled(unplayable)
+        }
+    }
+
+    private var actualSize: some View {
+        Toggle(Words.actualSize, isOn: $view.actualSize)
+            .toggleStyle(.button)
+            .help(Words.actualSizeHelp)
+            .fixedSize()
+            .disabled(unplayable)
     }
 
     // Buttons, not a selection, so the moment the picture is nearest to can be jumped back to.
@@ -122,6 +147,9 @@ struct ComparePlayer: View {
                 }
             }
         }
+        .fixedSize()
+        // A sample's other clips stay open to choose when one of them can't play.
+        .disabled(moments == .episode && unplayable)
     }
 
     /// A sample's clips each carry their own size, so the frame labels say it.
