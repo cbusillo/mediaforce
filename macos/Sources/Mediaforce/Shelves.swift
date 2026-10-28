@@ -190,7 +190,8 @@ struct SizeBar: View {
 struct BiggestTable: View {
     static let rowLimit = 9
     static let headerHeight: CGFloat = 28
-    static let rowHeight: CGFloat = 24
+    // Tall enough for the poster beside each name.
+    static let rowHeight: CGFloat = 32
     static let noteHeight: CGFloat = 16
     // A poster that fits inside a row.
     static let posterWidth: CGFloat = 14
