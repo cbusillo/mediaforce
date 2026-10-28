@@ -165,6 +165,9 @@ def reconcile_source_publish(connection: DBClient, operation: str) -> bool:
                     raise RuntimeError("Restored source identity is unavailable")
         connection.execute(update(source_moves).where(source_moves.c.operation_id == operation).values(phase="rolled_back"))
         connection.execute(update(source_transitions).where(source_transitions.c.operation_id == operation).values(outcome="rolled_back"))
+        connection.execute(update(library_items).where(library_items.c.id == row["library_item_id"]).values(
+            source_revision=library_items.c.source_revision + 1,
+        ))
         connection.commit()
         return True
     except (OSError, RuntimeError):

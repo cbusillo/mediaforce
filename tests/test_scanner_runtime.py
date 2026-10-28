@@ -1,5 +1,7 @@
 import json
+from contextlib import nullcontext
 import os
+import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
@@ -7,7 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
-from sqlalchemy import select, update
+from sqlalchemy import func, insert, select, update
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
@@ -26,9 +28,11 @@ from mediaforce.library.scanner import (
     _content_version_changed,
     _failed_probe_summary,
     _iter_media_files,
+    _reconcile_missing_items,
     scan_library,
 )
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
+from mediaforce.encoding.source_publication import apply_source_moves, prepare_source_publish, reconcile_source_publish
 from mediaforce.web.runtime.job_runtime import _stats_payload
 
 
@@ -153,6 +157,189 @@ class ScannerRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(len(connection.statements), 2)
         self.assertTrue(connection.statements[0])
         self.assertTrue(connection.statements[-1])
+
+    def test_source_change_during_scan_wins_over_unchanged_and_reprobe_updates(self) -> None:
+        for changed_content in (False, True):
+            with self.subTest(changed_content=changed_content), tempfile.TemporaryDirectory() as temp_dir:
+                project_root = Path(temp_dir)
+                media_root = project_root / "movies"
+                media_root.mkdir()
+                movie = media_root / "Feature.mkv"
+                movie.write_bytes(b"first")
+                config = self._config(project_root, {"movies": media_root})
+
+                try:
+                    with patch(
+                        "mediaforce.library.scanner.probe_media",
+                        return_value=_failed_probe_summary(RuntimeError("fixture probe")),
+                    ):
+                        with open_db(config.paths.db_path) as connection:
+                            scan_library(connection, config)
+                            existing_content_fingerprint = connection.execute(
+                                select(library_items.c.content_version_fingerprint)
+                            ).scalar_one()
+                            if changed_content:
+                                movie.write_bytes(b"replacement")
+
+                            def record_source_change(*_args: Any, **_kwargs: Any) -> str:
+                                connection.execute(
+                                    update(library_items).values(
+                                        source_path=str(media_root / "Feature.mp4"),
+                                        file_name="Feature.mp4",
+                                        container=".mp4",
+                                        source_revision=library_items.c.source_revision + 1,
+                                        updated_at="9999-01-01T00:00:00+00:00",
+                                        last_seen_at="9999-01-01T00:00:00+00:00",
+                                    )
+                                )
+                                connection.commit()
+                                return str(existing_content_fingerprint)
+
+                            target = (
+                                "mediaforce.library.scanner.probe_media"
+                                if changed_content
+                                else "mediaforce.library.scanner.content_version_fingerprint"
+                            )
+                            side_effect = record_source_change
+                            if changed_content:
+                                def reprobe_source_change(*args: Any, **kwargs: Any) -> ProbeSummary:
+                                    record_source_change(*args, **kwargs)
+                                    return _failed_probe_summary(RuntimeError("fixture probe"))
+
+                                side_effect = reprobe_source_change
+                            with patch(target, side_effect=side_effect):
+                                stats = scan_library(connection, config)
+                            row = connection.execute(select(library_items)).mappings().one()
+                finally:
+                    reset_engine_cache()
+
+                self.assertEqual(row["source_path"], str(media_root / "Feature.mp4"))
+                self.assertEqual(row["container"], ".mp4")
+                self.assertIsNone(row["missing_since"])
+                self.assertEqual(stats.unchanged, 0)
+                self.assertEqual(stats.reprobed, 0)
+
+    def test_source_operation_during_observation_is_left_alone(self) -> None:
+        for reprobe, rollback in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(reprobe=reprobe, rollback=rollback), tempfile.TemporaryDirectory() as temp_dir:
+                project_root = Path(temp_dir)
+                media_root = project_root / "movies"
+                media_root.mkdir()
+                movie = media_root / "Feature.mkv"
+                movie.write_bytes(b"original")
+                staged = project_root / "staged.mkv"
+                staged.write_bytes(b"compressed")
+                config = self._config(project_root, {"movies": media_root})
+                probe = _failed_probe_summary(RuntimeError("fixture probe"))
+                try:
+                    with open_db(config.paths.db_path) as connection, patch(
+                        "mediaforce.library.scanner.probe_media", return_value=probe,
+                    ):
+                        scan_library(connection, config)
+                        prior = connection.execute(select(library_items)).mappings().one()
+                        prepared = prepare_source_publish(
+                            connection, prior["id"], source_path=movie, staging_path=staged,
+                            archive_path=project_root / "archive.mkv", destination_path=movie, backup_path=None,
+                        )
+                        self.assertTrue(reconcile_source_publish(connection, prepared))
+                        item = connection.execute(select(library_items)).mappings().one()
+                        initial_sources = list(connection.execute(select(library_items)).mappings().all())
+
+                        def prepare(*_args: Any, **_kwargs: Any) -> Any:
+                            with open_db(config.paths.db_path) as writer:
+                                operation = prepare_source_publish(
+                                    writer, item["id"], source_path=movie, staging_path=staged,
+                                    archive_path=project_root / "archive.mkv", destination_path=movie,
+                                    backup_path=None,
+                                )
+                                if rollback:
+                                    apply_source_moves(writer, operation)
+                                    self.assertTrue(reconcile_source_publish(writer, operation))
+                            return probe if reprobe else item["content_version_fingerprint"]
+
+                        target = "mediaforce.library.scanner.probe_media" if reprobe else "mediaforce.library.scanner.content_version_fingerprint"
+                        force_probe = patch("mediaforce.library.scanner._source_content_unchanged", return_value=False) if reprobe else nullcontext()
+                        with force_probe, patch(target, side_effect=prepare):
+                            stats = scan_library(connection, config)
+                        missing = _reconcile_missing_items(
+                            connection, configured_roots={"movies"}, reconcilable_roots={"movies"},
+                            seen_paths_by_root={"movies": {str(media_root / "another.mkv")}},
+                            initial_sources=initial_sources, updated_at="later",
+                        )
+                        current = connection.execute(select(library_items)).mappings().one()
+                finally:
+                    reset_engine_cache()
+                self.assertEqual(stats.unchanged + stats.reprobed, 0)
+                self.assertEqual(current["mtime_ns"], item["mtime_ns"])
+                if rollback:
+                    self.assertGreater(current["source_revision"], item["source_revision"])
+                else:
+                    self.assertEqual(current["source_revision"], item["source_revision"])
+                self.assertEqual(missing, 0)
+                self.assertIsNone(current["missing_since"])
+
+
+    def test_missing_reconciliation_scales_below_library_sized_sqlite_variable_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            media_root = project_root / "movies"
+            media_root.mkdir()
+            config = self._config(project_root, {"movies": media_root})
+            rows = [
+                {
+                    "source_path": str(media_root / f"Feature-{index}.mkv"),
+                    "rel_path": f"movies/Feature-{index}.mkv",
+                    "media_root": "movies",
+                    "parent_dir": "movies",
+                    "file_name": f"Feature-{index}.mkv",
+                    "container": ".mkv",
+                    "size_bytes": 1,
+                    "mtime_ns": 1,
+                    "fingerprint": str(index),
+                    "audio_summary_json": "[]",
+                    "subtitle_summary_json": "[]",
+                    "last_scan_id": "old",
+                    "discovered_at": "2026-01-01T00:00:00+00:00",
+                    "last_seen_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                }
+                for index in range(12_000)
+            ]
+
+            try:
+                with open_db(config.paths.db_path) as connection:
+                    driver = cast(sqlite3.Connection, connection.connection.driver_connection)
+                    previous_limit = driver.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+                    try:
+                        connection.execute(insert(library_items), rows)
+                        connection.execute(
+                            update(library_items)
+                            .where(library_items.c.source_path == rows[0]["source_path"])
+                            .values(
+                                last_seen_at="2026-02-01T00:00:00+00:00",
+                                updated_at="2026-02-01T00:00:00+00:00",
+                            )
+                        )
+                        connection.commit()
+                        missing = _reconcile_missing_items(
+                            connection,
+                            configured_roots={"movies"},
+                            reconcilable_roots={"movies"},
+                            seen_paths_by_root={"movies": {str(rows[0]["source_path"])}},
+                            initial_sources=list(connection.execute(select(library_items)).mappings().all()),
+                            updated_at="2026-02-01T00:00:00+00:00",
+                        )
+                        connection.commit()
+                    finally:
+                        driver.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous_limit)
+                    missing_rows = connection.execute(
+                        select(func.count()).select_from(library_items).where(library_items.c.missing_since.is_not(None))
+                    ).scalar_one()
+            finally:
+                reset_engine_cache()
+
+        self.assertEqual(missing, 11_999)
+        self.assertEqual(missing_rows, 11_999)
 
     def test_scan_releases_write_transaction_before_probing_next_item(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
