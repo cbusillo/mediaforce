@@ -714,7 +714,7 @@ requiring a new encode request. Mediaforce preserves unverified remote artifacts
 while the host is unreachable, removes the interrupted partial output once the
 host is available again, and then requeues the same episode from the beginning.
 It does not resume a partial media stream or promote interrupted output.
-A checked copy whose automatic publishing stops after its retries, or whose
+A copy whose automatic checking or publishing stops after its retries, or whose
 files could not be restored after a publishing failure, appears as waiting for
 you on the Mac item page. It names the publishing problem while other files
 continue independently.

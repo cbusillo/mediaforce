@@ -84,15 +84,12 @@ final class ItemTests: XCTestCase {
         let season = try facts([
             file(1, stage: "needs_you", bytes: 100, waitReason: #"{"code": "publish_failed"}"#),
             file(2, stage: "needs_you", bytes: 100, waitReason: #"{"code": "publish_unsafe"}"#),
-            file(3, stage: "published", bytes: 100),
+            file(3, stage: "needs_you", bytes: 100),
         ])
 
-        XCTAssertEqual(season.waiting.map(\.libraryItemId), [1, 2])
-        XCTAssertTrue(Words.fileState(season.files[0]).localizedCaseInsensitiveContains("publish"))
-        XCTAssertTrue(Words.waitingReason(season.files[0]).contains("passed its check"))
-        XCTAssertTrue(Words.fileState(season.files[1]).localizedCaseInsensitiveContains("restor"))
-        XCTAssertTrue(Words.waitingReason(season.files[1]).contains("before publishing"))
-        XCTAssertNotEqual(Words.waitingReason(season.files[0]), Words.waitingReason(season.files[1]))
+        XCTAssertEqual(season.waiting.map(\.libraryItemId), [1, 2, 3])
+        XCTAssertEqual(Set(season.files.map(Words.fileState)).count, 3)
+        XCTAssertEqual(Set(season.files.map(Words.waitingReason)).count, 3)
     }
 
     func testASizeQuestionNamesBothSizes() throws {

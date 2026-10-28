@@ -289,4 +289,4 @@ def _stopped_publish_state(raw_validation: Any) -> str | None:
     except json.JSONDecodeError:
         return None
     state = object_dict(payload.get("automatic_publish")).get("state")
-    return str(state) if payload.get("passed") is True and state in {"failed", "unsafe"} else None
+    return str(state) if payload.get("passed") is not False and state in {"failed", "unsafe"} else None

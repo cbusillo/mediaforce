@@ -109,11 +109,12 @@ def test_a_failed_copy_that_could_not_be_made_again_says_why(config: MediaforceC
     assert file["wait_reason"] == {"code": "not_made_again", "blockers": ["original_unreachable"]}
 
 
+@pytest.mark.parametrize("passed", [True, None, False])
 @pytest.mark.parametrize("publish_state", ["failed", "unsafe", "waiting", None])
 def test_a_passed_copy_with_stopped_publishing_waits_without_holding_other_files(
-    config: MediaforceConfig, tmp_path: Path, publish_state: str | None,
+    config: MediaforceConfig, tmp_path: Path, publish_state: str | None, passed: bool | None,
 ) -> None:
-    validation = {"passed": True, "automatic_publish": {"state": publish_state}}
+    validation = {"passed": passed, "automatic_publish": {"state": publish_state}}
     with open_db(config.paths.db_path) as connection:
         item_id = _episode(connection, tmp_path, 1, size=900, status="validated")
         _replaced(connection, tmp_path, 2, size=100, original_size=700)
@@ -128,13 +129,16 @@ def test_a_passed_copy_with_stopped_publishing_waits_without_holding_other_files
 
     assert facts is not None
     stopped, published, untouched = facts["files"]
-    if publish_state in {"failed", "unsafe"}:
+    if passed is False:
+        assert stopped["stage"] == "needs_you"
+        assert stopped["wait_reason"] == {"code": "check_failed"}
+    elif publish_state in {"failed", "unsafe"}:
         assert stopped["stage"] == "needs_you"
         assert stopped["wait_reason"] == {"code": f"publish_{publish_state}"}
     else:
         assert stopped["stage"] == "checking"
         assert stopped["wait_reason"] is None
-    assert stopped["validation"] is None
+    assert stopped["validation"] == ("failed" if passed is False else None)
     assert published["stage"] == "published"
     assert untouched["stage"] == "held"
 
