@@ -49,8 +49,16 @@ struct SampleWork: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             if let facts {
-                Text(Words.sampleHeadline(facts, namesSeason: namesSeason, now: .now))
-                    .font(.title3.weight(.semibold))
+                // On a kind's page the headline names the season, so it opens the season's page.
+                Group {
+                    if namesSeason {
+                        Button(Words.sampleHeadline(facts, namesSeason: true, now: .now)) { openItem(prefix) }
+                            .buttonStyle(QuietLinkStyle(primary: true))
+                    } else {
+                        Text(Words.sampleHeadline(facts, namesSeason: false, now: .now))
+                    }
+                }
+                .font(.title3.weight(.semibold))
                 if let failure = Words.sampleFailure(facts.failure), facts.state == "needs_help" {
                     Text(failure)
                         .foregroundStyle(.secondary)
