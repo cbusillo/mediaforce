@@ -2,7 +2,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -69,7 +69,7 @@ def test_combined_failure_keeps_independent_video_and_audio_results() -> None:
 
     def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         if "-filter_complex" in command:
-            if "[audio_out]" in command[command.index("-filter_complex") + 1]:
+            if "-af" in command:
                 return subprocess.CompletedProcess(command, 1, "", "audio graph unavailable")
             return video
         return subprocess.CompletedProcess(command, 0, "", _AUDIO_OUTPUT)
@@ -232,8 +232,8 @@ def test_real_ffmpeg_emits_bounded_signal_and_edge_frames(tmp_path: Path) -> Non
     assert summary["analysis"]["aggregate"]["edge_density_mean"] > 0
 
 
-@pytest.mark.parametrize(("frame_budget", "sample_fps"), [(24, 2), (3, 1), (8, 2)])
-def test_real_combined_audio_matches_independent_window(tmp_path: Path, frame_budget: int, sample_fps: int) -> None:
+@pytest.fixture
+def audio_pattern_source(tmp_path: Path) -> tuple[Path, str]:
     binary = ffmpeg_binary()
     if shutil.which(binary) is None:
         pytest.skip("FFmpeg is required for the decode protocol check")
@@ -244,6 +244,12 @@ def test_real_combined_audio_matches_independent_window(tmp_path: Path, frame_bu
          "-c:v", "mpeg4", "-q:v", "5", "-c:a", "pcm_s16le", str(source)],
         check=True, capture_output=True, timeout=15,
     )
+    return source, binary
+
+
+@pytest.mark.parametrize(("frame_budget", "sample_fps"), [(24, 2), (3, 1), (8, 2)])
+def test_real_combined_audio_matches_independent_window(audio_pattern_source: tuple[Path, str], frame_budget: int, sample_fps: int) -> None:
+    source, binary = audio_pattern_source
     summary = analyze_media_fingerprint(
         source, video_stream={"codec_name": "mpeg4"}, audio_streams=[{"channels": 1}], duration_seconds=16,
         max_frames=frame_budget, range_count=1, sample_fps=sample_fps, timeout_seconds=5,
@@ -254,3 +260,30 @@ def test_real_combined_audio_matches_independent_window(tmp_path: Path, frame_bu
     assert sample["sampled_frames"] == frame_budget
     assert sample["audio"]["status"] == reference["status"] == "measured"
     assert sample["audio"]["measurements"] == parse_ebur128_summary(reference["output"])
+
+
+def test_decoder_logs_cannot_corrupt_frame_metadata(audio_pattern_source: tuple[Path, str]) -> None:
+    from mediaforce.encoding import fingerprint
+
+    source, binary = audio_pattern_source
+    options = dict(ffmpeg_name=binary, start_seconds=0, frame_limit=DEFAULT_FINGERPRINT_MAX_FRAMES,
+        sample_fps=24, download_format=None, timeout_seconds=5, process_controller=None, command_runner=None)
+    reference = _run_fingerprint_range(source, **options)
+    actual_run = fingerprint._run_bounded_media_command
+
+    def noisy(command: list[str], **kwargs: Any) -> dict[str, str]:
+        changed = list(command)
+        if "-af" in changed:
+            index = changed.index("-af") + 1
+            changed[index] = "ashowinfo," + changed[index]
+        else:
+            index = changed.index("-filter_complex") + 1
+            changed[index] = changed[index].replace(",ebur128=", ",ashowinfo,ebur128=")
+        return actual_run(changed, **kwargs)
+
+    with patch.object(fingerprint, "_run_bounded_media_command", side_effect=noisy):
+        for _ in range(3):
+            result = _run_fingerprint_range(source, **options, audio_duration_seconds=12)
+            assert result.status == reference.status == "measured"
+            assert result.signal_frames == reference.signal_frames
+            assert result.edge_frames == reference.edge_frames

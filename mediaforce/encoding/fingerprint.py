@@ -99,7 +99,6 @@ def analyze_media_fingerprint(
     frames_per_range = max(1, max_frames // max(1, len(starts)))
     sample_duration = frames_per_range / max(sample_fps, 0.1)
     audio_duration = min(max(sample_duration, 4.0), 12.0) if audio_probe["track_count"] > 0 else None
-    folded_audio_duration = audio_duration if audio_duration is not None and sample_duration >= audio_duration else None
     download_format = {"yuv420p": "nv12", "nv12": "nv12", "yuv420p10le": "p010le", "p010le": "p010le"}.get(
         str(stream.get("pix_fmt") or "")
     ) if hardware_decoding else None
@@ -122,7 +121,7 @@ def analyze_media_fingerprint(
                 sample_fps=sample_fps, download_format=download_format, timeout_seconds=timeout_seconds,
                 process_controller=process_controller, command_runner=command_runner,
                 expected_min_frames=expected_frames,
-                audio_duration_seconds=folded_audio_duration,
+                audio_duration_seconds=audio_duration,
             )
             media_timed_out = video_result.status == "timeout"
         signal_frames = video_result.signal_frames
@@ -482,24 +481,33 @@ def _run_fingerprint_pass(
     download = f"hwdownload,format={download_format}," if download_format else ""
     filters = (
         f"[0:v:0]fps={sample_fps:.3f},trim=end_frame={frame_limit},{download}split[signal][edge];"
-        "[signal]scale=320:-2:flags=bicubic,format=yuv420p,signalstats,metadata=print:file=-[signal_out];"
+        "[signal]scale=320:-2:flags=bicubic,format=yuv420p,signalstats,metadata=print:file=-:direct=1[signal_out];"
         "[edge]scale=320:-2:flags=bicubic,format=gray,edgedetect=low=0.08:high=0.22,"
-        "signalstats,metadata=print:file='pipe\\:2'[edge_out]"
+        "signalstats,metadata=print:file='pipe\\:2':direct=1[edge_out]"
     )
-    if audio_duration_seconds is not None:
-        filters += f";[0:a:0]atrim=duration={audio_duration_seconds:.3f},ebur128=peak=true:framelog=quiet[audio_out]"
     command = [
         ffmpeg_name, "-hide_banner", "-nostats", "-v", "info" if audio_duration_seconds is not None else "quiet", "-ss", f"{start_seconds:.3f}",
         *(["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"] if download_format else []),
-        "-i", str(path), "-filter_complex", filters, "-map", "[signal_out]", "-map", "[edge_out]",
-        *(["-map", "[audio_out]"] if audio_duration_seconds is not None else []),
+        "-i", str(path),
+        *(_audio_input_arguments(path, start_seconds, audio_duration_seconds) if audio_duration_seconds is not None else []),
+        "-filter_complex", filters, "-map", "[signal_out]", "-map", "[edge_out]",
         "-frames:v:0", str(frame_limit), "-frames:v:1", str(frame_limit),
-        *(["-an"] if audio_duration_seconds is None else []), "-sn", "-dn", "-f", "null", "-",
+        "-an", "-sn", "-dn", "-f", "null", "-",
+        *(_audio_output_arguments(1) if audio_duration_seconds is not None else []),
     ]
     return _run_bounded_media_command(
         command, timeout_seconds=timeout_seconds, process_controller=process_controller,
         command_runner=command_runner,
     )
+
+
+def _audio_input_arguments(path: Path, start_seconds: float, duration_seconds: float) -> list[str]:
+    return ["-ss", f"{start_seconds:.3f}", "-t", f"{duration_seconds:.3f}", "-i", str(path)]
+
+
+def _audio_output_arguments(input_index: int) -> list[str]:
+    return ["-map", f"{input_index}:a:0?", "-af", "ebur128=peak=true:framelog=quiet",
+            "-vn", "-sn", "-dn", "-f", "null", "-"]
 
 
 def _run_audio_range(
@@ -513,27 +521,9 @@ def _run_audio_range(
         command_runner: RemoteMediaCommands | None,
 ) -> dict[str, str]:
     command = [
-        ffmpeg_name,
-        "-hide_banner",
-        "-nostats",
-        "-v",
-        "info",
-        "-ss",
-        f"{start_seconds:.3f}",
-        "-t",
-        f"{duration_seconds:.3f}",
-        "-i",
-        str(path),
-        "-map",
-        "0:a:0?",
-        "-af",
-        "ebur128=peak=true:framelog=quiet",
-        "-vn",
-        "-sn",
-        "-dn",
-        "-f",
-        "null",
-        "-",
+        ffmpeg_name, "-hide_banner", "-nostats", "-v", "info",
+        *_audio_input_arguments(path, start_seconds, duration_seconds),
+        *_audio_output_arguments(0),
     ]
     return _run_bounded_media_command(
         command,
