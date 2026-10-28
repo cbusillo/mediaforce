@@ -115,7 +115,8 @@ class LoginItemTests(unittest.TestCase):
         self.assertEqual([call[1] for call in calls], ["bootout", "print", "enable", "bootstrap", "kickstart"])
         self.assertEqual(calls[3][-1], str(self.paths.plist))
         # Registered is not running: launchd can defer the first spawn, so the job is started explicitly, never killed.
-        self.assertEqual(calls[4][2:], ["-p", calls[0][-1]])
+        self.assertEqual(calls[4][-1], calls[0][-1])
+        self.assertNotIn("-k", calls[4])
         self.assertEqual(rotation_call_count, 2)
         self.assertTrue(self.paths.stdout_log.with_name("web.log.1").exists())
 

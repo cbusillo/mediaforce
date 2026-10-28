@@ -293,9 +293,7 @@ def _bootstrap(runner: CommandRunner, domain: str, plist_path: Path) -> None:
         result = runner(command)
     _require_success(result, "bootstrap the login item")
     # Without -k, a job launchd already started keeps running.
-    _require_success(
-        runner(["/bin/launchctl", "kickstart", "-p", f"{domain}/{LOGIN_ITEM_LABEL}"]), "start the login item"
-    )
+    _require_success(runner(["/bin/launchctl", "kickstart", f"{domain}/{LOGIN_ITEM_LABEL}"]), "start the login item")
 
 
 def _require_success(result: subprocess.CompletedProcess[str], action: str) -> None:
