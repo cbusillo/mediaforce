@@ -257,6 +257,11 @@ Guidance:
     - the read-only projection reads each item's whole stored evidence row,
       so a source or policy changed since measuring needs a check on the page
       exactly as it does in the synchronized queue
+  - `file_encode_outcomes.py`
+    - automatic admission and episode pages share each file's newest outcome,
+      using saved item IDs with legacy path fallback and strict file selection
+    - an earlier attempt still awaiting writer cleanup remains visible behind
+      a later completion; unknown completed membership cannot clear a question
   - `folder_tuning_helpers.py`
   - `folder_tuning_advice.py`
   - `folder_tuning_runtime.py`

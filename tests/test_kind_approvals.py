@@ -25,6 +25,8 @@ from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 from mediaforce.web.runtime.encode_runtime import CONTROLLER_RESTART_STOP_REASON, KEPT_ORIGINAL_TERMINAL_REASON, unfinished_child_reason
 from mediaforce.library.content_kinds import season_evidence, season_grouping
 from mediaforce.library.source_evidence import append_version
+from mediaforce.library.workflow_state import ItemWorkflowState
+from mediaforce.web.runtime.episode_progress import load_season_episode_progress
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
 from mediaforce.web.routes.app_window import register_app_window_routes
@@ -624,6 +626,14 @@ def _stored_folder_run(
     return children
 
 
+def _displayed_episode(config: MediaforceConfig, item_id: int, path: str) -> dict[str, Any]:
+    item = ItemWorkflowState(item_id=item_id, rel_path=path, status="discovered", state="encode_candidate",
+                             lane="encode", has_staged_output=False, blocker=None)
+    with open_db(config.paths.db_path) as connection:
+        [episode] = load_season_episode_progress(connection, [item], config=config)
+    return episode
+
+
 @pytest.mark.parametrize("scope", [SEASON, "tv/Thriller", "tv", ""])
 @pytest.mark.parametrize("status,reason", [
     ("needs_attention", None), ("failed", None), ("stopped", CONTROLLER_RESTART_STOP_REASON), ("stopped", None),
@@ -730,6 +740,7 @@ def test_a_newer_completion_does_not_reconcile_an_earlier_restart_stopped_writer
     load = _loader({SEASON: _approved(config)}, {})
 
     assert _next(config, load) is None
+    assert _displayed_episode(config, item_id, EPISODE)["stage"] == "needs_you"
 
     with open_db(config.paths.db_path) as connection:
         connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == children[item_id]).values(status="completed"))
@@ -783,6 +794,7 @@ def test_a_catalog_path_change_does_not_hide_a_stopped_writer_for_the_same_item(
         connection.execute(library_items.update().where(library_items.c.id == item_id).values(rel_path=renamed, parent_dir=OTHER_SEASON))
 
     assert _next(config, _loader({OTHER_SEASON: _approved(config)}, {})) is None
+    assert _displayed_episode(config, item_id, renamed)["stage"] == "needs_you"
 
 
 @pytest.mark.parametrize("indexes", [None, [], [99], [0, 99], "0"])
@@ -801,6 +813,7 @@ def test_unknown_shard_membership_cannot_clear_an_older_question(tmp_path: Path,
     assert encode_run_manifest_files(child, strict_indexes=True) == []
     assert encode_run_manifest_rel_paths(child)
     assert _next(config, _loader({SEASON: _approved(config)}, {})) is None
+    assert _displayed_episode(config, item_id, EPISODE)["stage"] == "needs_you"
 
 
 def test_an_undone_keep_original_is_not_held_by_its_old_backstop_stop(tmp_path: Path) -> None:
