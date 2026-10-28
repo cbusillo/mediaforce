@@ -29,6 +29,7 @@ from mediaforce.library.motion_keep_state import kept_original_clause
 
 DEFAULT_EVIDENCE_QUEUE_NAME = "evidence"
 DEFAULT_EVIDENCE_BATCH_LIMIT = 25
+MAX_CONCURRENT_EVIDENCE_FILES = 3
 
 EVIDENCE_WORK_PRIORITY_DECISION = 0
 EVIDENCE_WORK_PRIORITY_RECLASSIFICATION = 10
@@ -798,7 +799,10 @@ def claim_next_evidence_work(
         lease_seconds: int,
         now: datetime | None = None,
         excluded_media_roots: Collection[str] = (),
+        max_running_files: int = 1,
 ) -> EvidenceWorkClaim | None:
+    if not 1 <= max_running_files <= MAX_CONCURRENT_EVIDENCE_FILES:
+        raise ValueError(f"Evidence concurrency must be between one and {MAX_CONCURRENT_EVIDENCE_FILES} files.")
     current = now or datetime.now(UTC)
     now_iso = current.isoformat(timespec="seconds")
     lease_expires_at = (current + timedelta(seconds=max(1, lease_seconds))).isoformat(timespec="seconds")
@@ -811,7 +815,7 @@ def claim_next_evidence_work(
             return None
         running_count = int(
             connection.execute(
-                select(func.count())
+                select(func.count(library_item_evidence_state.c.library_item_id.distinct()))
                 .select_from(library_item_evidence_state)
                 .where(
                     library_item_evidence_state.c.work_batch_id == batch_id,
@@ -819,7 +823,7 @@ def claim_next_evidence_work(
                 )
             ).scalar_one()
         )
-        if running_count:
+        if running_count >= max_running_files:
             connection.rollback()
             return None
         _mark_unavailable_evidence_work(connection, batch_id, now_iso, excluded_media_roots)

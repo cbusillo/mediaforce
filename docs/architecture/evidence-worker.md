@@ -58,6 +58,21 @@ Failure in one analyzer preserves the other valid result; cancellation and sourc
 changes still fence both results. A cancellation between commits preserves only
 the already committed result. Running files are excluded from other claims.
 
+The automatic runner admits at most three distinct files, counting a paired
+cadence/fingerprint lease as one file. Each execution unit keeps its own SSH
+connections and process controllers. Units reuse the same queue loop, including
+configuration refresh, discovery and retry handling. Idle units return when
+another unit completes work or discovers more originals. An unexpected worker
+failure cancels its peers through a private stop signal without setting the app's
+shutdown flag; app shutdown is also observed synchronously before claiming.
+Foreground item limits retain their serial behavior. The bound follows the
+one/two/three-unit trial on [#1136](https://github.com/cbusillo/mediaforce/issues/1136).
+
+Serial execution prepares the next original ahead of analysis. Parallel units
+qualify their own next file while other units analyze, retaining the full
+device-bound digest and all admission checks. They do not each prefetch the same
+queued original, avoiding redundant digest reads and preparation cancellation.
+
 ## Durable state
 
 `library_item_evidence_state` owns one independent work unit for each
@@ -111,7 +126,7 @@ Queue states are:
 
 - `paused`: no new claim is allowed
 - `queued`: claimable work exists
-- `running`: exactly one work unit owns the media-analysis lane
+- `running`: up to three files own analysis leases, with each kind tracked independently
 - `cancel_requested`: queued work is cancelled and the active managed process
   is being terminated
 - `completed`, `completed_with_errors`, or `cancelled`: terminal batch state

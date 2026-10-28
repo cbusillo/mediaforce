@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Collection
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from functools import partial
 from datetime import UTC, datetime, timedelta
@@ -25,7 +26,7 @@ from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, fin
 from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaConnections, RemoteMediaHostUnavailableError
 from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, \
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host, unmeasurable_evidence_roots
-from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, SOURCE_ROOT_WAIT_REASON, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
+from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, MAX_CONCURRENT_EVIDENCE_FILES, SOURCE_ROOT_WAIT_REASON, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
     current_library_item_source_fingerprint, evidence_queue_summary, extend_evidence_claim, heartbeat_evidence_work, \
     load_evidence_queue_state, load_evidence_work_claim, mark_evidence_attempt_started, original_intake_hold, recover_evidence_queue, \
     transition_evidence_work, waiting_evidence_host_roots
@@ -34,7 +35,7 @@ from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANA
     sync_library_item_evidence_state
 from mediaforce.library.probe import probe_evidence, probe_evidence_source
 from mediaforce.library.source_evidence import load_source_evidence, observe_file, pending_source_operation, record_current_measurement
-from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher
+from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher, StopSignal
 
 EVIDENCE_JOB_LEASE_SECONDS = 45
 EVIDENCE_JOB_HEARTBEAT_SECONDS = 5.0
@@ -64,7 +65,7 @@ class EvidenceWorkerDeps:
     max_attempts: int = EVIDENCE_JOB_MAX_ATTEMPTS
     source_retry_delay_seconds: int = EVIDENCE_SOURCE_RETRY_DELAY_SECONDS
     evidence_host_rows: Callable[[MediaforceConfig], list[dict[str, Any]]] = collect_evidence_host_rows
-    shutdown_event: threading.Event | None = None
+    shutdown_event: StopSignal | None = None
     prepare_next_original: Callable[[MediaforceConfig, EvidenceWorkClaim], None] | None = None
     remote_commands: Callable[[dict[str, object]], RemoteMediaCommands] | None = None
     read_probe: Callable[..., dict[str, object]] = probe_evidence_source
@@ -74,6 +75,15 @@ class EvidenceWorkerDeps:
 class _AnalysisTarget:
     source_path: Path
     command_runner: RemoteMediaCommands | None
+
+
+@dataclass(frozen=True, slots=True)
+class _EvidenceStopSignal:
+    parent: StopSignal | None
+    cancelled: threading.Event
+
+    def is_set(self) -> bool:
+        return self.cancelled.is_set() or (self.parent is not None and self.parent.is_set())
 
 
 def default_evidence_worker_deps() -> EvidenceWorkerDeps:
@@ -91,6 +101,7 @@ def process_evidence_queue_once(
         deps: EvidenceWorkerDeps | None = None,
         excluded_media_roots: Collection[str] | None = None,
         max_work_items: int | None = 1,
+        max_running_files: int = 1,
 ) -> int:
     if max_work_items is not None and max_work_items <= 0:
         raise ValueError("Evidence worker item budget must be greater than zero.")
@@ -105,6 +116,7 @@ def process_evidence_queue_once(
             worker_id=worker_id,
             lease_seconds=runtime_deps.lease_seconds,
             excluded_media_roots=roots,
+            max_running_files=max_running_files,
         )
     if claim is None:
         return 0
@@ -125,27 +137,83 @@ def run_evidence_queue_until_blocked(
         max_work_items: int | None = 1,
         max_seconds: float | None = None,
         stop_event: threading.Event | None = None,
+        max_running_files: int = 1,
 ) -> dict[str, Any]:
     if max_work_items is not None and max_work_items <= 0:
         raise ValueError("Evidence worker item budget must be greater than zero.")
     if max_seconds is not None and max_seconds <= 0:
         raise ValueError("Evidence worker time budget must be greater than zero.")
+    if not 1 <= max_running_files <= MAX_CONCURRENT_EVIDENCE_FILES:
+        raise ValueError(f"Evidence concurrency must be between one and {MAX_CONCURRENT_EVIDENCE_FILES} files.")
     runtime_deps = deps or default_evidence_worker_deps()
+    deadline = time.monotonic() + max_seconds if max_seconds is not None else None
+    if max_work_items is None and max_running_files > 1:
+        return _run_parallel_evidence_queue(config_path=config_path, config=config, deps=runtime_deps,
+            stop_event=stop_event, deadline=deadline, max_running_files=max_running_files)
+    return _run_evidence_queue_unit(config_path=config_path, config=config, deps=runtime_deps,
+        max_work_items=max_work_items, stop_event=stop_event, deadline=deadline, max_running_files=max_running_files)
+
+
+def _run_parallel_evidence_queue(
+        *, config_path: Path, config: MediaforceConfig | None, deps: EvidenceWorkerDeps,
+        stop_event: StopSignal | None, deadline: float | None, max_running_files: int,
+) -> dict[str, Any]:
+    cancelled = threading.Event()
+    stop = _EvidenceStopSignal(stop_event if stop_event is not None else deps.shutdown_event, cancelled)
+    progress = threading.Event()
+    processed = 0
+    with ThreadPoolExecutor(max_workers=max_running_files, thread_name_prefix="evidence-file") as executor:
+        pending = set()
+        submit_unit = partial(executor.submit, _run_evidence_queue_unit, config_path=config_path, config=config,
+            deps=deps, max_work_items=None, stop_event=stop, deadline=deadline,
+            max_running_files=max_running_files, progress_event=progress)
+        try:
+            for _ in range(max_running_files):
+                pending.add(submit_unit())
+            while pending:
+                finished, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    processed += int(future.result()["processed_count"])
+                if progress.is_set():
+                    progress.clear()
+                    if not stop.is_set() and (deadline is None or time.monotonic() < deadline):
+                        for _ in range(max_running_files - len(pending)):
+                            pending.add(submit_unit())
+        finally:
+            cancelled.set()
+    current_config = config or deps.load_config(config_path)
+    with open_db(current_config.paths.db_path) as connection:
+        summary = evidence_queue_summary(connection)
+    summary["processed_count"] = processed
+    if stop.parent is not None and stop.parent.is_set():
+        summary["stop_reason"] = "shutdown"
+    elif deadline is not None and time.monotonic() >= deadline:
+        summary["stop_reason"] = "time_budget"
+    else:
+        summary["stop_reason"] = "blocked"
+    return summary
+
+
+def _run_evidence_queue_unit(
+        *, config_path: Path, config: MediaforceConfig | None, deps: EvidenceWorkerDeps,
+        max_work_items: int | None, stop_event: StopSignal | None, deadline: float | None,
+        max_running_files: int, progress_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    runtime_deps = deps
     if stop_event is not None:
         runtime_deps = replace(runtime_deps, shutdown_event=stop_event)
     current_config = config or runtime_deps.load_config(config_path)
     processed = 0
     progress_since_discovery = 0
-    started_at = time.monotonic()
     stop_reason = "blocked"
     stop_requested = stop_event.is_set if stop_event is not None else lambda: False
     with RemoteMediaConnections() as connections, SourceAdmissionPrefetcher(stop_event=stop_event, logger=runtime_deps.logger,
-                                 deadline=started_at + max_seconds if max_seconds is not None else None) as prefetch:
+                                 deadline=deadline) as prefetch:
         while max_work_items is None or processed < max_work_items:
             if stop_requested():
                 stop_reason = "shutdown"
                 break
-            if max_seconds is not None and time.monotonic() - started_at >= max_seconds:
+            if deadline is not None and time.monotonic() >= deadline:
                 stop_reason = "time_budget"
                 break
             if config is None and processed:
@@ -156,15 +224,18 @@ def run_evidence_queue_until_blocked(
                 break
             prepare_next = partial(prefetch.start, excluded_media_roots=roots)
             runtime_deps = replace(runtime_deps, remote_commands=runtime_deps.remote_commands or connections.runner, prepare_next_original=(
-                prepare_next if max_work_items is None or processed + 1 < max_work_items else None
+                prepare_next if max_running_files == 1 and (max_work_items is None or processed + 1 < max_work_items) else None
             ))
             completed = process_evidence_queue_once(config_path=config_path, config=current_config,
                 deps=runtime_deps, excluded_media_roots=roots,
-                max_work_items=None if max_work_items is None else max_work_items - processed)
+                max_work_items=None if max_work_items is None else max_work_items - processed,
+                max_running_files=max_running_files)
             if not completed:
                 if max_work_items is None and progress_since_discovery and not stop_requested():
                     progress_since_discovery = 0
                     if _discover_originals(current_config, runtime_deps):
+                        if progress_event is not None:
+                            progress_event.set()
                         continue
                 break
             prefetch.wait()
@@ -173,6 +244,8 @@ def run_evidence_queue_until_blocked(
             if max_work_items is None and progress_since_discovery >= DEFAULT_EVIDENCE_BATCH_LIMIT and not stop_requested():
                 _discover_originals(current_config, runtime_deps)
                 progress_since_discovery = 0
+            if progress_event is not None:
+                progress_event.set()
             if max_work_items is not None and processed >= max_work_items:
                 stop_reason = "item_budget"
     with open_db(current_config.paths.db_path) as connection:
@@ -624,7 +697,7 @@ def _evidence_heartbeat_loop(
 ) -> None:
     while not stop_event.wait(deps.heartbeat_seconds):
         if deps.shutdown_event is not None and deps.shutdown_event.is_set():
-            process_controller.cancel(EvidenceWorkDeferred("Analysis will resume after the app restarts"))
+            process_controller.cancel(EvidenceWorkDeferred("This check was interrupted; it will retry when work resumes"))
             return
         try:
             with open_db(config.paths.db_path) as connection:

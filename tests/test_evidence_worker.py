@@ -5,10 +5,13 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import ANY, Mock, patch
 
 from sqlalchemy import select, update
@@ -21,12 +24,14 @@ from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence, reclassify_cadence_summary, \
     unavailable_cadence_summary
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, analyze_media_fingerprint
-from mediaforce.library.evidence_queue import EvidenceWorkClaim, cancel_evidence_queue, claim_next_evidence_work, \
+from mediaforce.library.evidence_queue import EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, MAX_CONCURRENT_EVIDENCE_FILES, EvidenceWorkClaim, cancel_evidence_queue, claim_next_evidence_work, \
     evidence_queue_summary, extend_evidence_claim, mark_evidence_attempt_started, pause_evidence_queue, recover_evidence_queue, \
-    queue_decision_evidence_work, resume_evidence_queue, start_evidence_work
+    queue_decision_evidence_work, resume_evidence_queue, start_evidence_work, transition_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, \
     load_library_item_evidence_states, rebuild_library_item_evidence_states, sync_library_item_evidence_state
-from mediaforce.library.evidence_worker import EvidenceWorkerDeps, process_evidence_queue_once, run_evidence_queue_until_blocked
+from mediaforce.library.evidence_worker import EVIDENCE_JOB_HEARTBEAT_SECONDS, EVIDENCE_JOB_LEASE_SECONDS, \
+    EvidenceWorkerDeps, process_evidence_queue_once, run_evidence_queue_until_blocked
+from mediaforce.library.source_prefetch import StopSignal
 from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker, cadence_queue_partition, \
     cadence_safety_partition
 from mediaforce.web.runtime.operator_work import start_ready_evidence_work
@@ -110,6 +115,201 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertIsNone(paused_claim)
         self.assertIsNotNone(first_claim)
         self.assertIsNone(second_claim)
+
+    def test_automatic_runner_measures_distinct_files_concurrently(self) -> None:
+        from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner
+
+        item_ids = {self._insert_item(index, cadence_summary_json=None, media_fingerprint_json=None)[0]
+                    for index in range(1, MAX_CONCURRENT_EVIDENCE_FILES + 1)}
+        self._queue_unpaused_analysis(item_ids)
+        started = threading.Event()
+        release = threading.Event()
+        paths: set[Path] = set()
+        lock = threading.Lock()
+
+        def analyze(path: Path, kind: str, **_kwargs: object) -> dict[str, object]:
+            with lock:
+                paths.add(path)
+                if len(paths) == len(item_ids):
+                    started.set()
+            if not release.wait(10):
+                raise RuntimeError("The test did not release concurrent analysis")
+            return json.loads(self._cadence_summary_json() if kind == CADENCE_EVIDENCE_KIND else self._fingerprint_summary_json())
+
+        deps = replace(self._deps(analyze), lease_seconds=EVIDENCE_JOB_LEASE_SECONDS,
+                       heartbeat_seconds=EVIDENCE_JOB_HEARTBEAT_SECONDS)
+        runner = BoundedEvidenceRunner(self.config.paths.config_path, deps=deps)
+        with patch("mediaforce.library.evidence_worker._discover_originals", return_value=0):
+            runner.start(max_work_items=None)
+            try:
+                self.assertTrue(started.wait(5), "Every file should start before any analyzer is released")
+                with open_db(self.config.paths.db_path) as connection:
+                    running = connection.execute(select(library_item_evidence_state).where(
+                        library_item_evidence_state.c.work_status == "running")).mappings().all()
+                self.assertEqual({row["library_item_id"] for row in running}, item_ids)
+                self.assertEqual({(row["library_item_id"], row["evidence_kind"]) for row in running},
+                    {(item_id, kind) for item_id in item_ids for kind in (CADENCE_EVIDENCE_KIND, MEDIA_FINGERPRINT_EVIDENCE_KIND)})
+            finally:
+                release.set()
+                runner.join()
+        with open_db(self.config.paths.db_path) as connection:
+            statuses = connection.execute(select(library_item_evidence_state.c.work_status)).scalars().all()
+        self.assertEqual(set(statuses), {"completed"})
+
+    def test_parallel_admission_counts_files_and_keeps_a_slot_until_both_rows_finish(self) -> None:
+        item_ids = [self._insert_item(index, cadence_summary_json=None, media_fingerprint_json=None)[0]
+                    for index in range(1, MAX_CONCURRENT_EVIDENCE_FILES + 2)]
+        self._queue_unpaused_analysis(item_ids)
+        pairs = []
+        for index in range(MAX_CONCURRENT_EVIDENCE_FILES):
+            with open_db(self.config.paths.db_path) as connection:
+                primary = claim_next_evidence_work(connection, worker_id=f"worker-{index}", lease_seconds=30,
+                    max_running_files=MAX_CONCURRENT_EVIDENCE_FILES)
+            assert primary is not None
+            with open_db(self.config.paths.db_path) as connection:
+                companion = extend_evidence_claim(connection, primary, lease_seconds=30)
+            assert companion is not None
+            pairs.append((primary, companion))
+        self.assertEqual({primary.library_item_id for primary, _companion in pairs}, set(item_ids[:-1]))
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertIsNone(claim_next_evidence_work(connection, worker_id="extra", lease_seconds=30,
+                max_running_files=MAX_CONCURRENT_EVIDENCE_FILES))
+            transition_evidence_work(connection, pairs[0][0], work_status="completed")
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertIsNone(claim_next_evidence_work(connection, worker_id="extra", lease_seconds=30,
+                max_running_files=MAX_CONCURRENT_EVIDENCE_FILES))
+            transition_evidence_work(connection, pairs[0][1], work_status="completed")
+        with open_db(self.config.paths.db_path) as connection:
+            next_claim = claim_next_evidence_work(connection, worker_id="extra", lease_seconds=30,
+                max_running_files=MAX_CONCURRENT_EVIDENCE_FILES)
+        assert next_claim is not None
+        self.assertEqual(next_claim.library_item_id, item_ids[-1])
+
+    def test_parallel_shutdown_during_host_check_prevents_claims(self) -> None:
+        item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+        self._queue_unpaused_analysis([item_id])
+        self.config.raw["remote_hosts"] = [{"host": "fixture.example", "mode": "ssh",
+                                            "source_roots": {"tv": str(self.media_root)}}]
+        stop = threading.Event()
+
+        def hosts(_config: MediaforceConfig) -> list[dict[str, object]]:
+            stop.set()
+            return [{"key": "fixture.example", "available": True, "capabilities": ["encode_queue"]}]
+
+        deps = replace(self._deps(Mock()), evidence_host_rows=hosts)
+        with patch("mediaforce.library.evidence_worker.process_evidence_queue_once") as process:
+            result = run_evidence_queue_until_blocked(config_path=self.config.paths.config_path, config=self.config,
+                deps=deps, max_work_items=None, max_running_files=MAX_CONCURRENT_EVIDENCE_FILES, stop_event=stop)
+        process.assert_not_called()
+        self.assertEqual(result["processed_count"], 0)
+        self.assertEqual(result["stop_reason"], "shutdown")
+
+    def test_independent_callers_share_the_same_file_admission_bound(self) -> None:
+        item_ids = [self._insert_item(index, cadence_summary_json=None, media_fingerprint_json=None)[0]
+                    for index in range(1, MAX_CONCURRENT_EVIDENCE_FILES + 2)]
+        self._queue_unpaused_analysis(item_ids)
+        ready = threading.Barrier(len(item_ids))
+
+        def claim(index: int) -> EvidenceWorkClaim | None:
+            ready.wait(timeout=5)
+            with open_db(self.config.paths.db_path) as connection:
+                return claim_next_evidence_work(connection, worker_id=f"caller-{index}", lease_seconds=30,
+                    max_running_files=MAX_CONCURRENT_EVIDENCE_FILES)
+
+        with ThreadPoolExecutor(max_workers=len(item_ids)) as executor:
+            claims = list(executor.map(claim, range(len(item_ids))))
+        admitted = [row for row in claims if row is not None]
+        self.assertEqual(len(admitted), MAX_CONCURRENT_EVIDENCE_FILES)
+        self.assertEqual(len({row.library_item_id for row in admitted}), len(admitted))
+
+    def test_parallel_worker_failure_stops_owned_peers_without_setting_the_app_stop(self) -> None:
+        app_stop = threading.Event()
+        entered = threading.Barrier(MAX_CONCURRENT_EVIDENCE_FILES)
+        lock = threading.Lock()
+        calls = 0
+        peer_stops: list[bool] = []
+
+        def unit(**kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            with lock:
+                index = calls
+                calls += 1
+            entered.wait(timeout=3)
+            if index == 0:
+                raise RuntimeError("worker cleanup failed")
+            stop = cast(StopSignal, kwargs["stop_event"])
+            deadline = time.monotonic() + 3
+            while not stop.is_set() and time.monotonic() < deadline:
+                threading.Event().wait(0.01)
+            with lock:
+                peer_stops.append(stop.is_set())
+            return {"processed_count": 0}
+
+        with patch("mediaforce.library.evidence_worker._run_evidence_queue_unit", side_effect=unit):
+            with self.assertRaises(RuntimeError):
+                run_evidence_queue_until_blocked(config_path=self.config.paths.config_path, config=self.config,
+                    deps=self._deps(Mock()), max_work_items=None, max_running_files=MAX_CONCURRENT_EVIDENCE_FILES,
+                    stop_event=app_stop)
+        self.assertFalse(app_stop.is_set())
+        self.assertEqual(peer_stops, [True] * (MAX_CONCURRENT_EVIDENCE_FILES - 1))
+
+    def test_parallel_runner_refills_workers_after_new_work_arrives(self) -> None:
+        items = [self._insert_item(index, cadence_summary_json=None, media_fingerprint_json=None)
+                 for index in range(1, MAX_CONCURRENT_EVIDENCE_FILES + 2)]
+        item_ids = [item_id for item_id, _path in items]
+        self._queue_unpaused_analysis(item_ids[:1])
+        empty_workers = threading.Event()
+        later_started = threading.Event()
+        release = threading.Event()
+        lock = threading.Lock()
+        empty_calls = 0
+        added = False
+        paths: set[Path] = set()
+        actual_process = process_evidence_queue_once
+
+        def process(**kwargs: Any) -> int:
+            nonlocal empty_calls
+            result = actual_process(**kwargs)
+            if not result:
+                with lock:
+                    empty_calls += 1
+                    if empty_calls >= MAX_CONCURRENT_EVIDENCE_FILES - 1:
+                        empty_workers.set()
+            return result
+
+        def analyze(path: Path, kind: str, **_kwargs: object) -> dict[str, object]:
+            nonlocal added
+            if path == items[0][1]:
+                if not empty_workers.wait(3):
+                    raise RuntimeError("Other workers did not reach the empty queue")
+                if not added:
+                    added = True
+                    self._queue_unpaused_analysis(item_ids[1:])
+            else:
+                with lock:
+                    paths.add(path)
+                    if len(paths) == len(item_ids) - 1:
+                        later_started.set()
+                if not release.wait(5):
+                    raise RuntimeError("The test did not release later analysis")
+            return json.loads(self._cadence_summary_json() if kind == CADENCE_EVIDENCE_KIND else self._fingerprint_summary_json())
+
+        from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner
+        deps = replace(self._deps(analyze), lease_seconds=EVIDENCE_JOB_LEASE_SECONDS,
+                       heartbeat_seconds=EVIDENCE_JOB_HEARTBEAT_SECONDS)
+        runner = BoundedEvidenceRunner(self.config.paths.config_path, deps=deps)
+        with patch("mediaforce.library.evidence_worker.process_evidence_queue_once", side_effect=process), patch(
+            "mediaforce.library.evidence_worker._discover_originals", return_value=0
+        ):
+            runner.start(max_work_items=None)
+            try:
+                self.assertTrue(later_started.wait(4), "Idle workers should return when another file queues more work")
+            finally:
+                release.set()
+                runner.join()
+        with open_db(self.config.paths.db_path) as connection:
+            statuses = connection.execute(select(library_item_evidence_state.c.work_status)).scalars().all()
+        self.assertEqual(set(statuses), {"completed"})
 
     def test_extend_claim_owns_the_next_kind_without_spending_an_attempt(self) -> None:
         item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
@@ -1299,6 +1499,15 @@ class EvidenceWorkerTests(unittest.TestCase):
             max_seconds=None,
         )
         self.assertIs(run_worker.call_args.kwargs["deps"].evidence_host_rows, _schedule_aware_evidence_host_rows)
+
+    def _queue_unpaused_analysis(self, item_ids: Iterable[int]) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for item_id in item_ids:
+                for kind in (CADENCE_EVIDENCE_KIND, MEDIA_FINGERPRINT_EVIDENCE_KIND):
+                    queue_decision_evidence_work(connection, self.config, "tv", library_item_ids=[item_id],
+                        evidence_kind=kind, work_reason="manual_check", require_measurement=True,
+                        priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, start_new_batch=True)
+            resume_evidence_queue(connection)
 
     def _insert_item(
             self,

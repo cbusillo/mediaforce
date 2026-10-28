@@ -12,7 +12,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.library.background_work import list_evidence_backlog, load_background_work_state, \
     summarize_evidence_inventory
-from mediaforce.library.evidence_queue import EVIDENCE_QUEUE_ACTIVE_STATUSES, \
+from mediaforce.library.evidence_queue import EVIDENCE_QUEUE_ACTIVE_STATUSES, MAX_CONCURRENT_EVIDENCE_FILES, \
     evidence_queue_summary, recover_evidence_queue, runnable_evidence_work_count, evidence_queue_allows_preparation
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps, run_evidence_queue_until_blocked
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
@@ -82,6 +82,7 @@ class BoundedEvidenceRunner:
                 deps=self._deps,
                 max_work_items=max_work_items,
                 stop_event=self._stop_event,
+                max_running_files=MAX_CONCURRENT_EVIDENCE_FILES if max_work_items is None else 1,
             )
         except Exception:
             LOGGER.exception("Bounded evidence work failed")
