@@ -1446,4 +1446,4 @@ def test_urgent_sibling_remains_visible_while_original_admission_owns_the_file(t
         from mediaforce.library.evidence_queue import next_evidence_work_query
         assert database.execute(next_evidence_work_query(primary.batch_id, datetime.now(UTC).isoformat())).first() is None
         assert original_intake_hold(database, batch_id=primary.batch_id,
-                                    priority=primary.work_priority) == "higher_priority"
+            priority=primary.work_priority, allowed_running_item=primary.library_item_id) == "higher_priority"

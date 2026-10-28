@@ -4,6 +4,7 @@ import time
 from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from types import TracebackType
+from typing import Protocol
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
@@ -21,8 +22,12 @@ from mediaforce.library.source_intake import assess_source_input
 from mediaforce.library.evidence_hosts import remote_evidence_hosts
 
 
+class StopSignal(Protocol):
+    def is_set(self) -> bool: ...
+
+
 class SourceAdmissionPrefetcher:
-    def __init__(self, *, stop_event: threading.Event | None, logger: logging.Logger, deadline: float | None = None) -> None:
+    def __init__(self, *, stop_event: StopSignal | None, logger: logging.Logger, deadline: float | None = None) -> None:
         self._stop_event = stop_event
         self._closed = threading.Event()
         self._deadline = deadline
@@ -84,7 +89,8 @@ class SourceAdmissionPrefetcher:
 
         def require_runnable(connection: DBClient) -> None:
             self._check_stopped()
-            if (original_intake_hold(connection, batch_id=claim.batch_id, priority=claim.work_priority, excluded_media_roots=roots) is not None
+            if (original_intake_hold(connection, batch_id=claim.batch_id, priority=claim.work_priority,
+                    excluded_media_roots=roots, allowed_running_item=claim.library_item_id) is not None
                     or self._next_item(config, connection, claim, roots) != item_id):
                 raise ProcessCancelledError("Original admission preparation is no longer runnable")
 

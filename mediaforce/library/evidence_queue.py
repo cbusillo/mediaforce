@@ -29,6 +29,7 @@ from mediaforce.library.motion_keep_state import kept_original_clause
 
 DEFAULT_EVIDENCE_QUEUE_NAME = "evidence"
 DEFAULT_EVIDENCE_BATCH_LIMIT = 25
+MAX_CONCURRENT_EVIDENCE_FILES = 3
 
 EVIDENCE_WORK_PRIORITY_DECISION = 0
 EVIDENCE_WORK_PRIORITY_RECLASSIFICATION = 10
@@ -551,6 +552,8 @@ def _evidence_due_now(now_iso: str) -> Any:
 
 def original_intake_hold(
     connection: DBClient, *, batch_id: str, priority: int, excluded_media_roots: Collection[str] = (),
+    allowed_running_item: int | None = None,
+    max_running_files: int = 1,
 ) -> Literal["cancelled", "paused", "higher_priority"] | None:
     state = load_evidence_queue_state(connection)
     if (state["batch_id"] != batch_id or state["cancel_requested"]
@@ -558,12 +561,28 @@ def original_intake_hold(
         return "cancelled"
     if background_work_is_paused(connection) or state["is_paused"]:
         return "paused"
-    if connection.execute(next_evidence_work_query(batch_id, timestamp(), excluded_media_roots=excluded_media_roots,
-                                                  include_running_items=True).where(
+    urgent = next_evidence_work_query(batch_id, timestamp(), excluded_media_roots=excluded_media_roots,
+                                     allowed_running_item=allowed_running_item).where(
         library_item_evidence_state.c.work_priority < priority,
-    )).first() is not None:
-        return "higher_priority"
-    return None
+    )
+    if max_running_files > 1:
+        running = select(
+            library_item_evidence_state.c.library_item_id,
+            func.min(library_item_evidence_state.c.work_priority).label("priority"),
+        ).where(
+            library_item_evidence_state.c.work_batch_id == batch_id,
+            library_item_evidence_state.c.work_status == "running",
+        ).group_by(library_item_evidence_state.c.library_item_id).subquery()
+        victim = select(running, func.count().over().label("file_count")).order_by(
+            running.c.priority.desc(), running.c.library_item_id.desc(),
+        ).limit(1).subquery()
+        urgent = urgent.outerjoin(victim, true()).where(or_(
+            library_item_evidence_state.c.library_item_id == allowed_running_item,
+            and_(victim.c.file_count >= max_running_files, victim.c.library_item_id == allowed_running_item,
+                 victim.c.priority > library_item_evidence_state.c.work_priority),
+        ))
+    return "higher_priority" if connection.execute(urgent).first() is not None else None
+
 
 def runnable_evidence_work_count(connection: DBClient) -> int:
     """Claimable items in the current batch, or zero when anything holds the queue back."""
@@ -690,7 +709,7 @@ def cancel_evidence_queue(connection: DBClient, *, updated_at: str | None = None
 
 
 def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_roots: Collection[str] = (),
-                             allowed_running_item: int | None = None, include_running_items: bool = False) -> Any:
+                             allowed_running_item: int | None = None) -> Any:
     query = (
         select(library_item_evidence_state.c.library_item_id, library_item_evidence_state.c.evidence_kind)
         .where(
@@ -712,12 +731,11 @@ def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_root
     source_waiting_items = select(library_items.c.id).where(
         library_items.c.media_root.in_(_waiting_roots_query(batch_id, now_iso, "waiting_source"))
     )
-    if not include_running_items:
-        running = library_item_evidence_state.alias("running_items")
-        running_items = select(running.c.library_item_id).where(running.c.work_status == "running")
-        if allowed_running_item is not None:
-            running_items = running_items.where(running.c.library_item_id != allowed_running_item)
-        query = query.where(library_item_evidence_state.c.library_item_id.not_in(running_items))
+    running = library_item_evidence_state.alias("running_items")
+    running_items = select(running.c.library_item_id).where(running.c.work_status == "running")
+    if allowed_running_item is not None:
+        running_items = running_items.where(running.c.library_item_id != allowed_running_item)
+    query = query.where(library_item_evidence_state.c.library_item_id.not_in(running_items))
     return query.where(
         or_(library_item_evidence_state.c.library_item_id.not_in(blocked_items), ~_evidence_requires_computer()),
         or_(~_evidence_requires_source(), library_item_evidence_state.c.library_item_id.not_in(source_waiting_items)),
@@ -798,7 +816,10 @@ def claim_next_evidence_work(
         lease_seconds: int,
         now: datetime | None = None,
         excluded_media_roots: Collection[str] = (),
+        max_running_files: int = 1,
 ) -> EvidenceWorkClaim | None:
+    if not 1 <= max_running_files <= MAX_CONCURRENT_EVIDENCE_FILES:
+        raise ValueError(f"Evidence concurrency must be between one and {MAX_CONCURRENT_EVIDENCE_FILES} files.")
     current = now or datetime.now(UTC)
     now_iso = current.isoformat(timespec="seconds")
     lease_expires_at = (current + timedelta(seconds=max(1, lease_seconds))).isoformat(timespec="seconds")
@@ -811,7 +832,7 @@ def claim_next_evidence_work(
             return None
         running_count = int(
             connection.execute(
-                select(func.count())
+                select(func.count(library_item_evidence_state.c.library_item_id.distinct()))
                 .select_from(library_item_evidence_state)
                 .where(
                     library_item_evidence_state.c.work_batch_id == batch_id,
@@ -819,7 +840,7 @@ def claim_next_evidence_work(
                 )
             ).scalar_one()
         )
-        if running_count:
+        if running_count >= max_running_files:
             connection.rollback()
             return None
         _mark_unavailable_evidence_work(connection, batch_id, now_iso, excluded_media_roots)
