@@ -112,7 +112,8 @@ final class ItemTests: XCTestCase {
 
         XCTAssertEqual(season.sound?.options.map(Words.soundName), ["Film", "Speech-heavy"])
         let airing = try XCTUnwrap(season.stillAiring)
-        XCTAssertTrue(Words.stillAiringExplanation(airing).hasSuffix("TMDB says it has ended."))
+        XCTAssertEqual(airing.seriesPrefix, "tv/Futurama")
+        XCTAssertEqual(airing.airing, false)
     }
 
     func testANotificationOpensThePageItIsAbout() {
