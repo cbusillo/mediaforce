@@ -15,6 +15,7 @@ def register_host_routes(
         reset_host_trust_action: Callable[[str], dict[str, Any]],
         retry_host_connection_action: Callable[[str], dict[str, Any]],
 ) -> None:
+
     @app.post("/api/hosts/start")
     async def api_host_start(request: Request) -> JSONResponse:
         body = await request.json()

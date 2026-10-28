@@ -70,12 +70,12 @@ def cadence_left_out_files(
     work = partition.evidence_work
     if bool(work.get("is_paused")):
         queued_reason = (
-            "Needs a motion-pattern check first. The check is prepared in Activity; select Start analysis."
+            "Needs a motion-pattern check first. The check is paused."
         )
     elif str(work.get("status") or "") == "running":
-        queued_reason = "Needs a motion-pattern check first. The check is running in Activity."
+        queued_reason = "Needs a motion-pattern check first. The check is running."
     else:
-        queued_reason = "Needs a motion-pattern check first. The check is queued in Activity."
+        queued_reason = "Needs a motion-pattern check first. The check is queued."
     unavailable_detail = str(partition.analysis_unavailable_reason or "").strip().rstrip(".")
     groups: list[tuple[Collection[int], str, str]] = [
         (
@@ -89,8 +89,8 @@ def cadence_left_out_files(
             partition.analysis_failed_item_ids,
             "cadence_analysis_failed",
             (
-                "Its motion-pattern check failed earlier. Open Activity, use Prepare analysis for its folder, "
-                "then select Start analysis to check it again."
+                "Its motion-pattern check failed earlier. "
+                "The file stays out until the check succeeds."
             ),
         ),
         (
@@ -160,8 +160,6 @@ def nothing_queued_response(left_out: list[LeftOutFile], **extra: Any) -> dict[s
         "affected_item_count": len(left_out),
         "left_out": left_out_payload(left_out),
         "queued_count": 0,
-        "next_route": "/ops",
-        "next_action_label": "Open Activity",
         **extra,
     }
 
@@ -191,7 +189,5 @@ def queue_result_without_files(left_out: list[LeftOutFile], **extra: Any) -> dic
         "queued_count": 0,
         "checks_started_count": count,
         "left_out": left_out_payload(left_out),
-        "next_route": "/ops",
-        "next_action_label": "Open Activity",
         **extra,
     }

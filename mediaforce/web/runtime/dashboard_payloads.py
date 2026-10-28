@@ -139,47 +139,6 @@ def reconcile_pending_review_samples(
     return resolved_count
 
 
-def dashboard_folders_payload(
-        config: MediaforceConfig,
-        *,
-        folder_card_cache_key: Any,
-        list_folder_cards: Any,
-        list_series_folder_cards: Any | None = None,
-        include_series_folders: bool = True,
-) -> dict[str, Any]:
-    cache_key = folder_card_cache_key(config)
-    with open_db(config.paths.db_path) as connection:
-        folders = list_folder_cards(config, connection)
-        series_folders = (
-            list_series_folder_cards(config, connection)
-            if include_series_folders and list_series_folder_cards is not None
-            else []
-        )
-    return {
-        "folders": [asdict(folder) for folder in folders],
-        "series_folders": [asdict(folder) for folder in series_folders],
-        "catalog_empty": not folders,
-        "folder_cache_key": _serialize_cache_key(cache_key),
-    }
-
-
-def dashboard_library_payload(
-        config: MediaforceConfig,
-        *,
-        folder_card_cache_key: Any,
-        list_library_structure_cards: Any,
-) -> dict[str, Any]:
-    cache_key = folder_card_cache_key(config)
-    with open_db(config.paths.db_path) as connection:
-        folders = list_library_structure_cards(config, connection)
-    return {
-        "folders": [asdict(folder) for folder in folders],
-        "series_folders": [],
-        "catalog_empty": not folders,
-        "folder_cache_key": _serialize_cache_key(cache_key),
-    }
-
-
 def folder_status_payload(
         config: MediaforceConfig,
         normalized_prefix: str,

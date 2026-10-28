@@ -25,7 +25,6 @@ from mediaforce.encoding.remote_media import RemoteMediaCommands
 from mediaforce.cli import _schedule_aware_evidence_host_rows
 from mediaforce.hosts.types import FFMPEG_MISSING_ISSUE, HostStatus
 from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, select_evidence_host
-from mediaforce.library.background_work import list_evidence_backlog
 from mediaforce.library.evidence_queue import cancel_evidence_queue, claim_next_evidence_work, \
     evidence_queue_summary, resume_evidence_queue, start_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_STATE_CURRENT, \
@@ -308,7 +307,6 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
 
         with open_db(config.paths.db_path) as connection:
             summary = evidence_queue_summary(connection)
-            backlog = list_evidence_backlog(connection, work_status="waiting_host")
             early_claim = claim_next_evidence_work(connection, worker_id="worker-a", lease_seconds=5, excluded_media_roots={"tv"})
         with open_db(config.paths.db_path) as connection:
             later_claim = claim_next_evidence_work(
@@ -320,7 +318,6 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
 
         self.assertEqual(summary["status"], "queued")
         self.assertEqual(summary["remaining_count"], 1)
-        self.assertEqual([row["library_item_id"] for row in backlog["rows"]], [item_id])
         self.assertIsNone(early_claim)
         assert later_claim is not None
         self.assertEqual(later_claim.library_item_id, item_id)

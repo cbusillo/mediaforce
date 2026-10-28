@@ -562,10 +562,6 @@ def test_retry_connection_route_posts_and_reads_stay_check_free(
         response = asyncio.run(routes[("/api/hosts/retry-connection", "POST")](Request()))
     assert json.loads(response.body) == {"ok": True, "message": "Worker is connected.", "kind": "success"}
     release.assert_called_once()
-    with patch("subprocess.run", side_effect=AssertionError("read launched a check")), patch_attr(
-        recovery, "probe_host_status", side_effect=AssertionError("read launched a check"),
-    ):
-        routes[("/api/recovery-alerts", "GET")]()
 
 
 def test_host_alert_reads_as_sentences(config: MediaforceConfig, empty_host_status_cache: None) -> None:

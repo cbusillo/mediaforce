@@ -872,7 +872,6 @@ class EvidenceWorkerTests(unittest.TestCase):
 
         self.assertEqual(blocker["code"], "cadence_analysis_required")
         self.assertEqual(blocker["affected_item_count"], 1)
-        self.assertEqual(blocker["next_route"], "/ops")
         self.assertEqual(
             [dict(row) for row in rows],
             [
