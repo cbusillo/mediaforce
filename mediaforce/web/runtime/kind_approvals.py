@@ -33,7 +33,7 @@ from mediaforce.library.content_kinds import evidence_stamp, season_evidence, se
 from mediaforce.library.source_evidence import SourceEvidenceContext
 from mediaforce.tuning.calibration_jobs import load_latest_jobs_for_prefixes
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    effective_production_approval, holds_approval, production_approval_contract
+    approval_prefixes, effective_production_approval, holds_approval, production_approval_contract, production_calibration
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 from mediaforce.web.runtime.production_holds import approval_identity
@@ -214,10 +214,14 @@ def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tup
 
 
 def _latest_run_unsettled(connection: DBClient, season: str) -> bool:
-    status = connection.execute(
-        select(encode_jobs.c.status).where(encode_jobs.c.prefix == season).order_by(encode_jobs.c.created_at.desc()).limit(1)
-    ).scalar_one_or_none()
-    return status in _UNSETTLED_RUN_STATUSES
+    run = connection.execute(
+        select(encode_jobs.c.prefix, encode_jobs.c.status).where(
+            encode_jobs.c.prefix.in_(["", *approval_prefixes(season)]), encode_jobs.c.parent_job_id.is_(None),
+        ).order_by(encode_jobs.c.created_at.desc()).limit(1)
+    ).mappings().first()
+    return bool(run and (run["status"] == "stopped" or (
+        run["prefix"] == season and run["status"] in _UNSETTLED_RUN_STATUSES
+    )))
 
 
 def _attempts_file(config: MediaforceConfig) -> Path:
@@ -275,6 +279,9 @@ def next_kind_season(
     for season, waiting_bytes, files in _waiting_seasons(connection, config):
         approval = effective_production_approval(config, season, load_calibration_state)
         if approval is None or not approval.current:
+            continue
+        sample_prefix, _sample = production_calibration(config, season, load_calibration_state)
+        if sample_prefix != approval.prefix:
             continue
         chosen = KindSeason(season, approval.kind, waiting_bytes, approval_identity(approval.calibration, approval.contract), files)
         if _attempted(attempts.get(season), chosen, now) or _latest_run_unsettled(connection, season):

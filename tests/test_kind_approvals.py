@@ -565,3 +565,28 @@ def test_automatic_folder_admission_preserves_approval_and_queue_guards(tmp_path
         _encode_job(config, OTHER_SEASON, "running")
 
     assert _next(config, _loader({SEASON: approval}, {})) is None
+
+
+@pytest.mark.parametrize("scope", [SEASON, "tv/Thriller", "tv"])
+def test_automatic_admission_respects_a_stop_on_its_containing_scope(tmp_path: Path, scope: str) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    _encode_job(config, scope, "stopped")
+
+    assert _next(config, _loader({SEASON: _approved(config)}, {})) is None
+
+
+def test_a_new_season_sample_waits_for_review_instead_of_retrying_the_show_approval(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    pending = {key: value for key, value in _approved(config).items() if not key.startswith("accepted_")}
+
+    assert _next(config, _loader({"tv/Thriller": _approved(config), SEASON: pending}, {})) is None
+
+
+def test_a_file_problem_in_a_show_run_does_not_hold_other_seasons(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    _encode_job(config, "tv/Thriller", "needs_attention")
+
+    assert _next(config, _loader({"tv/Thriller": _approved(config)}, {})) is not None
