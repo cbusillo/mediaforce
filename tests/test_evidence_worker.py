@@ -1572,7 +1572,10 @@ class EvidenceWorkerTests(unittest.TestCase):
                 runner.tool_lineage.return_value = {"ffmpeg_version": "fixture"}
                 metadata_text = "frame:0 pts:0\nlavfi.signalstats.YAVG=24"
                 video = subprocess.CompletedProcess([], 0, metadata_text, metadata_text)
-                runner.run.side_effect = [*([video] if phase == "audio" else []), subprocess.TimeoutExpired([], 1)]
+                runner.run.side_effect = [
+                    *([subprocess.CompletedProcess([], 1, "", "combined audio unavailable"), video] if phase == "audio" else []),
+                    subprocess.TimeoutExpired([], 1),
+                ]
                 timed_out = analyze_media_fingerprint(
                     Path("fixture.mkv"), video_stream={"codec_name": "h264", "pix_fmt": "yuv420p"},
                     audio_streams=[{"channels": 2}], duration_seconds=1200, max_frames=3,

@@ -2,12 +2,16 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
 from mediaforce.core.binaries import ffmpeg_binary
-from mediaforce.encoding.fingerprint import analyze_media_fingerprint, _run_fingerprint_range, reclassify_media_fingerprint_summary
+from mediaforce.encoding.fingerprint import (
+    DEFAULT_FINGERPRINT_MAX_FRAMES, DEFAULT_FINGERPRINT_RANGE_COUNT, analyze_media_fingerprint,
+    _run_audio_range, _run_fingerprint_range, fingerprint_video_decode_timed_out, parse_ebur128_summary,
+    reclassify_media_fingerprint_summary,
+)
 
 
 def _frame_metadata(luma: int, count: int = 1) -> str:
@@ -21,10 +25,10 @@ def _video_result(luma: int, count: int) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess([], 0, _frame_metadata(luma, count), _frame_metadata(51, count))
 
 
-def _fingerprint_without_audio(runner: Mock) -> dict[str, Any]:
+def _fingerprint(runner: Mock, *, audio_streams: list[dict[str, object]] | None = None) -> dict[str, Any]:
     runner.tool_lineage.return_value = {"ffmpeg_version": "test"}
     return analyze_media_fingerprint(
-        Path("episode.mkv"), video_stream={"codec_name": "h264"}, audio_streams=[],
+        Path("episode.mkv"), video_stream={"codec_name": "h264"}, audio_streams=audio_streams or [],
         duration_seconds=1200, command_runner=runner,
     )
 
@@ -33,7 +37,7 @@ def test_combined_pass_preserves_signal_and_edge_metadata() -> None:
     runner = Mock()
     frames_per_range = 120
     runner.run.return_value = _video_result(24, frames_per_range)
-    summary = _fingerprint_without_audio(runner)
+    summary = _fingerprint(runner)
     ranges = summary["analysis"]["ranges"]
 
     assert runner.run.call_count == len(ranges)
@@ -45,12 +49,67 @@ def test_combined_pass_preserves_signal_and_edge_metadata() -> None:
     assert aggregate["duplicate_like_frame_fraction"] == 0
 
 
+_AUDIO_OUTPUT = "Integrated loudness:\n I: -18.5 LUFS\nLoudness range:\n LRA: 13.2 LU\nTrue peak:\n Peak: -1.0 dBFS\n"
+
+
+def test_audio_and_video_share_each_range_command() -> None:
+    video = _video_result(24, DEFAULT_FINGERPRINT_MAX_FRAMES // DEFAULT_FINGERPRINT_RANGE_COUNT)
+    runner = Mock()
+    runner.run.return_value = subprocess.CompletedProcess([], 0, video.stdout, video.stderr + "\n" + _AUDIO_OUTPUT)
+    summary = _fingerprint(runner, audio_streams=[{"channels": 2}])
+
+    assert runner.run.call_count == len(summary["analysis"]["ranges"])
+    assert summary["analysis"]["sampled_frames"] == DEFAULT_FINGERPRINT_MAX_FRAMES
+    assert all(row["audio"]["measurements"] == parse_ebur128_summary(_AUDIO_OUTPUT) for row in summary["analysis"]["ranges"])
+
+
+def test_combined_failure_keeps_independent_video_and_audio_results() -> None:
+    runner = Mock()
+    video = _video_result(24, DEFAULT_FINGERPRINT_MAX_FRAMES // DEFAULT_FINGERPRINT_RANGE_COUNT)
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "-filter_complex" in command:
+            if "-af" in command:
+                return subprocess.CompletedProcess(command, 1, "", "audio graph unavailable")
+            return video
+        return subprocess.CompletedProcess(command, 0, "", _AUDIO_OUTPUT)
+
+    runner.run.side_effect = run
+    summary = _fingerprint(runner, audio_streams=[{"channels": 2}])
+    assert summary["analysis"]["sampled_frames"] == DEFAULT_FINGERPRINT_MAX_FRAMES
+    assert summary["analysis"]["coverage"] == 1
+    assert all(row["audio"]["measurements"] == parse_ebur128_summary(_AUDIO_OUTPUT) for row in summary["analysis"]["ranges"])
+
+
+@pytest.mark.parametrize(("hidden_header", "expected_frames"), [(0, 2), (1, 2), (None, 2), (None, 3)])
+def test_combined_metadata_damage_retries_video_and_keeps_audio(hidden_header: int | None, expected_frames: int) -> None:
+    signal = _frame_metadata(24) + "\n" + _frame_metadata(130).replace("frame:0", "frame:1")
+    edge = _frame_metadata(51) + "\n" + _frame_metadata(102).replace("frame:0", "frame:1")
+    clean = subprocess.CompletedProcess([], 0, signal, edge)
+    damaged = edge if hidden_header is None else edge.replace(f"frame:{hidden_header} ", f"[decoder @ 0x1234] frame:{hidden_header} ")
+    runner = Mock()
+    runner.run.side_effect = [subprocess.CompletedProcess([], 0, signal, damaged + "\n" + _AUDIO_OUTPUT), clean]
+    options = dict(ffmpeg_name="ffmpeg", start_seconds=0, frame_limit=3, sample_fps=2, download_format=None,
+                   timeout_seconds=5, process_controller=None, expected_min_frames=expected_frames)
+    reference_runner = Mock()
+    reference_runner.run.return_value = clean
+    reference = _run_fingerprint_range(Path("episode.mkv"), **options, command_runner=reference_runner)
+    result = _run_fingerprint_range(Path("episode.mkv"), **options, command_runner=runner, audio_duration_seconds=4)
+
+    assert result.status == reference.status == "measured"
+    assert result.signal_frames == reference.signal_frames
+    assert result.edge_frames == reference.edge_frames
+    assert result.audio_result is not None
+    assert parse_ebur128_summary(result.audio_result["output"]) == parse_ebur128_summary(_AUDIO_OUTPUT)
+    assert runner.run.call_count == (1 if hidden_header is None else 2)
+
+
 def test_failed_range_retains_independently_measured_ranges() -> None:
     runner = Mock()
     runner.run.side_effect = [
         _video_result(24, 120), subprocess.CompletedProcess([], 1, "", ""), _video_result(130, 120),
     ]
-    summary = _fingerprint_without_audio(runner)
+    summary = _fingerprint(runner)
     ranges = summary["analysis"]["ranges"]
 
     assert [row["status"] for row in ranges] == ["measured", "failed", "measured"]
@@ -134,10 +193,10 @@ def test_unmapped_pixel_format_uses_full_software_pass() -> None:
         assert "-hwaccel" not in call.args[0]
 
 
-@pytest.mark.parametrize("timeout_phase", ["video", "audio"])
+@pytest.mark.parametrize("timeout_phase", ["combined", "audio"])
 def test_timeout_does_not_start_another_decode(timeout_phase: str) -> None:
     runner = Mock()
-    completed = [_video_result(24, 120)] if timeout_phase == "audio" else []
+    completed = [subprocess.CompletedProcess([], 1, "", "combined pass failed"), _video_result(24, 120)] if timeout_phase == "audio" else []
     runner.run.side_effect = [*completed, subprocess.TimeoutExpired([], 1)]
     runner.tool_lineage.return_value = {"ffmpeg_version": "test"}
     summary = analyze_media_fingerprint(
@@ -150,12 +209,13 @@ def test_timeout_does_not_start_another_decode(timeout_phase: str) -> None:
     assert summary["analysis"]["coverage"] < 1
     assert summary["decision"]["status"] == "unknown"
     assert reclassify_media_fingerprint_summary(summary)["decision"]["status"] == "unknown"
+    assert fingerprint_video_decode_timed_out(summary) is (timeout_phase == "combined")
 
 
 def test_missing_edge_metadata_cannot_claim_coverage() -> None:
     runner = Mock()
     runner.run.return_value = subprocess.CompletedProcess([], 0, _frame_metadata(24, 120), "")
-    summary = _fingerprint_without_audio(runner)
+    summary = _fingerprint(runner)
 
     assert summary["decision"]["status"] == "unknown"
     assert summary["analysis"]["coverage"] == 0
@@ -164,7 +224,7 @@ def test_missing_edge_metadata_cannot_claim_coverage() -> None:
 def test_failed_pass_cannot_claim_measured_coverage() -> None:
     runner = Mock()
     runner.run.return_value = subprocess.CompletedProcess([], 1, _frame_metadata(24), "decoder failed")
-    summary = _fingerprint_without_audio(runner)
+    summary = _fingerprint(runner)
 
     assert summary["analysis"]["coverage"] == 0
     assert summary["decision"]["status"] == "unknown"
@@ -193,3 +253,57 @@ def test_real_ffmpeg_emits_bounded_signal_and_edge_frames(tmp_path: Path) -> Non
     assert all(row["status"] == "measured" for row in ranges)
     assert sum(row["sampled_frames"] for row in ranges) == frame_budget
     assert summary["analysis"]["aggregate"]["edge_density_mean"] > 0
+
+
+@pytest.fixture
+def audio_pattern_source(tmp_path: Path) -> tuple[Path, str]:
+    binary = ffmpeg_binary()
+    if shutil.which(binary) is None:
+        pytest.skip("FFmpeg is required for the decode protocol check")
+    source = tmp_path / "audio-pattern.mkv"
+    subprocess.run(
+        [binary, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=64x48:rate=24:duration=16",
+         "-f", "lavfi", "-i", "sine=frequency=637:sample_rate=48000:duration=16,volume='if(lt(t,3),0.01,1)':eval=frame",
+         "-c:v", "mpeg4", "-q:v", "5", "-c:a", "pcm_s16le", str(source)],
+        check=True, capture_output=True, timeout=15,
+    )
+    return source, binary
+
+
+@pytest.mark.parametrize(("frame_budget", "sample_fps"), [(24, 2), (3, 1), (8, 2)])
+def test_real_combined_audio_matches_independent_window(audio_pattern_source: tuple[Path, str], frame_budget: int, sample_fps: int) -> None:
+    source, binary = audio_pattern_source
+    summary = analyze_media_fingerprint(
+        source, video_stream={"codec_name": "mpeg4"}, audio_streams=[{"channels": 1}], duration_seconds=16,
+        max_frames=frame_budget, range_count=1, sample_fps=sample_fps, timeout_seconds=5,
+    )
+    sample = summary["analysis"]["ranges"][0]
+    reference = _run_audio_range(source, ffmpeg_name=binary, start_seconds=sample["start_seconds"],
+        duration_seconds=sample["audio"]["duration_seconds"], timeout_seconds=5, process_controller=None, command_runner=None)
+    assert sample["sampled_frames"] == frame_budget
+    assert sample["audio"]["status"] == reference["status"] == "measured"
+    assert sample["audio"]["measurements"] == parse_ebur128_summary(reference["output"])
+
+
+def test_decoder_logs_cannot_corrupt_frame_metadata(audio_pattern_source: tuple[Path, str]) -> None:
+    from mediaforce.encoding import fingerprint
+
+    source, binary = audio_pattern_source
+    options = dict(ffmpeg_name=binary, start_seconds=0, frame_limit=DEFAULT_FINGERPRINT_MAX_FRAMES,
+        sample_fps=24, download_format=None, timeout_seconds=5, process_controller=None, command_runner=None)
+    reference = _run_fingerprint_range(source, **options)
+    actual_run = fingerprint._run_bounded_media_command
+
+    def noisy(command: list[str], **kwargs: Any) -> dict[str, str]:
+        changed = list(command)
+        if "-af" in changed:
+            index = changed.index("-af") + 1
+            changed[index] = "ashowinfo," + changed[index]
+        return actual_run(changed, **kwargs)
+
+    with patch.object(fingerprint, "_run_bounded_media_command", side_effect=noisy):
+        for _ in range(3):
+            result = _run_fingerprint_range(source, **options, audio_duration_seconds=12)
+            assert result.status == reference.status == "measured"
+            assert result.signal_frames == reference.signal_frames
+            assert result.edge_frames == reference.edge_frames

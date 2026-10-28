@@ -24,12 +24,22 @@ frames before copying them to CPU memory. The GPU still decodes the entire
 sampled range. Each range records its decoder; unsupported or incomplete
 hardware decoding uses the complete software pass. A timeout stops further
 analysis for that file and leaves its result unknown for the queue to retry,
-while later queue items remain free to continue. After a video decoder timeout,
-the next attempt uses software; an audio timeout does not change the video
-decoder. End-of-file hardware samples must contain matching signal and edge
+while later queue items remain free to continue. After a video-containing command timeout, including a combined video/audio
+command, the next attempt uses software; an independent audio timeout does not
+change the video decoder. A combined timeout cannot identify which stream stalled,
+so recovery is conservative and the result stays unknown until a complete retry. End-of-file hardware samples must contain matching signal and edge
 counts meeting the expected available frames, without reducing the decode cap.
-Audio and
-cadence retain their measurements and safety decisions.
+A video range also measures the first audio stream in the same FFmpeg process.
+The audio keeps its own input, seek, duration and null output, so video frame
+caps cannot shorten its window and a missing audio segment cannot block the
+video filter graph. This saves process and SSH command launches while retaining
+the independent file open and seek. Frame metadata uses direct writes to keep
+audio and decoder logs from interleaving within a metadata line. If a combined
+command fails, the worker retries video independently and runs the independent
+audio check; a failed audio command cannot erase valid video measurements.
+A successful combined command with mismatched frame-metadata counts reruns video
+alone at its quiet log level and keeps the already measured audio.
+Audio and cadence retain their measurements and safety decisions.
 
 The worker reuses an SSH master per unchanged encode-computer configuration
 within its run. Sockets live in private short temporary directories. The worker starts a
