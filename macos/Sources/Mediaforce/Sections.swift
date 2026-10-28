@@ -1,46 +1,25 @@
 import SwiftUI
 
+/// What the work's state in the title bar means, when it needs saying, and the last change.
 struct WorkStatus: View {
     let facts: MainWindowFacts
-    private var work: MainWindowFacts.Work { facts.work }
     private var lastChange: MainWindowFacts.Event? { facts.lastChange }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            Image(systemName: symbol)
-                .font(.system(size: 24, weight: .regular))
-                .foregroundStyle(.secondary)
-                .frame(width: 32, alignment: .center)
-                .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(Words.workHeadline(facts))
-                    .font(.title3.weight(.semibold))
-                if let explanation = Words.workExplanation(facts) {
-                    Text(explanation)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: 640, alignment: .leading)
-                }
-                if let lastChange {
-                    Text("Last change: \(Words.event(lastChange)), \(Words.moment(lastChange.at))")
-                        .font(.callout)
-                        .foregroundStyle(.tertiary)
-                        .padding(.top, 2)
-                }
+        VStack(alignment: .leading, spacing: 4) {
+            if let explanation = Words.workExplanation(facts) {
+                Text(explanation)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 640, alignment: .leading)
             }
-            Spacer(minLength: 0)
+            if let lastChange {
+                Text("Last change: \(Words.event(lastChange)), \(Words.moment(lastChange.at))")
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+            }
         }
-    }
-
-    private var symbol: String {
-        if work.stopReasons.contains("storage_unavailable") { return "externaldrive.badge.xmark" }
-        if work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty { return "hand.raised" }
-        switch work.state {
-        case "paused": return "pause.circle"
-        case "running": return "gearshape.2"
-        case "stopped": return "exclamationmark.circle"
-        default: return "checkmark.circle"
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

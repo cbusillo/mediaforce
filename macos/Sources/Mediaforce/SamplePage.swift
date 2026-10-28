@@ -7,16 +7,20 @@ struct SamplePage: View {
     @State private var facts: SampleFacts?
 
     var body: some View {
-        PageFrame(title: title) {
+        let names = self.names
+        PageFrame(title: names.season, subtitle: names.show) {
             SampleWork(prefix: prefix, model: model, facts: $facts, openItem: openItem)
         }
     }
 
-    private var title: String {
-        if let facts { return Words.season(facts.show, facts.season) }
+    /// The season names the page and its show is the subtitle, as on the season's own page.
+    private var names: (season: String, show: String) {
+        if let facts { return Words.seasonTitle(facts.show, facts.season) }
         let samples = (model.facts?.samples.waitingOnYou ?? []) + (model.facts?.samples.approvedNotStarted ?? [])
-        if let sample = samples.first(where: { $0.prefix == prefix }) { return Words.season(sample.show, sample.season) }
-        return prefix.split(separator: "/").dropFirst().joined(separator: ", ")
+        if let sample = samples.first(where: { $0.prefix == prefix }) { return Words.seasonTitle(sample.show, sample.season) }
+        // Until its facts arrive, the page is named by its folders.
+        let folders = prefix.split(separator: "/").map(String.init)
+        return (folders.last ?? prefix, folders.count > 2 ? folders[folders.count - 2] : "")
     }
 }
 
