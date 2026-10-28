@@ -37,6 +37,8 @@ the independent file open and seek. Frame metadata uses direct writes to keep
 audio and decoder logs from interleaving within a metadata line. If a combined
 command fails, the worker retries video independently and runs the independent
 audio check; a failed audio command cannot erase valid video measurements.
+A successful combined command with mismatched frame-metadata counts reruns video
+alone at its quiet log level and keeps the already measured audio.
 Audio and cadence retain their measurements and safety decisions.
 
 The worker reuses an SSH master per unchanged encode-computer configuration

@@ -449,10 +449,15 @@ def _run_fingerprint_range(
     def run_pass(download: str | None) -> FingerprintRangeResult:
         result = run_command(download_format=download, audio_duration_seconds=audio_duration_seconds)
         audio_result = result if audio_duration_seconds is not None and result["status"] == "measured" else None
-        if audio_duration_seconds is not None and result["status"] == "failed":
+        decoder = f"videotoolbox-{download}" if download else "software"
+        parsed = _fingerprint_range_result(result, decoder=decoder, audio_result=audio_result)
+        if audio_duration_seconds is not None and (
+            result["status"] == "failed"
+            or result["status"] == "measured" and len(parsed.signal_frames) != len(parsed.edge_frames)
+        ):
             result = run_command(download_format=download)
-        return _fingerprint_range_result(result, decoder=f"videotoolbox-{download}" if download else "software",
-                                         audio_result=audio_result)
+            parsed = _fingerprint_range_result(result, decoder=decoder, audio_result=audio_result)
+        return parsed
 
     if download_format is not None:
         hardware_result = run_pass(download_format)

@@ -81,6 +81,29 @@ def test_combined_failure_keeps_independent_video_and_audio_results() -> None:
     assert all(row["audio"]["measurements"] == parse_ebur128_summary(_AUDIO_OUTPUT) for row in summary["analysis"]["ranges"])
 
 
+@pytest.mark.parametrize(("hidden_header", "expected_frames"), [(0, 2), (1, 2), (None, 2), (None, 3)])
+def test_combined_metadata_damage_retries_video_and_keeps_audio(hidden_header: int | None, expected_frames: int) -> None:
+    signal = _frame_metadata(24) + "\n" + _frame_metadata(130).replace("frame:0", "frame:1")
+    edge = _frame_metadata(51) + "\n" + _frame_metadata(102).replace("frame:0", "frame:1")
+    clean = subprocess.CompletedProcess([], 0, signal, edge)
+    damaged = edge if hidden_header is None else edge.replace(f"frame:{hidden_header} ", f"[decoder @ 0x1234] frame:{hidden_header} ")
+    runner = Mock()
+    runner.run.side_effect = [subprocess.CompletedProcess([], 0, signal, damaged + "\n" + _AUDIO_OUTPUT), clean]
+    options = dict(ffmpeg_name="ffmpeg", start_seconds=0, frame_limit=3, sample_fps=2, download_format=None,
+                   timeout_seconds=5, process_controller=None, expected_min_frames=expected_frames)
+    reference_runner = Mock()
+    reference_runner.run.return_value = clean
+    reference = _run_fingerprint_range(Path("episode.mkv"), **options, command_runner=reference_runner)
+    result = _run_fingerprint_range(Path("episode.mkv"), **options, command_runner=runner, audio_duration_seconds=4)
+
+    assert result.status == reference.status == "measured"
+    assert result.signal_frames == reference.signal_frames
+    assert result.edge_frames == reference.edge_frames
+    assert result.audio_result is not None
+    assert parse_ebur128_summary(result.audio_result["output"]) == parse_ebur128_summary(_AUDIO_OUTPUT)
+    assert runner.run.call_count == (1 if hidden_header is None else 2)
+
+
 def test_failed_range_retains_independently_measured_ranges() -> None:
     runner = Mock()
     runner.run.side_effect = [
@@ -276,9 +299,6 @@ def test_decoder_logs_cannot_corrupt_frame_metadata(audio_pattern_source: tuple[
         if "-af" in changed:
             index = changed.index("-af") + 1
             changed[index] = "ashowinfo," + changed[index]
-        else:
-            index = changed.index("-filter_complex") + 1
-            changed[index] = changed[index].replace(",ebur128=", ",ashowinfo,ebur128=")
         return actual_run(changed, **kwargs)
 
     with patch.object(fingerprint, "_run_bounded_media_command", side_effect=noisy):
