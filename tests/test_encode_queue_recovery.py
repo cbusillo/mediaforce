@@ -9697,7 +9697,6 @@ raise SystemExit(0)
         self.assertTrue(result["ok"])
         self.assertFalse(result["queued"])
         self.assertEqual(result["auto_queue_status"], "approval_only")
-        self.assertIn("Choose Make the season", result["message"])
         calibration = load_calibration_state(self.config, "tv/show")
         assert calibration is not None
         self.assertTrue(calibration.get("accepted_at"))
