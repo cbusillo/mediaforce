@@ -3,9 +3,7 @@ import fcntl
 import json
 import logging
 import os
-import re
 import shutil
-import subprocess
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -14,17 +12,13 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from tempfile import NamedTemporaryFile, mkdtemp
 from time import monotonic, time as wall_time
 from typing import Any, NamedTuple
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from starlette.background import BackgroundTask
-from fastapi.responses import FileResponse
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import literal_column
 from sqlalchemy import select
@@ -32,7 +26,7 @@ from sqlalchemy import select
 from mediaforce.core.audio_presets import AUDIO_PRESETS
 from mediaforce.advisor import TuningPolicyResponse
 from mediaforce.advising.routing import advisor_routing_from_config
-from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
+from mediaforce.tuning.calibration_jobs import load_job, \
     list_queue_summary, sample_failures_in_a_row, update_job_telemetry
 from mediaforce.tuning.quality_observations import (
     backfill_quality_search_observations,
@@ -52,14 +46,11 @@ from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, base_c
 from mediaforce.web.runtime.audio_preset_runtime import dismiss_suggestion, series_genres, show_audio_preset_payload, \
     tv_show_prefix
 from mediaforce.web.runtime.automatic_publish import publish_checked_files_once
-from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
 from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
 from mediaforce.core.db_tables import encode_jobs
-from mediaforce.core.db_tables import learning_artifacts
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
-from mediaforce.core.db_tables import tuning_sessions
 from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, DISPLAY_ENCODE_JOB_KINDS, \
     clear_terminal_encode_jobs_for_prefix, \
     ensure_queue_state, load_active_encode_job_for_prefix, load_latest_encode_job, \
@@ -79,21 +70,14 @@ from mediaforce.execution import (
 )
 from mediaforce.library.evidence_worker import default_evidence_worker_deps
 from mediaforce.library.folder_profiles import inspect_prefix
-from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state, \
-    set_background_work_paused
-from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EvidenceQueueConflict, \
-    cancel_evidence_queue, ensure_evidence_queue_state, evidence_queue_summary, pause_evidence_queue, \
-    resume_evidence_queue, start_evidence_work
+from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state
+from mediaforce.library.evidence_queue import EvidenceQueueConflict, \
+    ensure_evidence_queue_state
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import media_group_scope_for_rel_path, resolve_media_scope, resolve_media_scopes, \
-    scope_rel_path_filter, series_context_for_prefix, tv_series_scope_for_rel_path
+    scope_rel_path_filter, series_context_for_prefix
 from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
-from mediaforce.library.staged_integrity import (
-    CheckedStagedOutputUnavailable,
-    checked_staged_output,
-    staged_integrity_report_for_scope,
-)
 from mediaforce.library.other_library import load_other_library_payload, load_other_scope_payload, \
     other_group_scope_for_rel_path, other_scope_action_blocker
 from mediaforce.library.other_profiles import OTHER_FOLDER_SCOPE_MAX_ITEMS
@@ -117,7 +101,6 @@ from mediaforce.remote import (
     prepare_remote_host_with_password,
     remote_mount_recovery_supported,
     reset_remote_host_trust,
-    run_remote_command,
     run_host_lifecycle_command,
 )
 from mediaforce.review import (
@@ -130,7 +113,6 @@ from mediaforce.review import (
     review_moment_payload,
     render_source_review_clips,
 )
-from mediaforce.reviewing.renderers import NATIVE_COMPARE_FILTER
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.tuning_memory import (
     record_tuning_session,
@@ -155,44 +137,31 @@ from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_samp
     samples_to_remake, start_compressing
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
-from mediaforce.web.runtime.show_settings_runtime import prefixes_with_samples, use_show_settings
-from mediaforce.web.checked_output_preview import (
-    InvalidByteRange,
-    checked_output_media_type,
-    checked_output_stream_response,
-)
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, approve_kind_action, \
     background_queue_blocker, kinds_payload, next_kind_season, record_kind_attempt, stop_kind_approval
-from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_folders_payload, \
-    dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
+from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
-    clear_completed_backups_action, completed_page_payload, confirm_originals_removed_action, \
-    record_deleted_original_backups, \
-    list_completed_folders, \
+    completed_page_payload, record_deleted_original_backups, \
     ensure_encode_host_ready, ensure_sample_host_ready, \
-    folder_ai_tune_action, folder_ai_tune_confirm_action, folder_ai_tune_preview_action, \
-    folder_card_cache_key, folder_status_payload, host_config_for_key, host_lifecycle_start_command, \
+    folder_ai_tune_action, folder_ai_tune_confirm_action, folder_card_cache_key, folder_status_payload, host_config_for_key, host_lifecycle_start_command, \
     host_lifecycle_start_timeout_seconds, host_lifecycle_stop_command, host_runtime_rows, \
     list_library_structure_cards, load_calibration_state, load_json_object, load_pending_proposal, \
     multimodal_review_pack_public_view, pause_encode_queue_action, pending_proposal_public_view, \
     planned_audio_review_context, preview_folder_cards, proposal_alignment_issue, \
     proposal_context_snapshot, proposal_signal_copy, promote_folder_outputs_action, \
-    approve_measured_encode_recovery_action, \
     queue_folder_encode_action, recent_tuning_sessions, \
     reconcile_pending_review_samples, refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, \
-    retry_failed_encode_prefix_action, retry_failed_encode_queue_action, review_media_context, \
+    review_media_context, \
     review_pack_dir, review_pair_key, review_pairs, safe_collect_host_statuses, save_advice_state, \
     save_calibration_state, save_pending_proposal, save_profile_action, \
     sample_calibration_host_statuses, sample_host_options, sample_host_options_from_statuses, \
-    settings_page_payload, stop_calibration_queue_action, stop_encode_queue_action, \
     validate_folder_outputs_action, \
     build_multimodal_review_pack, build_tuning_runtime_toolbelt, load_latest_failed_sample_job_state, \
     load_latest_failed_target_size_job_state, load_retryable_sample_job_state
-from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem, production_action_blocker, \
-    tv_promotion_readiness_payload
+from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem, production_action_blocker
 from mediaforce.web.runtime.folder_cards import list_folder_cards
 from mediaforce.web.runtime.page_state import PageStateSources, card_page_states, folder_page_state
 from mediaforce.library.workflow_state import build_folder_workflow_state
@@ -212,7 +181,7 @@ from mediaforce.web.routes.queues import (
 )
 from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_child_recovery
 from mediaforce.web.runtime.size_exception import decide_size_exception
-from mediaforce.web.runtime.size_held import decide_size_held_file, remake_staged_files, staged_remake_records
+from mediaforce.web.runtime.size_held import decide_size_held_file, remake_staged_files
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
     production_approval_identity, production_calibration
@@ -222,9 +191,7 @@ from mediaforce.encoding.put_back import reconcile_unfinished_put_backs
 from mediaforce.web.runtime.put_back import put_original_back_action
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
-from mediaforce.web.runtime.episode_progress import folder_episodes_payload
 from mediaforce.web.runtime.app_item import item_payload, player_file
-from mediaforce.web.runtime.sample_history import sample_history_payload
 from mediaforce.web.runtime.encode_runtime import ControllerShutdownCancelledError, mark_host_cooldowns, \
     release_host_cooldowns, sync_encode_job_parent, sweep_stopped_remote_encodes
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
@@ -232,7 +199,7 @@ from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle, run_supervised_worker_loop
 from mediaforce.web.runtime.host_recovery import process_host_recovery_once, retry_host_connection
 from mediaforce.web.runtime.host_status import refresh_current_machine_host_statuses
-from mediaforce.web.runtime.recovery_alerts import recovery_alerts, record_recovery_alerts
+from mediaforce.web.runtime.recovery_alerts import record_recovery_alerts
 from mediaforce.web.runtime.controller_storage_recovery import (
     controller_storage_admission_issue,
     controller_storage_recovery_snapshot,
@@ -294,7 +261,6 @@ from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_
     calibration_job_public_payload as runtime_calibration_job_public_payload, \
     dispatch_calibration_job as runtime_dispatch_calibration_job, \
     expire_calibration_job as runtime_expire_calibration_job, \
-    latest_scan_completed_at as runtime_latest_scan_completed_at, \
     load_job_state as runtime_load_job_state, \
     load_overlapping_job_state as runtime_load_overlapping_job_state, \
     load_scan_job_state as runtime_load_scan_job_state, \
@@ -306,8 +272,7 @@ from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_
     save_scan_job_state as runtime_save_scan_job_state, scan_is_stale as runtime_scan_is_stale, \
     scan_job_belongs_to_current_process as runtime_scan_job_belongs_to_current_process, \
     scan_process_is_alive as runtime_scan_process_is_alive
-from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, build_operator_work_payload, \
-    start_ready_evidence_work
+from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, start_ready_evidence_work
 from mediaforce.web.settings_runtime import (
     ALWAYS_SCHEDULE_PROFILE,
     DEFAULT_HOST_SCHEDULE_PROFILE,
@@ -315,7 +280,6 @@ from mediaforce.web.settings_runtime import (
     build_runtime_media_settings as _build_runtime_media_settings,
     build_runtime_video_settings as _build_runtime_video_settings,
     compression_settings_facts as _compression_settings_facts_runtime,
-    build_runtime_settings_payload as _build_runtime_settings_payload,
     canonical_schedule_profile_key as _canonical_schedule_profile_key,
     computer_section_settings as _computer_section_settings,
     computer_settings_facts as _computer_settings_facts_runtime,
@@ -747,38 +711,6 @@ def create_app(
             )
         return await call_next(request)
 
-    def _settings_page_payload(
-            include_archive_cleanup: bool = True,
-            *,
-            error: str | None = None,
-            saved: bool = False,
-            host_notice: str | None = None,
-            host_notice_kind: str | None = None,
-            libraries: list[dict[str, Any]] | None = None,
-            remote_hosts: list[dict[str, str]] | None = None,
-            transcode_root: str | None = None,
-            video_defaults: dict[str, Any] | None = None,
-            encode_queue_scheduler: dict[str, Any] | None = None,
-            schedule_profiles: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        return settings_page_payload(
-            config,
-            encode_queue_scheduler_policy=_encode_queue_scheduler_policy,
-            normalize_encode_queue_scheduler=_normalize_encode_queue_scheduler,
-            archive_cleanup_summary_fn=archive_cleanup_summary,
-            include_archive_cleanup=include_archive_cleanup,
-            error=error,
-            saved=saved,
-            host_notice=host_notice,
-            host_notice_kind=host_notice_kind,
-            libraries=libraries,
-            remote_hosts=remote_hosts,
-            transcode_root=transcode_root,
-            video_defaults=video_defaults,
-            encode_queue_scheduler=encode_queue_scheduler,
-            schedule_profiles=schedule_profiles,
-        )
-
     def _dashboard_summary_payload(preview_limit: int | None = None) -> dict[str, Any]:
         return dashboard_summary_payload(
             config,
@@ -795,54 +727,6 @@ def create_app(
     def _dashboard_scan_job_payload() -> dict[str, Any] | None:
         with open_db(config.paths.db_path) as connection:
             return _load_scan_status(connection, config, prefix=None)
-
-    def _dashboard_folders_payload(include_series_folders: bool = True) -> dict[str, Any]:
-        shared_decisions: list[CandidateDecision] | None = None
-
-        def folder_decisions(connection: DBClient) -> list[CandidateDecision]:
-            nonlocal shared_decisions
-            if shared_decisions is None:
-                shared_decisions = project_candidates(connection, config, prefixes=[])
-            return shared_decisions
-
-        return dashboard_folders_payload(
-            config,
-            folder_card_cache_key=_folder_card_cache_key,
-            list_folder_cards=lambda active_config, connection: _list_folder_cards(
-                active_config,
-                connection,
-                candidate_decisions=folder_decisions(connection),
-            ),
-            list_series_folder_cards=lambda active_config, connection: _list_series_folder_cards(
-                active_config,
-                connection,
-                candidate_decisions=folder_decisions(connection),
-            ),
-            include_series_folders=include_series_folders,
-        )
-
-    def _dashboard_library_payload() -> dict[str, Any]:
-        return dashboard_library_payload(
-            config,
-            folder_card_cache_key=_folder_card_cache_key,
-            list_library_structure_cards=_list_library_structure_cards,
-        )
-
-    def _dashboard_library_details_payload() -> dict[str, Any]:
-        return dashboard_folders_payload(
-            config,
-            folder_card_cache_key=_folder_card_cache_key,
-            list_folder_cards=_list_library_detail_cards,
-            include_series_folders=False,
-        )
-
-    def _dashboard_movie_library_payload() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            return load_movie_library_payload(
-                connection,
-                config,
-                include_details=False,
-            )
 
     def _dashboard_movie_library_details_payload() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
@@ -878,14 +762,6 @@ def create_app(
                 include_details=True,
                 metrics_by_prefix={card.prefix: asdict(card) for card in cards},
                 candidate_decisions=decisions,
-            )
-
-    def _dashboard_other_library_payload() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            return load_other_library_payload(
-                connection,
-                config,
-                include_details=False,
             )
 
     def _dashboard_other_library_details_payload() -> dict[str, Any]:
@@ -969,43 +845,6 @@ def create_app(
             ),
         )
 
-    def _folder_staged_integrity_payload(
-            normalized_prefix: str,
-            offset: int,
-            limit: int,
-    ) -> dict[str, Any]:
-        with open_readonly_db(config.paths.db_path) as connection:
-            scope = resolve_media_scope(
-                connection,
-                normalized_prefix,
-                library_types=config.library_type_map,
-            )
-            report = staged_integrity_report_for_scope(
-                connection,
-                config,
-                scope,
-                discover=True,
-            )
-            items = _load_folder_staged_items(
-                connection,
-                config,
-                normalized_prefix,
-                statuses={"validated"},
-            )
-            promotion_readiness = tv_promotion_readiness_payload(
-                connection,
-                config,
-                scope,
-                report,
-                items,
-                load_calibration_state_fn=_load_calibration_state,
-            )
-            detail = report.detail_payload(offset=offset, limit=limit)
-            detail["records"] = staged_remake_records(
-                connection, detail["records"], normalized_prefix, current_approval=_remake_current_approval,
-            )
-        return {**detail, "promotion_readiness": promotion_readiness}
-
     def _saved_library_context() -> dict[str, Any]:
         """What the settings builders compare a submitted library list against."""
         media = config.media
@@ -1085,32 +924,6 @@ def create_app(
             with open_db(config.paths.db_path) as connection:
                 _maybe_schedule_scan(connection, config, prefix=None, force=True)
         _refresh_host_status_cache(config)
-
-    def _save_settings_action(
-            *,
-            libraries: list[dict[str, Any]],
-            remote_hosts: list[dict[str, Any]],
-            transcode_root: str,
-            catalog_refresh_hours: Any,
-            video_defaults: dict[str, Any],
-            encode_queue_scheduler: dict[str, Any],
-            schedule_profiles: list[dict[str, Any]],
-            metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        if not transcode_root:
-            raise ValueError("A transcode folder is required.")
-        _apply_settings_payload(_build_runtime_settings_payload(
-            libraries=libraries,
-            remote_hosts=remote_hosts,
-            transcode_root=transcode_root,
-            catalog_refresh_hours=catalog_refresh_hours,
-            video_defaults=video_defaults,
-            encode_queue_scheduler=encode_queue_scheduler,
-            schedule_profiles=schedule_profiles,
-            metadata=metadata if metadata is not None else config.metadata,
-            **_saved_library_context(),
-        ))
-        return {"ok": True, "message": "Settings saved.", "settings": _settings_page_payload(saved=True)}
 
     def _settings_snapshot(section: str) -> tuple[MediaforceConfig, str]:
         """Loaded settings and the stored `section` revision, both from one stored state.
@@ -1368,10 +1181,6 @@ def create_app(
             "controller_storage": controller_storage_recovery_snapshot(config),
         }
 
-    @app.get("/api/recovery-alerts")
-    def api_recovery_alerts() -> dict[str, Any]:
-        return {"alerts": recovery_alerts(config)}
-
     def _release_work_snapshot() -> ReleaseWorkSnapshot:
         return release_work_payload(config.paths.db_path)
 
@@ -1401,18 +1210,9 @@ def create_app(
         app,
         dashboard_payload=_dashboard_api_payload,
         dashboard_scan_job_payload=_dashboard_scan_job_payload,
-        dashboard_folders_payload=_dashboard_folders_payload,
-        dashboard_library_payload=_dashboard_library_payload,
-        dashboard_library_details_payload=_dashboard_library_details_payload,
-        dashboard_movie_library_payload=_dashboard_movie_library_payload,
-        dashboard_movie_library_details_payload=_dashboard_movie_library_details_payload,
-        dashboard_other_library_payload=_dashboard_other_library_payload,
-        dashboard_other_library_details_payload=_dashboard_other_library_details_payload,
     )
     register_settings_routes(
         app,
-        settings_payload=_settings_page_payload,
-        save_settings_action=_save_settings_action,
         library_type_preview_action=_library_type_preview_action,
         archive_cleanup_payload=lambda transcode_root=None: archive_cleanup_summary(
             config,
@@ -1443,8 +1243,6 @@ def create_app(
     register_completed_routes(
         app,
         completed_payload=lambda: _completed_page_payload(),
-        clear_completed_backups_action=lambda prefixes=None: _clear_completed_backups_action(prefixes),
-        confirm_originals_removed_action=lambda prefixes: _confirm_originals_removed_action(prefixes),
     )
 
     def _title_poster(title_prefix: str) -> Path | None:
@@ -1460,48 +1258,6 @@ def create_app(
         reset_host_trust_action=_reset_host_trust_action,
         retry_host_connection_action=_retry_host_connection_action,
     )
-
-    def _operator_work_payload(
-            *,
-            backlog_offset: int = 0,
-            backlog_limit: int = 25,
-            evidence_kind: str | None = None,
-            evidence_state: str | None = None,
-            media_root: str | None = None,
-            work_status: str | None = None,
-    ) -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            return build_operator_work_payload(
-                connection,
-                config,
-                scan_job=_load_scan_status(connection, config, prefix=None),
-                catalog_is_stale=_scan_is_stale(connection, config, prefix=None),
-                latest_scan_completed_at=_latest_scan_completed_at(connection, prefix=None),
-                evidence_runner_active=evidence_runner.active,
-                backlog_offset=backlog_offset,
-                backlog_limit=backlog_limit,
-                evidence_kind=evidence_kind,
-                evidence_state=evidence_state,
-                media_root=media_root,
-                work_status=work_status,
-            )
-
-    def _pause_background_work_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            set_background_work_paused(connection, is_paused=True)
-            pause_evidence_queue(connection)
-        return {
-            "ok": True,
-            "message": "Paused new catalog and analysis work. Any item already running can finish safely.",
-        }
-
-    def _resume_background_work_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            set_background_work_paused(connection, is_paused=False)
-        return {
-            "ok": True,
-            "message": "Background work can start again. Prepared analysis remains paused until you resume it.",
-        }
 
     def _refresh_catalog_action() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
@@ -1520,85 +1276,9 @@ def create_app(
             ),
         }
 
-    def _prepare_evidence_action(
-            prefix: str,
-            evidence_kinds: list[str] | tuple[str, ...] | None,
-            limit: int,
-    ) -> dict[str, Any]:
-        if limit > DEFAULT_EVIDENCE_BATCH_LIMIT:
-            raise ValueError(f"The operator work limit is {DEFAULT_EVIDENCE_BATCH_LIMIT} items per batch.")
-        with open_db(config.paths.db_path) as connection:
-            summary = start_evidence_work(
-                connection,
-                config,
-                prefix,
-                evidence_kinds=evidence_kinds,
-                limit=limit,
-            )
-        item_count = int(summary.get("prepared_count", summary.get("item_count")) or 0)
-        return {
-            "ok": True,
-            "message": (
-                f"Prepared {item_count} evidence {'update' if item_count == 1 else 'updates'}. Review the scope, then start analysis."
-                if item_count
-                else "That scope is already current. No analysis was prepared."
-            ),
-        }
-
-    def _pause_evidence_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            pause_evidence_queue(connection)
-        return {
-            "ok": True,
-            "message": "Paused analysis before the next item. An item already running can finish safely.",
-        }
-
-    def _resume_evidence_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            if background_work_is_paused(connection):
-                raise EvidenceQueueConflict(
-                    "Background catalog and analysis work is paused. Resume it before starting analysis."
-                )
-            summary = evidence_queue_summary(connection)
-            if not summary.get("batch_id") or str(summary.get("status") or "") not in {
-                "paused",
-                "queued",
-                "running",
-            }:
-                raise EvidenceQueueConflict("Prepare a bounded analysis batch before starting work.")
-            summary = resume_evidence_queue(connection)
-            item_budget = min(
-                max(1, int(summary.get("remaining_count") or summary.get("item_count") or 1)),
-                DEFAULT_EVIDENCE_BATCH_LIMIT,
-            )
-        started = evidence_runner.start(max_work_items=item_budget)
-        return {
-            "ok": True,
-            "message": (
-                "Analysis started. It will stop when this prepared batch is complete or blocked."
-                if started
-                else "Analysis is already running."
-            ),
-        }
-
-    def _cancel_evidence_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            cancel_evidence_queue(connection)
-        return {
-            "ok": True,
-            "message": "Cancelled remaining analysis. A running media process is being stopped safely.",
-        }
-
     register_operator_work_routes(
         app,
-        operator_work_payload=_operator_work_payload,
-        pause_background_work_action=_pause_background_work_action,
-        resume_background_work_action=_resume_background_work_action,
         refresh_catalog_action=_refresh_catalog_action,
-        prepare_evidence_action=_prepare_evidence_action,
-        pause_evidence_action=_pause_evidence_action,
-        resume_evidence_action=_resume_evidence_action,
-        cancel_evidence_action=_cancel_evidence_action,
     )
 
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:
@@ -1963,66 +1643,6 @@ def create_app(
         finally:
             _record_deleted_original_backups(removed_paths)
 
-    def _clear_completed_backups_action(prefixes: list[str] | None) -> dict[str, Any]:
-        try:
-            archive_root = config.archive_root
-        except KeyError:
-            archive_root = None
-        with open_db(config.paths.db_path) as connection:
-            folders = list_completed_folders(
-                connection,
-                folder_group=lambda rel_path: _folder_group(
-                    rel_path,
-                    library_types=config.library_type_map,
-                ),
-                archive_root=archive_root,
-            )
-        valid_prefixes = {folder.prefix for folder in folders}
-        removed_paths: list[Path] = []
-        try:
-            result = clear_completed_backups_action(
-                config,
-                folder_group=lambda rel_path: _folder_group(
-                    rel_path,
-                    library_types=config.library_type_map,
-                ),
-                prefixes=prefixes,
-                valid_prefixes=valid_prefixes,
-                on_removed=removed_paths.append,
-            )
-        finally:
-            _record_deleted_original_backups(removed_paths)
-        result["completed"] = _completed_page_payload()
-        return result
-
-    def _confirm_originals_removed_action(prefixes: list[str]) -> dict[str, Any]:
-        try:
-            archive_root = config.archive_root
-        except KeyError:
-            archive_root = None
-        with open_db(config.paths.db_path) as connection:
-            folders = list_completed_folders(
-                connection,
-                folder_group=lambda rel_path: _folder_group(
-                    rel_path,
-                    library_types=config.library_type_map,
-                ),
-                archive_root=archive_root,
-            )
-            valid_prefixes = {folder.prefix for folder in folders}
-            result = confirm_originals_removed_action(
-                connection,
-                folder_group=lambda rel_path: _folder_group(
-                    rel_path,
-                    library_types=config.library_type_map,
-                ),
-                archive_root=archive_root,
-                prefixes=prefixes,
-                valid_prefixes=valid_prefixes,
-            )
-        result["completed"] = _completed_page_payload()
-        return result
-
     def _recent_tuning_sessions(connection: DBClient, prefix: str, limit: int = 8) -> list[dict[str, Any]]:
         return recent_tuning_sessions(connection, prefix, load_json_object_fn=_load_json_object, limit=limit)
 
@@ -2105,28 +1725,6 @@ def create_app(
             save_job_state=_save_job_state,
             clear_pending_proposal=_clear_pending_proposal,
             record_tuning_session=record_tuning_session,
-        )
-
-    def _folder_ai_tune_preview_action(
-            normalized_prefix: str,
-            note: str,
-            host_key: str,
-            operator_intent: dict[str, Any] | None = None,
-            scope_membership_token: str = "",
-    ) -> dict[str, Any]:
-        blocker = production_action_blocker(config, normalized_prefix)
-        if blocker is not None:
-            return blocker
-        blocker = _other_scope_action_blocker(normalized_prefix, scope_membership_token)
-        if blocker is not None:
-            return blocker
-        return folder_ai_tune_preview_action(
-            config,
-            _folder_ai_tune_deps(),
-            normalized_prefix,
-            note,
-            host_key,
-            operator_intent,
         )
 
     def _folder_ai_tune_action(
@@ -2301,27 +1899,6 @@ def create_app(
             scope_membership_token=scope_membership_token,
         )
 
-    def _queue_older_seasons_encode_action(
-            normalized_prefix: str,
-            notes: str,
-            bypass_schedule: bool,
-            confirmed: bool,
-            scope_membership_token: str = "",
-    ) -> ActionPayload:
-        if not confirmed:
-            raise HTTPException(
-                status_code=400,
-                detail="Confirm the older-season selection before starting production.",
-            )
-        return _queue_encode_action(
-            normalized_prefix,
-            notes,
-            bypass_schedule,
-            override_older_seasons=True,
-            older_seasons_confirmed=confirmed,
-            scope_membership_token=scope_membership_token,
-        )
-
     def _accept_ambiguous_motion_action(normalized_prefix: str) -> ActionPayload:
         blocker = production_action_blocker(config, normalized_prefix)
         if blocker is not None:
@@ -2356,34 +1933,6 @@ def create_app(
         # Library cards and space saved count this file again as an original.
         _reset_folder_card_cache()
         return result
-
-    def _approve_measured_encode_recovery_action(
-            normalized_prefix: str,
-            scope_membership_token: str = "",
-    ) -> ActionPayload:
-        blocker = production_action_blocker(config, normalized_prefix)
-        if blocker is not None:
-            return blocker
-        blocker = _other_scope_action_blocker(normalized_prefix, scope_membership_token)
-        if blocker is not None:
-            return blocker
-        return approve_measured_encode_recovery_action(
-            config,
-            normalized_prefix,
-            now_iso=_now_iso,
-            load_calibration_state=_load_calibration_state,
-            calibration_draft_hash=_calibration_draft_hash,
-            save_calibration_state=_save_calibration_state,
-            review_gate=_review_gate,
-            upsert_override=_upsert_override,
-            queue_folder_encode_action=lambda prefix, notes, bypass_schedule: _queue_folder_encode_action(
-                prefix,
-                notes,
-                bypass_schedule,
-                False,
-                scope_membership_token,
-            ),
-        )
 
     def _validate_folder_outputs_action(
             normalized_prefix: str,
@@ -2597,93 +2146,6 @@ def create_app(
             now_iso=_now_iso,
         )
 
-    def _stop_encode_queue_action() -> dict[str, Any]:
-        return stop_encode_queue_action(
-            connection_factory=lambda: open_db(config.paths.db_path),
-            config=config,
-            now_iso=_now_iso,
-            cancel_queue_process=_cancel_active_encode_processes,
-            sweep_orphaned_encode_processes=lambda: _sweep_orphaned_encode_processes(config),
-            clear_stale_encoding_items=lambda: _clear_stale_encoding_items_when_idle(config),
-        )
-
-    def _retry_failed_encode_queue_action() -> dict[str, Any]:
-        return retry_failed_encode_queue_action(
-            connection_factory=lambda: open_db(config.paths.db_path),
-            config=config,
-            load_calibration_state=_load_calibration_state,
-            review_gate=_review_gate,
-            queue_folder_encode_action=_queue_folder_encode_action,
-        )
-
-    def _retry_failed_encode_prefix_action(
-            prefix: str,
-            scope_membership_token: str = "",
-    ) -> dict[str, Any]:
-        return retry_failed_encode_prefix_action(
-            connection_factory=lambda: open_db(config.paths.db_path),
-            config=config,
-            prefix=prefix,
-            load_calibration_state=_load_calibration_state,
-            review_gate=_review_gate,
-            queue_folder_encode_action=lambda normalized_prefix, notes, bypass_schedule: _queue_folder_encode_action(
-                normalized_prefix,
-                notes,
-                bypass_schedule,
-                False,
-                scope_membership_token,
-            ),
-        )
-
-    def _stop_calibration_queue_action() -> dict[str, Any]:
-        return stop_calibration_queue_action(
-            connection_factory=lambda: open_db(config.paths.db_path),
-            config=config,
-            now_iso=_now_iso,
-            active_calibration_process_controllers=_active_calibration_process_controllers,
-            load_job_state=_load_job_state,
-            save_job_state=_save_job_state,
-        )
-
-    def _clear_folder_tuning_action(normalized_prefix: str) -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            return _clear_folder_tuning_state(
-                connection,
-                config=config,
-                prefix=normalized_prefix,
-            )
-
-    def _use_show_settings_action(normalized_prefix: str) -> dict[str, Any]:
-        nonlocal config
-
-        def show_has_approval(show_prefix: str) -> bool:
-            approval = effective_production_approval(config, show_prefix, _load_calibration_state)
-            return (
-                approval is not None
-                and approval.prefix == show_prefix
-                and approval.current
-                and approval.contract is not None
-            )
-
-        def season_sample_prefixes(season_prefix: str) -> list[str]:
-            with open_readonly_db(config.paths.db_path) as connection:
-                return prefixes_with_samples(
-                    connection, season_prefix, has_sample=lambda prefix: _calibration_file(config, prefix).exists(),
-                )
-
-        result = use_show_settings(
-            config,
-            normalized_prefix,
-            show_has_approval=show_has_approval,
-            tuned_prefixes=season_sample_prefixes,
-            clear_tuning=_clear_folder_tuning_action,
-        )
-        if result.get("changed"):
-            config = load_config(config.paths.config_path)
-            app.state.config = config
-            _reset_folder_card_cache()
-        return result
-
     def _save_series_lifecycle_action(normalized_prefix: str, mode: str) -> dict[str, Any]:
         nonlocal config
         normalized_mode = mode.strip().lower()
@@ -2768,44 +2230,17 @@ def create_app(
 
     register_folder_routes(
         app,
-        folder_status_payload=_folder_status_payload,
-        folder_staged_integrity_payload=_folder_staged_integrity_payload,
-        folder_episodes_payload=lambda prefix: folder_episodes_payload(config, prefix),
-        folder_sample_history_payload=lambda prefix, offset, limit: sample_history_payload(
-            config.paths.db_path, prefix, offset, limit,
-        ),
-        folder_content_payload=_folder_content_payload,
-        checked_output_preview_payload=lambda prefix: _checked_output_preview_payload(
-            config,
-            prefix,
-        ),
-        checked_output_preview_stream_action=lambda prefix, range_header: (
-            _checked_output_preview_stream_action(config, prefix, range_header)
-        ),
-        download_review_compare_action=lambda prefix: _download_review_compare_action(
-            config,
-            prefix,
-        ),
-        folder_ai_tune_action=_folder_ai_tune_action,
-        folder_ai_tune_preview_action=_folder_ai_tune_preview_action,
-        folder_ai_tune_confirm_action=_folder_ai_tune_confirm_action,
-        clear_folder_tuning_action=_clear_folder_tuning_action,
         save_series_lifecycle_action=_save_series_lifecycle_action,
         save_audio_preset_action=_save_audio_preset_action,
-        audio_preset_payload=_audio_preset_payload,
         dismiss_audio_preset_suggestion_action=_dismiss_audio_preset_suggestion_action,
-        approve_measured_encode_recovery_action=_approve_measured_encode_recovery_action,
         accept_ambiguous_motion_action=_accept_ambiguous_motion_action,
         keep_motion_held_originals_action=_keep_motion_held_originals_action,
         undo_motion_keep_action=_undo_motion_keep_action,
         put_original_back_action=_put_original_back_action,
         queue_folder_encode_action=_queue_folder_encode_action,
-        queue_older_seasons_encode_action=_queue_older_seasons_encode_action,
         validate_folder_outputs_action=_validate_folder_outputs_action,
         promote_folder_outputs_action=_promote_folder_outputs_action,
         decide_size_held_action=_decide_size_held_action,
-        save_profile_action=_save_profile_action,
-        use_show_settings_action=_use_show_settings_action,
     )
 
     def _season_payloads(normalized_prefix: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
@@ -2855,10 +2290,6 @@ def create_app(
         app,
         pause_encode_queue_action=_pause_encode_queue_action,
         resume_encode_queue_action=_resume_encode_queue_action,
-        retry_failed_encode_queue_action=_retry_failed_encode_queue_action,
-        retry_failed_encode_prefix_action=_retry_failed_encode_prefix_action,
-        stop_encode_queue_action=_stop_encode_queue_action,
-        stop_calibration_queue_action=_stop_calibration_queue_action,
     )
 
     return app
@@ -2886,336 +2317,6 @@ def _folder_display_policy(
     if live_policy:
         return live_policy
     return object_dict(sample_item.get("resolved_policy"))
-
-
-def _download_review_compare_action(config: MediaforceConfig, prefix: str) -> FileResponse:
-    calibration = _load_calibration_state(config, prefix)
-    if calibration is None:
-        raise HTTPException(status_code=404, detail="No sampled review clips are available for this folder yet.")
-    retained_pairs = _review_compare_pair_entries(config, calibration)
-    compare_clips = [
-        clip_path for clip_path in _review_compare_bundle_entries(config, calibration)
-        if clip_path.exists()
-    ]
-    if retained_pairs and len(retained_pairs) >= max(len(compare_clips), 1):
-        bundle_path, download_name, cleanup_path = _build_review_compare_video_from_pairs(
-            config=config,
-            prefix=prefix,
-            retained_pairs=retained_pairs,
-        )
-        return FileResponse(
-            bundle_path,
-            filename=download_name,
-            media_type="video/quicktime",
-            background=BackgroundTask(_remove_path_if_exists, cleanup_path),
-        )
-
-    if not compare_clips:
-        raise HTTPException(status_code=404, detail="No side-by-side compare clips are available for this folder yet.")
-    bundle_path, download_name = _build_review_compare_video(
-        config=config,
-        prefix=prefix,
-        compare_clips=compare_clips,
-    )
-    return FileResponse(
-        bundle_path,
-        filename=download_name,
-        media_type="video/quicktime",
-        background=BackgroundTask(_remove_path_if_exists, bundle_path),
-    )
-
-
-def _checked_output_preview_payload(config: MediaforceConfig, prefix: str) -> dict[str, Any]:
-    try:
-        with open_readonly_db(config.paths.db_path) as connection:
-            output = checked_staged_output(connection, config, prefix)
-    except CheckedStagedOutputUnavailable as error:
-        return {
-            "available": False,
-            "code": error.code,
-            "detail": error.detail,
-        }
-    return {
-        "available": True,
-        "code": "checked_output_ready",
-        "filename": output.path.name,
-        "size_bytes": output.size_bytes,
-        "media_type": checked_output_media_type(output.path),
-    }
-
-
-def _checked_output_preview_stream_action(
-        config: MediaforceConfig,
-        prefix: str,
-        range_header: str | None,
-) -> Response:
-    try:
-        with open_readonly_db(config.paths.db_path) as connection:
-            output = checked_staged_output(connection, config, prefix)
-    except CheckedStagedOutputUnavailable as error:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": error.code, "message": error.detail},
-        ) from error
-    try:
-        return checked_output_stream_response(output, range_header)
-    except InvalidByteRange as error:
-        raise HTTPException(
-            status_code=416,
-            detail={"code": "checked_output_range_invalid", "message": str(error)},
-            headers={"Content-Range": f"bytes */{output.size_bytes}"},
-        ) from error
-    except CheckedStagedOutputUnavailable as error:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": error.code, "message": error.detail},
-        ) from error
-
-
-def _build_review_compare_video(
-        *,
-        config: MediaforceConfig,
-        prefix: str,
-        compare_clips: list[Path],
-) -> tuple[Path, str]:
-    bundle_dir = config.paths.web_state_dir / "downloads"
-    bundle_dir.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(prefix="review-bundle-", suffix=".mov", dir=bundle_dir, delete=False) as temp_file:
-        bundle_path = Path(temp_file.name)
-    _concat_review_compare_clips(bundle_path=bundle_path, compare_clips=compare_clips)
-    download_name = f"{_download_name_slug(prefix)}-full-review-compare.mov"
-    return bundle_path, download_name
-
-
-def _build_review_compare_video_from_pairs(
-        *,
-        config: MediaforceConfig,
-        prefix: str,
-        retained_pairs: list[tuple[Path, Path]],
-) -> tuple[Path, str, Path]:
-    downloads_dir = config.paths.web_state_dir / "downloads"
-    downloads_dir.mkdir(parents=True, exist_ok=True)
-    bundle_dir = Path(mkdtemp(prefix="review-bundle-", dir=downloads_dir))
-    compare_clips: list[Path] = []
-    try:
-        geometry = _retained_review_pairs_compare_geometry(retained_pairs)
-        for index, (source_clip, preview_clip) in enumerate(retained_pairs, start=1):
-            output_path = bundle_dir / f"native-compare-{index:02d}.mkv"
-            _render_retained_review_pair_compare(
-                source_clip=source_clip,
-                preview_clip=preview_clip,
-                output_path=output_path,
-                geometry=geometry,
-            )
-            compare_clips.append(output_path)
-        bundle_path = bundle_dir / f"{_download_name_slug(prefix)}-full-review-compare.mov"
-        _concat_review_compare_clips(bundle_path=bundle_path, compare_clips=compare_clips)
-    except Exception:
-        _remove_path_if_exists(bundle_dir)
-        raise
-    download_name = f"{_download_name_slug(prefix)}-full-review-compare.mov"
-    return bundle_path, download_name, bundle_dir
-
-
-def _retained_review_pair_compare_geometry(retained_pair: tuple[Path, Path]) -> VideoGeometry:
-    source_clip, preview_clip = retained_pair
-    source_geometry = _video_geometry(source_clip)
-    preview_geometry = _video_geometry(preview_clip)
-    return VideoGeometry(
-        width=source_geometry.width + preview_geometry.width,
-        height=max(source_geometry.height, preview_geometry.height),
-    )
-
-
-def _retained_review_pairs_compare_geometry(retained_pairs: list[tuple[Path, Path]]) -> VideoGeometry:
-    geometries = [_retained_review_pair_compare_geometry(pair) for pair in retained_pairs]
-    return VideoGeometry(
-        width=max(geometry.width for geometry in geometries),
-        height=max(geometry.height for geometry in geometries),
-    )
-
-
-def _video_geometry(path: Path) -> VideoGeometry:
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=width,height",
-        "-of",
-        "json",
-        str(path),
-    ]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        stderr = (result.stderr or "").strip()
-        detail = stderr or f"ffprobe could not read video dimensions for {path.name}."
-        raise HTTPException(status_code=500, detail=detail)
-    try:
-        payload = json.loads(result.stdout or "{}")
-        stream = object_dict(object_list(payload.get("streams"))[0] if object_list(payload.get("streams")) else {})
-        width = int(stream.get("width") or 0)
-        height = int(stream.get("height") or 0)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        width = 0
-        height = 0
-    if width <= 0 or height <= 0:
-        raise HTTPException(status_code=500, detail=f"Could not read video dimensions for {path.name}.")
-    return VideoGeometry(width=width, height=height)
-
-
-def _retained_review_pair_compare_filter(geometry: VideoGeometry | None = None) -> str:
-    if geometry is None:
-        return NATIVE_COMPARE_FILTER
-    return (
-        f"{NATIVE_COMPARE_FILTER};"
-        f"[v]pad={geometry.width}:{geometry.height}:0:0:black,setsar=1[vout]"
-    )
-
-
-def _retained_review_pair_compare_map(geometry: VideoGeometry | None = None) -> str:
-    return "[vout]" if geometry is not None else "[v]"
-
-
-def _render_retained_review_pair_compare(
-        *,
-        source_clip: Path,
-        preview_clip: Path,
-        output_path: Path,
-        geometry: VideoGeometry | None = None,
-) -> None:
-    command = [
-        ffmpeg_binary(),
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-y",
-        "-i",
-        str(source_clip),
-        "-i",
-        str(preview_clip),
-        "-filter_complex",
-        _retained_review_pair_compare_filter(geometry),
-        "-map",
-        _retained_review_pair_compare_map(geometry),
-        "-an",
-        "-c:v",
-        "libx264",
-        "-crf",
-        "16",
-        "-preset",
-        "veryfast",
-        str(output_path),
-    ]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
-        _remove_path_if_exists(output_path)
-        stderr = (result.stderr or "").strip()
-        detail = stderr or "ffmpeg could not build a native-resolution review comparison clip."
-        raise HTTPException(status_code=500, detail=detail)
-
-
-def _review_compare_pair_entries(config: MediaforceConfig, calibration: dict[str, Any]) -> list[tuple[Path, Path]]:
-    entries: list[tuple[Path, Path]] = []
-    for raw_pair in object_list(calibration.get("review_pairs")):
-        pair = object_dict(raw_pair)
-        source_clip = _review_file_from_url(config, str(object_dict(pair.get("source_clip")).get("path") or ""))
-        preview_clip = _review_file_from_url(config, str(object_dict(pair.get("preview_clip")).get("path") or ""))
-        if source_clip is None or preview_clip is None:
-            continue
-        if source_clip.exists() and preview_clip.exists():
-            entries.append((source_clip, preview_clip))
-    if entries:
-        return entries
-
-    source_by_timestamp = {
-        _review_pair_timestamp_key(float_value(clip.get("timestamp_seconds"))): _review_file_from_url(
-            config,
-            str(clip.get("path") or ""),
-        )
-        for clip in (object_dict(raw_clip) for raw_clip in object_list(calibration.get("source_clips")))
-    }
-    for raw_clip in object_list(calibration.get("preview_clips")):
-        preview = object_dict(raw_clip)
-        key = _review_pair_timestamp_key(float_value(preview.get("timestamp_seconds")))
-        source_clip = source_by_timestamp.get(key)
-        preview_clip = _review_file_from_url(config, str(preview.get("path") or ""))
-        if source_clip is None or preview_clip is None:
-            continue
-        if source_clip.exists() and preview_clip.exists():
-            entries.append((source_clip, preview_clip))
-    return entries
-
-
-def _review_pair_timestamp_key(timestamp: float | None) -> int:
-    return int(round(float(timestamp or 0.0) * 1000))
-
-
-def _review_compare_bundle_entries(config: MediaforceConfig, calibration: dict[str, Any]) -> list[Path]:
-    entries: list[Path] = []
-    for raw_clip in object_list(calibration.get("compare_clips")):
-        clip_path = _review_file_from_url(config, str(object_dict(raw_clip).get("path") or ""))
-        if clip_path is None:
-            continue
-        entries.append(clip_path)
-    if entries:
-        return entries
-    for raw_pair in object_list(calibration.get("review_pairs")):
-        pair = object_dict(raw_pair)
-        compare_clip = object_dict(pair.get("compare_clip"))
-        clip_path = _review_file_from_url(config, str(compare_clip.get("path") or ""))
-        if clip_path is None:
-            continue
-        entries.append(clip_path)
-    return entries
-
-
-def _concat_review_compare_clips(*, bundle_path: Path, compare_clips: list[Path]) -> None:
-    list_file = bundle_path.with_suffix(".txt")
-    list_file.write_text("".join(_ffmpeg_concat_file_line(path) for path in compare_clips))
-    command = [
-        ffmpeg_binary(),
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_file),
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-movflags",
-        "+faststart",
-        str(bundle_path),
-    ]
-    result = subprocess.run(command, capture_output=True, text=True)
-    _remove_path_if_exists(list_file)
-    if result.returncode != 0 or not bundle_path.exists() or bundle_path.stat().st_size <= 0:
-        _remove_path_if_exists(bundle_path)
-        stderr = (result.stderr or "").strip()
-        detail = stderr or "ffmpeg could not build the combined review video."
-        raise HTTPException(status_code=500, detail=detail)
-
-
-def _ffmpeg_concat_file_line(path: Path) -> str:
-    escaped = str(path).replace("'", "'\\''")
-    return f"file '{escaped}'\n"
-
-
-def _download_name_slug(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return slug or "review-bundle"
 
 
 @dataclass(frozen=True)
@@ -3472,32 +2573,11 @@ def _list_folder_cards(
     return _attach_page_states(connection, config, _attach_media_scopes(connection, config, cards))
 
 
-def _list_series_folder_cards(
-        config: MediaforceConfig,
-        connection: DBClient,
-        *,
-        candidate_decisions: list[CandidateDecision] | None = None,
-) -> list[FolderCard]:
-    library_types = config.library_type_map
-    return _folder_cards_for_group(
-        config,
-        connection,
-        folder_group=lambda rel_path: _tv_series_folder_group(
-            rel_path,
-            library_types=library_types,
-        ),
-        aggregate_badges=True,
-        media_roots={root for root, library_type in config.library_type_map.items() if library_type == "tv"},
-        candidate_decisions=candidate_decisions,
-    )
-
-
 def _folder_cards_for_group(
         config: MediaforceConfig,
         connection: DBClient,
         *,
         folder_group: Any,
-        aggregate_badges: bool = False,
         minimum_recommended_savings_bytes: int | None = MIN_RECOMMENDED_SAVINGS_BYTES,
         rel_path_root: str | None = None,
         media_roots: set[str] | None = None,
@@ -3515,14 +2595,6 @@ def _folder_cards_for_group(
             needs_attention_badges = _folder_needs_attention_badges(connection)
         if calibration_job_badges is None:
             calibration_job_badges = _folder_calibration_job_badges(connection)
-        if aggregate_badges:
-            aggregated_badge = _aggregated_folder_review_badge(
-                prefix,
-                needs_attention_badges=needs_attention_badges,
-                calibration_job_badges=calibration_job_badges,
-            )
-            if aggregated_badge is not None:
-                return aggregated_badge
         return _folder_review_badge(
             config,
             prefix,
@@ -3856,26 +2928,6 @@ def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, 
             ),
         }
     return badges
-
-
-def _aggregated_folder_review_badge(
-        prefix: str,
-        *,
-        needs_attention_badges: dict[str, dict[str, str | None]],
-        calibration_job_badges: dict[str, dict[str, str | None]],
-) -> dict[str, str | None] | None:
-    for badges in (needs_attention_badges, calibration_job_badges):
-        exact_badge = badges.get(prefix)
-        if exact_badge is not None:
-            return exact_badge
-        descendant_badges = [
-            badge
-            for badge_prefix, badge in badges.items()
-            if badge_prefix.startswith(f"{prefix}/")
-        ]
-        if descendant_badges:
-            return descendant_badges[0]
-    return None
 
 
 def _folder_calibration_job_badges(connection: DBClient) -> dict[str, dict[str, str | None]]:
@@ -4692,10 +3744,6 @@ def _catalog_stale_after(config: MediaforceConfig) -> timedelta:
     return interval * 2 if interval is not None else CATALOG_STALE_AFTER_WITHOUT_AUTOMATIC_REFRESH
 
 
-def _latest_scan_completed_at(connection: DBClient, prefix: str | None) -> datetime | None:
-    return runtime_latest_scan_completed_at(connection, prefix)
-
-
 def _scan_process_is_alive(pid: JSONValue) -> bool:
     return runtime_scan_process_is_alive(pid)
 
@@ -4767,15 +3815,6 @@ def _movie_folder_group(
     if scope is None or scope.domain != "movie":
         return None
     return scope.group_tuple()
-
-
-def _tv_series_folder_group(
-        rel_path: str,
-        *,
-        library_types: Mapping[str, str] | None = None,
-) -> tuple[str, str, str, str] | None:
-    scope = tv_series_scope_for_rel_path(rel_path, library_types=library_types)
-    return scope.group_tuple() if scope is not None else None
 
 
 def _tv_season_folder_group(
@@ -4872,33 +3911,6 @@ def _review_file_from_url(config: MediaforceConfig, value: str) -> Path | None:
     return candidate
 
 
-def _review_cleanup_targets(config: MediaforceConfig, calibration_payload: dict[str, Any] | None) -> list[Path]:
-    if not isinstance(calibration_payload, dict):
-        return []
-    targets: list[Path] = []
-    seen: set[Path] = set()
-    for key in ("compare_clips", "preview_clips", "source_clips"):
-        for clip in object_list(calibration_payload.get(key)):
-            review_file = _review_file_from_url(config, str(object_dict(clip).get("path") or ""))
-            if review_file is None:
-                continue
-            if review_file not in seen:
-                seen.add(review_file)
-                targets.append(review_file)
-            try:
-                relative = review_file.relative_to(config.paths.review_dir)
-            except ValueError:
-                continue
-            if not relative.parts:
-                continue
-            root = config.paths.review_dir / relative.parts[0]
-            if root in seen:
-                continue
-            seen.add(root)
-            targets.append(root)
-    return sorted(targets, key=lambda path: len(path.parts), reverse=True)
-
-
 def _remove_path_if_exists(path: Path) -> None:
     try:
         if path.is_dir() and not path.is_symlink():
@@ -4909,90 +3921,6 @@ def _remove_path_if_exists(path: Path) -> None:
         return
     except OSError:
         return
-
-
-def _prune_empty_parents(path: Path, *, stop_at: Path) -> None:
-    current = path
-    stop = stop_at.resolve()
-    while True:
-        try:
-            resolved = current.resolve()
-        except OSError:
-            return
-        if resolved == stop:
-            return
-        try:
-            current.rmdir()
-        except FileNotFoundError:
-            current = current.parent
-            continue
-        except OSError:
-            return
-        current = current.parent
-
-
-def _clear_folder_tuning_state(
-        connection: DBClient,
-        *,
-        config: MediaforceConfig,
-        prefix: str,
-) -> dict[str, Any]:
-    active_job = load_active_job(connection, prefix)
-    if active_job is not None:
-        return {"ok": False,
-                "message": "A calibration job is still active for this folder. Wait for it to finish before clearing it."}
-
-    calibration_payload = None
-    calibration_path = _calibration_file(config, prefix)
-    if calibration_path.exists():
-        try:
-            loaded = json.loads(calibration_path.read_text())
-            calibration_payload = loaded if isinstance(loaded, dict) else None
-        except (OSError, json.JSONDecodeError):
-            calibration_payload = None
-
-    review_targets = _review_cleanup_targets(config, calibration_payload)
-    review_pack_path = _review_pack_dir(config, prefix)
-    review_pack_present = review_pack_path.exists()
-    artifact_rows = connection.execute(
-        select(learning_artifacts.c.artifact_path).where(learning_artifacts.c.prefix == prefix)
-    ).mappings().fetchall()
-    artifact_paths = [Path(str(row["artifact_path"])) for row in artifact_rows if
-                      str(row["artifact_path"] or "").strip()]
-    session_count = int(connection.execute(
-        select(func.count()).select_from(tuning_sessions).where(tuning_sessions.c.prefix == prefix)
-    ).scalar_one())
-    job_count = int(connection.execute(
-        select(func.count()).select_from(calibration_jobs_table).where(calibration_jobs_table.c.prefix == prefix)
-    ).scalar_one())
-
-    connection.execute(delete(tuning_sessions).where(tuning_sessions.c.prefix == prefix))
-    connection.execute(delete(calibration_jobs_table).where(calibration_jobs_table.c.prefix == prefix))
-
-    _remove_path_if_exists(calibration_path)
-    _remove_path_if_exists(_advice_file(config, prefix))
-    _remove_path_if_exists(_proposal_file(config, prefix))
-    for artifact_path in artifact_paths:
-        _remove_path_if_exists(artifact_path)
-    for review_target in review_targets:
-        _remove_path_if_exists(review_target)
-        if review_target.parent != config.paths.review_dir:
-            _prune_empty_parents(review_target.parent, stop_at=config.paths.review_dir)
-    _remove_path_if_exists(review_pack_path)
-    if review_pack_path.parent != config.paths.review_dir:
-        _prune_empty_parents(review_pack_path.parent, stop_at=config.paths.review_dir)
-
-    return {
-        "ok": True,
-        "message": "Cleared the tuning thread and sampled calibration artifacts for this folder.",
-        "cleared": {
-            "tuning_sessions": session_count,
-            "calibration_jobs": job_count,
-            "review_targets": len(review_targets),
-            "review_pack_artifacts": int(review_pack_present),
-            "learning_artifacts": len(artifact_paths),
-        },
-    }
 
 
 def _upsert_override(file_path: Path, prefix: str, policy: ActionPayload) -> None:

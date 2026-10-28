@@ -220,7 +220,7 @@ Guidance:
   - `page_state.py`
     - the one `page_state` a folder page and its library card lead with: a
       state key, tone, recovery kind, primary action, failure kind and the job
-      or saved sample that decided it, on `/api/folders/<prefix>/status` and on
+      or saved sample that decided it, in the native sample/item facts and
       each TV folder card
     - decided from database rows and saved samples, never from the hour-long
       sample notice: the workflow state's wider-run rules for encode work, the
@@ -252,13 +252,12 @@ Guidance:
   - `folder_tuning_runtime.py`
   - `folder_ai_tuning.py`
   - `dashboard_payloads.py`
-  - `settings_payloads.py`
   - `tool_capabilities.py`
     - explicit-lifecycle ffmpeg capability snapshots used by read-only payloads
 
 Guidance:
 
-- `web/app.py` is still large (over 5,000 lines). Add new route-specific behavior in `web/routes/` or `web/runtime/` rather
+- `web/app.py` still owns the application wiring. Add new route-specific behavior in `web/routes/` or `web/runtime/` rather
   than growing `web/app.py`.
 - Only trim more from `web/app.py` when a clearly mechanical helper cluster or
   removable compatibility wrapper appears.

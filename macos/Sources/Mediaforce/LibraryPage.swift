@@ -9,8 +9,11 @@ struct LibraryPage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                WorkStatus(facts: facts)
-                    .padding(.bottom, 22)
+                // Only when there is something to explain; the title bar already says what the work is doing.
+                if Words.workExplanation(facts) != nil || facts.lastChange != nil {
+                    WorkStatus(facts: facts)
+                        .padding(.bottom, 22)
+                }
                 StorageBar(facts: facts, open: open)
                     .padding(.bottom, 26)
                 HStack(alignment: .top, spacing: 28) {
@@ -36,5 +39,6 @@ struct LibraryPage: View {
         .scrollBounceBehavior(.basedOnSize)
         .background(Color(nsColor: .textBackgroundColor))
         .navigationTitle("Library")
+        .navigationSubtitle(Words.workHeadline(facts))
     }
 }

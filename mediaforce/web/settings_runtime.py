@@ -970,9 +970,9 @@ def build_runtime_metadata_settings(
 ) -> dict[str, Any]:
     """Build the `metadata` runtime settings from the Plex and TMDB tab: on/off for each and the Plex address.
 
-    Key variable names, refresh intervals and the TMDB address carry over from `saved`, normalized as the website
-    save does. Every saved Plex path carries over verbatim, including one kept for a removed library, since the
-    Libraries side owns those paths and keeps them so a removal can be undone.
+    Key variable names, refresh intervals and the TMDB address carry over from `saved`, normalized before saving.
+    Every saved Plex path carries over verbatim, including one kept for a removed library, since the Libraries
+    side owns those paths and keeps them so a removal can be undone.
     """
     if not isinstance(plex.get("enabled"), bool) or not isinstance(tmdb.get("enabled"), bool):
         raise SettingsValidationError("Choose on or off for Plex and TMDB.")
@@ -1014,9 +1014,9 @@ COMPRESSION_WHOLE_FIELDS = {"tallest_picture", "grain"}
 
 
 def compression_settings_facts(*, video_defaults: dict[str, str], revision: str) -> dict[str, Any]:
-    """The Mac app's Compression tab: the compression defaults the website edits, under the tab's own names.
+    """The Mac app's Compression tab, under the tab's own names.
 
-    `video_defaults` is `settings_video_defaults_for_config`, the values the website's form starts from.
+    `video_defaults` is `settings_video_defaults_for_config`.
     """
     facts: dict[str, Any] = {}
     for name, key in COMPRESSION_FIELDS.items():
@@ -1038,11 +1038,11 @@ def compression_settings_facts(*, video_defaults: dict[str, str], revision: str)
 
 
 def build_runtime_video_settings(*, edits: dict[str, Any], saved: dict[str, str]) -> dict[str, Any]:
-    """Build the `video` runtime settings from the Compression tab's fields, validated as the website save is.
+    """Build validated `video` runtime settings from the Compression tab's fields.
 
-    `saved` is `settings_video_defaults_for_config`, so defaults the tab does not show carry over as the website
-    form would send them. As on the website, changing the size limit holds samples to the same new limit; an
-    unchanged limit leaves the saved sample limit alone. Every field is required, and a choice the website does
+    `saved` is `settings_video_defaults_for_config`, so defaults the tab does not show carry over.
+    Changing the size limit holds samples to the same new limit; an
+    unchanged limit leaves the saved sample limit alone. Every field is required, and a choice the tab does
     not offer is refused instead of quietly replaced.
     """
     video_defaults: dict[str, Any] = dict(saved)
@@ -1360,48 +1360,6 @@ def _new_schedule_key(name: str, used_keys: set[str]) -> str:
     return key
 
 
-def build_runtime_settings_payload(
-        *,
-        libraries: list[dict[str, Any]],
-        remote_hosts: list[dict[str, Any]],
-        transcode_root: str,
-        catalog_refresh_hours: Any = DEFAULT_CATALOG_REFRESH_HOURS,
-        video_defaults: dict[str, Any] | None = None,
-        encode_queue_scheduler: dict[str, Any],
-        schedule_profiles: list[dict[str, Any]],
-        metadata: dict[str, Any] | None = None,
-        existing_library_types: dict[str, str] | None = None,
-        existing_libraries: dict[str, dict[str, Any]] | None = None,
-        existing_library_paths: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    _reject_submitted_secrets(metadata)
-    media, plex_library_roots = build_runtime_media_settings(
-        libraries=libraries,
-        transcode_root=transcode_root,
-        catalog_refresh_hours=catalog_refresh_hours,
-        existing_library_types=existing_library_types,
-        existing_libraries=existing_libraries,
-        existing_library_paths=existing_library_paths,
-    )
-    known_library_keys = set(media["source_roots"])
-    computers = build_runtime_computer_settings(
-        remote_hosts=remote_hosts,
-        encode_queue_scheduler=encode_queue_scheduler,
-        schedule_profiles=schedule_profiles,
-        known_library_keys=known_library_keys,
-    )
-    normalized_video_defaults = normalize_video_defaults(video_defaults)
-    metadata_payload = dict(metadata) if isinstance(metadata, dict) else {}
-    plex_payload = dict(metadata_payload.get("plex")) if isinstance(metadata_payload.get("plex"), dict) else {}
-    plex_payload["library_roots"] = plex_library_roots
-    metadata_payload["plex"] = plex_payload
-    normalized_metadata = normalize_metadata_settings(metadata_payload, known_library_keys=known_library_keys)
-    return {
-        "media": media,
-        "video": normalized_video_defaults,
-        **computers,
-        "metadata": normalized_metadata,
-    }
 
 
 def build_runtime_computer_settings(
@@ -1576,21 +1534,6 @@ def build_runtime_computer_settings(
 
 def _paths_overlap(left: Path, right: Path) -> bool:
     return left == right or left in right.parents or right in left.parents
-
-
-def _reject_submitted_secrets(value: Any, *, path: tuple[str, ...] = ()) -> None:
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            key_text = str(key).strip().lower()
-            next_path = (*path, key_text)
-            secret_key = key_text in {"token", "password", "secret", "api_key", "apikey"}
-            if secret_key and nested is not None and nested != "" and nested is not False:
-                raise SettingsValidationError("Credential values are not accepted in Settings.")
-            _reject_submitted_secrets(nested, path=next_path)
-        return
-    if isinstance(value, list):
-        for nested in value:
-            _reject_submitted_secrets(nested, path=path)
 
 
 def normalize_metadata_settings(

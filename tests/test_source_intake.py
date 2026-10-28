@@ -41,7 +41,7 @@ from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_CUR
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps, process_evidence_queue_once
 from mediaforce.library.source_evidence import load_source_evidence, observe_file, record_current_measurement
 from mediaforce.library.source_intake import assess_readable_source, commit_readable_source, queue_original_intake
-from test_source_evidence import connection, _config, _insert_item
+from test_source_evidence import connection as connection, _config, _insert_item
 import test_evidence_worker as worker_fixtures
 
 
@@ -1164,12 +1164,6 @@ def test_completed_operator_rows_do_not_block_later_prepare(tmp_path: Path) -> N
             .where(library_item_evidence_state.c.library_item_id != second_id)
             .values(work_status="completed", work_reason="operator_scope")
         )
-        from mediaforce.web.runtime.operator_work import build_operator_work_payload
-
-        payload = build_operator_work_payload(
-            database, config, scan_job=None, catalog_is_stale=False, latest_scan_completed_at=None, evidence_runner_active=True
-        )
-        assert payload["evidence"]["can_prepare"]
         result = start_evidence_work(database, config, "tv/second.mkv")
         assert result["is_paused"]
 

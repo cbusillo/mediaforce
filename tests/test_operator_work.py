@@ -15,15 +15,14 @@ from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, scan_runs
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.library.background_work import set_background_work_paused
-from mediaforce.library.evidence_queue import EvidenceQueueConflict, claim_next_evidence_work, resume_evidence_queue, \
-    start_evidence_work
+from mediaforce.library.evidence_queue import EvidenceQueueConflict, claim_next_evidence_work, start_evidence_work
 from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
 from mediaforce.library.scanner import ScanStats
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import job_runtime as job_runtime_module
 from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_db, latest_scan_completed_at, \
     load_scan_status, maybe_schedule_scan, repair_stale_scan_runs, run_scan_job, save_scan_job_state, scan_is_stale
-from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, build_operator_work_payload
+from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner
 
 
 class OperatorWorkTests(unittest.TestCase):
@@ -60,85 +59,6 @@ class OperatorWorkTests(unittest.TestCase):
     def tearDown(self) -> None:
         reset_engine_cache()
         self.temp_dir.cleanup()
-
-    def test_payload_is_idle_without_runner_and_paginates_reachable_backlog(self) -> None:
-        self._insert_item()
-
-        with open_db(self.config.paths.db_path) as connection:
-            payload = build_operator_work_payload(
-                connection,
-                self.config,
-                scan_job=None,
-                catalog_is_stale=False,
-                latest_scan_completed_at=None,
-                evidence_runner_active=False,
-                backlog_limit=1,
-            )
-
-        self.assertEqual(payload["background"]["status"], "active")
-        self.assertEqual(payload["catalog"]["freshness"], "current")
-        self.assertEqual(payload["catalog"]["automatic_refresh_hours"], 6)
-        self.assertFalse(payload["catalog"]["providers"]["plex"]["token_configured"])
-        self.assertEqual(payload["evidence"]["live_status"], "idle")
-        self.assertEqual(payload["refresh"], {"mode": "manual", "interval_ms": None})
-        self.assertEqual(payload["evidence"]["backlog"]["total"], 2)
-        self.assertEqual(len(payload["evidence"]["backlog"]["rows"]), 1)
-        self.assertTrue(payload["evidence"]["backlog"]["has_next"])
-        self.assertNotIn("source_path", payload["evidence"]["backlog"]["rows"][0])
-
-    def test_prepared_batch_stays_quiet_until_explicit_runner_start(self) -> None:
-        self._insert_item()
-        with open_db(self.config.paths.db_path) as connection:
-            start_evidence_work(connection, self.config, "tv", limit=1)
-            payload = build_operator_work_payload(
-                connection,
-                self.config,
-                scan_job=None,
-                catalog_is_stale=False,
-                latest_scan_completed_at=None,
-                evidence_runner_active=False,
-            )
-
-        self.assertEqual(payload["evidence"]["live_status"], "paused")
-        self.assertTrue(payload["evidence"]["can_resume"])
-        self.assertEqual(payload["refresh"]["mode"], "manual")
-
-    def test_resumed_queue_without_runner_offers_continue_instead_of_pause(self) -> None:
-        self._insert_item()
-        with open_db(self.config.paths.db_path) as connection:
-            start_evidence_work(connection, self.config, "tv", limit=1)
-            resume_evidence_queue(connection)
-            payload = build_operator_work_payload(
-                connection,
-                self.config,
-                scan_job=None,
-                catalog_is_stale=False,
-                latest_scan_completed_at=None,
-                evidence_runner_active=False,
-            )
-
-        self.assertTrue(payload["evidence"]["can_resume"])
-        self.assertFalse(payload["evidence"]["can_pause"])
-
-    def test_backlog_offset_clamps_to_last_reachable_page(self) -> None:
-        self._insert_item()
-        with open_db(self.config.paths.db_path) as connection:
-            payload = build_operator_work_payload(
-                connection,
-                self.config,
-                scan_job=None,
-                catalog_is_stale=False,
-                latest_scan_completed_at=None,
-                evidence_runner_active=False,
-                backlog_offset=100,
-                backlog_limit=1,
-            )
-
-        backlog = payload["evidence"]["backlog"]
-        self.assertEqual(backlog["offset"], 1)
-        self.assertEqual(backlog["range_start"], 2)
-        self.assertEqual(backlog["range_end"], 2)
-        self.assertFalse(backlog["has_next"])
 
     def test_global_pause_blocks_new_batches_and_claims(self) -> None:
         self._insert_item()

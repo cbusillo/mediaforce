@@ -450,58 +450,6 @@ def _queued_run_item_ids(jobs: list[dict[str, Any]], *, manifest_reader: Manifes
     return busy_ids
 
 
-def staged_remake_records(
-        connection: DBClient,
-        records: list[dict[str, Any]],
-        prefix: str,
-        *,
-        current_approval: CurrentApprovalFn,
-) -> list[dict[str, Any]]:
-    """Attach per-file action availability to the already paginated integrity rows."""
-    manifest_reader = cache(read_manifest)
-    ids = [int(record["item_id"]) for record in records if record.get("item_id") is not None]
-    rows = {int(row["library_item_id"]): row for row in connection.execute(
-        select(staged_artifacts, library_items.c.source_path.label("original_source_path"),
-               kept_original_clause(library_items.c.id).label("kept_original"))
-        .select_from(staged_artifacts.join(library_items, library_items.c.id == staged_artifacts.c.library_item_id))
-        .where(staged_artifacts.c.library_item_id.in_(ids))
-    ).mappings()}
-    settings_history = staged_run_items(connection, {
-        item_id for item_id, row in rows.items() if _stored_validation(row).get("passed") is True
-    }, manifest_reader=manifest_reader)
-    approvals: dict[str, dict[str, Any] | None] = {}
-
-    def approval_for_scope(scope: str) -> dict[str, Any] | None:
-        if scope not in approvals:
-            approvals[scope] = current_approval(scope)
-        return approvals[scope]
-
-    for record in records:
-        record_id = record.get("item_id")
-        row = rows.get(record_id) if isinstance(record_id, int) else None
-        recovery = staged_remake_details(connection, row, prefix,
-                                        current_approval=approval_for_scope, settings_history=settings_history,
-                                        manifest_reader=manifest_reader)
-        if recovery is not None:
-            record["remake"] = {key: recovery[key] for key in ("reason", "blocked_reason")}
-            intent = remake_intent(row)
-            if intent:
-                record["remake"]["pending"] = True
-                copy_state = ("removed" if intent.get("state") == "removed" else
-                              "present" if requested_copy_is_present(row) else "unknown")
-                record["remake"]["copy_state"] = copy_state
-                record["detail"] = ("Saved request to make this file again. Use Make again to retry only this file "
-                                    "with its saved settings. " + str(recovery["blocked_reason"]))
-                if copy_state == "removed":
-                    record["detail"] = "Finished copy removed; not queued yet. " + record["detail"]
-                elif copy_state == "present":
-                    record["detail"] = ("Finished copy remains. Use Make again to retry with the current approved settings. "
-                                        + str(recovery["blocked_reason"]))
-                else:
-                    record["detail"] = "Finished copy presence is unconfirmed. " + record["detail"]
-    return records
-
-
 def _load_remake_row(connection: DBClient, item_id: int) -> DBRow | None:
     return connection.execute(
         select(staged_artifacts, library_items.c.rel_path,

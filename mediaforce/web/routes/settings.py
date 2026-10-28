@@ -8,47 +8,18 @@ from starlette.concurrency import run_in_threadpool
 from mediaforce.web.routes.folders import request_body
 from mediaforce.web.settings_runtime import SettingsValidationError
 
-SETTINGS_SAVE_ERROR_MESSAGE = (
-    "Settings could not be saved. Review the submitted values and try again."
-)
-
 
 def register_settings_routes(
-        app: FastAPI,
-        *,
-        settings_payload: Callable[[bool], dict[str, Any]],
-        save_settings_action: Callable[..., dict[str, Any]],
-        library_type_preview_action: Callable[[str, str], dict[str, Any]],
-        archive_cleanup_payload: Callable[[str | None], dict[str, Any]],
-        clear_archive_cleanup_action: Callable[[str | None], dict[str, Any]],
+    app: FastAPI,
+    *,
+    library_type_preview_action: Callable[[str, str], dict[str, Any]],
+    archive_cleanup_payload: Callable[[str | None], dict[str, Any]],
+    clear_archive_cleanup_action: Callable[[str | None], dict[str, Any]],
 ) -> None:
-    @app.get("/api/settings")
-    def api_settings(include_archive_cleanup: int = 1) -> JSONResponse:
-        return JSONResponse(settings_payload(bool(include_archive_cleanup)))
 
     @app.get("/api/archive-cleanup")
     def api_archive_cleanup(transcode_root: str | None = None) -> JSONResponse:
         return JSONResponse(archive_cleanup_payload((transcode_root or "").strip() or None))
-
-    @app.post("/api/settings")
-    async def api_settings_save(request: Request) -> JSONResponse:
-        body = await request.json()
-        try:
-            result = save_settings_action(
-                libraries=[dict(item) for item in body.get("libraries", [])],
-                remote_hosts=[dict(item) for item in body.get("remote_hosts", [])],
-                transcode_root=str(body.get("transcode_root", "")).strip(),
-                catalog_refresh_hours=body.get("catalog_refresh_hours", 6),
-                video_defaults=dict(body.get("video_defaults", {})),
-                encode_queue_scheduler=dict(body.get("encode_queue_scheduler", {})),
-                schedule_profiles=[dict(item) for item in body.get("schedule_profiles", [])],
-                metadata=(dict(body["metadata"]) if isinstance(body.get("metadata"), dict) else None),
-            )
-        except SettingsValidationError as exc:
-            return JSONResponse({"ok": False, "message": exc.public_message}, status_code=400)
-        except ValueError:
-            return JSONResponse({"ok": False, "message": SETTINGS_SAVE_ERROR_MESSAGE}, status_code=400)
-        return JSONResponse(result)
 
     @app.post("/api/settings/library-type-preview")
     async def api_library_type_preview(request: Request) -> JSONResponse:
@@ -59,7 +30,7 @@ def register_settings_routes(
                 str(body.get("library_type", "")).strip(),
             )
         except ValueError:
-            return JSONResponse({"ok": False, "message": SETTINGS_SAVE_ERROR_MESSAGE}, status_code=400)
+            return JSONResponse({"ok": False, "code": "invalid_settings"}, status_code=400)
         return JSONResponse(result)
 
     @app.post("/api/archive-cleanup/clear")
@@ -69,10 +40,10 @@ def register_settings_routes(
 
 
 def register_library_settings_routes(
-        app: FastAPI,
-        *,
-        library_settings_facts: Callable[[], dict[str, Any]],
-        save_library_settings_action: Callable[..., dict[str, Any]],
+    app: FastAPI,
+    *,
+    library_settings_facts: Callable[[], dict[str, Any]],
+    save_library_settings_action: Callable[..., dict[str, Any]],
 ) -> None:
     """The Mac app's Libraries settings tab. Refusals carry a code the app words; never a sentence."""
 
@@ -103,10 +74,10 @@ def register_library_settings_routes(
 
 
 def register_computer_settings_routes(
-        app: FastAPI,
-        *,
-        computer_settings_facts: Callable[[], dict[str, Any]],
-        save_computer_settings_action: Callable[..., dict[str, Any]],
+    app: FastAPI,
+    *,
+    computer_settings_facts: Callable[[], dict[str, Any]],
+    save_computer_settings_action: Callable[..., dict[str, Any]],
 ) -> None:
     """The Mac app's Computers settings tab. Refusals carry a code the app words; never a sentence."""
 
@@ -140,10 +111,10 @@ def register_computer_settings_routes(
 
 
 def register_metadata_settings_routes(
-        app: FastAPI,
-        *,
-        metadata_settings_facts: Callable[[], dict[str, Any]],
-        save_metadata_settings_action: Callable[..., dict[str, Any]],
+    app: FastAPI,
+    *,
+    metadata_settings_facts: Callable[[], dict[str, Any]],
+    save_metadata_settings_action: Callable[..., dict[str, Any]],
 ) -> None:
     """The Mac app's Plex and TMDB settings tab. Refusals carry a code the app words; never a sentence."""
 
@@ -177,10 +148,10 @@ def register_metadata_settings_routes(
 
 
 def register_compression_settings_routes(
-        app: FastAPI,
-        *,
-        compression_settings_facts: Callable[[], dict[str, Any]],
-        save_compression_settings_action: Callable[..., dict[str, Any]],
+    app: FastAPI,
+    *,
+    compression_settings_facts: Callable[[], dict[str, Any]],
+    save_compression_settings_action: Callable[..., dict[str, Any]],
 ) -> None:
     """The Mac app's Compression settings tab. Refusals carry a code the app words; never a sentence."""
 

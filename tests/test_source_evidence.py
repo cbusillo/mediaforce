@@ -28,7 +28,6 @@ from mediaforce.encoding.staging import promote_one_item
 from mediaforce.encoding.put_back import PUT_BACK_EVENT, PutBackRefused, PutBackRestoreError, put_original_back, \
     reconcile_unfinished_put_backs
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
-from mediaforce.web.runtime.episode_progress import put_back_rel_paths
 from mediaforce.library.evidence_acquisition import load_fingerprint_acquisition_items, plan_fingerprint_acquisition
 from mediaforce.library.evidence_state import EvidenceKind
 from mediaforce.library.source_evidence import append_measurement, ensure_active_source_version, json_text, load_source_evidence, \
@@ -1140,8 +1139,6 @@ def test_put_back_returns_the_original_and_keeps_it(connection: DBClient, tmp_pa
     assert (keep["reason_code"], keep["source_fingerprint"]) == ("put_back", item["content_version_fingerprint"])
     assert library_item_ids_kept_original(connection, [published["id"]]) == {published["id"]}
     assert [kind for kind, _details in events] == [PUT_BACK_EVENT]
-    # The episode list words it as the owner's put-back, not a motion-pattern choice.
-    assert put_back_rel_paths(connection, [item["rel_path"], "tv/Show/Season 1/other.mkv"]) == {item["rel_path"]}
 
 
 def test_put_back_refuses_when_the_backup_is_gone(connection: DBClient, tmp_path: Path) -> None:

@@ -12,15 +12,14 @@ from sqlalchemy import select
 
 from mediaforce import cli
 from mediaforce.web.runtime.archive_cleanup import clear_archive_cleanup_action
-from mediaforce.web.runtime.episode_progress import folder_episodes_payload
-from mediaforce.web.runtime.completed_runtime import list_completed_folders, clear_completed_backups_action
+from mediaforce.web.runtime.app_item import item_payload
+from mediaforce.web.runtime.completed_runtime import list_completed_folders
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.utils import file_fingerprint, timestamp
 from mediaforce.encoding.delivery_lock import delivery_lock
-from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.staging import FINAL_SIZE_GOAL_CHECK, PromotionRestoreError, PromotionWaiting
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.staged_validation import not_remade_blockers
@@ -29,6 +28,7 @@ from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import automatic_publish as delivery
 from mediaforce.web.runtime import size_held
+from mediaforce.web.runtime.size_held import _load_remake_row
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.production_approval import production_approval_contract
 
@@ -681,9 +681,7 @@ def test_retained_rollback_is_counted_and_owner_cleanup_reaches_it(
     assert folders[0].archived_backup_size_bytes == len(b"earlier rollback") + len(
         b"original media file"
     )
-    result = clear_completed_backups_action(
-        config, folder_group=web_app._folder_group, prefixes=[folders[0].prefix]
-    )
+    result = clear_archive_cleanup_action(config)
     assert result["removed_count"] == folders[0].archived_backup_count
     assert not any(path.is_file() for path in config.archive_root.rglob("*"))
     assert Path(item["source_path"]).read_bytes() == b"av1"
@@ -786,7 +784,7 @@ def test_manual_publish_waiting_for_encode_rechecks_validation(config: Mediaforc
 
 
 @pytest.mark.parametrize("rel_path", ["movies/Title.avi", "tv/Show/Episode 01.avi"])
-def test_loose_file_rollback_counts_and_selected_cleanup_follow_owner(config: MediaforceConfig, rel_path: str) -> None:
+def test_loose_file_rollback_counts_and_cleanup_follow_owner(config: MediaforceConfig, rel_path: str) -> None:
     _, item, _ = _stage(config, rel_path)
     archive = config.archive_root / item["rel_path"]
     archive.parent.mkdir(parents=True, exist_ok=True)
@@ -795,9 +793,8 @@ def test_loose_file_rollback_counts_and_selected_cleanup_follow_owner(config: Me
     with open_db(config.paths.db_path) as connection:
         folders = list_completed_folders(connection, archive_root=config.archive_root, folder_group=web_app._folder_group)
     assert folders[0].archived_backup_count == 2
-    result = clear_completed_backups_action(config, folder_group=web_app._folder_group, prefixes=[folders[0].prefix])
+    result = clear_archive_cleanup_action(config)
     assert result["removed_count"] == 2
-    assert result["removed_prefix_count"] == 1
     assert not any(path.is_file() for path in config.archive_root.rglob("*"))
     assert Path(item["source_path"]).with_suffix(".mkv").read_bytes() == b"av1"
 
@@ -847,8 +844,7 @@ def test_wait_reason_is_public_without_duplicate_details(config: MediaforceConfi
     assert record.detail.count(record.publish_wait_reason) == 1
 
 
-@pytest.mark.parametrize("settings_cleanup", [False, True])
-def test_owner_cleanup_preserves_an_original_during_publication(config: MediaforceConfig, settings_cleanup: bool) -> None:
+def test_owner_cleanup_preserves_an_original_during_publication(config: MediaforceConfig) -> None:
     from mediaforce import execution
     _stage(config, "tv/Show/Season 1/done.mkv", checked=True)
     _run(config)
@@ -870,9 +866,7 @@ def test_owner_cleanup_preserves_an_original_during_publication(config: Mediafor
         thread.start()
         try:
             assert moved.wait(5)
-            result = (clear_archive_cleanup_action(config) if settings_cleanup else
-                clear_completed_backups_action(config, folder_group=web_app._folder_group,
-                    prefixes=["tv/Show/Season 1"], valid_prefixes={"tv/Show/Season 1"}))
+            result = clear_archive_cleanup_action(config)
             assert result["ok"] is False
             assert result["removed_count"] == 0
         finally:
@@ -882,14 +876,12 @@ def test_owner_cleanup_preserves_an_original_during_publication(config: Mediafor
     assert len(failures) == 1
     assert not isinstance(failures[0], PromotionRestoreError)
     assert Path(item["source_path"]).read_bytes() == b"original media file"
-    result = clear_completed_backups_action(config, folder_group=web_app._folder_group,
-        prefixes=["tv/Show/Season 1"], valid_prefixes={"tv/Show/Season 1"})
+    result = clear_archive_cleanup_action(config)
     assert result["ok"] is True
     assert result["removed_count"] == 1
 
 
-@pytest.mark.parametrize("settings_cleanup", [False, True])
-def test_cleanup_keeps_originals_needed_by_an_unpublished_sibling(config: MediaforceConfig, settings_cleanup: bool) -> None:
+def test_cleanup_keeps_originals_needed_by_an_unpublished_sibling(config: MediaforceConfig) -> None:
     _stage(config, "tv/Show/Season 1/done.mkv", checked=True)
     _run(config)
     item_id, item, _ = _stage(config, "tv/Show/Season 1/unsafe.mkv", checked=True)
@@ -901,9 +893,7 @@ def test_cleanup_keeps_originals_needed_by_an_unpublished_sibling(config: Mediaf
     retained.write_bytes(b"previous original")
     with open_db(config.paths.db_path) as connection:
         delivery._record_wait(connection, item_id, "unsafe", "Inspect and restore this file.")
-    result = (clear_archive_cleanup_action(config) if settings_cleanup else
-        clear_completed_backups_action(config, folder_group=web_app._folder_group,
-            prefixes=["tv/Show/Season 1"], valid_prefixes={"tv/Show/Season 1"}))
+    result = clear_archive_cleanup_action(config)
     assert result["removed_count"] == 1
     assert result["preserved_count"] == 2
     assert "Inspect and restore" in result["message"]
@@ -962,10 +952,11 @@ def _keep(config: MediaforceConfig, item_id: int, item: dict[str, Any]) -> dict[
 
 def _remake_reason(config: MediaforceConfig, item_id: int) -> str | None:
     with open_db(config.paths.db_path) as connection:
-        report = staged_integrity_report(connection, config, "tv/Show/Season 1", discover=False)
-        records = [record.to_payload() for record in report.records if record.item_id == item_id]
-        size_held.staged_remake_records(connection, records, "tv/Show/Season 1", current_approval=lambda _p: None)
-    return object_dict(records[0].get("remake")).get("reason")
+        details = size_held.staged_remake_details(
+            connection, _load_remake_row(connection, item_id), "tv/Show/Season 1",
+            current_approval=lambda _prefix: None,
+        )
+    return details["reason"] if details is not None else None
 
 
 @pytest.mark.parametrize("band_in_plan", [True, False], ids=["band_in_plan", "no_band_in_plan"])
@@ -1007,8 +998,10 @@ def test_copy_only_over_its_size_keeps_the_original_without_asking(
     assert _kept_reason(config, item_id) == size_held.OVER_SIZE_KEEP_REASON
     assert not staged.exists()
     assert Path(item["source_path"]).read_bytes() == b"original media file"
-    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
-    assert (episode["stage"], episode["owner_action"]) == ("kept_original", None)
+    payload = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+    assert payload is not None
+    [episode] = payload["files"]
+    assert episode["stage"] == "kept_original"
 
 
 def test_encoder_size_miss_with_another_failure_stays_failed(config: MediaforceConfig) -> None:
@@ -1079,8 +1072,10 @@ def test_kept_original_settles_the_file_while_its_failed_copy_cannot_be_removed(
     assert _kept_reason(config, item_id) == reason
     assert (Path(config.media["staging_root"]) / item["rel_path"]).exists()
     assert Path(item["source_path"]).read_bytes() == b"original media file"
-    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
-    assert (episode["stage"], episode["owner_action"], episode["wait_reason"]) == ("kept_original", None, None)
+    payload = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+    assert payload is not None
+    [episode] = payload["files"]
+    assert (episode["stage"], episode["wait_reason"]) == ("kept_original", None)
     assert _remake_reason(config, item_id) is None
     assert not _keep(config, item_id, item)["ok"]
 
@@ -1127,7 +1122,9 @@ def test_failed_check_is_made_again_until_the_limit_then_the_original_is_kept(co
         assert connection.execute(
             select(staged_artifacts.c.library_item_id).where(staged_artifacts.c.library_item_id == item_id)
         ).first() is None
-    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    payload = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+    assert payload is not None
+    [episode] = payload["files"]
     assert episode["stage"] == "kept_original"
     with open_db(config.paths.db_path) as connection:
         # A changed source lapses the keep, so the new source is worked on like any other file.
@@ -1149,8 +1146,10 @@ def test_failed_copy_waiting_to_be_made_again_does_not_wait_on_the_owner(config:
     with open_db(config.paths.db_path) as connection:
         [state] = build_folder_workflow_state(connection, "tv/Show/Season 1").items
     assert state.lane != "blocked"
-    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
-    assert (episode["stage"], episode["validation"], episode["owner_action"]) == ("waiting", "remaking", None)
+    payload = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+    assert payload is not None
+    [episode] = payload["files"]
+    assert (episode["stage"], episode["validation"]) == ("waiting", "remaking")
 
 
 def test_failed_copy_whose_remake_is_always_refused_goes_to_the_owner(config: MediaforceConfig) -> None:
@@ -1175,7 +1174,9 @@ def test_failed_copy_whose_remake_is_always_refused_goes_to_the_owner(config: Me
 
     assert len(refusals) == delivery.UNKNOWN_FAILURE_RETRY_LIMIT
     assert staged.exists()
-    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    payload = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+    assert payload is not None
+    [episode] = payload["files"]
     assert (episode["stage"], episode["validation"]) == ("needs_you", "failed")
     assert episode["wait_reason"] == {"code": "not_made_again", "blockers": ["approval_missing"]}
 
@@ -1223,7 +1224,9 @@ def test_a_remake_that_fails_before_removal_reaches_the_owner_with_its_reason(co
                     config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=remake
                 )
 
-    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    payload = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+    assert payload is not None
+    [episode] = payload["files"]
     assert episode["wait_reason"] == {"code": "not_made_again", "blockers": ["recovery_failed"]}
 
 
@@ -1242,7 +1245,9 @@ def test_failed_copy_waits_for_running_work_without_going_to_the_owner(config: M
                 )
 
     assert staged.exists()
-    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    payload = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+    assert payload is not None
+    [episode] = payload["files"]
     assert (episode["stage"], episode["validation"]) == ("waiting", "remaking")
 
 
@@ -1267,7 +1272,9 @@ def test_only_a_copy_still_in_use_keeps_waiting_without_the_owner(
                     config, load_calibration_state=lambda _config, _prefix: _approval(), remake_files=remake
                 )
 
-    [episode] = folder_episodes_payload(config, "tv/Show/Season 1")["episodes"]
+    payload = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+    assert payload is not None
+    [episode] = payload["files"]
     assert (episode["stage"] == "needs_you") is reaches_owner
     if reaches_owner:
         assert episode["wait_reason"]["blockers"] == [refusal]

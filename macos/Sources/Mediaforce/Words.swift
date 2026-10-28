@@ -14,6 +14,12 @@ enum Words {
         return "\(show), Season \(season)"
     }
 
+    /// A season's page title and subtitle: the season, then its show. A show sampled whole is named alone.
+    static func seasonTitle(_ show: String, _ season: Int?) -> (season: String, show: String) {
+        guard let season else { return (show, "") }
+        return ("Season \(season)", show)
+    }
+
     static func computerState(_ code: String) -> String {
         switch code {
         case "ready": "Ready"
@@ -50,15 +56,6 @@ enum Words {
     static let restartQuestion = "Restart Mediaforce?"
     static let restartMessage = "Anything being compressed or sampled right now is interrupted."
     static let settingsDidNotLoad = "Mediaforce is running, but these settings didn't load."
-
-    static func serverSymbol(_ situation: ServerSituation) -> String {
-        switch situation {
-        case .checking: "ellipsis.circle"
-        case .notSetUp: "shippingbox"
-        case .notRunning: "moon.zzz"
-        case .inTrouble: "exclamationmark.triangle"
-        }
-    }
 
     static func serverHeadline(_ situation: ServerSituation) -> String {
         switch situation {
@@ -192,12 +189,12 @@ enum Words {
 extension Words {
     static func workHeadline(_ facts: MainWindowFacts) -> String {
         let work = facts.work
-        if work.pausedByOwner { return "Paused." }
-        if work.stopReasons.contains("storage_unavailable") { return "Paused. This Mac can't see the media library." }
-        if work.stopReasons.contains("no_computer_ready") { return "Waiting for a computer." }
-        if work.runningCount > 0 { return "Compressing." }
-        if work.waitingCount > 0 { return "Waiting to start." }
-        return facts.samples.waitingOnYou.isEmpty ? "All caught up." : "Waiting for you."
+        if work.pausedByOwner { return "Paused" }
+        if work.stopReasons.contains("storage_unavailable") { return "Paused: this Mac can't see the media library" }
+        if work.stopReasons.contains("no_computer_ready") { return "Waiting for a computer" }
+        if work.runningCount > 0 { return "Compressing" }
+        if work.waitingCount > 0 { return "Waiting to start" }
+        return facts.samples.waitingOnYou.isEmpty ? "All caught up" : "Waiting for you"
     }
 
     static func workExplanation(_ facts: MainWindowFacts) -> String? {

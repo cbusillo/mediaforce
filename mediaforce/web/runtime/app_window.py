@@ -13,6 +13,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, count_pending_encode_work, load_queue_state
 from mediaforce.library.candidate_selection import SEASON_PATTERN
+from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
@@ -489,7 +490,7 @@ def _work(
         storage_admits_work: bool,
         computers: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    paused = bool(load_queue_state(connection).get("is_paused"))
+    paused = bool(load_queue_state(connection).get("is_paused")) or background_work_is_paused(connection)
     waiting_count = count_pending_encode_work(connection)
     running_count = sum(running_encode_counts_by_host(connection).values())
     stop_reasons = []
