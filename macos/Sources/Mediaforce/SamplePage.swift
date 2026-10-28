@@ -1,5 +1,3 @@
-import AVKit
-import Combine
 import SwiftUI
 
 struct SamplePage: View {
@@ -41,6 +39,7 @@ struct SampleWork: View {
     @State private var confirming: String?
     // The sample can't be made until a size is chosen, so the page offers the sizes right there.
     @State private var askingSize = false
+    @State private var players = ComparePlayers()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -56,7 +55,9 @@ struct SampleWork: View {
                         .controlSize(.small)
                 }
                 if !facts.moments.isEmpty {
-                    SampleComparison(moments: facts.moments, client: model.client)
+                    ComparePlayer(players: players, model: model, moments: .clips(facts.moments),
+                                  names: PictureNames(compressed: Words.sample),
+                                  gettingReady: Words.gettingSampleReady, couldNotPlay: Words.couldNotPlaySample)
                 }
                 SampleFactsGrid(facts: facts)
                 if let coverage = Words.sampleCoverage(facts) {
@@ -76,6 +77,7 @@ struct SampleWork: View {
             }
         }
         .task(id: refreshes) { await watch() }
+        .onDisappear { players.pause() }
         .confirmationDialog(
             confirming.flatMap(Words.sampleConfirmation)?.title ?? "",
             isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
@@ -246,146 +248,5 @@ struct SampleActions: View {
             }
         }
         .disabled(working)
-    }
-}
-
-enum HearSide: Hashable {
-    case original, sample
-}
-
-@MainActor
-@Observable
-final class ComparisonPlayers {
-    let original = AVPlayer()
-    let sample = AVPlayer()
-    private(set) var playing = false
-    var hear: HearSide = .original {
-        didSet { applySound() }
-    }
-
-    init() {
-        applySound()
-    }
-
-    func load(_ moment: SampleFacts.Moment, client: MediaforceClient) {
-        pause()
-        original.replaceCurrentItem(with: AVPlayerItem(url: client.reviewMedia(moment.original.url)))
-        sample.replaceCurrentItem(with: AVPlayerItem(url: client.reviewMedia(moment.sample.url)))
-    }
-
-    func toggle() {
-        if playing {
-            pause()
-            return
-        }
-        if original.currentItem.map({ $0.currentTime() >= $0.duration }) == true {
-            original.seek(to: .zero)
-        }
-        sample.seek(to: original.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero)
-        original.play()
-        sample.play()
-        playing = true
-    }
-
-    func startOver() {
-        pause()
-        original.seek(to: .zero)
-        sample.seek(to: .zero)
-    }
-
-    func pause() {
-        original.pause()
-        sample.pause()
-        playing = false
-    }
-
-    private func applySound() {
-        original.isMuted = hear != .original
-        sample.isMuted = hear != .sample
-    }
-}
-
-struct SampleComparison: View {
-    let moments: [SampleFacts.Moment]
-    let client: MediaforceClient
-    @State private var players = ComparisonPlayers()
-    @State private var moment = 0
-
-    var body: some View {
-        let current = moments[min(moment, moments.count - 1)]
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 12) {
-                ClipView(label: Words.original, detail: Words.clipSize(current.original), player: players.original)
-                ClipView(label: Words.sample, detail: Words.clipSize(current.sample), player: players.sample)
-            }
-            HStack(spacing: 14) {
-                Button {
-                    players.toggle()
-                } label: {
-                    Label(players.playing ? Words.pause : Words.play, systemImage: players.playing ? "pause.fill" : "play.fill")
-                }
-                .keyboardShortcut(.space, modifiers: [])
-                Button(Words.startOver, systemImage: "backward.end.fill") { players.startOver() }
-                Picker(Words.hear, selection: Bindable(players).hear) {
-                    Text(Words.original).tag(HearSide.original)
-                    Text(Words.sample).tag(HearSide.sample)
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                if moments.count > 1 {
-                    Picker(Words.momentChoice, selection: $moment) {
-                        ForEach(moments.indices, id: \.self) { index in
-                            Text(Words.momentTime(moments[index].atSeconds)).tag(index)
-                        }
-                    }
-                    .fixedSize()
-                }
-            }
-        }
-        .task(id: current) { players.load(current, client: client) }
-        .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification).receive(on: RunLoop.main)) { note in
-            if (note.object as? AVPlayerItem) === players.original.currentItem { players.pause() }
-        }
-        .onDisappear { players.pause() }
-    }
-}
-
-struct ClipView: View {
-    let label: String
-    let detail: String
-    let player: AVPlayer
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(label)
-                    .font(.headline)
-                Spacer()
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            PlayerSurface(player: player)
-                .aspectRatio(16 / 9, contentMode: .fit)
-                .background(Color.black)
-                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
-
-struct PlayerSurface: NSViewRepresentable {
-    let player: AVPlayer
-
-    func makeNSView(context: Context) -> AVPlayerView {
-        let view = AVPlayerView()
-        view.controlsStyle = .none
-        view.player = player
-        return view
-    }
-
-    func updateNSView(_ view: AVPlayerView, context: Context) {
-        view.player = player
     }
 }
