@@ -900,7 +900,10 @@ def create_app(
             nonlocal catalog_refresh_needed
             if section is not None and _section_revision(existing_runtime_settings, section) != revision:
                 raise SettingsValidationError("Settings changed since they were loaded.", "settings_changed")
-            merged_runtime_settings = _merge_runtime_settings_payload(existing_runtime_settings, payload)
+            merged_runtime_settings = _merge_runtime_settings_payload(
+                existing_runtime_settings, payload,
+                schedule_defaults=object_list(object_dict(config.raw.get("encode_queue")).get("schedule_profiles")),
+            )
             merged_runtime_settings = _without_plex_library_roots(merged_runtime_settings, cleared_plex_roots)
             merged_runtime_settings = _bind_runtime_library_overrides(merged_runtime_settings, changed_type_roots)
             catalog_refresh_needed = (

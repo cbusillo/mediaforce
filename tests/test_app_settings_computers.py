@@ -1,11 +1,20 @@
 import asyncio
 import json
+from datetime import datetime
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from starlette.routing import Route
+
+from mediaforce.core.config import load_config
+from mediaforce.core.db import open_db
+from mediaforce.hosts.types import HostStatus
+from mediaforce.web import app as web_app
+from mediaforce.web.runtime.encode_runtime import _selected_encode_schedule_close_deadline
 
 from test_app_settings_library import _json_request, library_app  # noqa: F401  (`library_app` is the fixture)
 
@@ -225,3 +234,55 @@ def test_computer_facts_read_the_file_as_it_is_now(computers_app: tuple[FastAPI,
     saved = json.loads(runtime_settings_path.read_text())
     assert saved["remote_hosts"][1]["label"] == "Renamed elsewhere"
     assert saved["encode_queue"]["schedule_profiles"][0]["label"] == "Late nights"
+
+
+@pytest.mark.parametrize("day", ["2026-10-28", "2026-11-01", "2027-03-14"])
+@pytest.mark.parametrize("finish_current_file", [False, True])
+def test_saved_night_window_reaches_dispatch_for_only_the_selected_computer(
+    computers_app: tuple[FastAPI, Path], finish_current_file: bool, day: str,
+) -> None:
+    app, runtime_settings_path = computers_app
+    before = json.loads(runtime_settings_path.read_text())
+    body = _body(app)
+    body["schedules"].append({
+        "key": "new-night", "name": "Night window", "days": body["schedules"][0]["days"] + ["wed", "thu", "fri", "sat", "sun"],
+        "all_day_days": [], "start_hour": 0, "end_hour": 5, "finish_current_file": finish_current_file,
+    })
+    body["computers"][0]["schedule"] = "new-night"
+    assert _save(app, body)[0] == 200
+    assert _facts(app)["schedules"][-1]["finish_current_file"] is finish_current_file
+    stored = json.loads(runtime_settings_path.read_text())
+    assert stored["remote_hosts"][1] == before["remote_hosts"][1]
+    config = load_config(runtime_settings_path.parent.parent / "config" / "config.toml")
+    status = HostStatus(
+        key="studio.local", label="Studio", mode="ssh", priority=2, capabilities=["encode_queue"],
+        available=True, message="Ready", missing_paths=[], schedule_timezone="America/New_York",
+    )
+    for hour, minute, second, allowed in [(23, 59, 59, False), (0, 0, 0, True), (4, 59, 59, True), (5, 0, 0, False)]:
+        now = datetime.fromisoformat(day).replace(hour=hour, minute=minute, second=second, tzinfo=ZoneInfo("America/New_York"))
+        with open_db(config.paths.db_path) as connection, patch("mediaforce.web.app._safe_collect_host_statuses", return_value=[status]):
+            rows = web_app._host_runtime_rows(connection, config, now=now)
+        assert rows[0]["queue_active"] is allowed
+        assert rows[0]["finish_current_file"] is finish_current_file
+        if allowed:
+            closes_at = datetime.fromisoformat(rows[0]["schedule_closes_at"])
+            assert closes_at == datetime.fromisoformat(day).replace(hour=5, tzinfo=ZoneInfo("America/New_York"))
+            assert (_selected_encode_schedule_close_deadline({"item_count": 1}, rows[0]) is None) is finish_current_file
+
+
+@pytest.mark.parametrize("submitted", [None, False])
+def test_older_computers_save_preserves_the_close_option_unless_explicitly_changed(
+    computers_app: tuple[FastAPI, Path], submitted: bool | None,
+) -> None:
+    app, runtime_settings_path = computers_app
+    stored = json.loads(runtime_settings_path.read_text())
+    stored["encode_queue"]["schedule_profiles"][0]["finish_current_file"] = True
+    runtime_settings_path.write_text(json.dumps(stored))
+    body = _body(app)
+    if submitted is None:
+        body["schedules"][0].pop("finish_current_file")
+    else:
+        body["schedules"][0]["finish_current_file"] = submitted
+
+    assert _save(app, body)[0] == 200
+    assert _facts(app)["schedules"][0]["finish_current_file"] is (submitted is None)

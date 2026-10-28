@@ -24,8 +24,10 @@ enum Words {
         switch code {
         case "ready": "Ready"
         case "busy": "Compressing"
+        case "finishing_file": "Finishing this file, then waiting for its work window"
+        case "schedule_disabled": "Work is turned off for this computer"
         case "checking": "Checking this computer"
-        case "outside_schedule": "Off schedule"
+        case "outside_schedule": "Waiting for its work window"
         case "cooling_down": "Resting after repeated failures"
         case "not_encoding": "Makes samples only"
         case "storage_unreachable": "Can't reach shared storage"
@@ -101,7 +103,7 @@ enum Words {
     static let workWindowsItem = "Work windows"
 
     /// States where a computer is fine as it is; every other state has something to fix.
-    private static let computerStatesFine: Set<String> = ["ready", "busy", "outside_schedule", "not_encoding", "checking", "away", "reconnecting", "unreachable"]
+    private static let computerStatesFine: Set<String> = ["ready", "busy", "finishing_file", "schedule_disabled", "outside_schedule", "not_encoding", "checking", "away", "reconnecting", "unreachable"]
 
     static func computerNeedsYou(_ state: String?) -> Bool {
         state.map { !computerStatesFine.contains($0) } ?? false
@@ -812,6 +814,8 @@ extension Words {
     static let allDayOn = "All day"
     static let startsAt = "From"
     static let endsAt = "Until"
+    static let finishCurrentFile = "Finish the current file when the window closes"
+    static let finishCurrentFileHelp = "No new files start after closing. With this off, an interrupted file starts over in the next window."
     static let workWindowHelp = "When Until is earlier than From, the window runs overnight. Times are each computer's own."
     static let keepComputer = "Keep computer"
     static let keepWorkWindow = "Keep work window"

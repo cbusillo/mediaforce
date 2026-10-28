@@ -554,6 +554,11 @@ def _computer_state(row: Mapping[str, Any]) -> str:
     if not row.get("available"):
         return _unavailable_computer_state(row)
     if int(row.get("active_encode_count") or 0):
+        if not row.get("schedule_open") and any(
+            not job.get("bypass_schedule") and not job.get("schedule_close_deadline_at")
+            for job in row.get("running_jobs") or []
+        ):
+            return "finishing_file"
         return "busy"
     if "encode_queue" not in {str(capability).lower() for capability in row.get("capabilities") or []}:
         return "not_encoding"
@@ -561,6 +566,8 @@ def _computer_state(row: Mapping[str, Any]) -> str:
         return "storage_unreachable"
     if row.get("active_flag") == "cooldown":
         return "cooling_down"
+    if row.get("schedule_profile") == "never":
+        return "schedule_disabled"
     if not row.get("schedule_open"):
         return "outside_schedule"
     return "ready" if row.get("queue_active") else "not_ready"

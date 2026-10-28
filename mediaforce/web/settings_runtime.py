@@ -363,6 +363,7 @@ def settings_schedule_profile_rows_for_config(config: MediaforceConfig, *, min_r
                     "all_day_days_of_week": list(normalized["all_day_days_of_week"]),
                     "start_hour": str(normalized["start_hour"]),
                     "end_hour": str(normalized["end_hour"]),
+                    "finish_current_file": normalized["finish_current_file"],
                 }
             )
     return index_schedule_profile_rows(rows, min_rows=min_rows)
@@ -380,6 +381,7 @@ def index_schedule_profile_rows(rows: list[dict[str, Any]], *, min_rows: int = 1
             ),
             "start_hour": row.get("start_hour", str(DEFAULT_SCHEDULER_POLICY["start_hour"])),
             "end_hour": row.get("end_hour", str(DEFAULT_SCHEDULER_POLICY["end_hour"])),
+            "finish_current_file": row.get("finish_current_file") is True,
         }
         for index, row in enumerate(rows)
     ]
@@ -644,6 +646,7 @@ def normalize_encode_queue_scheduler(raw: dict[str, Any] | None) -> dict[str, An
     normalized = {
         "mode": mode,
         "timezone": timezone,
+        "finish_current_file": payload.get("finish_current_file") is True,
         "start_hour": start_hour,
         "end_hour": end_hour,
         "days_of_week": days_of_week,
@@ -1223,6 +1226,7 @@ def computer_settings_facts(
                 "all_day_days": list(row.get("all_day_days_of_week") or []),
                 "start_hour": _whole(row.get("start_hour"), int(str(DEFAULT_SCHEDULER_POLICY["start_hour"]))),
                 "end_hour": _whole(row.get("end_hour"), int(str(DEFAULT_SCHEDULER_POLICY["end_hour"]))),
+                "finish_current_file": row.get("finish_current_file") is True,
             }
             for row in schedule_rows
         ],
@@ -1286,6 +1290,7 @@ def computer_section_settings(
             "all_day_days_of_week": _strings(item.get("all_day_days")),
             "start_hour": start_hour,
             "end_hour": end_hour,
+            **({"finish_current_file": item["finish_current_file"] is True} if "finish_current_file" in item else {}),
         })
 
     remote_rows: list[dict[str, Any]] = []
@@ -1488,6 +1493,7 @@ def build_runtime_computer_settings(
                 "all_day_days_of_week": all_day_days_of_week,
                 "start_hour": start_hour_text,
                 "end_hour": end_hour_text,
+                "finish_current_file": row.get("finish_current_file"),
             }
         )
         normalized_profiles.append(
@@ -1500,6 +1506,7 @@ def build_runtime_computer_settings(
                 "all_day_days_of_week": list(normalized["all_day_days_of_week"]),
                 "start_hour": normalized["start_hour"],
                 "end_hour": normalized["end_hour"],
+                **({"finish_current_file": normalized["finish_current_file"]} if "finish_current_file" in row else {}),
             }
         )
         seen_profile_keys.add(key_text)
@@ -1665,7 +1672,9 @@ def normalize_video_defaults(raw: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def merge_runtime_settings_payload(existing: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+def merge_runtime_settings_payload(
+        existing: dict[str, Any], updates: dict[str, Any], *, schedule_defaults: Collection[dict[str, Any]] = (),
+) -> dict[str, Any]:
     merged = dict(existing)
     if "encode_queue" in updates:
         merged.pop("heavy_queue", None)
@@ -1676,6 +1685,25 @@ def merge_runtime_settings_payload(existing: dict[str, Any], updates: dict[str, 
             merged[key] = nested
             continue
         merged[key] = value
+    updated_queue = updates.get("encode_queue")
+    if isinstance(updated_queue, dict) and isinstance(updated_queue.get("schedule_profiles"), list):
+        existing_queue = existing.get("encode_queue")
+        saved_profiles = list(schedule_defaults)
+        if isinstance(existing_queue, dict) and isinstance(existing_queue.get("schedule_profiles"), list):
+            saved_profiles.extend(existing_queue["schedule_profiles"])
+        saved_close_options = {
+            canonical_schedule_profile_key(profile.get("key") or profile.get("name")): profile.get("finish_current_file") is True
+            for profile in saved_profiles if isinstance(profile, dict)
+        }
+        merged["encode_queue"]["schedule_profiles"] = [
+            {
+                **profile,
+                "finish_current_file": profile.get(
+                    "finish_current_file", saved_close_options.get(canonical_schedule_profile_key(profile.get("key")), False),
+                ) is True,
+            }
+            for profile in updated_queue["schedule_profiles"]
+        ]
     return merged
 
 

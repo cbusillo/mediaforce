@@ -12,6 +12,8 @@ from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_stat
 from mediaforce.library.background_work import background_work_is_paused, set_background_work_paused
 from mediaforce.web.runtime import host_status
 from mediaforce.web.runtime.app_window import app_window_payload, tv_shows_payload
+from mediaforce.web.runtime.host_runtime import _running_encode_jobs_for_hosts
+from mediaforce.web.runtime.encode_scheduler import format_eta_seconds
 
 LIBRARY_TYPES = {"tv": "tv", "movies": "movie", "other": "other"}
 READY_STORAGE = {"mounts": [{"mount_point": "/Volumes/media", "status": "ready", "last_failure_kind": None}]}
@@ -274,6 +276,7 @@ def test_computer_states_are_codes(connection: DBClient) -> None:
         _computer("studio", active_encode_count=1, active_flag="busy"),
         _computer("mbp"),
         _computer("night", schedule_open=False, active_flag="idle"),
+        _computer("off", schedule_open=False, schedule_profile="never"),
         _computer("cooling", active_flag="cooldown"),
         _computer("sampler", capabilities=["sample_calibration"]),
         _computer("mini", available=False, check_failure="password_needed"),
@@ -287,7 +290,7 @@ def test_computer_states_are_codes(connection: DBClient) -> None:
     states = [(computer["key"], computer["state"]) for computer in _payload(connection, computers=computers)["computers"]]
 
     assert states == [
-        ("studio", "busy"), ("mbp", "ready"), ("night", "outside_schedule"), ("cooling", "cooling_down"),
+        ("studio", "busy"), ("mbp", "ready"), ("night", "outside_schedule"), ("off", "schedule_disabled"), ("cooling", "cooling_down"),
         ("sampler", "not_encoding"), ("mini", "password_needed"), ("server", "storage_unreachable"),
         ("odd", "not_ready"), ("staging", "storage_unreachable"), ("refused", "not_ready"), ("new", "checking"),
     ]
@@ -423,3 +426,21 @@ def test_computer_only_claims_reconnection_when_its_storage_can_be_reconnected(
     row["recovery"]["status"] = "action_required"
     [computer] = _payload(connection, computers=[row])["computers"]
     assert computer["attention_reason"] is None
+
+
+@pytest.mark.parametrize(
+    ("bypass", "deadline", "current_option", "expected"),
+    [(False, None, False, "finishing_file"), (False, NOW, True, "busy"), (True, None, True, "busy")],
+)
+def test_closed_window_copy_follows_the_running_jobs_recorded_close_behavior(
+    connection: DBClient, bypass: bool, deadline: str | None, current_option: bool, expected: str,
+) -> None:
+    _encode_job(connection, "tv/Show/Season 1", status="running", host_key="studio")
+    connection.execute(encode_jobs.update().values(
+        item_count=1, bypass_schedule=bypass, schedule_close_deadline_at=deadline,
+    ))
+    jobs = _running_encode_jobs_for_hosts(connection, format_eta_seconds=format_eta_seconds)
+    computer = _computer(
+        "studio", schedule_open=False, active_encode_count=1, finish_current_file=current_option, running_jobs=jobs,
+    )
+    assert _payload(connection, computers=[computer])["computers"][0]["state"] == expected

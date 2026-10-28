@@ -184,3 +184,37 @@ release, quiesce all work producers, recheck work and process custody before
 stopping the service, then follow the authoritative release path. Candidate,
 backup, runtime and post-check evidence must stay bound to that exact release;
 uncertain effects require reconciliation rather than replay.
+
+## M4 night window (Q1015)
+
+The Director chose 12:00 AM–5:00 AM local time for this Mac's encoding
+starts. Deliver the reviewed scheduling change through the staged deploy
+above before applying its new setting. Then use the existing Computers
+settings API (`GET` and `POST /api/app/settings/computers`, preserving the
+returned revision and all other computers and schedules), or the Mac app's
+Settings → Computers:
+
+- Add a separate work window named `Night window`, every day, From
+  `12 AM`, Until `5 AM`, with no all-day exception days.
+- Allow the current file to finish when the window closes. Its API field is
+  `finish_current_file: true`; the hours are `start_hour: 0`, `end_hour: 5`.
+- Assign it only to the existing M4 Mac Studio computer. Do not identify it
+  by a guessed address or replace a schedule other computers still use.
+- Read the saved settings back. Check Activity's Computers row outside the
+  window: it waits, or says it is finishing the current file first. No new ordinary queued file or
+  sample starts on that computer until midnight in its own timezone.
+
+At 5:00 AM, a file already running finishes normally, including quality
+checks and publication, even if this takes it past 5:00 AM. There is no
+checkpoint to resume a partial encode safely. Finishing the file preserves
+that work at the window boundary; the next file waits for midnight. Duration
+estimates still hold back files unlikely to finish before 5:00 AM. A service
+restart can interrupt a file under the existing recovery rules; do not deploy
+until the documented idle gate passes. Legacy multi-file jobs retain their
+hard stop; normal queue work is already one file per job. Originals and rollback copies
+stay under the existing publication and cleanup rules. A deliberate bypass
+request still overrides the schedule and must not be used for ordinary
+night-window work. No launchd, energy, sleep or other system setting changes
+are needed. The schedule is runtime configuration, shared by server releases,
+so reverting source does not restore an older setting: record the previous
+computer assignment and restore it through the same settings endpoint if needed.

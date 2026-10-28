@@ -35,7 +35,8 @@ still answers when that storage is gone, and it starts no work.
   `action` and `failure` are the folder page's own codes, from
   `mediaforce/web/runtime/page_state.py`.
 - `computers`: each computer's `state`, from the same rows as the computers
-  page: `ready`, `busy`, `outside_schedule` (with `schedule_opens_at`),
+  page: `ready`, `busy`, `finishing_file` (a running file without a close deadline
+  or an explicit bypass), `schedule_disabled`, `outside_schedule` (with `schedule_opens_at`),
   `cooling_down` (with `cooldown_until`), `not_encoding`, `checking`,
   `storage_unreachable`, `not_ready`, or the kind of failed check
   (`password_needed`, `unreachable`, `remote_login_off`, `identity_changed`,

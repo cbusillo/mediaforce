@@ -144,6 +144,7 @@ final class SettingsTests: XCTestCase {
         draft.addSchedule(days: ["sat"])
         let newKey = draft.schedules[1].schedule.key
         draft.schedules[1].schedule.name = "Weekends"
+        draft.schedules[1].schedule.finishCurrentFile = true
         draft.addComputer(abilities: saved.abilities, mediaAccess: "mounted")
         draft.computers[1].computer.address = "laptop.local"
         draft.computers[1].computer.schedule = newKey
@@ -166,6 +167,7 @@ final class SettingsTests: XCTestCase {
             "start_hour": 22, "end_hour": 6,
         ] as NSDictionary)
         XCTAssertEqual(sentSchedules[1]["key"] as? String, newKey)
+        XCTAssertEqual(sentSchedules[1]["finish_current_file"] as? Bool, true)
         XCTAssertEqual(body["revision"] as? String, "c1")
     }
 

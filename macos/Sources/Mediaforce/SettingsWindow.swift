@@ -844,6 +844,13 @@ struct WorkWindowEditor: View {
                     ForEach(0..<24, id: \.self) { hour in Text(Words.hour(hour)).tag(hour) }
                 }
             }
+            Toggle(Words.finishCurrentFile, isOn: Binding(
+                get: { schedule.finishCurrentFile == true },
+                set: { schedule.finishCurrentFile = $0 }
+            ))
+            Text(Words.finishCurrentFileHelp)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
     }

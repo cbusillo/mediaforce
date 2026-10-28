@@ -19451,93 +19451,97 @@ raise SystemExit(0)
             self.assertEqual(job["host"]["key"], "local")
 
     def test_claim_next_runnable_encode_job_stamps_absolute_schedule_deadline(self) -> None:
-        source_path = self._create_source_file("episode-deadline.mkv")
-        staging_path = self._staging_path("episode-deadline.mkv")
         deadline = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
 
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path)
-            self._write_manifest(
-                "manifest-deadline.json",
-                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
-            )
-            self._save_job(
-                connection,
-                job_id="job-deadline",
-                manifest_name="manifest-deadline.json",
-                host={},
-                status="queued",
-                attempt_count=0,
-            )
-            connection.commit()
-            deps = web_app._encode_queue_runtime_deps()
-            deps.host_runtime_rows = Mock(return_value=[])
+        for finish_current_file in (False, True):
+            source_path = self._create_source_file(f"episode-deadline-{finish_current_file}.mkv")
+            staging_path = self._staging_path(f"episode-deadline-{finish_current_file}.mkv")
+            with open_db(self.config.paths.db_path) as connection:
+                item_id = self._insert_library_item(connection, source_path)
+                self._write_manifest(
+                    "manifest-deadline.json",
+                    [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+                )
+                self._save_job(
+                    connection,
+                    job_id="job-deadline",
+                    manifest_name="manifest-deadline.json",
+                    host={},
+                    status="queued",
+                    attempt_count=0,
+                )
+                connection.commit()
+                deps = web_app._encode_queue_runtime_deps()
+                deps.host_runtime_rows = Mock(return_value=[])
 
-            with patch(
-                    "mediaforce.web.runtime.encode_runtime.select_encode_host",
-                    return_value=(
-                        {
-                            "key": "local",
-                            "label": "Local",
-                            "mode": "local",
-                            "schedule_closes_at": deadline,
-                        },
-                        None,
-                    ),
-            ):
-                claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
+                with patch(
+                        "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                        return_value=(
+                            {
+                                "key": "local",
+                                "label": "Local",
+                                "mode": "local",
+                                "schedule_closes_at": deadline,
+                                "finish_current_file": finish_current_file,
+                            },
+                            None,
+                        ),
+                ):
+                    claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
 
-            self.assertIsNotNone(claimed)
-            assert claimed is not None
-            self.assertEqual(claimed["status"], "running")
-            self.assertEqual(claimed["attempt_count"], 1)
-            self.assertEqual(claimed["schedule_close_deadline_at"], deadline)
-            self.assertNotIn("schedule_closes_at", claimed["host"])
+                self.assertIsNotNone(claimed)
+                assert claimed is not None
+                self.assertEqual(claimed["status"], "running")
+                self.assertEqual(claimed["attempt_count"], 1)
+                self.assertEqual(claimed["schedule_close_deadline_at"], None if finish_current_file else deadline)
+                self.assertNotIn("schedule_closes_at", claimed["host"])
 
     def test_claim_next_runnable_encode_job_does_not_start_after_close_boundary(self) -> None:
-        source_path = self._create_source_file("episode-closed.mkv")
-        staging_path = self._staging_path("episode-closed.mkv")
         deadline = (datetime.now(tz=UTC) - timedelta(seconds=1)).isoformat(timespec="seconds")
 
-        with open_db(self.config.paths.db_path) as connection:
-            item_id = self._insert_library_item(connection, source_path)
-            self._write_manifest(
-                "manifest-closed.json",
-                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
-            )
-            self._save_job(
-                connection,
-                job_id="job-closed",
-                manifest_name="manifest-closed.json",
-                host={},
-                status="queued",
-                attempt_count=0,
-            )
-            connection.commit()
-            deps = web_app._encode_queue_runtime_deps()
-            deps.host_runtime_rows = Mock(return_value=[])
+        for finish_current_file in (False, True):
+            source_path = self._create_source_file(f"episode-closed-{finish_current_file}.mkv")
+            staging_path = self._staging_path(f"episode-closed-{finish_current_file}.mkv")
+            with open_db(self.config.paths.db_path) as connection:
+                item_id = self._insert_library_item(connection, source_path)
+                self._write_manifest(
+                    "manifest-closed.json",
+                    [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+                )
+                self._save_job(
+                    connection,
+                    job_id="job-closed",
+                    manifest_name="manifest-closed.json",
+                    host={},
+                    status="queued",
+                    attempt_count=0,
+                )
+                connection.commit()
+                deps = web_app._encode_queue_runtime_deps()
+                deps.host_runtime_rows = Mock(return_value=[])
 
-            with patch(
-                    "mediaforce.web.runtime.encode_runtime.select_encode_host",
-                    return_value=(
-                        {
-                            "key": "local",
-                            "label": "Local",
-                            "mode": "local",
-                            "schedule_closes_at": deadline,
-                        },
-                        None,
-                    ),
-            ):
-                claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
+                with patch(
+                        "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                        return_value=(
+                            {
+                                "key": "local",
+                                "label": "Local",
+                                "mode": "local",
+                                "schedule_closes_at": deadline,
+                                "finish_current_file": finish_current_file,
+                            },
+                            None,
+                        ),
+                ):
+                    claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
 
-            self.assertIsNone(claimed)
-            queued = load_encode_job(connection, "job-closed")
-            assert queued is not None
-            self.assertEqual(queued["status"], "queued")
-            self.assertEqual(queued["attempt_count"], 0)
-            self.assertEqual(queued["waiting_reason"], encode_runtime.SCHEDULE_CLOSE_WAITING_REASON)
-            self.assertIsNone(queued["schedule_close_deadline_at"])
+                self.assertIsNone(claimed)
+                queued = load_encode_job(connection, "job-closed")
+                assert queued is not None
+                self.assertEqual(queued["status"], "queued")
+                self.assertEqual(queued["attempt_count"], 0)
+                self.assertEqual(queued["waiting_reason"], encode_runtime.SCHEDULE_CLOSE_WAITING_REASON)
+                self.assertIsNone(queued["schedule_close_deadline_at"])
 
     def test_bypass_job_claim_ignores_schedule_close_deadline(self) -> None:
         source_path = self._create_source_file("episode-bypass-deadline.mkv")
