@@ -14,7 +14,7 @@ from mediaforce.library.background_work import list_evidence_backlog, load_backg
     summarize_evidence_inventory
 from mediaforce.library.evidence_queue import EVIDENCE_QUEUE_ACTIVE_STATUSES, MAX_CONCURRENT_EVIDENCE_FILES, \
     evidence_queue_summary, recover_evidence_queue, runnable_evidence_work_count, evidence_queue_allows_preparation
-from mediaforce.library.evidence_worker import EvidenceWorkerDeps, run_evidence_queue_until_blocked
+from mediaforce.library.evidence_worker import EvidenceQueueProgress, EvidenceWorkerDeps, run_evidence_queue_until_blocked
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.metadata_sync import metadata_configuration_status
 
@@ -31,6 +31,7 @@ class BoundedEvidenceRunner:
         self._stop_event = stop_event
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._progress = EvidenceQueueProgress()
 
     def prepare_background_work(self) -> int:
         from mediaforce.library.source_intake import queue_original_intake
@@ -49,6 +50,7 @@ class BoundedEvidenceRunner:
             raise ValueError("Evidence work item budget must be greater than zero.")
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
+                self._progress.wake()
                 return False
             thread = threading.Thread(
                 target=self._run,
@@ -62,6 +64,13 @@ class BoundedEvidenceRunner:
                 self._thread = None
                 raise
         return True
+
+    def wake(self) -> bool:
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                return False
+            self._progress.wake()
+            return True
 
     def join(self) -> None:
         while True:
@@ -83,6 +92,7 @@ class BoundedEvidenceRunner:
                 max_work_items=max_work_items,
                 stop_event=self._stop_event,
                 max_running_files=MAX_CONCURRENT_EVIDENCE_FILES if max_work_items is None else 1,
+                wake_signal=self._progress,
             )
         except Exception:
             LOGGER.exception("Bounded evidence work failed")
@@ -94,12 +104,12 @@ class BoundedEvidenceRunner:
 
 def start_ready_evidence_work(db_path: Path, runner: BoundedEvidenceRunner) -> bool:
     """Run evidence work that is queued and unpaused but has no runner, such as checks production waits on."""
-    if runner.active:
-        return False
     try:
         runner.prepare_background_work()
     except Exception:
         LOGGER.exception("Original discovery failed; queued analysis can still start")
+    if runner.wake():
+        return False
     with open_db(db_path) as connection:
         recover_evidence_queue(connection)
         runnable = runnable_evidence_work_count(connection)

@@ -5,7 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -26,11 +26,11 @@ from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence, 
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, analyze_media_fingerprint
 from mediaforce.library.evidence_queue import EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, MAX_CONCURRENT_EVIDENCE_FILES, EvidenceWorkClaim, cancel_evidence_queue, claim_next_evidence_work, \
     evidence_queue_summary, extend_evidence_claim, mark_evidence_attempt_started, pause_evidence_queue, recover_evidence_queue, \
-    queue_decision_evidence_work, resume_evidence_queue, start_evidence_work, transition_evidence_work
+    original_intake_hold, queue_decision_evidence_work, resume_evidence_queue, start_evidence_work, transition_evidence_work
 from mediaforce.library.evidence_state import EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, \
     load_library_item_evidence_states, rebuild_library_item_evidence_states, sync_library_item_evidence_state
 from mediaforce.library.evidence_worker import EVIDENCE_JOB_HEARTBEAT_SECONDS, EVIDENCE_JOB_LEASE_SECONDS, \
-    EvidenceWorkerDeps, process_evidence_queue_once, run_evidence_queue_until_blocked
+    EvidenceQueueProgress, EvidenceWorkerDeps, process_evidence_queue_once, run_evidence_queue_until_blocked
 from mediaforce.library.source_prefetch import StopSignal
 from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker, cadence_queue_partition, \
     cadence_safety_partition
@@ -262,20 +262,9 @@ class EvidenceWorkerTests(unittest.TestCase):
         later_started = threading.Event()
         release = threading.Event()
         lock = threading.Lock()
-        empty_calls = 0
         added = False
         paths: set[Path] = set()
-        actual_process = process_evidence_queue_once
-
-        def process(**kwargs: Any) -> int:
-            nonlocal empty_calls
-            result = actual_process(**kwargs)
-            if not result:
-                with lock:
-                    empty_calls += 1
-                    if empty_calls >= MAX_CONCURRENT_EVIDENCE_FILES - 1:
-                        empty_workers.set()
-            return result
+        process = self._signal_idle_units(empty_workers)
 
         def analyze(path: Path, kind: str, **_kwargs: object) -> dict[str, object]:
             nonlocal added
@@ -310,6 +299,119 @@ class EvidenceWorkerTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             statuses = connection.execute(select(library_item_evidence_state.c.work_status)).scalars().all()
         self.assertEqual(set(statuses), {"completed"})
+
+    def test_late_empty_worker_refills_after_the_progress_was_already_observed(self) -> None:
+        with open_db(self.config.paths.db_path):
+            pass
+        progress = EvidenceQueueProgress()
+        late_ready = threading.Event()
+        release_late = threading.Event()
+        first_refilled = threading.Event()
+        second_refilled = threading.Event()
+        release = threading.Event()
+        lock = threading.Lock()
+        calls = 0
+
+        def unit(**_kwargs: object) -> dict[str, object]:
+            nonlocal calls
+            with lock:
+                index = calls
+                calls += 1
+            empty_generation = progress.generation()
+            if index == 0:
+                if not late_ready.wait(3):
+                    raise RuntimeError("The late empty claim did not start")
+                progress.wake()
+                release.wait(5)
+            elif index == 1:
+                late_ready.set()
+                release_late.wait(5)
+                return {"processed_count": 0, "_empty_generation": empty_generation}
+            elif index >= MAX_CONCURRENT_EVIDENCE_FILES:
+                first_refilled.set()
+                if index > MAX_CONCURRENT_EVIDENCE_FILES:
+                    second_refilled.set()
+                release.wait(5)
+            return {"processed_count": 0, "_empty_generation": progress.generation()}
+
+        with patch("mediaforce.library.evidence_worker._run_evidence_queue_unit", side_effect=unit), ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(run_evidence_queue_until_blocked,
+                config_path=self.config.paths.config_path, config=self.config, deps=self._deps(Mock()),
+                max_work_items=None, max_running_files=MAX_CONCURRENT_EVIDENCE_FILES, wake_signal=progress)
+            try:
+                self.assertTrue(first_refilled.wait(3))
+                release_late.set()
+                self.assertTrue(second_refilled.wait(3), "A late empty result must not consume an available file slot")
+            finally:
+                release_late.set()
+                release.set()
+            future.result(timeout=5)
+
+    def test_another_units_unclaimable_sibling_does_not_hold_admission(self) -> None:
+        other, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+        own, _path = self._insert_item(2, cadence_summary_json=None, media_fingerprint_json=None)
+        self._queue_unpaused_analysis([other, own])
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(update(library_item_evidence_state).where(
+                library_item_evidence_state.c.library_item_id == other).values(work_priority=0))
+        with open_db(self.config.paths.db_path) as connection:
+            other_claim = claim_next_evidence_work(connection, worker_id="other", lease_seconds=30,
+                max_running_files=MAX_CONCURRENT_EVIDENCE_FILES)
+        with open_db(self.config.paths.db_path) as connection:
+            own_claim = claim_next_evidence_work(connection, worker_id="own", lease_seconds=30,
+                max_running_files=MAX_CONCURRENT_EVIDENCE_FILES)
+        assert other_claim is not None and own_claim is not None
+        self.assertEqual(own_claim.library_item_id, own)
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertIsNone(original_intake_hold(connection, batch_id=own_claim.batch_id,
+                priority=own_claim.work_priority, allowed_running_item=own_claim.library_item_id))
+            connection.execute(update(library_item_evidence_state).where(
+                library_item_evidence_state.c.library_item_id == own,
+                library_item_evidence_state.c.evidence_kind != own_claim.evidence_kind).values(work_priority=0))
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertEqual(original_intake_hold(connection, batch_id=own_claim.batch_id,
+                priority=own_claim.work_priority, allowed_running_item=own_claim.library_item_id), "higher_priority")
+
+    def test_active_runner_wakes_idle_units_for_externally_discovered_work(self) -> None:
+        from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner
+
+        items = [self._insert_item(index, cadence_summary_json=None, media_fingerprint_json=None)
+                 for index in range(1, MAX_CONCURRENT_EVIDENCE_FILES + 1)]
+        self._queue_unpaused_analysis([items[0][0]])
+        empty = threading.Event()
+        all_started = threading.Event()
+        release = threading.Event()
+        lock = threading.Lock()
+        seen: set[Path] = set()
+        process = self._signal_idle_units(empty)
+
+        def analyze(path: Path, kind: str, **_kwargs: object) -> dict[str, object]:
+            with lock:
+                seen.add(path)
+                if len(seen) == len(items):
+                    all_started.set()
+            if not release.wait(10):
+                raise RuntimeError("The test did not release external work")
+            return json.loads(self._cadence_summary_json() if kind == CADENCE_EVIDENCE_KIND else self._fingerprint_summary_json())
+
+        def discover() -> int:
+            self._queue_unpaused_analysis([item_id for item_id, _path in items[1:]])
+            return len(items) - 1
+
+        deps = replace(self._deps(analyze), lease_seconds=EVIDENCE_JOB_LEASE_SECONDS,
+                       heartbeat_seconds=EVIDENCE_JOB_HEARTBEAT_SECONDS)
+        runner = BoundedEvidenceRunner(self.config.paths.config_path, deps=deps)
+        with patch("mediaforce.library.evidence_worker.process_evidence_queue_once", side_effect=process), patch(
+            "mediaforce.library.evidence_worker._discover_originals", return_value=0
+        ), patch.object(runner, "prepare_background_work", side_effect=discover):
+            runner.start(max_work_items=None)
+            try:
+                self.assertTrue(empty.wait(5))
+                self.assertFalse(start_ready_evidence_work(self.config.paths.db_path, runner))
+                self.assertTrue(all_started.wait(3), "External requests should use the idle file slots")
+            finally:
+                release.set()
+                runner.join()
 
     def test_extend_claim_owns_the_next_kind_without_spending_an_attempt(self) -> None:
         item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
@@ -607,6 +709,7 @@ class EvidenceWorkerTests(unittest.TestCase):
     def test_ready_evidence_work_starts_the_runner_only_when_runnable(self) -> None:
         item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
         runner = Mock(active=False)
+        runner.wake.return_value = False
         runner.prepare_background_work.return_value = 0
         runner.start.return_value = True
 
@@ -625,8 +728,10 @@ class EvidenceWorkerTests(unittest.TestCase):
 
         runner.reset_mock()
         runner.active = True
+        runner.wake.return_value = True
         self.assertFalse(start_ready_evidence_work(self.config.paths.db_path, runner))
         runner.active = False
+        runner.wake.return_value = False
         with open_db(self.config.paths.db_path) as connection:
             pause_evidence_queue(connection)
         self.assertFalse(start_ready_evidence_work(self.config.paths.db_path, runner))
@@ -1499,6 +1604,24 @@ class EvidenceWorkerTests(unittest.TestCase):
             max_seconds=None,
         )
         self.assertIs(run_worker.call_args.kwargs["deps"].evidence_host_rows, _schedule_aware_evidence_host_rows)
+
+    @staticmethod
+    def _signal_idle_units(empty: threading.Event) -> Callable[..., int]:
+        lock = threading.Lock()
+        empty_calls = 0
+        actual_process = process_evidence_queue_once
+
+        def process(**kwargs: Any) -> int:
+            nonlocal empty_calls
+            count = actual_process(**kwargs)
+            if not count:
+                with lock:
+                    empty_calls += 1
+                    if empty_calls >= MAX_CONCURRENT_EVIDENCE_FILES - 1:
+                        empty.set()
+            return count
+
+        return process
 
     def _queue_unpaused_analysis(self, item_ids: Iterable[int]) -> None:
         with open_db(self.config.paths.db_path) as connection:

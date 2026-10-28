@@ -62,7 +62,9 @@ The automatic runner admits at most three distinct files, counting a paired
 cadence/fingerprint lease as one file. Each execution unit keeps its own SSH
 connections and process controllers. Units reuse the same queue loop, including
 configuration refresh, discovery and retry handling. Idle units return when
-another unit completes work or discovers more originals. An unexpected worker
+another unit completes work or discovers more originals, and when an external
+request queues work. Empty units report the progress generation they observed
+before claiming so a late exit cannot miss newly queued work. An unexpected worker
 failure cancels its peers through a private stop signal without setting the app's
 shutdown flag; app shutdown is also observed synchronously before claiming.
 Foreground item limits retain their serial behavior. The bound follows the
@@ -141,7 +143,8 @@ timeout and cancellation boundary.
 Claims use a short SQLite `BEGIN IMMEDIATE` transaction:
 
 1. Read the singleton pause/cancel state.
-2. Refuse a claim while another work unit is `running`.
+2. Refuse a claim at the requested distinct-file limit (one for foreground
+   work, at most three for automatic work); exclude files another unit owns.
 3. Atomically move one ready work unit to `running` with a worker ID and lease.
 4. Commit and close the transaction before opening media or launching a child
    process.

@@ -47,6 +47,21 @@ SourceAvailability = Literal["available", "root_unavailable", "source_unavailabl
 REMOTE_SOURCE_MISMATCH_ERROR = (
     "The encode computer does not see the same copy of this file; run a scan before retrying evidence work."
 )
+EVIDENCE_INTERRUPTED_REASON = "This check was interrupted; it will retry when work resumes"
+
+
+class EvidenceQueueProgress:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._generation = 0
+
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def wake(self) -> None:
+        with self._lock:
+            self._generation += 1
 
 
 class EvidenceWorkDeferred(ProcessCancelledError):
@@ -138,6 +153,7 @@ def run_evidence_queue_until_blocked(
         max_seconds: float | None = None,
         stop_event: threading.Event | None = None,
         max_running_files: int = 1,
+        wake_signal: EvidenceQueueProgress | None = None,
 ) -> dict[str, Any]:
     if max_work_items is not None and max_work_items <= 0:
         raise ValueError("Evidence worker item budget must be greater than zero.")
@@ -149,7 +165,7 @@ def run_evidence_queue_until_blocked(
     deadline = time.monotonic() + max_seconds if max_seconds is not None else None
     if max_work_items is None and max_running_files > 1:
         return _run_parallel_evidence_queue(config_path=config_path, config=config, deps=runtime_deps,
-            stop_event=stop_event, deadline=deadline, max_running_files=max_running_files)
+            stop_event=stop_event, deadline=deadline, max_running_files=max_running_files, wake_signal=wake_signal)
     return _run_evidence_queue_unit(config_path=config_path, config=config, deps=runtime_deps,
         max_work_items=max_work_items, stop_event=stop_event, deadline=deadline, max_running_files=max_running_files)
 
@@ -157,25 +173,29 @@ def run_evidence_queue_until_blocked(
 def _run_parallel_evidence_queue(
         *, config_path: Path, config: MediaforceConfig | None, deps: EvidenceWorkerDeps,
         stop_event: StopSignal | None, deadline: float | None, max_running_files: int,
+        wake_signal: EvidenceQueueProgress | None,
 ) -> dict[str, Any]:
     cancelled = threading.Event()
     stop = _EvidenceStopSignal(stop_event if stop_event is not None else deps.shutdown_event, cancelled)
-    progress = threading.Event()
+    progress = wake_signal or EvidenceQueueProgress()
+    observed_generation = progress.generation()
     processed = 0
     with ThreadPoolExecutor(max_workers=max_running_files, thread_name_prefix="evidence-file") as executor:
         pending = set()
         submit_unit = partial(executor.submit, _run_evidence_queue_unit, config_path=config_path, config=config,
             deps=deps, max_work_items=None, stop_event=stop, deadline=deadline,
-            max_running_files=max_running_files, progress_event=progress)
+            max_running_files=max_running_files, progress=progress)
         try:
             for _ in range(max_running_files):
                 pending.add(submit_unit())
             while pending:
                 finished, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
-                for future in finished:
-                    processed += int(future.result()["processed_count"])
-                if progress.is_set():
-                    progress.clear()
+                results = [future.result() for future in finished]
+                processed += sum(int(result["processed_count"]) for result in results)
+                generation = progress.generation()
+                if generation != observed_generation or any(
+                        result.get("_empty_generation", generation) < generation for result in results):
+                    observed_generation = generation
                     if not stop.is_set() and (deadline is None or time.monotonic() < deadline):
                         for _ in range(max_running_files - len(pending)):
                             pending.add(submit_unit())
@@ -197,7 +217,7 @@ def _run_parallel_evidence_queue(
 def _run_evidence_queue_unit(
         *, config_path: Path, config: MediaforceConfig | None, deps: EvidenceWorkerDeps,
         max_work_items: int | None, stop_event: StopSignal | None, deadline: float | None,
-        max_running_files: int, progress_event: threading.Event | None = None,
+        max_running_files: int, progress: EvidenceQueueProgress | None = None,
 ) -> dict[str, Any]:
     runtime_deps = deps
     if stop_event is not None:
@@ -205,6 +225,7 @@ def _run_evidence_queue_unit(
     current_config = config or runtime_deps.load_config(config_path)
     processed = 0
     progress_since_discovery = 0
+    empty_generation = progress.generation() if progress is not None else 0
     stop_reason = "blocked"
     stop_requested = stop_event.is_set if stop_event is not None else lambda: False
     with RemoteMediaConnections() as connections, SourceAdmissionPrefetcher(stop_event=stop_event, logger=runtime_deps.logger,
@@ -226,16 +247,18 @@ def _run_evidence_queue_unit(
             runtime_deps = replace(runtime_deps, remote_commands=runtime_deps.remote_commands or connections.runner, prepare_next_original=(
                 prepare_next if max_running_files == 1 and (max_work_items is None or processed + 1 < max_work_items) else None
             ))
+            claim_generation = progress.generation() if progress is not None else 0
             completed = process_evidence_queue_once(config_path=config_path, config=current_config,
                 deps=runtime_deps, excluded_media_roots=roots,
                 max_work_items=None if max_work_items is None else max_work_items - processed,
                 max_running_files=max_running_files)
             if not completed:
+                empty_generation = claim_generation
                 if max_work_items is None and progress_since_discovery and not stop_requested():
                     progress_since_discovery = 0
                     if _discover_originals(current_config, runtime_deps):
-                        if progress_event is not None:
-                            progress_event.set()
+                        if progress is not None:
+                            progress.wake()
                         continue
                 break
             prefetch.wait()
@@ -244,14 +267,16 @@ def _run_evidence_queue_unit(
             if max_work_items is None and progress_since_discovery >= DEFAULT_EVIDENCE_BATCH_LIMIT and not stop_requested():
                 _discover_originals(current_config, runtime_deps)
                 progress_since_discovery = 0
-            if progress_event is not None:
-                progress_event.set()
+            if progress is not None:
+                progress.wake()
             if max_work_items is not None and processed >= max_work_items:
                 stop_reason = "item_budget"
     with open_db(current_config.paths.db_path) as connection:
         summary = evidence_queue_summary(connection)
     summary["processed_count"] = processed
     summary["stop_reason"] = stop_reason
+    if progress is not None:
+        summary["_empty_generation"] = empty_generation
     return summary
 
 
@@ -357,14 +382,15 @@ def _run_evidence_claim(
                     return
                 last_guard_check = now
                 with open_db(config.paths.db_path) as database:
-                    hold = original_intake_hold(database, batch_id=claim.batch_id, priority=claim.work_priority, excluded_media_roots=excluded_media_roots)
-                if hold == "cancelled":
+                    admission_hold = original_intake_hold(database, batch_id=claim.batch_id, priority=claim.work_priority,
+                        excluded_media_roots=excluded_media_roots, allowed_running_item=claim.library_item_id)
+                if admission_hold == "cancelled":
                     raise ProcessCancelledError("Evidence work was cancelled.")
                 if shutting_down:
-                    raise EvidenceWorkDeferred("Original checks will resume after the app restarts")
-                if hold == "paused":
+                    raise EvidenceWorkDeferred(EVIDENCE_INTERRUPTED_REASON)
+                if admission_hold == "paused":
                     raise EvidenceWorkDeferred("Original checks are paused")
-                if hold == "higher_priority":
+                if admission_hold == "higher_priority":
                     raise EvidenceWorkDeferred("Waiting for a file that needs a check sooner")
 
             with process_controller.activity_guard(guard_intake):
@@ -437,7 +463,7 @@ def _run_evidence_claim(
                     claims[claims.index(owned)] = active
                     owned = active
                     hold = original_intake_hold(connection, batch_id=owned.batch_id, priority=owned.work_priority,
-                                                excluded_media_roots=excluded_media_roots)
+                        excluded_media_roots=excluded_media_roots, allowed_running_item=owned.library_item_id)
                 if hold == "cancelled":
                     raise ProcessCancelledError("Evidence work was cancelled.")
                 if hold in {"higher_priority", "paused"} or (deps.shutdown_event is not None and deps.shutdown_event.is_set()):
@@ -446,7 +472,7 @@ def _run_evidence_claim(
                     claims.remove(owned)
                     continue
             if deps.shutdown_event is not None and deps.shutdown_event.is_set():
-                raise EvidenceWorkDeferred("Original checks will resume after the app restarts")
+                raise EvidenceWorkDeferred(EVIDENCE_INTERRUPTED_REASON)
             if owned.evidence_kind not in started:
                 with open_db(config.paths.db_path) as connection:
                     active = mark_evidence_attempt_started(connection, owned)
@@ -697,7 +723,7 @@ def _evidence_heartbeat_loop(
 ) -> None:
     while not stop_event.wait(deps.heartbeat_seconds):
         if deps.shutdown_event is not None and deps.shutdown_event.is_set():
-            process_controller.cancel(EvidenceWorkDeferred("This check was interrupted; it will retry when work resumes"))
+            process_controller.cancel(EvidenceWorkDeferred(EVIDENCE_INTERRUPTED_REASON))
             return
         try:
             with open_db(config.paths.db_path) as connection:

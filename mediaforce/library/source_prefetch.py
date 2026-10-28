@@ -89,7 +89,8 @@ class SourceAdmissionPrefetcher:
 
         def require_runnable(connection: DBClient) -> None:
             self._check_stopped()
-            if (original_intake_hold(connection, batch_id=claim.batch_id, priority=claim.work_priority, excluded_media_roots=roots) is not None
+            if (original_intake_hold(connection, batch_id=claim.batch_id, priority=claim.work_priority,
+                    excluded_media_roots=roots, allowed_running_item=claim.library_item_id) is not None
                     or self._next_item(config, connection, claim, roots) != item_id):
                 raise ProcessCancelledError("Original admission preparation is no longer runnable")
 
