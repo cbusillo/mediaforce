@@ -19894,7 +19894,7 @@ raise SystemExit(0)
             {"host": "encode-a", "mode": "ssh", "capabilities": ["encode_queue"]},
             {"host": "encode-b", "mode": "ssh", "capabilities": ["encode_queue"]},
         ]
-        with patch.object(encode_runtime, "run_remote_command") as scoped_remote:
+        with patch("mediaforce.web.runtime.encode_runtime.run_remote_command") as scoped_remote:
             web_app._sweep_orphaned_encode_processes(self.config)
         scoped_remote.assert_not_called()
 
@@ -19904,7 +19904,7 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             self._save_job(connection, job_id="owned-sweep", manifest_name="owned-sweep.json", status="stopped",
                            attempt_count=1, host={"mode": "ssh", "host": "owned-host"})
-        with patch.object(encode_runtime, "end_remote_output_writers") as end_writers:
+        with patch("mediaforce.web.runtime.encode_runtime.end_remote_output_writers") as end_writers:
             web_app._sweep_orphaned_encode_processes(self.config)
         self.assertEqual({call.args[0]["host"] for call in end_writers.call_args_list}, {"owned-host"})
         self.assertEqual({call.args[1] for call in end_writers.call_args_list},
