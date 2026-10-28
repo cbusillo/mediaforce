@@ -426,7 +426,7 @@ def main() -> int:
         elif args.action == "smoke":
             from urllib.request import urlopen
             _, _, host, port = component_command(root)
-            for route in ["/api/dashboard", "/api/settings", "/api/hosts"]:
+            for route in ["/api/dashboard", "/api/app/settings/library", "/api/hosts"]:
                 with urlopen(f"http://{host}:{port}{route}", timeout=2) as response:
                     response.read()
             status = {"state": "smoke passed"}

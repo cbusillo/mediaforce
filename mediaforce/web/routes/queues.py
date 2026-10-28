@@ -17,10 +17,6 @@ def register_queue_routes(
         *,
         pause_encode_queue_action: Callable[[], dict[str, Any]],
         resume_encode_queue_action: Callable[[], dict[str, Any]],
-        retry_failed_encode_queue_action: Callable[[], dict[str, Any]],
-        retry_failed_encode_prefix_action: Callable[[str, str], dict[str, Any]],
-        stop_encode_queue_action: Callable[[], dict[str, Any]],
-        stop_calibration_queue_action: Callable[[], dict[str, Any]],
 ) -> None:
     @app.post("/api/encode-queue/pause")
     def api_pause_encode_queue() -> JSONResponse:
@@ -30,27 +26,6 @@ def register_queue_routes(
     def api_resume_encode_queue() -> JSONResponse:
         return JSONResponse(resume_encode_queue_action())
 
-    @app.post("/api/encode-queue/retry-failed")
-    def api_retry_failed_encode_queue() -> JSONResponse:
-        return JSONResponse(retry_failed_encode_queue_action())
-
-    @app.post("/api/encode-queue/retry-prefix")
-    async def api_retry_failed_encode_prefix(request: Request) -> JSONResponse:
-        body = await request.json()
-        result = await run_in_threadpool(
-            retry_failed_encode_prefix_action,
-            str(body.get("prefix", "")).strip(),
-            str(body.get("scope_membership_token", "")),
-        )
-        return JSONResponse(result)
-
-    @app.post("/api/encode-queue/stop")
-    def api_stop_encode_queue() -> JSONResponse:
-        return JSONResponse(stop_encode_queue_action())
-
-    @app.post("/api/calibration-queue/stop")
-    def api_stop_calibration_queue() -> JSONResponse:
-        return JSONResponse(stop_calibration_queue_action())
 
 
 def register_child_recovery_routes(

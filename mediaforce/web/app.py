@@ -79,11 +79,9 @@ from mediaforce.execution import (
 )
 from mediaforce.library.evidence_worker import default_evidence_worker_deps
 from mediaforce.library.folder_profiles import inspect_prefix
-from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state, \
-    set_background_work_paused
-from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EvidenceQueueConflict, \
-    cancel_evidence_queue, ensure_evidence_queue_state, evidence_queue_summary, pause_evidence_queue, \
-    resume_evidence_queue, start_evidence_work
+from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state
+from mediaforce.library.evidence_queue import EvidenceQueueConflict, \
+    ensure_evidence_queue_state
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.media_scopes import media_group_scope_for_rel_path, resolve_media_scope, resolve_media_scopes, \
     scope_rel_path_filter, series_context_for_prefix, tv_series_scope_for_rel_path
@@ -92,7 +90,6 @@ from mediaforce.library.movie_workflow import classify_movie_path, movie_item_in
 from mediaforce.library.staged_integrity import (
     CheckedStagedOutputUnavailable,
     checked_staged_output,
-    staged_integrity_report_for_scope,
 )
 from mediaforce.library.other_library import load_other_library_payload, load_other_scope_payload, \
     other_group_scope_for_rel_path, other_scope_action_blocker
@@ -117,7 +114,6 @@ from mediaforce.remote import (
     prepare_remote_host_with_password,
     remote_mount_recovery_supported,
     reset_remote_host_trust,
-    run_remote_command,
     run_host_lifecycle_command,
 )
 from mediaforce.review import (
@@ -155,7 +151,6 @@ from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_samp
     samples_to_remake, start_compressing
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
-from mediaforce.web.runtime.show_settings_runtime import prefixes_with_samples, use_show_settings
 from mediaforce.web.checked_output_preview import (
     InvalidByteRange,
     checked_output_media_type,
@@ -165,34 +160,27 @@ from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, approve_kind_action, \
     background_queue_blocker, kinds_payload, next_kind_season, record_kind_attempt, stop_kind_approval
-from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_folders_payload, \
-    dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
+from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
-    clear_completed_backups_action, completed_page_payload, confirm_originals_removed_action, \
-    record_deleted_original_backups, \
-    list_completed_folders, \
+    completed_page_payload, record_deleted_original_backups, \
     ensure_encode_host_ready, ensure_sample_host_ready, \
-    folder_ai_tune_action, folder_ai_tune_confirm_action, folder_ai_tune_preview_action, \
-    folder_card_cache_key, folder_status_payload, host_config_for_key, host_lifecycle_start_command, \
+    folder_ai_tune_action, folder_ai_tune_confirm_action, folder_card_cache_key, folder_status_payload, host_config_for_key, host_lifecycle_start_command, \
     host_lifecycle_start_timeout_seconds, host_lifecycle_stop_command, host_runtime_rows, \
     list_library_structure_cards, load_calibration_state, load_json_object, load_pending_proposal, \
     multimodal_review_pack_public_view, pause_encode_queue_action, pending_proposal_public_view, \
     planned_audio_review_context, preview_folder_cards, proposal_alignment_issue, \
     proposal_context_snapshot, proposal_signal_copy, promote_folder_outputs_action, \
-    approve_measured_encode_recovery_action, \
     queue_folder_encode_action, recent_tuning_sessions, \
     reconcile_pending_review_samples, refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, \
-    retry_failed_encode_prefix_action, retry_failed_encode_queue_action, review_media_context, \
+    review_media_context, \
     review_pack_dir, review_pair_key, review_pairs, safe_collect_host_statuses, save_advice_state, \
     save_calibration_state, save_pending_proposal, save_profile_action, \
     sample_calibration_host_statuses, sample_host_options, sample_host_options_from_statuses, \
-    settings_page_payload, stop_calibration_queue_action, stop_encode_queue_action, \
     validate_folder_outputs_action, \
     build_multimodal_review_pack, build_tuning_runtime_toolbelt, load_latest_failed_sample_job_state, \
     load_latest_failed_target_size_job_state, load_retryable_sample_job_state
-from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem, production_action_blocker, \
-    tv_promotion_readiness_payload
+from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem, production_action_blocker
 from mediaforce.web.runtime.folder_cards import list_folder_cards
 from mediaforce.web.runtime.page_state import PageStateSources, card_page_states, folder_page_state
 from mediaforce.library.workflow_state import build_folder_workflow_state
@@ -212,7 +200,7 @@ from mediaforce.web.routes.queues import (
 )
 from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_child_recovery
 from mediaforce.web.runtime.size_exception import decide_size_exception
-from mediaforce.web.runtime.size_held import decide_size_held_file, remake_staged_files, staged_remake_records
+from mediaforce.web.runtime.size_held import decide_size_held_file, remake_staged_files
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
     production_approval_identity, production_calibration
@@ -222,9 +210,7 @@ from mediaforce.encoding.put_back import reconcile_unfinished_put_backs
 from mediaforce.web.runtime.put_back import put_original_back_action
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
-from mediaforce.web.runtime.episode_progress import folder_episodes_payload
 from mediaforce.web.runtime.app_item import item_payload, player_file
-from mediaforce.web.runtime.sample_history import sample_history_payload
 from mediaforce.web.runtime.encode_runtime import ControllerShutdownCancelledError, mark_host_cooldowns, \
     release_host_cooldowns, sync_encode_job_parent, sweep_stopped_remote_encodes
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
@@ -232,7 +218,7 @@ from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle, run_supervised_worker_loop
 from mediaforce.web.runtime.host_recovery import process_host_recovery_once, retry_host_connection
 from mediaforce.web.runtime.host_status import refresh_current_machine_host_statuses
-from mediaforce.web.runtime.recovery_alerts import recovery_alerts, record_recovery_alerts
+from mediaforce.web.runtime.recovery_alerts import record_recovery_alerts
 from mediaforce.web.runtime.controller_storage_recovery import (
     controller_storage_admission_issue,
     controller_storage_recovery_snapshot,
@@ -306,8 +292,7 @@ from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_
     save_scan_job_state as runtime_save_scan_job_state, scan_is_stale as runtime_scan_is_stale, \
     scan_job_belongs_to_current_process as runtime_scan_job_belongs_to_current_process, \
     scan_process_is_alive as runtime_scan_process_is_alive
-from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, build_operator_work_payload, \
-    start_ready_evidence_work
+from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, start_ready_evidence_work
 from mediaforce.web.settings_runtime import (
     ALWAYS_SCHEDULE_PROFILE,
     DEFAULT_HOST_SCHEDULE_PROFILE,
@@ -315,7 +300,6 @@ from mediaforce.web.settings_runtime import (
     build_runtime_media_settings as _build_runtime_media_settings,
     build_runtime_video_settings as _build_runtime_video_settings,
     compression_settings_facts as _compression_settings_facts_runtime,
-    build_runtime_settings_payload as _build_runtime_settings_payload,
     canonical_schedule_profile_key as _canonical_schedule_profile_key,
     computer_section_settings as _computer_section_settings,
     computer_settings_facts as _computer_settings_facts_runtime,
@@ -747,37 +731,6 @@ def create_app(
             )
         return await call_next(request)
 
-    def _settings_page_payload(
-            include_archive_cleanup: bool = True,
-            *,
-            error: str | None = None,
-            saved: bool = False,
-            host_notice: str | None = None,
-            host_notice_kind: str | None = None,
-            libraries: list[dict[str, Any]] | None = None,
-            remote_hosts: list[dict[str, str]] | None = None,
-            transcode_root: str | None = None,
-            video_defaults: dict[str, Any] | None = None,
-            encode_queue_scheduler: dict[str, Any] | None = None,
-            schedule_profiles: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        return settings_page_payload(
-            config,
-            encode_queue_scheduler_policy=_encode_queue_scheduler_policy,
-            normalize_encode_queue_scheduler=_normalize_encode_queue_scheduler,
-            archive_cleanup_summary_fn=archive_cleanup_summary,
-            include_archive_cleanup=include_archive_cleanup,
-            error=error,
-            saved=saved,
-            host_notice=host_notice,
-            host_notice_kind=host_notice_kind,
-            libraries=libraries,
-            remote_hosts=remote_hosts,
-            transcode_root=transcode_root,
-            video_defaults=video_defaults,
-            encode_queue_scheduler=encode_queue_scheduler,
-            schedule_profiles=schedule_profiles,
-        )
 
     def _dashboard_summary_payload(preview_limit: int | None = None) -> dict[str, Any]:
         return dashboard_summary_payload(
@@ -796,53 +749,9 @@ def create_app(
         with open_db(config.paths.db_path) as connection:
             return _load_scan_status(connection, config, prefix=None)
 
-    def _dashboard_folders_payload(include_series_folders: bool = True) -> dict[str, Any]:
-        shared_decisions: list[CandidateDecision] | None = None
 
-        def folder_decisions(connection: DBClient) -> list[CandidateDecision]:
-            nonlocal shared_decisions
-            if shared_decisions is None:
-                shared_decisions = project_candidates(connection, config, prefixes=[])
-            return shared_decisions
 
-        return dashboard_folders_payload(
-            config,
-            folder_card_cache_key=_folder_card_cache_key,
-            list_folder_cards=lambda active_config, connection: _list_folder_cards(
-                active_config,
-                connection,
-                candidate_decisions=folder_decisions(connection),
-            ),
-            list_series_folder_cards=lambda active_config, connection: _list_series_folder_cards(
-                active_config,
-                connection,
-                candidate_decisions=folder_decisions(connection),
-            ),
-            include_series_folders=include_series_folders,
-        )
 
-    def _dashboard_library_payload() -> dict[str, Any]:
-        return dashboard_library_payload(
-            config,
-            folder_card_cache_key=_folder_card_cache_key,
-            list_library_structure_cards=_list_library_structure_cards,
-        )
-
-    def _dashboard_library_details_payload() -> dict[str, Any]:
-        return dashboard_folders_payload(
-            config,
-            folder_card_cache_key=_folder_card_cache_key,
-            list_folder_cards=_list_library_detail_cards,
-            include_series_folders=False,
-        )
-
-    def _dashboard_movie_library_payload() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            return load_movie_library_payload(
-                connection,
-                config,
-                include_details=False,
-            )
 
     def _dashboard_movie_library_details_payload() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
@@ -880,13 +789,6 @@ def create_app(
                 candidate_decisions=decisions,
             )
 
-    def _dashboard_other_library_payload() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            return load_other_library_payload(
-                connection,
-                config,
-                include_details=False,
-            )
 
     def _dashboard_other_library_details_payload() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
@@ -969,42 +871,6 @@ def create_app(
             ),
         )
 
-    def _folder_staged_integrity_payload(
-            normalized_prefix: str,
-            offset: int,
-            limit: int,
-    ) -> dict[str, Any]:
-        with open_readonly_db(config.paths.db_path) as connection:
-            scope = resolve_media_scope(
-                connection,
-                normalized_prefix,
-                library_types=config.library_type_map,
-            )
-            report = staged_integrity_report_for_scope(
-                connection,
-                config,
-                scope,
-                discover=True,
-            )
-            items = _load_folder_staged_items(
-                connection,
-                config,
-                normalized_prefix,
-                statuses={"validated"},
-            )
-            promotion_readiness = tv_promotion_readiness_payload(
-                connection,
-                config,
-                scope,
-                report,
-                items,
-                load_calibration_state_fn=_load_calibration_state,
-            )
-            detail = report.detail_payload(offset=offset, limit=limit)
-            detail["records"] = staged_remake_records(
-                connection, detail["records"], normalized_prefix, current_approval=_remake_current_approval,
-            )
-        return {**detail, "promotion_readiness": promotion_readiness}
 
     def _saved_library_context() -> dict[str, Any]:
         """What the settings builders compare a submitted library list against."""
@@ -1083,31 +949,6 @@ def create_app(
                 _maybe_schedule_scan(connection, config, prefix=None, force=True)
         _refresh_host_status_cache(config)
 
-    def _save_settings_action(
-            *,
-            libraries: list[dict[str, Any]],
-            remote_hosts: list[dict[str, Any]],
-            transcode_root: str,
-            catalog_refresh_hours: Any,
-            video_defaults: dict[str, Any],
-            encode_queue_scheduler: dict[str, Any],
-            schedule_profiles: list[dict[str, Any]],
-            metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        if not transcode_root:
-            raise ValueError("A transcode folder is required.")
-        _apply_settings_payload(_build_runtime_settings_payload(
-            libraries=libraries,
-            remote_hosts=remote_hosts,
-            transcode_root=transcode_root,
-            catalog_refresh_hours=catalog_refresh_hours,
-            video_defaults=video_defaults,
-            encode_queue_scheduler=encode_queue_scheduler,
-            schedule_profiles=schedule_profiles,
-            metadata=metadata if metadata is not None else config.metadata,
-            **_saved_library_context(),
-        ))
-        return {"ok": True, "message": "Settings saved.", "settings": _settings_page_payload(saved=True)}
 
     def _settings_snapshot(section: str) -> tuple[MediaforceConfig, str]:
         """Loaded settings and the stored `section` revision, both from one stored state.
@@ -1365,10 +1206,6 @@ def create_app(
             "controller_storage": controller_storage_recovery_snapshot(config),
         }
 
-    @app.get("/api/recovery-alerts")
-    def api_recovery_alerts() -> dict[str, Any]:
-        return {"alerts": recovery_alerts(config)}
-
     def _release_work_snapshot() -> ReleaseWorkSnapshot:
         return release_work_payload(config.paths.db_path)
 
@@ -1398,18 +1235,9 @@ def create_app(
         app,
         dashboard_payload=_dashboard_api_payload,
         dashboard_scan_job_payload=_dashboard_scan_job_payload,
-        dashboard_folders_payload=_dashboard_folders_payload,
-        dashboard_library_payload=_dashboard_library_payload,
-        dashboard_library_details_payload=_dashboard_library_details_payload,
-        dashboard_movie_library_payload=_dashboard_movie_library_payload,
-        dashboard_movie_library_details_payload=_dashboard_movie_library_details_payload,
-        dashboard_other_library_payload=_dashboard_other_library_payload,
-        dashboard_other_library_details_payload=_dashboard_other_library_details_payload,
     )
     register_settings_routes(
         app,
-        settings_payload=_settings_page_payload,
-        save_settings_action=_save_settings_action,
         library_type_preview_action=_library_type_preview_action,
         archive_cleanup_payload=lambda transcode_root=None: archive_cleanup_summary(
             config,
@@ -1440,8 +1268,6 @@ def create_app(
     register_completed_routes(
         app,
         completed_payload=lambda: _completed_page_payload(),
-        clear_completed_backups_action=lambda prefixes=None: _clear_completed_backups_action(prefixes),
-        confirm_originals_removed_action=lambda prefixes: _confirm_originals_removed_action(prefixes),
     )
 
     def _title_poster(title_prefix: str) -> Path | None:
@@ -1458,47 +1284,8 @@ def create_app(
         retry_host_connection_action=_retry_host_connection_action,
     )
 
-    def _operator_work_payload(
-            *,
-            backlog_offset: int = 0,
-            backlog_limit: int = 25,
-            evidence_kind: str | None = None,
-            evidence_state: str | None = None,
-            media_root: str | None = None,
-            work_status: str | None = None,
-    ) -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            return build_operator_work_payload(
-                connection,
-                config,
-                scan_job=_load_scan_status(connection, config, prefix=None),
-                catalog_is_stale=_scan_is_stale(connection, config, prefix=None),
-                latest_scan_completed_at=_latest_scan_completed_at(connection, prefix=None),
-                evidence_runner_active=evidence_runner.active,
-                backlog_offset=backlog_offset,
-                backlog_limit=backlog_limit,
-                evidence_kind=evidence_kind,
-                evidence_state=evidence_state,
-                media_root=media_root,
-                work_status=work_status,
-            )
 
-    def _pause_background_work_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            set_background_work_paused(connection, is_paused=True)
-            pause_evidence_queue(connection)
-        return {
-            "ok": True,
-            "message": "Paused new catalog and analysis work. Any item already running can finish safely.",
-        }
 
-    def _resume_background_work_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            set_background_work_paused(connection, is_paused=False)
-        return {
-            "ok": True,
-            "message": "Background work can start again. Prepared analysis remains paused until you resume it.",
-        }
 
     def _refresh_catalog_action() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
@@ -1517,85 +1304,13 @@ def create_app(
             ),
         }
 
-    def _prepare_evidence_action(
-            prefix: str,
-            evidence_kinds: list[str] | tuple[str, ...] | None,
-            limit: int,
-    ) -> dict[str, Any]:
-        if limit > DEFAULT_EVIDENCE_BATCH_LIMIT:
-            raise ValueError(f"The operator work limit is {DEFAULT_EVIDENCE_BATCH_LIMIT} items per batch.")
-        with open_db(config.paths.db_path) as connection:
-            summary = start_evidence_work(
-                connection,
-                config,
-                prefix,
-                evidence_kinds=evidence_kinds,
-                limit=limit,
-            )
-        item_count = int(summary.get("prepared_count", summary.get("item_count")) or 0)
-        return {
-            "ok": True,
-            "message": (
-                f"Prepared {item_count} evidence {'update' if item_count == 1 else 'updates'}. Review the scope, then start analysis."
-                if item_count
-                else "That scope is already current. No analysis was prepared."
-            ),
-        }
 
-    def _pause_evidence_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            pause_evidence_queue(connection)
-        return {
-            "ok": True,
-            "message": "Paused analysis before the next item. An item already running can finish safely.",
-        }
 
-    def _resume_evidence_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            if background_work_is_paused(connection):
-                raise EvidenceQueueConflict(
-                    "Background catalog and analysis work is paused. Resume it before starting analysis."
-                )
-            summary = evidence_queue_summary(connection)
-            if not summary.get("batch_id") or str(summary.get("status") or "") not in {
-                "paused",
-                "queued",
-                "running",
-            }:
-                raise EvidenceQueueConflict("Prepare a bounded analysis batch before starting work.")
-            summary = resume_evidence_queue(connection)
-            item_budget = min(
-                max(1, int(summary.get("remaining_count") or summary.get("item_count") or 1)),
-                DEFAULT_EVIDENCE_BATCH_LIMIT,
-            )
-        started = evidence_runner.start(max_work_items=item_budget)
-        return {
-            "ok": True,
-            "message": (
-                "Analysis started. It will stop when this prepared batch is complete or blocked."
-                if started
-                else "Analysis is already running."
-            ),
-        }
 
-    def _cancel_evidence_action() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            cancel_evidence_queue(connection)
-        return {
-            "ok": True,
-            "message": "Cancelled remaining analysis. A running media process is being stopped safely.",
-        }
 
     register_operator_work_routes(
         app,
-        operator_work_payload=_operator_work_payload,
-        pause_background_work_action=_pause_background_work_action,
-        resume_background_work_action=_resume_background_work_action,
         refresh_catalog_action=_refresh_catalog_action,
-        prepare_evidence_action=_prepare_evidence_action,
-        pause_evidence_action=_pause_evidence_action,
-        resume_evidence_action=_resume_evidence_action,
-        cancel_evidence_action=_cancel_evidence_action,
     )
 
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:
@@ -1960,65 +1675,7 @@ def create_app(
         finally:
             _record_deleted_original_backups(removed_paths)
 
-    def _clear_completed_backups_action(prefixes: list[str] | None) -> dict[str, Any]:
-        try:
-            archive_root = config.archive_root
-        except KeyError:
-            archive_root = None
-        with open_db(config.paths.db_path) as connection:
-            folders = list_completed_folders(
-                connection,
-                folder_group=lambda rel_path: _folder_group(
-                    rel_path,
-                    library_types=config.library_type_map,
-                ),
-                archive_root=archive_root,
-            )
-        valid_prefixes = {folder.prefix for folder in folders}
-        removed_paths: list[Path] = []
-        try:
-            result = clear_completed_backups_action(
-                config,
-                folder_group=lambda rel_path: _folder_group(
-                    rel_path,
-                    library_types=config.library_type_map,
-                ),
-                prefixes=prefixes,
-                valid_prefixes=valid_prefixes,
-                on_removed=removed_paths.append,
-            )
-        finally:
-            _record_deleted_original_backups(removed_paths)
-        result["completed"] = _completed_page_payload()
-        return result
 
-    def _confirm_originals_removed_action(prefixes: list[str]) -> dict[str, Any]:
-        try:
-            archive_root = config.archive_root
-        except KeyError:
-            archive_root = None
-        with open_db(config.paths.db_path) as connection:
-            folders = list_completed_folders(
-                connection,
-                folder_group=lambda rel_path: _folder_group(
-                    rel_path,
-                    library_types=config.library_type_map,
-                ),
-                archive_root=archive_root,
-            )
-            valid_prefixes = {folder.prefix for folder in folders}
-            result = confirm_originals_removed_action(
-                connection,
-                folder_group=lambda rel_path: _folder_group(
-                    rel_path,
-                    library_types=config.library_type_map,
-                ),
-                archive_root=archive_root,
-                prefixes=prefixes,
-                valid_prefixes=valid_prefixes,
-            )
-        result["completed"] = _completed_page_payload()
-        return result
 
     def _recent_tuning_sessions(connection: DBClient, prefix: str, limit: int = 8) -> list[dict[str, Any]]:
         return recent_tuning_sessions(connection, prefix, load_json_object_fn=_load_json_object, limit=limit)
@@ -2104,27 +1761,6 @@ def create_app(
             record_tuning_session=record_tuning_session,
         )
 
-    def _folder_ai_tune_preview_action(
-            normalized_prefix: str,
-            note: str,
-            host_key: str,
-            operator_intent: dict[str, Any] | None = None,
-            scope_membership_token: str = "",
-    ) -> dict[str, Any]:
-        blocker = production_action_blocker(config, normalized_prefix)
-        if blocker is not None:
-            return blocker
-        blocker = _other_scope_action_blocker(normalized_prefix, scope_membership_token)
-        if blocker is not None:
-            return blocker
-        return folder_ai_tune_preview_action(
-            config,
-            _folder_ai_tune_deps(),
-            normalized_prefix,
-            note,
-            host_key,
-            operator_intent,
-        )
 
     def _folder_ai_tune_action(
             normalized_prefix: str,
@@ -2298,26 +1934,6 @@ def create_app(
             scope_membership_token=scope_membership_token,
         )
 
-    def _queue_older_seasons_encode_action(
-            normalized_prefix: str,
-            notes: str,
-            bypass_schedule: bool,
-            confirmed: bool,
-            scope_membership_token: str = "",
-    ) -> ActionPayload:
-        if not confirmed:
-            raise HTTPException(
-                status_code=400,
-                detail="Confirm the older-season selection before starting production.",
-            )
-        return _queue_encode_action(
-            normalized_prefix,
-            notes,
-            bypass_schedule,
-            override_older_seasons=True,
-            older_seasons_confirmed=confirmed,
-            scope_membership_token=scope_membership_token,
-        )
 
     def _accept_ambiguous_motion_action(normalized_prefix: str) -> ActionPayload:
         blocker = production_action_blocker(config, normalized_prefix)
@@ -2354,33 +1970,6 @@ def create_app(
         _reset_folder_card_cache()
         return result
 
-    def _approve_measured_encode_recovery_action(
-            normalized_prefix: str,
-            scope_membership_token: str = "",
-    ) -> ActionPayload:
-        blocker = production_action_blocker(config, normalized_prefix)
-        if blocker is not None:
-            return blocker
-        blocker = _other_scope_action_blocker(normalized_prefix, scope_membership_token)
-        if blocker is not None:
-            return blocker
-        return approve_measured_encode_recovery_action(
-            config,
-            normalized_prefix,
-            now_iso=_now_iso,
-            load_calibration_state=_load_calibration_state,
-            calibration_draft_hash=_calibration_draft_hash,
-            save_calibration_state=_save_calibration_state,
-            review_gate=_review_gate,
-            upsert_override=_upsert_override,
-            queue_folder_encode_action=lambda prefix, notes, bypass_schedule: _queue_folder_encode_action(
-                prefix,
-                notes,
-                bypass_schedule,
-                False,
-                scope_membership_token,
-            ),
-        )
 
     def _validate_folder_outputs_action(
             normalized_prefix: str,
@@ -2594,92 +2183,11 @@ def create_app(
             now_iso=_now_iso,
         )
 
-    def _stop_encode_queue_action() -> dict[str, Any]:
-        return stop_encode_queue_action(
-            connection_factory=lambda: open_db(config.paths.db_path),
-            config=config,
-            now_iso=_now_iso,
-            cancel_queue_process=_cancel_active_encode_processes,
-            sweep_orphaned_encode_processes=lambda: _sweep_orphaned_encode_processes(config),
-            clear_stale_encoding_items=lambda: _clear_stale_encoding_items_when_idle(config),
-        )
 
-    def _retry_failed_encode_queue_action() -> dict[str, Any]:
-        return retry_failed_encode_queue_action(
-            connection_factory=lambda: open_db(config.paths.db_path),
-            config=config,
-            load_calibration_state=_load_calibration_state,
-            review_gate=_review_gate,
-            queue_folder_encode_action=_queue_folder_encode_action,
-        )
 
-    def _retry_failed_encode_prefix_action(
-            prefix: str,
-            scope_membership_token: str = "",
-    ) -> dict[str, Any]:
-        return retry_failed_encode_prefix_action(
-            connection_factory=lambda: open_db(config.paths.db_path),
-            config=config,
-            prefix=prefix,
-            load_calibration_state=_load_calibration_state,
-            review_gate=_review_gate,
-            queue_folder_encode_action=lambda normalized_prefix, notes, bypass_schedule: _queue_folder_encode_action(
-                normalized_prefix,
-                notes,
-                bypass_schedule,
-                False,
-                scope_membership_token,
-            ),
-        )
 
-    def _stop_calibration_queue_action() -> dict[str, Any]:
-        return stop_calibration_queue_action(
-            connection_factory=lambda: open_db(config.paths.db_path),
-            config=config,
-            now_iso=_now_iso,
-            active_calibration_process_controllers=_active_calibration_process_controllers,
-            load_job_state=_load_job_state,
-            save_job_state=_save_job_state,
-        )
 
-    def _clear_folder_tuning_action(normalized_prefix: str) -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
-            return _clear_folder_tuning_state(
-                connection,
-                config=config,
-                prefix=normalized_prefix,
-            )
 
-    def _use_show_settings_action(normalized_prefix: str) -> dict[str, Any]:
-        nonlocal config
-
-        def show_has_approval(show_prefix: str) -> bool:
-            approval = effective_production_approval(config, show_prefix, _load_calibration_state)
-            return (
-                approval is not None
-                and approval.prefix == show_prefix
-                and approval.current
-                and approval.contract is not None
-            )
-
-        def season_sample_prefixes(season_prefix: str) -> list[str]:
-            with open_readonly_db(config.paths.db_path) as connection:
-                return prefixes_with_samples(
-                    connection, season_prefix, has_sample=lambda prefix: _calibration_file(config, prefix).exists(),
-                )
-
-        result = use_show_settings(
-            config,
-            normalized_prefix,
-            show_has_approval=show_has_approval,
-            tuned_prefixes=season_sample_prefixes,
-            clear_tuning=_clear_folder_tuning_action,
-        )
-        if result.get("changed"):
-            config = load_config(config.paths.config_path)
-            app.state.config = config
-            _reset_folder_card_cache()
-        return result
 
     def _save_series_lifecycle_action(normalized_prefix: str, mode: str) -> dict[str, Any]:
         nonlocal config
@@ -2765,44 +2273,17 @@ def create_app(
 
     register_folder_routes(
         app,
-        folder_status_payload=_folder_status_payload,
-        folder_staged_integrity_payload=_folder_staged_integrity_payload,
-        folder_episodes_payload=lambda prefix: folder_episodes_payload(config, prefix),
-        folder_sample_history_payload=lambda prefix, offset, limit: sample_history_payload(
-            config.paths.db_path, prefix, offset, limit,
-        ),
-        folder_content_payload=_folder_content_payload,
-        checked_output_preview_payload=lambda prefix: _checked_output_preview_payload(
-            config,
-            prefix,
-        ),
-        checked_output_preview_stream_action=lambda prefix, range_header: (
-            _checked_output_preview_stream_action(config, prefix, range_header)
-        ),
-        download_review_compare_action=lambda prefix: _download_review_compare_action(
-            config,
-            prefix,
-        ),
-        folder_ai_tune_action=_folder_ai_tune_action,
-        folder_ai_tune_preview_action=_folder_ai_tune_preview_action,
-        folder_ai_tune_confirm_action=_folder_ai_tune_confirm_action,
-        clear_folder_tuning_action=_clear_folder_tuning_action,
         save_series_lifecycle_action=_save_series_lifecycle_action,
         save_audio_preset_action=_save_audio_preset_action,
-        audio_preset_payload=_audio_preset_payload,
         dismiss_audio_preset_suggestion_action=_dismiss_audio_preset_suggestion_action,
-        approve_measured_encode_recovery_action=_approve_measured_encode_recovery_action,
         accept_ambiguous_motion_action=_accept_ambiguous_motion_action,
         keep_motion_held_originals_action=_keep_motion_held_originals_action,
         undo_motion_keep_action=_undo_motion_keep_action,
         put_original_back_action=_put_original_back_action,
         queue_folder_encode_action=_queue_folder_encode_action,
-        queue_older_seasons_encode_action=_queue_older_seasons_encode_action,
         validate_folder_outputs_action=_validate_folder_outputs_action,
         promote_folder_outputs_action=_promote_folder_outputs_action,
         decide_size_held_action=_decide_size_held_action,
-        save_profile_action=_save_profile_action,
-        use_show_settings_action=_use_show_settings_action,
     )
 
     def _season_payloads(normalized_prefix: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
@@ -2852,10 +2333,6 @@ def create_app(
         app,
         pause_encode_queue_action=_pause_encode_queue_action,
         resume_encode_queue_action=_resume_encode_queue_action,
-        retry_failed_encode_queue_action=_retry_failed_encode_queue_action,
-        retry_failed_encode_prefix_action=_retry_failed_encode_prefix_action,
-        stop_encode_queue_action=_stop_encode_queue_action,
-        stop_calibration_queue_action=_stop_calibration_queue_action,
     )
 
     return app

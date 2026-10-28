@@ -2,17 +2,8 @@ from collections.abc import Callable, Collection
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
-from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
-
-from mediaforce.web.runtime.folder_actions import APPROVED_SAMPLE_NOTES
-
-
-def object_dict_or_none(value: Any) -> dict[str, Any] | None:
-    return value if isinstance(value, dict) else None
-
 
 def _request_flag(body: object, key: str) -> bool:
     return isinstance(body, dict) and body.get(key) is True
@@ -38,139 +29,18 @@ async def request_body(request: Request) -> dict[str, Any]:
 def register_folder_routes(
         app: FastAPI,
         *,
-        folder_status_payload: Callable[[str], dict[str, Any]],
-        folder_content_payload: Callable[[str], tuple[dict[str, Any], int]],
-        download_review_compare_action: Callable[[str], FileResponse],
-        folder_ai_tune_action: Callable[[str, str, str, dict[str, Any] | None, str], dict[str, Any]],
-        folder_ai_tune_preview_action: Callable[[str, str, str, dict[str, Any] | None, str], dict[str, Any]],
-        folder_ai_tune_confirm_action: Callable[[str, str, str], dict[str, Any]],
-        clear_folder_tuning_action: Callable[[str], dict[str, Any]],
         save_series_lifecycle_action: Callable[[str, str], dict[str, Any]],
         save_audio_preset_action: Callable[[str, str], dict[str, Any]],
-        audio_preset_payload: Callable[[str], dict[str, Any] | None],
         dismiss_audio_preset_suggestion_action: Callable[[str], dict[str, Any]],
-        approve_measured_encode_recovery_action: Callable[[str, str], dict[str, Any]],
         queue_folder_encode_action: Callable[[str, str, bool, bool, str], dict[str, Any]],
-        queue_older_seasons_encode_action: Callable[[str, str, bool, bool, str], dict[str, Any]],
         validate_folder_outputs_action: Callable[[str, str], dict[str, Any]],
         promote_folder_outputs_action: Callable[[str, str], dict[str, Any]],
-        save_profile_action: Callable[[str, bool, bool, str, str], dict[str, Any]],
-        folder_staged_integrity_payload: Callable[[str, int, int], dict[str, Any]] | None = None,
-        checked_output_preview_payload: Callable[[str], dict[str, Any]] | None = None,
-        checked_output_preview_stream_action: Callable[[str, str | None], Response] | None = None,
         accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
         keep_motion_held_originals_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
         undo_motion_keep_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
         put_original_back_action: Callable[[str, int], dict[str, Any]] | None = None,
         decide_size_held_action: Callable[[str, int | Collection[int], bool], dict[str, Any]] | None = None,
-        folder_episodes_payload: Callable[[str], dict[str, Any]] | None = None,
-        use_show_settings_action: Callable[[str], dict[str, Any]] | None = None,
-        folder_sample_history_payload: Callable[[str, int, int], dict[str, Any]] | None = None,
 ) -> None:
-    staged_integrity_payload = folder_staged_integrity_payload or (lambda _prefix, _offset, _limit: {})
-    preview_payload = checked_output_preview_payload or (
-        lambda _prefix: {"available": False, "code": "checked_output_unavailable"}
-    )
-    preview_stream_action = checked_output_preview_stream_action or (
-        lambda _prefix, _range_header: Response(status_code=404)
-    )
-
-    @app.get("/api/folders/{prefix:path}/status")
-    def api_folder_status(prefix: str) -> JSONResponse:
-        return JSONResponse(folder_status_payload(prefix.strip("/")))
-
-    if folder_episodes_payload is not None:
-        episodes_payload = folder_episodes_payload
-
-        @app.get("/api/folders/{prefix:path}/episodes")
-        def api_folder_episodes(prefix: str) -> JSONResponse:
-            return JSONResponse(episodes_payload(prefix.strip("/")))
-
-    @app.get("/api/folders/{prefix:path}/staged-integrity")
-    def api_folder_staged_integrity(prefix: str, offset: int = 0, limit: int = 50) -> JSONResponse:
-        return JSONResponse(staged_integrity_payload(prefix.strip("/"), offset, limit))
-
-    @app.get("/api/folders/{prefix:path}/checked-output-preview")
-    def api_folder_checked_output_preview(prefix: str) -> JSONResponse:
-        return JSONResponse(preview_payload(prefix.strip("/")))
-
-    @app.get("/api/folders/{prefix:path}/checked-output-preview/stream")
-    def api_folder_checked_output_preview_stream(prefix: str, request: Request) -> Response:
-        return preview_stream_action(prefix.strip("/"), request.headers.get("range"))
-
-    @app.get("/api/folders/{prefix:path}/review-compare/download")
-    def api_folder_review_compare_download(prefix: str) -> FileResponse:
-        return download_review_compare_action(prefix.strip("/"))
-
-    @app.get("/api/folders/{prefix:path}/audio-preset")
-    async def api_folder_audio_preset_state(prefix: str) -> JSONResponse:
-        payload = audio_preset_payload(prefix.strip("/"))
-        if payload is None:
-            return JSONResponse({"ok": False, "message": "A sound choice applies only to TV shows."}, status_code=404)
-        return JSONResponse({"ok": True, "audio_preset": payload})
-
-    if folder_sample_history_payload is not None:
-        history_payload = folder_sample_history_payload
-
-        @app.get("/api/folders/{prefix:path}/sample-history")
-        def api_folder_sample_history(prefix: str, offset: int = 0, limit: int = 10) -> JSONResponse:
-            return JSONResponse(history_payload(prefix.strip("/"), offset, limit), headers={"Cache-Control": "no-store"})
-
-    @app.get("/api/folders/{prefix:path}")
-    def api_folder(prefix: str) -> JSONResponse:
-        context, status_code = folder_content_payload(prefix.strip("/"))
-        return JSONResponse(context, status_code=status_code)
-
-    @app.post("/api/folders/{prefix:path}/ai-tune")
-    async def api_folder_ai_tune(prefix: str, request: Request) -> JSONResponse:
-        body = await request_body(request)
-        result = await run_in_threadpool(
-            folder_ai_tune_action,
-            prefix.strip("/"),
-            str(body.get("note", "")),
-            str(body.get("host_key", "")),
-            object_dict_or_none(body.get("operator_intent")),
-            str(body.get("scope_membership_token", "")),
-        )
-        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
-    @app.post("/api/folders/{prefix:path}/ai-tune/preview")
-    async def api_folder_ai_tune_preview(prefix: str, request: Request) -> JSONResponse:
-        body = await request_body(request)
-        result = await run_in_threadpool(
-            folder_ai_tune_preview_action,
-            prefix.strip("/"),
-            str(body.get("note", "")),
-            str(body.get("host_key", "")),
-            object_dict_or_none(body.get("operator_intent")),
-            str(body.get("scope_membership_token", "")),
-        )
-        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
-    @app.post("/api/folders/{prefix:path}/ai-tune/confirm")
-    async def api_folder_ai_tune_confirm(prefix: str, request: Request) -> JSONResponse:
-        body = await request_body(request)
-        result = await run_in_threadpool(
-            folder_ai_tune_confirm_action,
-            prefix.strip("/"),
-            str(body.get("proposal_id", "")),
-            str(body.get("scope_membership_token", "")),
-        )
-        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
-    @app.post("/api/folders/{prefix:path}/clear-tuning")
-    def api_folder_clear_tuning(prefix: str) -> JSONResponse:
-        result = clear_folder_tuning_action(prefix.strip("/"))
-        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
-    if use_show_settings_action is not None:
-        use_show_settings = use_show_settings_action
-
-        @app.post("/api/folders/{prefix:path}/use-show-settings")
-        async def api_folder_use_show_settings(prefix: str) -> JSONResponse:
-            result = await run_in_threadpool(use_show_settings, prefix.strip("/"))
-            return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
     @app.post("/api/folders/{prefix:path}/series-lifecycle")
     async def api_folder_series_lifecycle(prefix: str, request: Request) -> JSONResponse:
         body = await request_body(request)
@@ -207,17 +77,6 @@ def register_folder_routes(
             str(body.get("scope_membership_token", "")),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
-    @app.post("/api/folders/{prefix:path}/approve-recovery")
-    async def api_folder_approve_recovery(prefix: str, request: Request) -> JSONResponse:
-        body = await request_body(request)
-        result = await run_in_threadpool(
-            approve_measured_encode_recovery_action,
-            prefix.strip("/"),
-            str(body.get("scope_membership_token", "")),
-        )
-        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
     if accept_ambiguous_motion_action is not None:
         accept_ambiguous_motion = accept_ambiguous_motion_action
 
@@ -254,20 +113,6 @@ def register_folder_routes(
                 raise HTTPException(status_code=400, detail="Name one file with library_item_ids.")
             result = await run_in_threadpool(put_back, prefix.strip("/"), item_ids[0])
             return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
-    @app.post("/api/folders/{prefix:path}/queue-older-seasons")
-    async def api_folder_queue_older_seasons(prefix: str, request: Request) -> JSONResponse:
-        body = await request_body(request)
-        result = await run_in_threadpool(
-            queue_older_seasons_encode_action,
-            prefix.strip("/"),
-            str(body.get("notes", "")),
-            _request_flag(body, "bypass_schedule"),
-            _request_flag(body, "confirmed"),
-            str(body.get("scope_membership_token", "")),
-        )
-        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
     @app.post("/api/folders/{prefix:path}/validate-outputs")
     async def api_folder_validate_outputs(prefix: str, request: Request) -> JSONResponse:
         body = await request_body(request)
@@ -307,51 +152,3 @@ def register_folder_routes(
                 raise HTTPException(status_code=400, detail="Name one file and whether to keep it.")
             result = await run_in_threadpool(decide_size_held, prefix.strip("/"), item_id, keep)
             return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
-    @app.post("/api/folders/{prefix:path}/save-profile")
-    async def api_folder_save_profile(prefix: str, request: Request) -> JSONResponse:
-        body = await request_body(request)
-        result = await run_in_threadpool(
-            save_profile_action,
-            prefix.strip("/"),
-            bool(body.get("confirm_high_impact", False)),
-            bool(body.get("confirm_size_tradeoff", False)),
-            str(body.get("reviewed_draft_hash", "")),
-            str(body.get("scope_membership_token", "")),
-        )
-        start_mode = str(body.get("start_encode", "")).strip()
-        if result.get("ok") and start_mode:
-            result = {
-                **result,
-                "start_encode": await run_in_threadpool(_start_approved_encode, prefix.strip("/"), start_mode, body),
-            }
-        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
-
-    def _start_approved_encode(prefix: str, start_mode: str, body: dict[str, Any]) -> dict[str, Any]:
-        """Queue the encode the operator just approved, in the same request as the approval.
-
-        The approval is already saved, so a queue failure is reported beside it instead of
-        failing the request; the page then shows the approved state with one retry action.
-        """
-        notes = str(body.get("start_notes", "")) or APPROVED_SAMPLE_NOTES
-        token = str(body.get("scope_membership_token", ""))
-        try:
-            if start_mode == "older_seasons":
-                queued = queue_older_seasons_encode_action(prefix, notes, False, True, token)
-            elif start_mode == "scope":
-                queued = queue_folder_encode_action(prefix, notes, False, False, token)
-            else:
-                return {"mode": start_mode, "ok": False, "message": "Unknown start mode."}
-        except HTTPException as exc:
-            return {"mode": start_mode, "ok": False, "message": str(exc.detail)}
-        already_active = queued.get("code") == "encode_already_active"
-        job = queued.get("job") if isinstance(queued.get("job"), dict) else {}
-        return {
-            "mode": start_mode,
-            "ok": bool(queued.get("ok")) or already_active,
-            "already_active": already_active,
-            "message": str(queued.get("message") or ""),
-            # What was actually queued, so the page never reports its own pre-request count.
-            "queued_count": int(queued.get("recovered_item_count") or job.get("item_count") or 0),
-            "left_out_count": len(queued.get("left_out") or []),
-        }
