@@ -109,6 +109,40 @@ def test_a_failed_copy_that_could_not_be_made_again_says_why(config: MediaforceC
     assert file["wait_reason"] == {"code": "not_made_again", "blockers": ["original_unreachable"]}
 
 
+@pytest.mark.parametrize("passed", [True, None, False])
+@pytest.mark.parametrize("publish_state", ["failed", "unsafe", "waiting", None])
+def test_a_passed_copy_with_stopped_publishing_waits_without_holding_other_files(
+    config: MediaforceConfig, tmp_path: Path, publish_state: str | None, passed: bool | None,
+) -> None:
+    validation = {"passed": passed, "automatic_publish": {"state": publish_state}}
+    with open_db(config.paths.db_path) as connection:
+        item_id = _episode(connection, tmp_path, 1, size=900, status="validated")
+        _replaced(connection, tmp_path, 2, size=100, original_size=700)
+        _episode(connection, tmp_path, 3, size=900)
+        connection.execute(staged_artifacts.insert().values(
+            library_item_id=item_id, staging_path=str(tmp_path / "staging" / "1.mkv"), source_size_bytes=900,
+            bytes_saved=800, validation_json=json.dumps(validation), updated_at=NOW,
+        ))
+        connection.commit()
+
+    facts = item_payload(config, SEASON, sound=lambda _connection, _prefix: None)
+
+    assert facts is not None
+    stopped, published, untouched = facts["files"]
+    if passed is False:
+        assert stopped["stage"] == "needs_you"
+        assert stopped["wait_reason"] == {"code": "check_failed"}
+    elif publish_state in {"failed", "unsafe"}:
+        assert stopped["stage"] == "needs_you"
+        assert stopped["wait_reason"] == {"code": f"publish_{publish_state}"}
+    else:
+        assert stopped["stage"] == "checking"
+        assert stopped["wait_reason"] is None
+    assert stopped["validation"] == ("failed" if passed is False else None)
+    assert published["stage"] == "published"
+    assert untouched["stage"] == "held"
+
+
 def test_a_deleted_backup_leaves_nothing_to_compare(config: MediaforceConfig, tmp_path: Path) -> None:
     with open_db(config.paths.db_path) as connection:
         replaced = _replaced(connection, tmp_path, 1, size=100, original_size=700)
