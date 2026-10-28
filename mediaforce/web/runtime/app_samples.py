@@ -32,6 +32,12 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
     sample_item = object_dict(calibration.get("sample_item")) or object_dict(folder.get("sample_item"))
     balances = _balance_choices(folder)
     effective_balance = _effective_balance(balances)
+    if page_state.get("primary_action") == "retry_sample":
+        retry_policy = object_dict(object_dict(status.get("retryable_sample_job")).get("policy"))
+        retry_balance = operator_intent_from_policy(object_dict(retry_policy.get("video"))).compression_intent
+        if retry_balance.confirmed:
+            level = "perceptual_floor" if retry_balance.level == "transparent" else retry_balance.level
+            effective_balance = next((option for option in balances if option["key"] == level), effective_balance)
     return {
         **season_identity(str(folder["prefix"])),
         "state": page_state.get("key"),
@@ -262,8 +268,7 @@ def _size_choices(folder: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _effective_balance(balances: list[dict[str, Any]]) -> dict[str, Any] | None:
-    return next((option for option in balances if option.get("selected")
-                 and object_dict(option.get("compression_intent")).get("confirmed") is True), None) or next(
+    return next((option for option in balances if option.get("selected")), None) or next(
         (option for option in balances if option.get("key") == DEFAULT_BALANCE), None,
     )
 

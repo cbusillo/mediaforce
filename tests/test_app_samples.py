@@ -61,7 +61,7 @@ def _folder(**fields: Any) -> dict[str, Any]:
         "size_goal_options": [_option("recommended", 293.736), _option("smaller", 220.3), _option("legacy", 100, mode="ambiguous")],
         "compression_intent_options": [
             {"key": "reference", "title": "Preserve the reference", "selected": False, "compression_intent": {"schema_version": 1, "level": "reference", "confirmed": True}},
-            {"key": "balanced", "title": "Balance size and detail", "selected": True, "compression_intent": {"schema_version": 1, "level": "balanced", "confirmed": False}},
+            {"key": "balanced", "title": "Balance size and detail", "selected": True, "compression_intent": {"schema_version": 1, "level": "balanced", "confirmed": True}},
         ],
         **fields,
     }
@@ -152,6 +152,25 @@ def test_the_real_approval_check_refuses_a_changed_draft_and_asks_again_for_an_i
     assert approve(set(), "draft-1") == {"ok": False, "code": "confirm_high_impact"}
     assert approve({"high_impact"}, "a draft replaced since") == {"ok": False, "code": "sample_changed"}
     assert approve({"high_impact"}, "") == {"ok": False, "code": "sample_changed"}
+
+
+@pytest.mark.parametrize("saved_level,shown", [("reference", "reference"), ("transparent", "perceptual_floor")])
+def test_failed_sample_shows_the_balance_its_saved_retry_will_use(saved_level: str, shown: str) -> None:
+    folder = _folder()
+    if shown == "perceptual_floor":
+        folder["compression_intent_options"].append({
+            "key": "perceptual_floor", "title": "Smallest that still looks good", "selected": False,
+            "compression_intent": {"schema_version": 1, "level": "perceptual_floor", "confirmed": True},
+        })
+    failed = {
+        **_status("needs_help", "retry_sample"),
+        "retryable_sample_job": {"policy": {"video": {
+            "compression_intent_schema_version": 1, "compression_intent": saved_level,
+            "compression_intent_confirmed": True,
+        }}},
+    }
+    choices = sample_facts(folder, failed)["balance_choices"]
+    assert [choice["key"] for choice in choices if choice["selected"]] == [shown]
 
 
 def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_did_not() -> None:

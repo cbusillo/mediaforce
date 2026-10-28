@@ -97,7 +97,10 @@ retries the saved request when the sample failed for a reason a retry fixes,
 remakes a reviewed sample at its measured goal, or asks for a new sample at
 the chosen or recommended size. An explicit balance starts a fresh sample at
 that size instead of replaying a saved request. Without an explicit balance,
-the current choice or automatic balanced default remains in effect. It answers
+the current choice or automatic balanced default remains in effect. A failed
+sample displays its saved retry's balance, matching what an unchanged retry
+will make. An older saved request that cannot be reused asks for a fresh size
+selection rather than silently replacing its goal. It answers
 `409` with `choose_size` when a size must be chosen, `choose_balance` for an
 unavailable balance choice, or `refused`.
 
