@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+
 def _request_flag(body: object, key: str) -> bool:
     return isinstance(body, dict) and body.get(key) is True
 
@@ -12,8 +13,11 @@ def _request_flag(body: object, key: str) -> bool:
 def _request_item_ids(body: dict[str, Any]) -> list[int]:
     """The ``library_item_ids`` a per-file decision names: a non-empty list of positive ids."""
     item_ids = body.get("library_item_ids")
-    if (not isinstance(item_ids, list) or not item_ids
-            or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in item_ids)):
+    if (
+        not isinstance(item_ids, list)
+        or not item_ids
+        or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in item_ids)
+    ):
         raise HTTPException(status_code=400, detail="Name the files with library_item_ids.")
     return item_ids
 
@@ -27,20 +31,21 @@ async def request_body(request: Request) -> dict[str, Any]:
 
 
 def register_folder_routes(
-        app: FastAPI,
-        *,
-        save_series_lifecycle_action: Callable[[str, str], dict[str, Any]],
-        save_audio_preset_action: Callable[[str, str], dict[str, Any]],
-        dismiss_audio_preset_suggestion_action: Callable[[str], dict[str, Any]],
-        queue_folder_encode_action: Callable[[str, str, bool, bool, str], dict[str, Any]],
-        validate_folder_outputs_action: Callable[[str, str], dict[str, Any]],
-        promote_folder_outputs_action: Callable[[str, str], dict[str, Any]],
-        accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
-        keep_motion_held_originals_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
-        undo_motion_keep_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
-        put_original_back_action: Callable[[str, int], dict[str, Any]] | None = None,
-        decide_size_held_action: Callable[[str, int | Collection[int], bool], dict[str, Any]] | None = None,
+    app: FastAPI,
+    *,
+    save_series_lifecycle_action: Callable[[str, str], dict[str, Any]],
+    save_audio_preset_action: Callable[[str, str], dict[str, Any]],
+    dismiss_audio_preset_suggestion_action: Callable[[str], dict[str, Any]],
+    queue_folder_encode_action: Callable[[str, str, bool, bool, str], dict[str, Any]],
+    validate_folder_outputs_action: Callable[[str, str], dict[str, Any]],
+    promote_folder_outputs_action: Callable[[str, str], dict[str, Any]],
+    accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
+    keep_motion_held_originals_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
+    undo_motion_keep_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
+    put_original_back_action: Callable[[str, int], dict[str, Any]] | None = None,
+    decide_size_held_action: Callable[[str, int | Collection[int], bool], dict[str, Any]] | None = None,
 ) -> None:
+
     @app.post("/api/folders/{prefix:path}/series-lifecycle")
     async def api_folder_series_lifecycle(prefix: str, request: Request) -> JSONResponse:
         body = await request_body(request)
@@ -77,6 +82,7 @@ def register_folder_routes(
             str(body.get("scope_membership_token", "")),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
     if accept_ambiguous_motion_action is not None:
         accept_ambiguous_motion = accept_ambiguous_motion_action
 
@@ -113,6 +119,7 @@ def register_folder_routes(
                 raise HTTPException(status_code=400, detail="Name one file with library_item_ids.")
             result = await run_in_threadpool(put_back, prefix.strip("/"), item_ids[0])
             return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
     @app.post("/api/folders/{prefix:path}/validate-outputs")
     async def api_folder_validate_outputs(prefix: str, request: Request) -> JSONResponse:
         body = await request_body(request)
@@ -143,8 +150,13 @@ def register_folder_routes(
             item_ids = body.get("library_item_ids")
             keep = body.get("keep")
             if item_ids is not None:
-                if (item_id is not None or keep is not False or not isinstance(item_ids, list) or not item_ids
-                        or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in item_ids)):
+                if (
+                    item_id is not None
+                    or keep is not False
+                    or not isinstance(item_ids, list)
+                    or not item_ids
+                    or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in item_ids)
+                ):
                     raise HTTPException(status_code=400, detail="Name the files to make again with keep: false.")
                 result = await run_in_threadpool(decide_size_held, prefix.strip("/"), item_ids, False)
                 return JSONResponse(result, status_code=200 if result.get("ok") else 409)

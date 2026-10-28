@@ -13,11 +13,12 @@ SIZE_DECISION_PATH = "/api/encode-queue/size-decision"
 
 
 def register_queue_routes(
-        app: FastAPI,
-        *,
-        pause_encode_queue_action: Callable[[], dict[str, Any]],
-        resume_encode_queue_action: Callable[[], dict[str, Any]],
+    app: FastAPI,
+    *,
+    pause_encode_queue_action: Callable[[], dict[str, Any]],
+    resume_encode_queue_action: Callable[[], dict[str, Any]],
 ) -> None:
+
     @app.post("/api/encode-queue/pause")
     def api_pause_encode_queue() -> JSONResponse:
         return JSONResponse(pause_encode_queue_action())
@@ -27,21 +28,22 @@ def register_queue_routes(
         return JSONResponse(resume_encode_queue_action())
 
 
-
 def register_child_recovery_routes(
-        app: FastAPI,
-        *,
-        recover_children_action: Callable[[str, list[str], str | None], dict[str, Any]],
+    app: FastAPI,
+    *,
+    recover_children_action: Callable[[str, list[str], str | None], dict[str, Any]],
 ) -> None:
     async def dispatch(request: Request, *, apply: bool) -> JSONResponse:
         body = await _controller_json_body(request)
         parent_id = body.get("parent_job_id")
         child_ids = body.get("child_ids")
         if (
-                not isinstance(parent_id, str) or not parent_id.strip()
-                or not isinstance(child_ids, list) or not 1 <= len(child_ids) <= 100
-                or any(not isinstance(value, str) or not value.strip() for value in child_ids)
-                or len(set(child_ids)) != len(child_ids)
+            not isinstance(parent_id, str)
+            or not parent_id.strip()
+            or not isinstance(child_ids, list)
+            or not 1 <= len(child_ids) <= 100
+            or any(not isinstance(value, str) or not value.strip() for value in child_ids)
+            or len(set(child_ids)) != len(child_ids)
         ):
             raise HTTPException(status_code=400, detail="Specify one parent and 1–100 unique child IDs.")
         token = body.get("token") if apply else None
@@ -60,10 +62,11 @@ def register_child_recovery_routes(
 
 
 def register_size_decision_routes(
-        app: FastAPI,
-        *,
-        decide_size_exception_action: Callable[[str, bool], dict[str, Any]],
+    app: FastAPI,
+    *,
+    decide_size_exception_action: Callable[[str, bool], dict[str, Any]],
 ) -> None:
+
     @app.post(SIZE_DECISION_PATH)
     async def decide_size_exception(request: Request) -> JSONResponse:
         body = await _controller_json_body(request)
@@ -85,10 +88,7 @@ async def _controller_json_body(request: Request) -> dict[str, Any]:
     except ValueError:
         raise HTTPException(status_code=403, detail="Invalid recovery origin.") from None
     if request.headers.get("sec-fetch-site") == "cross-site" or (
-            parsed_origin is not None and (
-                parsed_origin.scheme != request.url.scheme
-                or parsed_origin.netloc != request.url.netloc
-            )
+        parsed_origin is not None and (parsed_origin.scheme != request.url.scheme or parsed_origin.netloc != request.url.netloc)
     ):
         raise HTTPException(status_code=403, detail="Recovery must originate from this controller.")
     try:

@@ -10,19 +10,12 @@ from typing import Any
 
 from sqlalchemy import select
 
-from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import DBClient, open_readonly_db
-from mediaforce.core.db_tables import library_items, motion_keep_decisions, staged_artifacts
+from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.type_defs import float_value, int_value, object_dict
-from mediaforce.encoding.encode_queue import encode_run_rel_paths, list_child_encode_jobs_for_parents, \
-    list_encode_runs_for_prefix
-from mediaforce.encoding.put_back import PUT_BACK_REASON
-from mediaforce.library.candidate_selection import encode_candidate_decisions, workflow_eligibility
-from mediaforce.library.motion_holds import queue_motion_holds
-from mediaforce.library.motion_keep_state import library_item_source_sql
-from mediaforce.library.media_scopes import resolve_media_scope
+from mediaforce.encoding.encode_queue import encode_run_rel_paths, list_child_encode_jobs_for_parents
 from mediaforce.library.staged_validation import not_remade_blockers, staged_validation_outcome
-from mediaforce.library.workflow_state import ItemWorkflowState, build_folder_workflow_state
+from mediaforce.library.workflow_state import ItemWorkflowState
 from mediaforce.web.runtime.encode_runtime import size_exception_question, unfinished_child_reason
 
 # Stages in the order the owner reads them: their part first, then work under way, then what is done.
@@ -38,7 +31,6 @@ EPISODE_STAGES = (
     "held",
     "not_started",
 )
-PUT_BACK_DETAIL = "Kept original: you put the original back."
 _RUNNING_PREPARATION_STATES = frozenset({"starting", "staging_source"})
 _OWNER_RUN_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
 _OWNER_VALIDATIONS = frozenset({"size_held", "failed"})
@@ -47,45 +39,6 @@ _VALIDATION_DETAILS = {
     "failed": "didn't pass its check",
     "remaking": "didn't pass its check; being made again",
 }
-
-
-def folder_episodes_payload(config: MediaforceConfig, prefix: str) -> dict[str, Any]:
-    """Every episode of one TV season with its stage; other scopes have no episode list."""
-    with open_readonly_db(config.paths.db_path) as connection:
-        scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
-        if scope.kind != "tv_season":
-            return {"prefix": scope.prefix, "available": False, "episodes": []}
-        decisions = encode_candidate_decisions(connection, config, prefixes=[scope.prefix])
-        workflow = build_folder_workflow_state(
-            connection,
-            scope.prefix,
-            # An episode the queue leaves out for its motion pattern is listed as staying as it is.
-            candidate_eligibility=workflow_eligibility(decisions, queue_motion_holds(connection, decisions)),
-            library_types=config.library_type_map,
-        )
-        episodes = load_season_episode_progress(
-            connection,
-            workflow.items,
-            list_encode_runs_for_prefix(connection, scope.prefix),
-        )
-        put_back = put_back_rel_paths(connection, [episode["rel_path"] for episode in episodes])
-    for episode in episodes:
-        if episode["stage"] == "kept_original" and episode["rel_path"] in put_back:
-            episode["detail"] = PUT_BACK_DETAIL
-    return {"prefix": scope.prefix, "available": True, "episodes": episodes}
-
-
-def put_back_rel_paths(connection: DBClient, rel_paths: list[str]) -> set[str]:
-    """The episodes kept original because the owner put their original back."""
-    if not rel_paths:
-        return set()
-    return set(connection.execute(select(library_items.c.rel_path).join(
-        motion_keep_decisions, motion_keep_decisions.c.library_item_id == library_items.c.id,
-    ).where(
-        library_items.c.rel_path.in_(rel_paths),
-        motion_keep_decisions.c.reason_code == PUT_BACK_REASON,
-        motion_keep_decisions.c.source_fingerprint == library_item_source_sql(),
-    )).scalars())
 
 
 def load_season_episode_progress(

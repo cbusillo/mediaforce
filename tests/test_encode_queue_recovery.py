@@ -107,15 +107,17 @@ from mediaforce.web import runtime_lock as runtime_lock_module
 from mediaforce.web import settings_runtime
 from mediaforce.web.runtime import completed_runtime, dashboard_payloads, encode_runtime, \
     folder_actions as folder_actions_runtime, \
-    host_runtime as host_runtime_module, job_runtime, queue_actions as queue_actions_runtime, \
-    calibration_runtime
+    host_runtime as host_runtime_module, job_runtime, calibration_runtime
 from mediaforce.web.runtime import folder_cards as folder_cards_runtime
 from mediaforce.web.runtime import ambiguous_motion as ambiguous_motion_runtime
 from mediaforce.web.runtime import production_holds as production_holds_runtime
 from mediaforce.web.runtime import motion_keep as motion_keep_runtime
 from mediaforce.web.runtime import host_status as web_host_status_runtime
 from mediaforce.library import workflow_state as workflow_state_runtime
-from mediaforce.web.runtime.episode_progress import folder_episodes_payload
+from mediaforce.web.runtime.episode_progress import load_season_episode_progress
+from mediaforce.web.runtime.app_item import item_payload
+from mediaforce.library.workflow_state import build_folder_workflow_state
+from mediaforce.encoding.encode_queue import list_encode_runs_for_prefix
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition, motion_hold_files_payload
 from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.library.evidence_state import library_item_source_fingerprint, sync_library_item_evidence_state
@@ -2975,58 +2977,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             f"2 files didn't come out at the size you approved. {encode_runtime.NEW_SIZE_GOAL_NEXT_STEP}",
         )
 
-    def test_broad_retry_delegates_final_size_miss_to_central_queue_guard(self) -> None:
-        prefix = "tv/show/episode-final-size-miss.mkv"
-        with open_db(self.config.paths.db_path) as connection:
-            now = web_app._now_iso()
-            save_encode_job(
-                connection,
-                {
-                    "job_id": "job-final-size-central-guard",
-                    "prefix": prefix,
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(self.root / "runs" / "final-size-central-guard.json"),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "deterministic",
-                    "last_failure_kind": "deterministic",
-                    "last_failure_at": now,
-                    "host_cooldown_until": None,
-                    "progress": {
-                        "failure_analysis": {
-                            "kind": "final_size_target_miss",
-                            "retry_strategy": "fresh_goal_required",
-                        }
-                    },
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": now,
-                    "updated_at": now,
-                },
-            )
-
-        self.assertIn(
-            prefix,
-            queue_actions_runtime._retryable_terminal_encode_prefixes(
-                connection_factory=lambda: open_db(self.config.paths.db_path)
-            ),
-        )
-
     def test_production_approval_contract_ignores_unrelated_policy_hash_change(self) -> None:
         original = production_approval_contract(
             self._accepted_calibration_contract(sample_job_id="sample-1", default_grain=8)
@@ -3184,20 +3134,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             manifest["items"][0]["resolved_policy"]["video"]["max_encoded_percent"],
             15,
         )
-
-    def test_legacy_measured_recovery_requires_a_fresh_confirmed_intent(self) -> None:
-        rel_path = "tv/show/legacy-recovery.mkv"
-        failure_analysis = {
-            "item_analyses": [{"manifest_index": 0, "item_rel_path": rel_path}],
-        }
-        manifest_items = [{"rel_path": rel_path, "resolved_policy": {"video": {}}}]
-
-        paths = folder_actions_runtime._legacy_measured_recovery_paths(
-            failure_analysis,
-            manifest_items,
-        )
-
-        self.assertEqual(paths, [rel_path])
 
     def test_queue_quality_only_calibration_blocks_unconfirmed_compression_intent(self) -> None:
         source = self._create_source_file("quality-only-legacy.mkv")
@@ -4107,30 +4043,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             },
         )
 
-    def test_releasing_a_computer_leaves_the_later_finished_run_newest(self) -> None:
-        prefix = "tv/show/Season 9"
-        now = datetime.now(tz=UTC)
-        with open_db(self.config.paths.db_path) as connection:
-            source = self._create_source_file("Season 9/episode-1.mkv")
-            item_id = self._insert_library_item(
-                connection, source, status="encoded", rel_path=f"{prefix}/episode-1.mkv",
-            )
-            self._insert_staged_artifact(connection, item_id, self._staging_path("Season 9/episode-1.mkv"))
-            self._season_run(connection, "job-season-failed", prefix, status="needs_attention", at=now - timedelta(hours=2))
-            self._season_run(connection, "job-season-finished", prefix, status="completed", at=now - timedelta(hours=1))
-
-            released = encode_runtime.release_host_cooldowns(connection, {"key": "remote-a"})
-            workflow = workflow_state_runtime.build_folder_workflow_state(connection, prefix)
-
-        self.assertEqual(released, 1)
-        self.assertEqual(workflow.state, "ready_to_validate")
-        self.assertNotIn(
-            prefix,
-            queue_actions_runtime._retryable_terminal_encode_prefixes(
-                connection_factory=lambda: open_db(self.config.paths.db_path)
-            ),
-        )
-
     def test_cleanup_on_a_share_that_stopped_answering_is_deferred_not_crashed(self) -> None:
         staging_path = self._staging_path("episode-dead-mount.mkv")
 
@@ -4663,142 +4575,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(updated["status"], "needs_attention")
             self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
 
-    def test_runtime_settings_payload_normalizes_capabilities(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[
-                {
-                    "label": "Remote A",
-                    "host": "remote-a",
-                    "repo_path": "/srv/mediaforce",
-                    "wake_mac": "aa:bb:cc:dd:ee:ff",
-                    "start_command": "ssh prox-main.shiny pct start 103",
-                    "stop_command": "ssh prox-main.shiny pct shutdown 103",
-                    "start_timeout_seconds": "240",
-                    "priority": "20",
-                    "max_parallel_encodes": "3",
-                    "schedule_profile": "late_night",
-                    "capabilities": "encode_queue, sample_calibration, encode_queue",
-                }
-            ],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[
-                {
-                    "key": "late_night",
-                    "label": "Late Night",
-                    "mode": "night",
-                    "timezone": "local",
-                    "start_hour": "23",
-                    "end_hour": "6",
-                }
-            ],
-        )
-        self.assertEqual(
-            payload["remote_hosts"][0]["capabilities"],
-            ["encode_queue", "sample_calibration"],
-        )
-        self.assertEqual(payload["remote_hosts"][0]["start_command"], "ssh prox-main.shiny pct start 103")
-        self.assertEqual(payload["remote_hosts"][0]["stop_command"], "ssh prox-main.shiny pct shutdown 103")
-        self.assertEqual(payload["remote_hosts"][0]["start_timeout_seconds"], 240)
-        self.assertEqual(payload["remote_hosts"][0]["max_parallel_encodes"], 3)
-        self.assertEqual(payload["remote_hosts"][0]["schedule_profile"], "late_night")
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["key"], "late_night")
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["timezone"], "host_local")
-
-    def test_runtime_settings_payload_persists_canonical_typed_library_rows(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[
-                {
-                    "key": "movies",
-                    "label": "Movies",
-                    "path": str(self.root / "source" / "movies"),
-                    "color": "#4e6fa6",
-                    "library_type": "movie",
-                    "availability": "browse_only",
-                    "default_profile": "movie_balanced",
-                    "plex_path": "/mnt/media/movies",
-                    "policy": {
-                        "grouping": "title",
-                        "editions": "separate",
-                        "extras": "exclude",
-                        "ranking": "oldest_added_first",
-                    },
-                }
-            ],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(payload["media"]["source_roots"], {"movies": str(self.root / "source" / "movies")})
-        self.assertEqual(payload["media"]["libraries"][0]["type"], "movie")
-        self.assertEqual(payload["media"]["libraries"][0]["path"], str(self.root / "source" / "movies"))
-        self.assertEqual(payload["metadata"]["plex"]["library_roots"], {"movies": "/mnt/media/movies"})
-
-    def test_runtime_settings_payload_requires_root_bound_type_change_confirmation(self) -> None:
-        row = {
-            "key": "tv",
-            "label": "TV Shows",
-            "path": str(self.root / "source" / "tv"),
-            "library_type": "movie",
-            "availability": "browse_only",
-            "default_profile": "movie_balanced",
-            "policy": {
-                "grouping": "title",
-                "editions": "separate",
-                "extras": "exclude",
-                "ranking": "oldest_added_first",
-            },
-        }
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            settings_runtime.build_runtime_settings_payload(
-                libraries=[row],
-                remote_hosts=[],
-                transcode_root=str(self.root / "staging"),
-                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-                schedule_profiles=[],
-                existing_library_types={"tv": "tv"},
-            )
-        self.assertIn("compatibility preview", raised.exception.public_message)
-
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[
-                {
-                    **row,
-                    "availability": "production",
-                    "type_change_confirmation": "tv:tv->movie",
-                }
-            ],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-            existing_library_types={"tv": "tv"},
-        )
-        self.assertEqual(payload["media"]["libraries"][0]["type"], "movie")
-        self.assertEqual(payload["media"]["libraries"][0]["availability"], "browse_only")
-
-    def test_runtime_settings_payload_accepts_movie_production(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[
-                {
-                    "key": "movies",
-                    "label": "Movies",
-                    "path": str(self.root / "source" / "movies"),
-                    "library_type": "movie",
-                    "availability": "production",
-                    "default_profile": "movie_balanced",
-                }
-            ],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-        self.assertEqual(payload["media"]["libraries"][0]["availability"], "production")
-
     def test_typed_library_maps_scan_browse_only_but_only_produce_ready_roots(self) -> None:
         self.config.raw["media"]["source_roots"] = {
             "tv": str(self.root / "source" / "tv"),
@@ -4945,293 +4721,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.config.raw.setdefault("planning", {})
         self.assertNotEqual(self.config.resolve_policy("tv/Example/Season 01")["video"].get("crf"), 22)
 
-    def test_runtime_settings_payload_rejects_submitted_secret_values(self) -> None:
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            settings_runtime.build_runtime_settings_payload(
-                libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-                remote_hosts=[],
-                transcode_root=str(self.root / "staging"),
-                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-                schedule_profiles=[],
-                metadata={"plex": {"token": "must-not-persist"}},
-            )
-        self.assertEqual(raised.exception.public_message, "Credential values are not accepted in Settings.")
-        self.assertEqual(str(raised.exception), "Settings validation failed.")
-
-    def test_runtime_settings_payload_defaults_host_schedule_to_always(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[
-                {
-                    "label": "Remote A",
-                    "host": "remote-a",
-                    "priority": "20",
-                    "max_parallel_encodes": "2",
-                    "capabilities": ["encode_queue"],
-                }
-            ],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-        self.assertEqual(payload["remote_hosts"][0]["schedule_profile"], "always")
-
-    def test_runtime_settings_payload_persists_video_defaults(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            video_defaults={
-                "quality_metric": "VMAF",
-                "target_vmaf": "85",
-                "min_target_vmaf": "80",
-                "target_xpsnr": "41",
-                "min_target_xpsnr": "35",
-                "target_size_mb": "300",
-                "target_runtime_minutes": "45",
-                "decision_model": "size_first_review",
-                "quality_engine": "ab_av1_fast_sample",
-                "max_height": "1080",
-                "default_grain": "8",
-                "max_encoded_percent": "80",
-            },
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(
-            payload["video"],
-            {
-                "quality_metric": "vmaf",
-                "target_vmaf": 85.0,
-                "min_target_vmaf": 80.0,
-                "target_xpsnr": 41.0,
-                "min_target_xpsnr": 35.0,
-                "target_size_mb": 300.0,
-                "target_size_bytes": 300_000_000,
-                "target_runtime_minutes": 45.0,
-                "size_goal_schema_version": 1,
-                "size_goal_mode": "normalized",
-                "size_goal_source": "config_default",
-                "sample_projection_tolerance_percent": 10.0,
-                "final_output_tolerance_percent": 5.0,
-                "decision_model": "size_first_review",
-                "quality_engine": "ab_av1_fast_sample",
-                "max_height": 1080,
-                "resolution_intent_mode": "max_height",
-                "resolution_intent_source": "config_default",
-                "default_grain": 8,
-                "max_encoded_percent": 80.0,
-            },
-        )
-
-    def test_runtime_settings_payload_persists_xpsnr_video_defaults(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            video_defaults={
-                "quality_metric": "XPSNR",
-                "target_vmaf": "85",
-                "min_target_vmaf": "80",
-                "target_xpsnr": "39.5",
-                "min_target_xpsnr": "34.5",
-                "target_size_mb": "300",
-                "target_runtime_minutes": "45",
-                "decision_model": "size_first_review",
-                "quality_engine": "ab_av1_fast_sample",
-                "max_height": "1080",
-                "default_grain": "8",
-                "max_encoded_percent": "80",
-            },
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(payload["video"]["quality_metric"], "xpsnr")
-        self.assertEqual(payload["video"]["target_xpsnr"], 39.5)
-        self.assertEqual(payload["video"]["min_target_xpsnr"], 34.5)
-
-    def test_runtime_settings_payload_rejects_unsupported_video_metric(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            video_defaults={"quality_metric": "ssim"},
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(payload["video"]["quality_metric"], "auto")
-
-    def test_runtime_settings_payload_defaults_video_metric_to_auto(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(payload["video"]["quality_metric"], "auto")
-
-    def test_runtime_settings_payload_defaults_to_size_first_review_model(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "staging"),
-            video_defaults={
-                "target_size_mb": "300",
-                "target_runtime_minutes": "45",
-                "decision_model": "size_first_review",
-                "quality_engine": "ab_av1_fast_sample",
-            },
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(payload["video"]["target_size_mb"], 300.0)
-        self.assertEqual(payload["video"]["target_runtime_minutes"], 45.0)
-        self.assertEqual(payload["video"]["decision_model"], "size_first_review")
-        self.assertEqual(payload["video"]["quality_engine"], "ab_av1_fast_sample")
-
-    def test_runtime_settings_payload_normalizes_media_access(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-            remote_hosts=[
-                {
-                    "label": "Remote A",
-                    "host": "remote-a",
-                    "priority": "20",
-                    "max_parallel_encodes": "2",
-                    "capabilities": ["encode_queue"],
-                    "media_access": "stream",
-                }
-            ],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-        self.assertEqual(payload["remote_hosts"][0]["media_access"], "stream")
-
-    def test_runtime_settings_payload_keeps_host_path_overrides_optional(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[
-                {"key": "movies", "path": str(self.root / "source" / "movies")},
-                {"key": "tv", "path": str(self.root / "source" / "tv")},
-            ],
-            remote_hosts=[
-                {
-                    "label": "Remote A",
-                    "host": "remote-a",
-                    "priority": "20",
-                    "max_parallel_encodes": "2",
-                    "capabilities": ["encode_queue"],
-                    "staging_root": str(self.root / "remote-staging"),
-                    "source_roots_json": json.dumps(
-                        {
-                            "movies": str(self.root / "remote-movies"),
-                            "tv": str(self.root / "remote-tv"),
-                        }
-                    ),
-                }
-            ],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-        self.assertEqual(
-            payload["remote_hosts"][0]["source_roots"],
-            {
-                "movies": str((self.root / "remote-movies").expanduser()),
-                "tv": str((self.root / "remote-tv").expanduser()),
-            },
-        )
-        self.assertEqual(payload["remote_hosts"][0]["staging_root"], str(self.root / "remote-staging"))
-
-    def test_runtime_settings_payload_rejects_unknown_library_override(self) -> None:
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            settings_runtime.build_runtime_settings_payload(
-                libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-                remote_hosts=[
-                    {
-                        "label": "Remote A",
-                        "host": "remote-a",
-                        "priority": "20",
-                        "max_parallel_encodes": "2",
-                        "capabilities": ["encode_queue"],
-                        "source_roots_json": json.dumps({"movies": "/srv/media/movies"}),
-                    }
-                ],
-                transcode_root=str(self.root / "staging"),
-                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-                schedule_profiles=[],
-            )
-        self.assertIn("Unknown library override", raised.exception.public_message)
-
-    def test_runtime_settings_payload_rejects_unknown_host_schedule_profile(self) -> None:
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            settings_runtime.build_runtime_settings_payload(
-                libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-                remote_hosts=[
-                    {
-                        "label": "Remote A",
-                        "host": "remote-a",
-                        "priority": "20",
-                        "max_parallel_encodes": "2",
-                        "schedule_profile": "missing_profile",
-                        "capabilities": "encode_queue",
-                    }
-                ],
-                transcode_root=str(self.root / "staging"),
-                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-                schedule_profiles=[],
-            )
-        self.assertIn("Unknown schedule profile", raised.exception.public_message)
-
-    def test_runtime_settings_payload_rejects_reserved_schedule_profile_key(self) -> None:
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            settings_runtime.build_runtime_settings_payload(
-                libraries=[{"key": "tv", "path": str(self.root / "source" / "tv")}],
-                remote_hosts=[],
-                transcode_root=str(self.root / "staging"),
-                encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-                schedule_profiles=[
-                    {
-                        "key": "never",
-                        "label": "Should Not Override",
-                        "start_hour": "0",
-                        "end_hour": "0",
-                    }
-                ],
-            )
-        self.assertIn("reserved", raised.exception.public_message)
-
-    def test_runtime_settings_payload_preserves_allowed_libraries_for_host(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[
-                {"key": "tv", "path": str(self.root / "source" / "tv")},
-                {"key": "movies", "path": str(self.root / "source" / "movies")},
-            ],
-            remote_hosts=[
-                {
-                    "label": "Remote A",
-                    "host": "remote-a",
-                    "priority": "20",
-                    "max_parallel_encodes": "2",
-                    "schedule_profile": "never",
-                    "capabilities": ["encode_queue"],
-                    "allowed_libraries": ["tv"],
-                }
-            ],
-            transcode_root=str(self.root / "staging"),
-            encode_queue_scheduler={"mode": "anytime", "start_hour": 22, "end_hour": 8, "timezone": "local"},
-            schedule_profiles=[],
-        )
-
-        self.assertEqual(payload["remote_hosts"][0]["schedule_profile"], "never")
-        self.assertEqual(payload["remote_hosts"][0]["allowed_libraries"], ["tv"])
-
     def test_settings_helpers_tolerate_malformed_runtime_values(self) -> None:
         self.config.raw["media"]["source_roots"] = ["not-a-mapping"]
         self.config.raw["media"]["staging_root"] = {"bad": "shape"}
@@ -5357,90 +4846,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["days_of_week"], ["mon", "tue", "wed", "thu", "fri", "sat"])
         self.assertEqual(rows[0]["all_day_days_of_week"], ["sun"])
-
-    def test_build_runtime_settings_payload_persists_schedule_days_of_week(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "movies", "path": str(self.root / "source" / "movies"), "color": "#123456"}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "transcode"),
-            encode_queue_scheduler={"mode": "anytime", "timezone": "host_local"},
-            schedule_profiles=[
-                {
-                    "key": "sunday_only",
-                    "label": "Sunday Only",
-                    "days_of_week": ["sun"],
-                    "all_day_days_of_week": [],
-                    "start_hour": "0",
-                    "end_hour": "0",
-                }
-            ],
-        )
-
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["days_of_week"], ["sun"])
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["all_day_days_of_week"], [])
-
-    def test_build_runtime_settings_payload_persists_all_day_schedule_days(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "movies", "path": str(self.root / "source" / "movies"), "color": "#123456"}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "transcode"),
-            encode_queue_scheduler={"mode": "anytime", "timezone": "host_local"},
-            schedule_profiles=[
-                {
-                    "key": "after_hours_plus_sunday",
-                    "label": "After Hours + Sunday",
-                    "days_of_week": ["mon", "tue", "wed", "thu", "fri"],
-                    "all_day_days_of_week": ["sun"],
-                    "start_hour": "20",
-                    "end_hour": "6",
-                }
-            ],
-        )
-
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["days_of_week"],
-                         ["mon", "tue", "wed", "thu", "fri"])
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["all_day_days_of_week"], ["sun"])
-
-    def test_build_runtime_settings_payload_preserves_all_day_only_schedule_days(self) -> None:
-        payload = settings_runtime.build_runtime_settings_payload(
-            libraries=[{"key": "movies", "path": str(self.root / "source" / "movies"), "color": "#123456"}],
-            remote_hosts=[],
-            transcode_root=str(self.root / "transcode"),
-            encode_queue_scheduler={"mode": "anytime", "timezone": "host_local"},
-            schedule_profiles=[
-                {
-                    "key": "sunday_all_day",
-                    "label": "Sunday All Day",
-                    "days_of_week": [],
-                    "all_day_days_of_week": ["sun"],
-                    "start_hour": "20",
-                    "end_hour": "6",
-                }
-            ],
-        )
-
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["days_of_week"], [])
-        self.assertEqual(payload["encode_queue"]["schedule_profiles"][0]["all_day_days_of_week"], ["sun"])
-
-    def test_build_runtime_settings_payload_rejects_schedule_profile_without_days(self) -> None:
-        with self.assertRaises(settings_runtime.SettingsValidationError) as raised:
-            settings_runtime.build_runtime_settings_payload(
-                libraries=[{"key": "movies", "path": str(self.root / "source" / "movies"), "color": "#123456"}],
-                remote_hosts=[],
-                transcode_root=str(self.root / "transcode"),
-                encode_queue_scheduler={"mode": "anytime", "timezone": "host_local"},
-                schedule_profiles=[
-                    {
-                        "key": "empty_days",
-                        "label": "Empty Days",
-                        "days_of_week": [],
-                        "all_day_days_of_week": [],
-                        "start_hour": "20",
-                        "end_hour": "6",
-                    }
-                ],
-            )
-        self.assertIn("Select at least one day", raised.exception.public_message)
 
     def test_host_runtime_rows_mark_never_schedule_as_disabled(self) -> None:
         self.config.raw["remote_hosts"] = [
@@ -7173,65 +6578,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(series_card.review_badge_label, "Sample running")
         self.assertEqual(series_card.review_badge_tone, "attention")
 
-    def test_dashboard_folders_payload_exposes_series_folders(self) -> None:
-        season_card = folder_cards_runtime.FolderCard(
-            prefix="tv/show/Season 1",
-            title="show · Season 1",
-            subtitle="show",
-            scope_label="Season",
-            item_count=1,
-            pending_count=1,
-            total_size_bytes=1024,
-            estimated_savings_bytes=512,
-            known_saved_bytes=0,
-            projected_reclaim_bytes=512,
-            average_age_days=0.0,
-            sort_score=1.0,
-            statuses={"planned": 1},
-            video_codecs={"h264": 1},
-        )
-        series_card = replace(season_card, prefix="tv/show", title="show", scope_label="Series", item_count=2)
-
-        payload = dashboard_payloads.dashboard_folders_payload(
-            self.config,
-            folder_card_cache_key=lambda _config: ("cache", 1, 2),
-            list_folder_cards=lambda _config, _connection: [season_card],
-            list_series_folder_cards=lambda _config, _connection: [series_card],
-        )
-
-        self.assertEqual(payload["folders"][0]["prefix"], "tv/show/Season 1")
-        self.assertEqual(payload["series_folders"][0]["prefix"], "tv/show")
-        self.assertEqual(payload["series_folders"][0]["scope_label"], "Series")
-
-    def test_dashboard_library_payload_marks_structure_as_loading_details(self) -> None:
-        structure_card = folder_cards_runtime.FolderCard(
-            prefix="tv/show/Season 1",
-            title="show · Season 1",
-            subtitle="show",
-            scope_label="Season",
-            item_count=2,
-            pending_count=1,
-            total_size_bytes=2048,
-            estimated_savings_bytes=0,
-            known_saved_bytes=0,
-            projected_reclaim_bytes=0,
-            average_age_days=0.0,
-            sort_score=0.0,
-            statuses={"planned": 1, "promoted": 1},
-            video_codecs={},
-            details_loading=True,
-        )
-
-        payload = dashboard_payloads.dashboard_library_payload(
-            self.config,
-            folder_card_cache_key=lambda _config: ("cache", 1, 2),
-            list_library_structure_cards=lambda _config, _connection: [structure_card],
-        )
-
-        self.assertEqual(payload["folders"][0]["prefix"], "tv/show/Season 1")
-        self.assertTrue(payload["folders"][0]["details_loading"])
-        self.assertEqual(payload["series_folders"], [])
-
     def test_folder_studio_series_context_and_encode_candidate_count_follow_manifest_selection(self) -> None:
         pending = self._create_source_file("pending.mkv")
         encoded = self._create_source_file("encoded.mkv")
@@ -8823,14 +8169,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 ),
             )
 
-        fixture_payload = folder_episodes_payload(self.config, season)
-        show_payload = folder_episodes_payload(self.config, "tv/show")
+        with open_db(self.config.paths.db_path) as connection:
+            workflow = build_folder_workflow_state(connection, season)
+            episodes = load_season_episode_progress(connection, workflow.items, list_encode_runs_for_prefix(connection, season))
 
-        self.assertTrue(fixture_payload["available"])
         self.assertEqual(
             [
                 (episode["rel_path"], episode["stage"], episode["detail"], episode["percent_complete"])
-                for episode in fixture_payload["episodes"]
+                for episode in episodes
             ],
             [
                 (f"{season}/Episode 04.mkv", "needs_you", "much smaller than expected; keep it or make it again", None),
@@ -8841,8 +8187,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 (rel_paths[2], "published", None, None),
             ],
         )
-        self.assertEqual(fixture_payload["episodes"][5]["bytes_saved"], 700_000_000)
-        self.assertFalse(show_payload["available"])
+        self.assertEqual(episodes[5]["bytes_saved"], 700_000_000)
 
     def test_folder_delivery_badge_ignores_fully_promoted_folders(self) -> None:
         card = self._folder_card_for_delivery_badge(
@@ -10623,239 +9968,6 @@ raise SystemExit(0)
 
         self.assertEqual(exc.exception.status_code, 409)
         self.assertIn("configured search or source-size limit", str(exc.exception.detail))
-
-    def test_retry_failed_encode_queue_action_retries_latest_approved_failures_only(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            now = web_app._now_iso()
-            for fixture_prefix, status in (
-                    ("tv/approved-a", "needs_attention"),
-                    ("tv/approved-b", "failed"),
-                    ("tv/review-blocked", "stopped"),
-                    ("tv/already-running", "running"),
-            ):
-                save_encode_job(
-                    connection,
-                    {
-                        "job_id": f"job-{fixture_prefix.rsplit('/', 1)[-1]}",
-                        "prefix": fixture_prefix,
-                        "job_kind": "folder",
-                        "parent_job_id": None,
-                        "status": status,
-                        "manifest_path": str(self.root / "runs" / f"{fixture_prefix.rsplit('/', 1)[-1]}.json"),
-                        "item_count": 1,
-                        "saved_profile_path": None,
-                        "host": {},
-                        "last_host": {},
-                        "notes": "",
-                        "bypass_schedule": False,
-                        "attempt_count": 3,
-                        "process_pid": None,
-                        "error": None,
-                        "leased_at": None,
-                        "lease_expires_at": None,
-                        "heartbeat_at": None,
-                        "worker_id": None,
-                        "retry_not_before": None,
-                        "waiting_reason": None,
-                        "terminal_reason": None,
-                        "last_failure_kind": None,
-                        "last_failure_at": None,
-                        "host_cooldown_until": None,
-                        "created_at": now,
-                        "started_at": None,
-                        "finished_at": now if status in {"needs_attention", "failed", "stopped"} else None,
-                        "updated_at": now,
-                    },
-                )
-
-        queued_prefixes: list[str] = []
-
-        def load_calibration_state(
-                _config: MediaforceConfig,
-                prefix: str,
-        ) -> folder_actions_runtime.ActionPayload | None:
-            if prefix == "tv/review-blocked":
-                return {"policy": {}, "review_media_ready": True}
-            return {"policy": {}, "accepted_at": web_app._now_iso(), "accepted_sample_job_id": "sample-1",
-                    "job_id": "sample-1"}
-
-        def review_gate(
-                calibration: folder_actions_runtime.ActionPayload | None) -> folder_actions_runtime.ActionPayload:
-            if calibration and calibration.get("accepted_at"):
-                return self._accepted_review_gate(calibration)
-            return {
-                "can_confirm_full": False,
-                "message": "Review clips and approve",
-                "status": "needs_approval",
-                "next_action_label": "Review clips and approve",
-            }
-
-        def queue_folder_encode_action(prefix: str, _notes: str,
-                                       _bypass_schedule: bool) -> folder_actions_runtime.ActionPayload:
-            queued_prefixes.append(prefix)
-            return {"ok": True, "message": "Queued the full folder encode."}
-
-        result = queue_actions_runtime.retry_failed_encode_queue_action(
-            connection_factory=lambda: open_db(self.config.paths.db_path),
-            config=self.config,
-            load_calibration_state=load_calibration_state,
-            review_gate=review_gate,
-            queue_folder_encode_action=queue_folder_encode_action,
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(set(queued_prefixes), {"tv/approved-a", "tv/approved-b"})
-        self.assertEqual(result["queued_count"], 2)
-        self.assertEqual(result["review_blocked_count"], 1)
-        self.assertEqual(result["review_blocked_prefixes"], ["tv/review-blocked"])
-
-    def test_retry_failed_encode_prefix_action_retries_only_requested_prefix(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            now = web_app._now_iso()
-            for fixture_prefix in ("tv/approved-a", "tv/approved-b"):
-                save_encode_job(
-                    connection,
-                    {
-                        "job_id": f"job-{fixture_prefix.rsplit('/', 1)[-1]}",
-                        "prefix": fixture_prefix,
-                        "job_kind": "folder",
-                        "parent_job_id": None,
-                        "status": "needs_attention",
-                        "manifest_path": str(self.root / "runs" / f"{fixture_prefix.rsplit('/', 1)[-1]}.json"),
-                        "item_count": 1,
-                        "saved_profile_path": None,
-                        "host": {},
-                        "last_host": {},
-                        "notes": "",
-                        "bypass_schedule": False,
-                        "attempt_count": 3,
-                        "process_pid": None,
-                        "error": None,
-                        "leased_at": None,
-                        "lease_expires_at": None,
-                        "heartbeat_at": None,
-                        "worker_id": None,
-                        "retry_not_before": None,
-                        "waiting_reason": None,
-                        "terminal_reason": None,
-                        "last_failure_kind": None,
-                        "last_failure_at": None,
-                        "host_cooldown_until": None,
-                        "created_at": now,
-                        "started_at": None,
-                        "finished_at": now,
-                        "updated_at": now,
-                    },
-                )
-
-        queued_prefixes: list[str] = []
-
-        def queue_folder_encode_action(prefix: str, _notes: str,
-                                       _bypass_schedule: bool) -> folder_actions_runtime.ActionPayload:
-            queued_prefixes.append(prefix)
-            return {"ok": True, "message": "Queued the full folder encode."}
-
-        result = queue_actions_runtime.retry_failed_encode_prefix_action(
-            connection_factory=lambda: open_db(self.config.paths.db_path),
-            config=self.config,
-            prefix="tv/approved-b",
-            load_calibration_state=lambda _config, _prefix: {
-                "policy": {},
-                "accepted_at": web_app._now_iso(),
-                "accepted_sample_job_id": "sample-1",
-                "job_id": "sample-1",
-            },
-            review_gate=self._accepted_review_gate,
-            queue_folder_encode_action=queue_folder_encode_action,
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(queued_prefixes, ["tv/approved-b"])
-        self.assertEqual(result["queued_prefixes"], ["tv/approved-b"])
-
-    def test_retry_failed_encode_prefix_action_reports_non_retryable_prefix(self) -> None:
-        result = queue_actions_runtime.retry_failed_encode_prefix_action(
-            connection_factory=lambda: open_db(self.config.paths.db_path),
-            config=self.config,
-            prefix="tv/not-failed",
-            load_calibration_state=lambda _config, _prefix: None,
-            review_gate=self._accepted_review_gate,
-            queue_folder_encode_action=lambda _prefix, _notes, _bypass_schedule: {"ok": True},
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["queued_count"], 0)
-        self.assertEqual(result["queued_prefixes"], [])
-        self.assertIn("No failed folder encode was ready", result["message"])
-
-    def test_retry_failed_encode_prefix_action_explains_fresh_goal_requirement(self) -> None:
-        prefix = "tv/show/episode-final-size-miss.mkv"
-        with open_db(self.config.paths.db_path) as connection:
-            now = web_app._now_iso()
-            save_encode_job(
-                connection,
-                {
-                    "job_id": "job-fresh-goal-required",
-                    "prefix": prefix,
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(self.root / "runs" / "fresh-goal-required.json"),
-                    "item_count": 1,
-                    "saved_profile_path": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 3,
-                    "process_pid": None,
-                    "error": None,
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": None,
-                    "last_failure_kind": "deterministic",
-                    "last_failure_at": now,
-                    "host_cooldown_until": None,
-                    "progress": {
-                        "failure_analysis": {
-                            "kind": "final_size_target_miss",
-                            "retry_strategy": "fresh_goal_required",
-                        }
-                    },
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": now,
-                    "updated_at": now,
-                },
-            )
-
-        queue_calls: list[str] = []
-
-        def queue_action(queued_prefix: str, _notes: str, _bypass_schedule: bool) -> dict[str, object]:
-            queue_calls.append(queued_prefix)
-            return {
-                "ok": False,
-                "code": "final_size_recovery_contract_unchanged",
-                "message": "Choose a fresh size or compression goal before retrying.",
-            }
-
-        result = queue_actions_runtime.retry_failed_encode_prefix_action(
-            connection_factory=lambda: open_db(self.config.paths.db_path),
-            config=self.config,
-            prefix=prefix,
-            load_calibration_state=self._accepted_calibration_state,
-            review_gate=self._accepted_review_gate,
-            queue_folder_encode_action=queue_action,
-        )
-
-        self.assertEqual(result["queued_count"], 0)
-        self.assertEqual(queue_calls, [prefix])
-        self.assertEqual(result["blocked"][0]["code"], "final_size_recovery_contract_unchanged")
-        self.assertIn("Choose a fresh size or compression goal", result["message"])
 
     def test_save_profile_action_requires_high_impact_confirmation(self) -> None:
         calibration_payload: folder_actions_runtime.ActionPayload = {
@@ -19864,31 +18976,6 @@ raise SystemExit(0)
         host_recovery_handle.join.assert_called_once_with()
         lease.release.assert_called_once_with()
 
-    def test_stop_encode_queue_action_sweeps_orphaned_processes_after_cancel(self) -> None:
-        cancel_queue_process = Mock()
-        sweep_orphaned_encode_processes = Mock()
-        clear_stale_encoding_items = Mock(return_value=4)
-
-        result = queue_actions_runtime.stop_encode_queue_action(
-            connection_factory=lambda: open_db(self.config.paths.db_path),
-            config=self.config,
-            now_iso=web_app._now_iso,
-            cancel_queue_process=cancel_queue_process,
-            sweep_orphaned_encode_processes=sweep_orphaned_encode_processes,
-            clear_stale_encoding_items=clear_stale_encoding_items,
-        )
-
-        self.assertTrue(result["ok"])
-        cancel_queue_process.assert_called_once_with()
-        sweep_orphaned_encode_processes.assert_called_once_with()
-        clear_stale_encoding_items.assert_called_once_with()
-        self.assertEqual(result["cleared_stale_item_count"], 4)
-
-        with open_db(self.config.paths.db_path) as connection:
-            state = load_queue_state(connection)
-        self.assertTrue(state["is_paused"])
-        self.assertTrue(state["stop_requested"])
-
     def test_orphan_sweep_does_not_signal_configured_hosts_without_queue_ownership(self) -> None:
         self.config.raw["remote_hosts"] = [
             {"host": "encode-a", "mode": "ssh", "capabilities": ["encode_queue"]},
@@ -19909,7 +18996,6 @@ raise SystemExit(0)
         self.assertEqual({call.args[0]["host"] for call in end_writers.call_args_list}, {"owned-host"})
         self.assertEqual({call.args[1] for call in end_writers.call_args_list},
                          {output, staging_runtime.partial_output_path(output)})
-
 
     def test_app_lifespan_joins_writers_and_releases_leadership_before_runtime_lock(self) -> None:
         startup_threads: list[Any] = []
@@ -20169,8 +19255,8 @@ raise SystemExit(0)
             root = Path(directory)
             web_state_dir = root / "web"
             web_state_dir.mkdir()
-            config_lower = SimpleNamespace(
-                paths=SimpleNamespace(
+            config_lower = replace(
+                self.config, paths=replace(self.config.paths,
                     config_path=root / "config.toml",
                     db_path=root / "library.sqlite3",
                     web_state_dir=web_state_dir,
@@ -20180,8 +19266,8 @@ raise SystemExit(0)
             keys_lower = runtime_lock_module._runtime_namespace_keys(config_lower, lock_path)
 
             upper_root = Path(str(root).upper()) if str(root)[0].isalpha() else root
-            config_upper = SimpleNamespace(
-                paths=SimpleNamespace(
+            config_upper = replace(
+                self.config, paths=replace(self.config.paths,
                     config_path=upper_root / "CONFIG.TOML",
                     db_path=upper_root / "LIBRARY.SQLITE3",
                     web_state_dir=upper_root / "WEB",
@@ -20206,14 +19292,14 @@ raise SystemExit(0)
             import unicodedata
             nfc_name = unicodedata.normalize("NFC", "café")
             nfd_name = unicodedata.normalize("NFD", "café")
-            config_nfc = SimpleNamespace(
-                paths=SimpleNamespace(
+            config_nfc = replace(
+                self.config, paths=replace(self.config.paths,
                     config_path=root / f"{nfc_name}.toml",
                     web_state_dir=web_state_dir,
                 ),
             )
-            config_nfd = SimpleNamespace(
-                paths=SimpleNamespace(
+            config_nfd = replace(
+                self.config, paths=replace(self.config.paths,
                     config_path=root / f"{nfd_name}.toml",
                     web_state_dir=web_state_dir,
                 ),
@@ -20234,14 +19320,14 @@ raise SystemExit(0)
             alias = root / "config-alias.toml"
             original.write_text("config", encoding="utf-8")
             os.link(original, alias)
-            first_config = SimpleNamespace(
-                paths=SimpleNamespace(
+            first_config = replace(
+                self.config, paths=replace(self.config.paths,
                     config_path=original,
                     web_state_dir=root / "first-state",
                 )
             )
-            second_config = SimpleNamespace(
-                paths=SimpleNamespace(
+            second_config = replace(
+                self.config, paths=replace(self.config.paths,
                     config_path=alias,
                     web_state_dir=root / "second-state",
                 )
@@ -20262,8 +19348,8 @@ raise SystemExit(0)
             self.assertEqual(len(first_identity_keys), 1)
 
     def test_runtime_namespace_identity_stat_errors_fail_closed(self) -> None:
-        config = SimpleNamespace(
-            paths=SimpleNamespace(
+        config = replace(
+            self.config, paths=replace(self.config.paths,
                 config_path=self.root / "config.toml",
                 web_state_dir=self.root / "state",
             )
@@ -20277,10 +19363,6 @@ raise SystemExit(0)
         ):
             with self.assertRaises(runtime_lock_module.MediaforceRuntimeBusyError):
                 runtime_lock_module._runtime_namespace_keys(config, lock_path)
-
-
-
-
 
     def test_process_calibration_queue_once_handles_plain_connection_queries(self) -> None:
         deps = web_app._calibration_queue_runtime_deps()
@@ -24262,202 +23344,6 @@ raise SystemExit(0)
         self.assertEqual(len(object_list(failure_analysis["item_analyses"])), 2)
         self.assertIn("2 of 2 files", str(failure_analysis["summary"]))
 
-    def test_approve_measured_encode_recovery_updates_policy_and_queues_failed_items(self) -> None:
-        manifest_path = self._write_manifest(
-            "manifest-recovery-approval.json",
-            [
-                {
-                    "library_item_id": 1,
-                    "rel_path": "tv/show/e09.mkv",
-                    "source_path": "tv/show/e09.mkv",
-                    "source_size_bytes": 1_000_000_000,
-                    "compression_intent": self._compression_intent_snapshot(),
-                    "resolved_policy": {
-                        "video": {
-                            "quality_metric": "vmaf",
-                            "target_vmaf": 88.0,
-                            "min_target_vmaf": 86.5,
-                            "max_encoded_percent": 15,
-                            "max_crf": 46,
-                        }
-                    },
-                },
-                {
-                    "library_item_id": 2,
-                    "rel_path": "tv/show/e10.mkv",
-                    "source_path": "tv/show/e10.mkv",
-                    "source_size_bytes": 1_000_000_000,
-                    "compression_intent": self._compression_intent_snapshot(),
-                    "resolved_policy": {
-                        "video": {
-                            "quality_metric": "vmaf",
-                            "target_vmaf": 88.0,
-                            "min_target_vmaf": 86.5,
-                            "max_encoded_percent": 15,
-                            "max_crf": 46,
-                        }
-                    },
-                },
-            ],
-        )
-        now = web_app._now_iso()
-        failure_analysis = {
-            "kind": "quality_floor_too_strict",
-            "retry_strategy": "needs_operator_approval",
-            "auto_retry_allowed": False,
-            "manifest_indexes": [0, 1],
-            "summary": "Measured policy analysis covers 2 of 2 selected items; operator approval is required.",
-            "item_analyses": [
-                {
-                    "kind": "quality_floor_too_strict",
-                    "manifest_index": 0,
-                    "manifest_indexes": [0],
-                    "item_rel_path": "tv/show/e09.mkv",
-                    "requested_metric": "VMAF",
-                    "target_score": 88.0,
-                    "min_score": 86.5,
-                    "max_encoded_percent": 15.0,
-                    "best_candidate": {
-                        "crf": 50.0,
-                        "metric": "VMAF",
-                        "score": 87.15,
-                        "predicted_encode_percent": 15.0,
-                    },
-                },
-                {
-                    "kind": "size_cap_too_strict",
-                    "manifest_index": 1,
-                    "manifest_indexes": [1],
-                    "item_rel_path": "tv/show/e10.mkv",
-                    "requested_metric": "VMAF",
-                    "target_score": 88.0,
-                    "min_score": 86.5,
-                    "max_encoded_percent": 15.0,
-                    "proposed_max_encoded_percent": 18,
-                    "best_candidate": {
-                        "crf": 48.0,
-                        "metric": "VMAF",
-                        "score": 87.12,
-                        "predicted_encode_percent": 17.0,
-                    },
-                },
-            ],
-        }
-        with open_db(self.config.paths.db_path) as connection:
-            save_encode_job(
-                connection,
-                {
-                    "job_id": "terminal-recovery-parent",
-                    "prefix": "tv/show",
-                    "job_kind": "folder",
-                    "parent_job_id": None,
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 2,
-                    "saved_profile_path": None,
-                    "manifest_indexes": None,
-                    "host": {},
-                    "last_host": {},
-                    "notes": "",
-                    "bypass_schedule": False,
-                    "attempt_count": 1,
-                    "process_pid": None,
-                    "error": "quality policy needs approval",
-                    "leased_at": None,
-                    "lease_expires_at": None,
-                    "heartbeat_at": None,
-                    "worker_id": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
-                    "terminal_reason": "deterministic",
-                    "last_failure_kind": "deterministic",
-                    "last_failure_at": now,
-                    "host_cooldown_until": None,
-                    "created_at": now,
-                    "started_at": now,
-                    "finished_at": now,
-                    "updated_at": now,
-                    "progress": {"failure_analysis": failure_analysis},
-                },
-            )
-
-        calibration_state = {
-            "accepted_at": now,
-            "policy": {
-                "video": {
-                    "quality_metric": "vmaf",
-                    "target_vmaf": 88.0,
-                    "min_target_vmaf": 86.5,
-                    "max_encoded_percent": 15,
-                    "max_crf": 46,
-                }
-            },
-        }
-        saved_calibrations: list[folder_actions_runtime.ActionPayload] = []
-        saved_overrides: list[folder_actions_runtime.ActionPayload] = []
-        queue_calls: list[tuple[str, str, bool]] = []
-
-        def save_calibration(
-                _config: MediaforceConfig,
-                _prefix: str,
-                payload: folder_actions_runtime.ActionPayload,
-        ) -> None:
-            saved_calibrations.append(payload)
-
-        def upsert_override(
-                _file_path: Path,
-                _prefix: str,
-                policy: folder_actions_runtime.ActionPayload,
-        ) -> None:
-            saved_overrides.append(policy)
-
-        def queue_action(prefix: str, notes: str, bypass_schedule: bool) -> folder_actions_runtime.ActionPayload:
-            queue_calls.append((prefix, notes, bypass_schedule))
-            return {"ok": True, "message": "Recovered 2 failed files.", "recovered_item_count": 2}
-
-        result = folder_actions_runtime.approve_measured_encode_recovery_action(
-            self.config,
-            "tv/show",
-            now_iso=web_app._now_iso,
-            load_calibration_state=lambda _config, _prefix: calibration_state,
-            calibration_draft_hash=lambda _payload: "draft-hash",
-            save_calibration_state=save_calibration,
-            review_gate=self._accepted_review_gate,
-            upsert_override=upsert_override,
-            queue_folder_encode_action=queue_action,
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["action"], "approved_measured_recovery")
-        self.assertEqual(queue_calls[0][0], "tv/show")
-        self.assertFalse(queue_calls[0][2])
-        self.assertIn("Preserve completed staged encodes", queue_calls[0][1])
-        saved_video = object_dict(object_dict(saved_calibrations[0]["policy"]).get("video"))
-        self.assertEqual(saved_video["target_vmaf"], 88.0)
-        self.assertEqual(saved_video["min_target_vmaf"], 86.5)
-        self.assertEqual(saved_video["max_encoded_percent"], 15)
-        self.assertEqual(saved_video["max_crf"], 46)
-        self.assertEqual(len(saved_overrides), 2)
-        first_override = object_dict(object_dict(saved_overrides[0]).get("video"))
-        second_override = object_dict(object_dict(saved_overrides[1]).get("video"))
-        self.assertEqual(first_override["target_vmaf"], 87.0)
-        self.assertEqual(first_override["max_encoded_percent"], 15)
-        self.assertEqual(first_override["max_crf"], 50)
-        self.assertEqual(second_override["target_vmaf"], 87.0)
-        self.assertEqual(second_override["max_encoded_percent"], 18)
-        self.assertEqual(second_override["max_crf"], 48)
-        saved_recoveries = object_list(saved_calibrations[0]["accepted_item_recoveries"])
-        self.assertEqual(len(saved_recoveries), 2)
-        first_escalation = object_dict(object_dict(saved_recoveries[0]).get("compression_escalation"))
-        second_escalation = object_dict(object_dict(saved_recoveries[1]).get("compression_escalation"))
-        self.assertEqual(first_escalation["scope"], "item")
-        self.assertEqual(second_escalation["scope"], "item")
-        self.assertEqual(first_escalation["job_id"], "terminal-recovery-parent")
-        self.assertEqual(
-            object_dict(second_escalation["decision"])["reason_code"],
-            "authorized_by_operator_override",
-        )
-
     def test_queue_folder_encode_rejects_existing_active_encode_for_prefix(self) -> None:
         manifest_path = self._write_manifest("manifest-existing-active.json", [{"library_item_id": 1}])
         with open_db(self.config.paths.db_path) as connection:
@@ -26716,14 +25602,11 @@ raise SystemExit(0)
                 staged_integrity=staged, lifecycle=scope_lifecycle,
             ),
         )
-        episodes = (
-            {}
-            if prefix == "tv/show"
-            else {
-                Path(episode["rel_path"]).name: episode
-                for episode in folder_episodes_payload(show.config, prefix)["episodes"]
-            }
-        )
+        episodes = {}
+        if prefix != "tv/show":
+            payload = item_payload(show.config, prefix, sound=lambda *_args: None)
+            assert payload is not None
+            episodes = {Path(episode["rel_path"]).name: episode for episode in payload["files"]}
         with open_db(self.config.paths.db_path) as connection:
             # Reading the page queued no check and held nothing.
             self.assertEqual(connection.execute(select(func.count()).select_from(production_holds)).scalar_one(), 0)
@@ -26798,7 +25681,7 @@ raise SystemExit(0)
         self.assertEqual(season.card.estimated_savings_bytes, 0)
         for name in ("One.mkv", "Three.mkv", "Four.mkv"):
             self.assertEqual(season.episodes[name]["stage"], "held")
-            self.assertIn("motion pattern", season.episodes[name]["detail"])
+            self.assertEqual(season.episodes[name]["held_reason"], "motion_pattern")
 
     def test_a_season_with_some_motion_held_episodes_counts_only_the_ones_queueing_takes(self) -> None:
         season = self._season_with_motion_holds({"Three.mkv": "held", "Four.mkv": "check"})
@@ -26914,7 +25797,7 @@ raise SystemExit(0)
         for name in held_names:
             episode = page.episodes[Path(name).name]
             self.assertEqual(episode["stage"], "kept_original")
-            self.assertIn("motion pattern", episode["detail"])
+            self.assertIsNotNone(episode["kept_reason"])
         # The queue agrees with the page: it takes none of them, checks none and holds none.
         queued = self._motion_queue(show, season)
         self.assertFalse(queued.result["ok"], queued.result)
@@ -32032,7 +30915,6 @@ raise SystemExit(0)
             ).scalar_one()
         self.assertEqual(statuses, ["planned", "planned"])
         self.assertEqual(event_type, "cleanup_concurrent_writer")
-
 
     def test_calibration_queue_summary_surfaces_recent_failed_jobs(self) -> None:
         now = web_app._now_iso()

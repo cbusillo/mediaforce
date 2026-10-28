@@ -3,9 +3,7 @@ import fcntl
 import json
 import logging
 import os
-import re
 import shutil
-import subprocess
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -14,17 +12,13 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from tempfile import NamedTemporaryFile, mkdtemp
 from time import monotonic, time as wall_time
 from typing import Any, NamedTuple
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from starlette.background import BackgroundTask
-from fastapi.responses import FileResponse
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import literal_column
 from sqlalchemy import select
@@ -32,7 +26,7 @@ from sqlalchemy import select
 from mediaforce.core.audio_presets import AUDIO_PRESETS
 from mediaforce.advisor import TuningPolicyResponse
 from mediaforce.advising.routing import advisor_routing_from_config
-from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
+from mediaforce.tuning.calibration_jobs import load_job, \
     list_queue_summary, sample_failures_in_a_row, update_job_telemetry
 from mediaforce.tuning.quality_observations import (
     backfill_quality_search_observations,
@@ -52,14 +46,11 @@ from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, base_c
 from mediaforce.web.runtime.audio_preset_runtime import dismiss_suggestion, series_genres, show_audio_preset_payload, \
     tv_show_prefix
 from mediaforce.web.runtime.automatic_publish import publish_checked_files_once
-from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
 from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
 from mediaforce.core.db_tables import encode_jobs
-from mediaforce.core.db_tables import learning_artifacts
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
-from mediaforce.core.db_tables import tuning_sessions
 from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, DISPLAY_ENCODE_JOB_KINDS, \
     clear_terminal_encode_jobs_for_prefix, \
     ensure_queue_state, load_active_encode_job_for_prefix, load_latest_encode_job, \
@@ -79,7 +70,7 @@ from mediaforce.execution import (
 )
 from mediaforce.library.evidence_worker import default_evidence_worker_deps
 from mediaforce.library.folder_profiles import inspect_prefix
-from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state
+from mediaforce.library.background_work import background_work_is_paused, ensure_background_work_state, set_background_work_paused
 from mediaforce.library.evidence_queue import EvidenceQueueConflict, \
     ensure_evidence_queue_state
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
@@ -87,10 +78,6 @@ from mediaforce.library.media_scopes import media_group_scope_for_rel_path, reso
     scope_rel_path_filter, series_context_for_prefix, tv_series_scope_for_rel_path
 from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
-from mediaforce.library.staged_integrity import (
-    CheckedStagedOutputUnavailable,
-    checked_staged_output,
-)
 from mediaforce.library.other_library import load_other_library_payload, load_other_scope_payload, \
     other_group_scope_for_rel_path, other_scope_action_blocker
 from mediaforce.library.other_profiles import OTHER_FOLDER_SCOPE_MAX_ITEMS
@@ -126,7 +113,6 @@ from mediaforce.review import (
     review_moment_payload,
     render_source_review_clips,
 )
-from mediaforce.reviewing.renderers import NATIVE_COMPARE_FILTER
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.tuning_memory import (
     record_tuning_session,
@@ -151,11 +137,6 @@ from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_samp
     samples_to_remake, start_compressing
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
-from mediaforce.web.checked_output_preview import (
-    InvalidByteRange,
-    checked_output_media_type,
-    checked_output_stream_response,
-)
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, approve_kind_action, \
@@ -280,7 +261,6 @@ from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_
     calibration_job_public_payload as runtime_calibration_job_public_payload, \
     dispatch_calibration_job as runtime_dispatch_calibration_job, \
     expire_calibration_job as runtime_expire_calibration_job, \
-    latest_scan_completed_at as runtime_latest_scan_completed_at, \
     load_job_state as runtime_load_job_state, \
     load_overlapping_job_state as runtime_load_overlapping_job_state, \
     load_scan_job_state as runtime_load_scan_job_state, \
@@ -708,6 +688,7 @@ def create_app(
         name="review_media",
     )
 
+
     @app.middleware("http")
     async def ensure_review_media_root(
             request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -718,6 +699,7 @@ def create_app(
 
     app.state.config = config
     app.state.evidence_runner = evidence_runner
+
 
     @app.middleware("http")
     async def periodic_cleanup(
@@ -730,7 +712,6 @@ def create_app(
                 shutdown_event=shutdown_event,
             )
         return await call_next(request)
-
 
     def _dashboard_summary_payload(preview_limit: int | None = None) -> dict[str, Any]:
         return dashboard_summary_payload(
@@ -748,10 +729,6 @@ def create_app(
     def _dashboard_scan_job_payload() -> dict[str, Any] | None:
         with open_db(config.paths.db_path) as connection:
             return _load_scan_status(connection, config, prefix=None)
-
-
-
-
 
     def _dashboard_movie_library_details_payload() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
@@ -788,7 +765,6 @@ def create_app(
                 metrics_by_prefix={card.prefix: asdict(card) for card in cards},
                 candidate_decisions=decisions,
             )
-
 
     def _dashboard_other_library_details_payload() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
@@ -871,7 +847,6 @@ def create_app(
             ),
         )
 
-
     def _saved_library_context() -> dict[str, Any]:
         """What the settings builders compare a submitted library list against."""
         media = config.media
@@ -948,7 +923,6 @@ def create_app(
             with open_db(config.paths.db_path) as connection:
                 _maybe_schedule_scan(connection, config, prefix=None, force=True)
         _refresh_host_status_cache(config)
-
 
     def _settings_snapshot(section: str) -> tuple[MediaforceConfig, str]:
         """Loaded settings and the stored `section` revision, both from one stored state.
@@ -1284,9 +1258,6 @@ def create_app(
         retry_host_connection_action=_retry_host_connection_action,
     )
 
-
-
-
     def _refresh_catalog_action() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
             if background_work_is_paused(connection):
@@ -1304,13 +1275,15 @@ def create_app(
             ),
         }
 
-
-
-
+    def _resume_background_work_action() -> dict[str, Any]:
+        with open_db(config.paths.db_path) as connection:
+            set_background_work_paused(connection, is_paused=False)
+        return {"ok": True, "message": "Background work can start again."}
 
     register_operator_work_routes(
         app,
         refresh_catalog_action=_refresh_catalog_action,
+        resume_background_work_action=_resume_background_work_action,
     )
 
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:
@@ -1675,8 +1648,6 @@ def create_app(
         finally:
             _record_deleted_original_backups(removed_paths)
 
-
-
     def _recent_tuning_sessions(connection: DBClient, prefix: str, limit: int = 8) -> list[dict[str, Any]]:
         return recent_tuning_sessions(connection, prefix, load_json_object_fn=_load_json_object, limit=limit)
 
@@ -1760,7 +1731,6 @@ def create_app(
             clear_pending_proposal=_clear_pending_proposal,
             record_tuning_session=record_tuning_session,
         )
-
 
     def _folder_ai_tune_action(
             normalized_prefix: str,
@@ -1934,7 +1904,6 @@ def create_app(
             scope_membership_token=scope_membership_token,
         )
 
-
     def _accept_ambiguous_motion_action(normalized_prefix: str) -> ActionPayload:
         blocker = production_action_blocker(config, normalized_prefix)
         if blocker is not None:
@@ -1969,7 +1938,6 @@ def create_app(
         # Library cards and space saved count this file again as an original.
         _reset_folder_card_cache()
         return result
-
 
     def _validate_folder_outputs_action(
             normalized_prefix: str,
@@ -2183,12 +2151,6 @@ def create_app(
             now_iso=_now_iso,
         )
 
-
-
-
-
-
-
     def _save_series_lifecycle_action(normalized_prefix: str, mode: str) -> dict[str, Any]:
         nonlocal config
         normalized_mode = mode.strip().lower()
@@ -2360,336 +2322,6 @@ def _folder_display_policy(
     if live_policy:
         return live_policy
     return object_dict(sample_item.get("resolved_policy"))
-
-
-def _download_review_compare_action(config: MediaforceConfig, prefix: str) -> FileResponse:
-    calibration = _load_calibration_state(config, prefix)
-    if calibration is None:
-        raise HTTPException(status_code=404, detail="No sampled review clips are available for this folder yet.")
-    retained_pairs = _review_compare_pair_entries(config, calibration)
-    compare_clips = [
-        clip_path for clip_path in _review_compare_bundle_entries(config, calibration)
-        if clip_path.exists()
-    ]
-    if retained_pairs and len(retained_pairs) >= max(len(compare_clips), 1):
-        bundle_path, download_name, cleanup_path = _build_review_compare_video_from_pairs(
-            config=config,
-            prefix=prefix,
-            retained_pairs=retained_pairs,
-        )
-        return FileResponse(
-            bundle_path,
-            filename=download_name,
-            media_type="video/quicktime",
-            background=BackgroundTask(_remove_path_if_exists, cleanup_path),
-        )
-
-    if not compare_clips:
-        raise HTTPException(status_code=404, detail="No side-by-side compare clips are available for this folder yet.")
-    bundle_path, download_name = _build_review_compare_video(
-        config=config,
-        prefix=prefix,
-        compare_clips=compare_clips,
-    )
-    return FileResponse(
-        bundle_path,
-        filename=download_name,
-        media_type="video/quicktime",
-        background=BackgroundTask(_remove_path_if_exists, bundle_path),
-    )
-
-
-def _checked_output_preview_payload(config: MediaforceConfig, prefix: str) -> dict[str, Any]:
-    try:
-        with open_readonly_db(config.paths.db_path) as connection:
-            output = checked_staged_output(connection, config, prefix)
-    except CheckedStagedOutputUnavailable as error:
-        return {
-            "available": False,
-            "code": error.code,
-            "detail": error.detail,
-        }
-    return {
-        "available": True,
-        "code": "checked_output_ready",
-        "filename": output.path.name,
-        "size_bytes": output.size_bytes,
-        "media_type": checked_output_media_type(output.path),
-    }
-
-
-def _checked_output_preview_stream_action(
-        config: MediaforceConfig,
-        prefix: str,
-        range_header: str | None,
-) -> Response:
-    try:
-        with open_readonly_db(config.paths.db_path) as connection:
-            output = checked_staged_output(connection, config, prefix)
-    except CheckedStagedOutputUnavailable as error:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": error.code, "message": error.detail},
-        ) from error
-    try:
-        return checked_output_stream_response(output, range_header)
-    except InvalidByteRange as error:
-        raise HTTPException(
-            status_code=416,
-            detail={"code": "checked_output_range_invalid", "message": str(error)},
-            headers={"Content-Range": f"bytes */{output.size_bytes}"},
-        ) from error
-    except CheckedStagedOutputUnavailable as error:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": error.code, "message": error.detail},
-        ) from error
-
-
-def _build_review_compare_video(
-        *,
-        config: MediaforceConfig,
-        prefix: str,
-        compare_clips: list[Path],
-) -> tuple[Path, str]:
-    bundle_dir = config.paths.web_state_dir / "downloads"
-    bundle_dir.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(prefix="review-bundle-", suffix=".mov", dir=bundle_dir, delete=False) as temp_file:
-        bundle_path = Path(temp_file.name)
-    _concat_review_compare_clips(bundle_path=bundle_path, compare_clips=compare_clips)
-    download_name = f"{_download_name_slug(prefix)}-full-review-compare.mov"
-    return bundle_path, download_name
-
-
-def _build_review_compare_video_from_pairs(
-        *,
-        config: MediaforceConfig,
-        prefix: str,
-        retained_pairs: list[tuple[Path, Path]],
-) -> tuple[Path, str, Path]:
-    downloads_dir = config.paths.web_state_dir / "downloads"
-    downloads_dir.mkdir(parents=True, exist_ok=True)
-    bundle_dir = Path(mkdtemp(prefix="review-bundle-", dir=downloads_dir))
-    compare_clips: list[Path] = []
-    try:
-        geometry = _retained_review_pairs_compare_geometry(retained_pairs)
-        for index, (source_clip, preview_clip) in enumerate(retained_pairs, start=1):
-            output_path = bundle_dir / f"native-compare-{index:02d}.mkv"
-            _render_retained_review_pair_compare(
-                source_clip=source_clip,
-                preview_clip=preview_clip,
-                output_path=output_path,
-                geometry=geometry,
-            )
-            compare_clips.append(output_path)
-        bundle_path = bundle_dir / f"{_download_name_slug(prefix)}-full-review-compare.mov"
-        _concat_review_compare_clips(bundle_path=bundle_path, compare_clips=compare_clips)
-    except Exception:
-        _remove_path_if_exists(bundle_dir)
-        raise
-    download_name = f"{_download_name_slug(prefix)}-full-review-compare.mov"
-    return bundle_path, download_name, bundle_dir
-
-
-def _retained_review_pair_compare_geometry(retained_pair: tuple[Path, Path]) -> VideoGeometry:
-    source_clip, preview_clip = retained_pair
-    source_geometry = _video_geometry(source_clip)
-    preview_geometry = _video_geometry(preview_clip)
-    return VideoGeometry(
-        width=source_geometry.width + preview_geometry.width,
-        height=max(source_geometry.height, preview_geometry.height),
-    )
-
-
-def _retained_review_pairs_compare_geometry(retained_pairs: list[tuple[Path, Path]]) -> VideoGeometry:
-    geometries = [_retained_review_pair_compare_geometry(pair) for pair in retained_pairs]
-    return VideoGeometry(
-        width=max(geometry.width for geometry in geometries),
-        height=max(geometry.height for geometry in geometries),
-    )
-
-
-def _video_geometry(path: Path) -> VideoGeometry:
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=width,height",
-        "-of",
-        "json",
-        str(path),
-    ]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        stderr = (result.stderr or "").strip()
-        detail = stderr or f"ffprobe could not read video dimensions for {path.name}."
-        raise HTTPException(status_code=500, detail=detail)
-    try:
-        payload = json.loads(result.stdout or "{}")
-        stream = object_dict(object_list(payload.get("streams"))[0] if object_list(payload.get("streams")) else {})
-        width = int(stream.get("width") or 0)
-        height = int(stream.get("height") or 0)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        width = 0
-        height = 0
-    if width <= 0 or height <= 0:
-        raise HTTPException(status_code=500, detail=f"Could not read video dimensions for {path.name}.")
-    return VideoGeometry(width=width, height=height)
-
-
-def _retained_review_pair_compare_filter(geometry: VideoGeometry | None = None) -> str:
-    if geometry is None:
-        return NATIVE_COMPARE_FILTER
-    return (
-        f"{NATIVE_COMPARE_FILTER};"
-        f"[v]pad={geometry.width}:{geometry.height}:0:0:black,setsar=1[vout]"
-    )
-
-
-def _retained_review_pair_compare_map(geometry: VideoGeometry | None = None) -> str:
-    return "[vout]" if geometry is not None else "[v]"
-
-
-def _render_retained_review_pair_compare(
-        *,
-        source_clip: Path,
-        preview_clip: Path,
-        output_path: Path,
-        geometry: VideoGeometry | None = None,
-) -> None:
-    command = [
-        ffmpeg_binary(),
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-y",
-        "-i",
-        str(source_clip),
-        "-i",
-        str(preview_clip),
-        "-filter_complex",
-        _retained_review_pair_compare_filter(geometry),
-        "-map",
-        _retained_review_pair_compare_map(geometry),
-        "-an",
-        "-c:v",
-        "libx264",
-        "-crf",
-        "16",
-        "-preset",
-        "veryfast",
-        str(output_path),
-    ]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
-        _remove_path_if_exists(output_path)
-        stderr = (result.stderr or "").strip()
-        detail = stderr or "ffmpeg could not build a native-resolution review comparison clip."
-        raise HTTPException(status_code=500, detail=detail)
-
-
-def _review_compare_pair_entries(config: MediaforceConfig, calibration: dict[str, Any]) -> list[tuple[Path, Path]]:
-    entries: list[tuple[Path, Path]] = []
-    for raw_pair in object_list(calibration.get("review_pairs")):
-        pair = object_dict(raw_pair)
-        source_clip = _review_file_from_url(config, str(object_dict(pair.get("source_clip")).get("path") or ""))
-        preview_clip = _review_file_from_url(config, str(object_dict(pair.get("preview_clip")).get("path") or ""))
-        if source_clip is None or preview_clip is None:
-            continue
-        if source_clip.exists() and preview_clip.exists():
-            entries.append((source_clip, preview_clip))
-    if entries:
-        return entries
-
-    source_by_timestamp = {
-        _review_pair_timestamp_key(float_value(clip.get("timestamp_seconds"))): _review_file_from_url(
-            config,
-            str(clip.get("path") or ""),
-        )
-        for clip in (object_dict(raw_clip) for raw_clip in object_list(calibration.get("source_clips")))
-    }
-    for raw_clip in object_list(calibration.get("preview_clips")):
-        preview = object_dict(raw_clip)
-        key = _review_pair_timestamp_key(float_value(preview.get("timestamp_seconds")))
-        source_clip = source_by_timestamp.get(key)
-        preview_clip = _review_file_from_url(config, str(preview.get("path") or ""))
-        if source_clip is None or preview_clip is None:
-            continue
-        if source_clip.exists() and preview_clip.exists():
-            entries.append((source_clip, preview_clip))
-    return entries
-
-
-def _review_pair_timestamp_key(timestamp: float | None) -> int:
-    return int(round(float(timestamp or 0.0) * 1000))
-
-
-def _review_compare_bundle_entries(config: MediaforceConfig, calibration: dict[str, Any]) -> list[Path]:
-    entries: list[Path] = []
-    for raw_clip in object_list(calibration.get("compare_clips")):
-        clip_path = _review_file_from_url(config, str(object_dict(raw_clip).get("path") or ""))
-        if clip_path is None:
-            continue
-        entries.append(clip_path)
-    if entries:
-        return entries
-    for raw_pair in object_list(calibration.get("review_pairs")):
-        pair = object_dict(raw_pair)
-        compare_clip = object_dict(pair.get("compare_clip"))
-        clip_path = _review_file_from_url(config, str(compare_clip.get("path") or ""))
-        if clip_path is None:
-            continue
-        entries.append(clip_path)
-    return entries
-
-
-def _concat_review_compare_clips(*, bundle_path: Path, compare_clips: list[Path]) -> None:
-    list_file = bundle_path.with_suffix(".txt")
-    list_file.write_text("".join(_ffmpeg_concat_file_line(path) for path in compare_clips))
-    command = [
-        ffmpeg_binary(),
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_file),
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-movflags",
-        "+faststart",
-        str(bundle_path),
-    ]
-    result = subprocess.run(command, capture_output=True, text=True)
-    _remove_path_if_exists(list_file)
-    if result.returncode != 0 or not bundle_path.exists() or bundle_path.stat().st_size <= 0:
-        _remove_path_if_exists(bundle_path)
-        stderr = (result.stderr or "").strip()
-        detail = stderr or "ffmpeg could not build the combined review video."
-        raise HTTPException(status_code=500, detail=detail)
-
-
-def _ffmpeg_concat_file_line(path: Path) -> str:
-    escaped = str(path).replace("'", "'\\''")
-    return f"file '{escaped}'\n"
-
-
-def _download_name_slug(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return slug or "review-bundle"
 
 
 @dataclass(frozen=True)
@@ -4166,10 +3798,6 @@ def _catalog_stale_after(config: MediaforceConfig) -> timedelta:
     return interval * 2 if interval is not None else CATALOG_STALE_AFTER_WITHOUT_AUTOMATIC_REFRESH
 
 
-def _latest_scan_completed_at(connection: DBClient, prefix: str | None) -> datetime | None:
-    return runtime_latest_scan_completed_at(connection, prefix)
-
-
 def _scan_process_is_alive(pid: JSONValue) -> bool:
     return runtime_scan_process_is_alive(pid)
 
@@ -4346,33 +3974,6 @@ def _review_file_from_url(config: MediaforceConfig, value: str) -> Path | None:
     return candidate
 
 
-def _review_cleanup_targets(config: MediaforceConfig, calibration_payload: dict[str, Any] | None) -> list[Path]:
-    if not isinstance(calibration_payload, dict):
-        return []
-    targets: list[Path] = []
-    seen: set[Path] = set()
-    for key in ("compare_clips", "preview_clips", "source_clips"):
-        for clip in object_list(calibration_payload.get(key)):
-            review_file = _review_file_from_url(config, str(object_dict(clip).get("path") or ""))
-            if review_file is None:
-                continue
-            if review_file not in seen:
-                seen.add(review_file)
-                targets.append(review_file)
-            try:
-                relative = review_file.relative_to(config.paths.review_dir)
-            except ValueError:
-                continue
-            if not relative.parts:
-                continue
-            root = config.paths.review_dir / relative.parts[0]
-            if root in seen:
-                continue
-            seen.add(root)
-            targets.append(root)
-    return sorted(targets, key=lambda path: len(path.parts), reverse=True)
-
-
 def _remove_path_if_exists(path: Path) -> None:
     try:
         if path.is_dir() and not path.is_symlink():
@@ -4383,90 +3984,6 @@ def _remove_path_if_exists(path: Path) -> None:
         return
     except OSError:
         return
-
-
-def _prune_empty_parents(path: Path, *, stop_at: Path) -> None:
-    current = path
-    stop = stop_at.resolve()
-    while True:
-        try:
-            resolved = current.resolve()
-        except OSError:
-            return
-        if resolved == stop:
-            return
-        try:
-            current.rmdir()
-        except FileNotFoundError:
-            current = current.parent
-            continue
-        except OSError:
-            return
-        current = current.parent
-
-
-def _clear_folder_tuning_state(
-        connection: DBClient,
-        *,
-        config: MediaforceConfig,
-        prefix: str,
-) -> dict[str, Any]:
-    active_job = load_active_job(connection, prefix)
-    if active_job is not None:
-        return {"ok": False,
-                "message": "A calibration job is still active for this folder. Wait for it to finish before clearing it."}
-
-    calibration_payload = None
-    calibration_path = _calibration_file(config, prefix)
-    if calibration_path.exists():
-        try:
-            loaded = json.loads(calibration_path.read_text())
-            calibration_payload = loaded if isinstance(loaded, dict) else None
-        except (OSError, json.JSONDecodeError):
-            calibration_payload = None
-
-    review_targets = _review_cleanup_targets(config, calibration_payload)
-    review_pack_path = _review_pack_dir(config, prefix)
-    review_pack_present = review_pack_path.exists()
-    artifact_rows = connection.execute(
-        select(learning_artifacts.c.artifact_path).where(learning_artifacts.c.prefix == prefix)
-    ).mappings().fetchall()
-    artifact_paths = [Path(str(row["artifact_path"])) for row in artifact_rows if
-                      str(row["artifact_path"] or "").strip()]
-    session_count = int(connection.execute(
-        select(func.count()).select_from(tuning_sessions).where(tuning_sessions.c.prefix == prefix)
-    ).scalar_one())
-    job_count = int(connection.execute(
-        select(func.count()).select_from(calibration_jobs_table).where(calibration_jobs_table.c.prefix == prefix)
-    ).scalar_one())
-
-    connection.execute(delete(tuning_sessions).where(tuning_sessions.c.prefix == prefix))
-    connection.execute(delete(calibration_jobs_table).where(calibration_jobs_table.c.prefix == prefix))
-
-    _remove_path_if_exists(calibration_path)
-    _remove_path_if_exists(_advice_file(config, prefix))
-    _remove_path_if_exists(_proposal_file(config, prefix))
-    for artifact_path in artifact_paths:
-        _remove_path_if_exists(artifact_path)
-    for review_target in review_targets:
-        _remove_path_if_exists(review_target)
-        if review_target.parent != config.paths.review_dir:
-            _prune_empty_parents(review_target.parent, stop_at=config.paths.review_dir)
-    _remove_path_if_exists(review_pack_path)
-    if review_pack_path.parent != config.paths.review_dir:
-        _prune_empty_parents(review_pack_path.parent, stop_at=config.paths.review_dir)
-
-    return {
-        "ok": True,
-        "message": "Cleared the tuning thread and sampled calibration artifacts for this folder.",
-        "cleared": {
-            "tuning_sessions": session_count,
-            "calibration_jobs": job_count,
-            "review_targets": len(review_targets),
-            "review_pack_artifacts": int(review_pack_present),
-            "learning_artifacts": len(artifact_paths),
-        },
-    }
 
 
 def _upsert_override(file_path: Path, prefix: str, policy: ActionPayload) -> None:

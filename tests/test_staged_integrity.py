@@ -30,7 +30,7 @@ from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_contract, \
     production_approval_matches
 from mediaforce.web.runtime import folder_actions, size_held
-from mediaforce.web.runtime.size_held import decide_size_held_file, staged_remake_records
+from mediaforce.web.runtime.size_held import decide_size_held_file
 from mediaforce.web.settings_runtime import settings_transcode_root_value
 
 
@@ -246,14 +246,8 @@ class StagedIntegrityTests(unittest.TestCase):
             report = staged_integrity_report(reader, self.config, prefix, discover=False)
             with open_db(self.config.paths.db_path) as writer:
                 writer.execute(staged_artifacts.delete().where(staged_artifacts.c.library_item_id == item_id))
-            records = staged_remake_records(
-                reader, report.detail_payload(offset=0, limit=10)["records"], prefix,
-                current_approval=lambda _prefix: self._new_remake_approval(),
-            )
             refreshed = staged_integrity_report(reader, self.config, prefix, discover=False)
 
-        self.assertEqual(records[0]["disposition"], "size_held")
-        self.assertNotIn("remake", records[0])
         self.assertFalse(any(record.disposition == "size_held" for record in refreshed.records))
         result = decide_size_held_file(
             self.config, prefix, item_id, keep=False, now_iso=lambda: "now",
@@ -744,12 +738,6 @@ class StagedIntegrityTests(unittest.TestCase):
             connection.execute(update(staged_artifacts).where(staged_artifacts.c.library_item_id == item_id)
                                .values(encode_host_key=None, encode_media_access=None))
             report = staged_integrity_report(connection, self.config, "tv/Show/Season 1", discover=False)
-            records = staged_remake_records(connection, report.detail_payload(offset=0, limit=100)["records"],
-                                           "tv/Show/Season 1", current_approval=lambda _prefix: self._new_remake_approval())
-            retry = next(record for record in records if record["item_id"] == item_id)
-            self.assertFalse(retry["remake"]["blocked_reason"])
-            self.assertTrue(retry["remake"]["pending"])
-            self.assertIn("Finished copy removed", retry["detail"])
         accepted = request()
         self.assertTrue(accepted["ok"], accepted)
         self.assertEqual(accepted["queued_library_item_ids"], [item_id])
@@ -959,36 +947,9 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertFalse(stage.exists())
         self.assertEqual(original.read_bytes(), b"source")
         with open_db(self.config.paths.db_path) as connection:
-            def record() -> dict[str, Any]:
-                report = staged_integrity_report(connection, self.config, prefix, discover=False)
-                return staged_remake_records(connection, report.detail_payload(offset=0, limit=10)["records"],
-                                             prefix, current_approval=lambda _prefix: approval)[0]
-
-            missing = record()
-            self.assertEqual(missing["disposition"], "missing")
-            self.assertIsNone(missing.get("size_prediction"))
-            self.assertEqual(missing["remake"]["copy_state"], "unknown")
-            self.assertTrue(missing["remake"]["pending"])
-            self.assertIn("saved settings", missing["detail"])
-            self.assertIn("unconfirmed", missing["detail"])
-            self.assertNotIn("copy removed", missing["detail"])
             row = connection.execute(select(staged_artifacts).where(
                 staged_artifacts.c.library_item_id == item_id)).mappings().one()
             self.assertEqual(size_held.remake_intent(row)["state"], "requested")
-            stage.write_bytes(b"small")
-            stat = stage.stat()
-            connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
-                staging_size_bytes=stat.st_size, staging_mtime_ns=stat.st_mtime_ns))
-            present = record()
-            self.assertEqual(present["remake"]["copy_state"], "present")
-            self.assertEqual(present["disposition"], "size_held")
-            self.assertEqual(present["size_prediction"]["actual_bytes"], 50)
-            stage.unlink()
-            size_held.save_remake_intent(connection, row, {**size_held.remake_intent(row), "state": "removed"}, now="later")
-            removed = record()
-            self.assertEqual(removed["remake"]["copy_state"], "removed")
-            self.assertEqual(removed["disposition"], "not_started")
-            self.assertIn("Finished copy removed", removed["detail"])
 
     def test_batch_remake_retains_each_saved_scope_and_mode_and_queue_exclusion(self) -> None:
         size_id, _stage, _manifest = self._final_size_file()
@@ -1079,10 +1040,6 @@ class StagedIntegrityTests(unittest.TestCase):
             manifest.write_text(json.dumps({"selection": {"queue_mode": "folder", "media_scope": {
                 "prefix": "tv/Show/Season 1"}}, "items": [{}]}))
             self._insert_artifact(connection, item_id, stage, passed=True, manifest_path=manifest, item_index=0)
-            records = staged_remake_records(connection, [{"item_id": item_id}], "tv/Show/Season 1",
-                current_approval=lambda _prefix: None)
-        self.assertEqual(records[0]["remake"]["reason"], "settings_history")
-        self.assertTrue(records[0]["remake"]["blocked_reason"])
         result = decide_size_held_file(
             self.config, "tv/Show/Season 1", item_id, keep=True, now_iso=lambda: "now",
             validate_items=lambda *_args: self.fail("must refuse"), queue_items=lambda *_args: self.fail("must refuse"),
@@ -1308,30 +1265,6 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertIn("Restore the saved run settings", result["message"])
         self.assertTrue(stage.exists())
 
-    def test_approved_page_reads_shared_policy_manifest_once(self) -> None:
-        policy = {"video": {"encoder": "libsvtav1", "target_vmaf": 93}}
-        manifest = self._write_policy_manifest("approved-page.json", [policy] * 10,
-            selection={"production_approval_contract": {"schema_version": 1, "policy_hash": "earlier"}})
-        reads: list[Path] = []
-        def read(path: Path) -> str:
-            reads.append(path)
-            with path.open(encoding="utf-8") as stream:
-                return stream.read()
-
-        with open_db(self.config.paths.db_path) as connection:
-            records = []
-            for index in range(10):
-                rel_path = f"tv/Show/Season 1/{index}.mkv"
-                item_id = self._insert_item(connection, rel_path, status="validated")
-                self._insert_artifact(connection, item_id, self._write_stage(rel_path, b"ready"), passed=True,
-                                      manifest_path=manifest, item_index=index)
-                records.append({"item_id": item_id})
-            with patch.object(Path, "read_text", read):
-                result = staged_remake_records(connection, records, "tv/Show/Season 1",
-                                              current_approval=lambda _prefix: self.fail("already approved"))
-        self.assertTrue(all("remake" not in record for record in result))
-        self.assertEqual(reads.count(manifest), 1)
-
     def test_active_sample_preserves_the_finished_file_before_queue_refusal(self) -> None:
         item_id, stage, _manifest = self._final_size_file()
         self._assert_remake_available(item_id)
@@ -1381,78 +1314,13 @@ class StagedIntegrityTests(unittest.TestCase):
 
     def _assert_remake_available(self, item_id: int) -> None:
         with open_db(self.config.paths.db_path) as connection:
-            page = staged_remake_records(connection, [{"item_id": item_id}], "tv/Show/Season 1",
-                current_approval=lambda _prefix: self._new_remake_approval())
-        self.assertFalse(page[0]["remake"]["blocked_reason"], page)
-
-    def test_remake_pages_share_reads_and_refresh_on_the_next_request(self) -> None:
-        for kind in ("approved", "settings_history", "final_size", "legacy_size"):
-            with self.subTest(kind=kind):
-                manifest = self.root / "runs" / f"{kind}.json"
-                manifest.parent.mkdir(parents=True, exist_ok=True)
-                selection = {"queue_mode": "older_seasons", "media_scope": {"prefix": "tv/Show"}}
-                if kind in {"approved", "final_size"}:
-                    selection["production_approval_contract"] = self._new_remake_approval(
-                        sample="old-sample", value_mb=300)
-                items = []
-                ids = []
-                with open_db(self.config.paths.db_path) as connection:
-                    for index in range(20):
-                        rel_path = f"tv/Show/Season 1/{kind}-{index}.mkv"
-                        item_id = self._insert_item(connection, rel_path, status="encoded")
-                        ids.append(item_id)
-                        stage = self._write_stage(rel_path, b"finished")
-                        self._insert_artifact(connection, item_id, stage, passed=True,
-                            manifest_path=manifest, item_index=index)
-                        item = {"library_item_id": item_id, "duration_seconds": 2700}
-                        if kind != "settings_history":
-                            item["resolved_policy"] = {"video": {"encoder": "libsvtav1"}}
-                        items.append(item)
-                        if kind in {"final_size", "legacy_size"}:
-                            connection.execute(staged_artifacts.update().where(
-                                staged_artifacts.c.library_item_id == item_id).values(validation_json=json.dumps({
-                                    "passed": False, "checks": [{"passed": False, "message": FINAL_SIZE_GOAL_CHECK}],
-                                    "final_size_goal": {"target_size_bytes": 300_000_000},
-                                })))
-                    if kind in {"final_size", "legacy_size"}:
-                        connection.execute(encode_jobs.insert().values(job_id=f"{kind}-run", prefix="tv/Show",
-                            status="failed", job_kind="folder", host_json="{}", manifest_path=str(manifest),
-                            item_count=len(items), created_at="now", updated_at="now", progress_json=json.dumps({
-                                "failure_analysis": {"kind": "final_size_target_miss", "manifest_index": 0,
-                                    "target_size_verification": {"target_size_bytes": 300_000_000}},
-                            })))
-                manifest.write_text(json.dumps({"selection": selection, "items": items}))
-                reads = []
-                original_read = Path.read_text
-
-                def counted_read(path: Path, *args: object, **kwargs: Any) -> str:
-                    if path == manifest:
-                        reads.append(path)
-                    return original_read(path, *args, **kwargs)
-
-                def page() -> list[dict[str, Any]]:
-                    with open_db(self.config.paths.db_path) as connection:
-                        return staged_remake_records(connection, [{"item_id": item_id} for item_id in ids],
-                            "tv/Show/Season 1", current_approval=lambda _prefix: self._new_remake_approval())
-
-                with patch.object(Path, "read_text", counted_read):
-                    records = page()
-                self.assertEqual(len(reads), 1)
-                if kind == "approved":
-                    self.assertTrue(all("remake" not in record for record in records))
-                else:
-                    self.assertTrue(all(not record["remake"]["blocked_reason"] for record in records), records)
-
-                manifest.write_text("broken json")
-                reads.clear()
-                with patch.object(Path, "read_text", counted_read):
-                    records = page()
-                self.assertEqual(len(reads), 1)
-                self.assertTrue(all("Restore the saved run settings" in record["remake"]["blocked_reason"]
-                                    for record in records), records)
-                manifest.write_text(json.dumps({"selection": selection, "items": items}))
-                records = page()
-                self.assertTrue(all(not record.get("remake", {}).get("blocked_reason") for record in records), records)
+            details = size_held.staged_remake_details(
+                connection, size_held._load_remake_row(connection, item_id), "tv/Show/Season 1",
+                current_approval=lambda _prefix: self._new_remake_approval(),
+            )
+        self.assertIsNotNone(details)
+        assert details is not None
+        self.assertFalse(details["blocked_reason"], details)
 
     def test_missing_run_context_preserves_the_output_until_its_record_is_restored(self) -> None:
         item_id, stage, manifest = self._final_size_file()

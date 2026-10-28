@@ -121,22 +121,6 @@ def _facts_body(app: FastAPI) -> dict[str, Any]:
     }
 
 
-def test_unsafe_settings_save_is_absent_while_revision_checked_save_remains(
-        library_app: tuple[FastAPI, Path],
-) -> None:
-    app, _runtime_settings_path = library_app
-    routes = {
-        (route.path, method)
-        for route in app.routes
-        if isinstance(route, Route)
-        for method in route.methods or set()
-    }
-
-    assert ("/api/settings", "POST") not in routes
-    assert ("/api/app/settings/library", "POST") in routes
-    assert _facts_body(app)["revision"]
-
-
 def test_library_save_changes_only_the_library_section(library_app: tuple[FastAPI, Path], tmp_path: Path) -> None:
     app, runtime_settings_path = library_app
     before = json.loads(runtime_settings_path.read_text())

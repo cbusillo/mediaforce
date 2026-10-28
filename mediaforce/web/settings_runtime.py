@@ -1355,48 +1355,6 @@ def _new_schedule_key(name: str, used_keys: set[str]) -> str:
     return key
 
 
-def build_runtime_settings_payload(
-        *,
-        libraries: list[dict[str, Any]],
-        remote_hosts: list[dict[str, Any]],
-        transcode_root: str,
-        catalog_refresh_hours: Any = DEFAULT_CATALOG_REFRESH_HOURS,
-        video_defaults: dict[str, Any] | None = None,
-        encode_queue_scheduler: dict[str, Any],
-        schedule_profiles: list[dict[str, Any]],
-        metadata: dict[str, Any] | None = None,
-        existing_library_types: dict[str, str] | None = None,
-        existing_libraries: dict[str, dict[str, Any]] | None = None,
-        existing_library_paths: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    _reject_submitted_secrets(metadata)
-    media, plex_library_roots = build_runtime_media_settings(
-        libraries=libraries,
-        transcode_root=transcode_root,
-        catalog_refresh_hours=catalog_refresh_hours,
-        existing_library_types=existing_library_types,
-        existing_libraries=existing_libraries,
-        existing_library_paths=existing_library_paths,
-    )
-    known_library_keys = set(media["source_roots"])
-    computers = build_runtime_computer_settings(
-        remote_hosts=remote_hosts,
-        encode_queue_scheduler=encode_queue_scheduler,
-        schedule_profiles=schedule_profiles,
-        known_library_keys=known_library_keys,
-    )
-    normalized_video_defaults = normalize_video_defaults(video_defaults)
-    metadata_payload = dict(metadata) if isinstance(metadata, dict) else {}
-    plex_payload = dict(metadata_payload.get("plex")) if isinstance(metadata_payload.get("plex"), dict) else {}
-    plex_payload["library_roots"] = plex_library_roots
-    metadata_payload["plex"] = plex_payload
-    normalized_metadata = normalize_metadata_settings(metadata_payload, known_library_keys=known_library_keys)
-    return {
-        "media": media,
-        "video": normalized_video_defaults,
-        **computers,
-        "metadata": normalized_metadata,
-    }
 
 
 def build_runtime_computer_settings(

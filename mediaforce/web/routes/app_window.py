@@ -27,17 +27,21 @@ def register_app_window_routes(
         approve_kind_action: Callable[[str, str], dict[str, Any]] | None = None,
         stop_kind_action: Callable[[str], dict[str, Any]] | None = None,
 ) -> None:
+
     @app.get("/api/app/main-window")
     def api_app_main_window() -> JSONResponse:
         return JSONResponse(main_window_payload())
+
 
     @app.get("/api/app/tv-shows")
     def api_app_tv_shows() -> JSONResponse:
         return JSONResponse(tv_shows_payload())
 
+
     @app.get("/api/app/movies")
     def api_app_movies() -> JSONResponse:
         return JSONResponse(movies_payload())
+
 
     @app.get("/api/app/other")
     def api_app_other() -> JSONResponse:
@@ -81,10 +85,12 @@ def register_app_window_routes(
         def api_app_kind_stop(kind: str) -> JSONResponse:
             return JSONResponse(stop_kind(kind))
 
+
     @app.get("/api/app/samples/{prefix:path}")
     def api_app_sample(prefix: str) -> JSONResponse:
         facts = sample_payload(prefix.strip("/"))
         return JSONResponse(facts or {}, status_code=200 if facts else 404)
+
 
     @app.post("/api/app/samples/{prefix:path}/approve")
     async def api_app_sample_approve(prefix: str, request: Request) -> JSONResponse:
@@ -98,10 +104,12 @@ def register_app_window_routes(
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
+
     @app.post("/api/app/samples/{prefix:path}/compress")
     async def api_app_sample_compress(prefix: str) -> JSONResponse:
         result = await run_in_threadpool(compress_season_action, prefix.strip("/"))
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
 
     @app.post("/api/app/samples/{prefix:path}/make")
     async def api_app_sample_make(prefix: str, request: Request) -> JSONResponse:

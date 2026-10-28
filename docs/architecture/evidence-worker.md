@@ -140,7 +140,7 @@ active batch at decision priority, and lets the rest of a production selection
 queue; the user sees each held item in Activity. A new batch created for a
 production run starts unpaused, and the web app's evidence-autostart worker
 runs any unpaused batch with claimable work, so held files are checked without
-anyone pressing `Start analysis`. The global background pause, a paused batch,
+an explicit analysis request. The global background pause, a paused batch,
 and cancellation still stop it. Sample checks still create a paused batch. A retained
 terminal failure is reported as a failure and requires an explicit item retry;
 repeating the blocked action does not reset its attempt budget. Fingerprint
@@ -316,7 +316,7 @@ computer, never on the controller:
   status cache as the web, while schedules are recomputed for every selection.
   Prefetch commit guards do no host checks or network work under write locks.
 - Pause prevents new claims but does not interrupt the active safe unit.
-- The global background-work pause prevents new catalog scans, batch creation,
+- A retained global background-work pause prevents new catalog scans, batch creation,
   queue resumes, and evidence claims. A scan or evidence update already running
   is allowed to finish safely. A queued scan rechecks the switch before it opens
   a source.
@@ -329,40 +329,22 @@ computer, never on the controller:
   required, the row completes its policy-only pass and returns to the bounded
   representative planner instead of fanning out into immediate analysis.
 
-## User flow
+## Controls
 
-The Activity workstation exposes the same bounded state machine:
+The native Mac app's library refresh runs inventory only. The same inventory
+also runs on its configured background schedule. Evidence needed for approved
+production work is queued and processed automatically; a problem stays with
+its file while other eligible work continues.
 
-1. `Refresh catalog` performs inventory only. It updates changed file facts and
-   never starts cadence or fingerprint analysis. The same inventory also runs
-   by itself: a leader-owned worker starts one when the last finished refresh
-   is older than `media.catalog_refresh_hours` (default 6, `0` turns it off).
-   Settings exposes this interval under Metadata. The worker re-runs a refresh
-   that a restart interrupted, and waits 30 minutes after a
-   failed one. It never runs from a read path and it honours
-   `Pause new background work`. The catalog is shown as stale after two missed
-   intervals, or after a day when automatic refresh is off.
-2. `Prepare analysis` chooses one explicit item, folder, or root scope, evidence
-   kinds, and a maximum number of updates. The new batch is paused.
-3. `Start analysis` launches one process-local bounded runner. It exits when the
-   prepared batch completes, reaches its update budget, or becomes blocked.
-4. `Pause after this item`, `Resume analysis`, and `Cancel batch` write durable
-   queue controls near the visible scope and progress.
-5. `Pause new background work` is separate from encode approval and processing
-   controls. It governs catalog inventory and evidence analysis only.
+Explicit bounded analysis remains available through the CLI commands below.
+Queue pause, resume and cancellation retain their existing durable state.
 
-The active item and backlog show both why evidence needs an update and why that
-work is scheduled now. Decision-blocking cadence rows are labelled as blocking a
-sample or production action; policy-only rows explicitly say that no media read
-is required.
-
-The workstation polls while a catalog scan or evidence runner is active and
-returns to manual refresh when idle. Backlog totals are paired with filters and
-pagination so every counted evidence update remains reachable. Source-root
-warnings use the scanner's preserved-cache messages rather than discarding the
-last known catalog.
-
-The CLI remains available for advanced or scripted operation.
+A global background pause saved by the retired web page remains respected.
+For an installation carrying that pause, the supported recovery is
+`POST /api/background-work/resume` on its existing Mediaforce server. This
+clears only that global pause; an explicitly paused evidence batch stays
+paused until resumed through the CLI. The endpoint is retained for this
+recovery, rather than silently clearing the saved choice on startup.
 
 Create a paused folder pilot:
 

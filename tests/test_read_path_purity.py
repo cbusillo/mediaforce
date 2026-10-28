@@ -1,4 +1,5 @@
 import subprocess
+import asyncio
 import tempfile
 import unittest
 from collections.abc import Callable
@@ -13,6 +14,7 @@ from sqlalchemy import select
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import scan_runs
+from mediaforce.library.background_work import background_work_is_paused, set_background_work_paused
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import tool_capabilities
 
@@ -146,7 +148,7 @@ class ReadPathPurityTests(unittest.TestCase):
         assert stored_job is not None
         self.assertEqual(stored_job["status"], "running")
 
-    def test_dashboard_folder_status_and_host_reads_launch_no_work(self) -> None:
+    def test_dashboard_and_native_reads_launch_no_work(self) -> None:
         with patch("mediaforce.web.app.load_config", return_value=self.config):
             app = web_app.create_app(self.config.paths.config_path)
 
@@ -155,12 +157,6 @@ class ReadPathPurityTests(unittest.TestCase):
             app,
             "/api/dashboard/scan-job",
             "api_dashboard_scan_job",
-        )
-        folder_endpoint = self._endpoint(app, "/api/folders/{prefix:path}", "api_folder")
-        folder_status_endpoint = self._endpoint(
-            app,
-            "/api/folders/{prefix:path}/status",
-            "api_folder_status",
         )
         hosts_endpoint = self._endpoint(app, "/api/hosts", "api_hosts")
         main_window_endpoint = self._endpoint(app, "/api/app/main-window", "api_app_main_window")
@@ -177,16 +173,12 @@ class ReadPathPurityTests(unittest.TestCase):
         ) as host_refresh_mock:
             dashboard_response = dashboard_endpoint(None)
             dashboard_scan_job_response = dashboard_scan_job_endpoint()
-            folder_response = folder_endpoint("tv/missing")
-            folder_status_response = folder_status_endpoint("tv/missing")
             hosts_response = hosts_endpoint(0)
             main_window_response = main_window_endpoint()
             poster_response = poster_endpoint("tv/missing")
 
         self.assertEqual(dashboard_response.status_code, 200)
         self.assertEqual(dashboard_scan_job_response.status_code, 200)
-        self.assertEqual(folder_response.status_code, 404)
-        self.assertEqual(folder_status_response.status_code, 200)
         self.assertEqual(hosts_response.status_code, 200)
         self.assertEqual(main_window_response.status_code, 200)
         self.assertEqual(poster_response.status_code, 404)
@@ -194,6 +186,17 @@ class ReadPathPurityTests(unittest.TestCase):
         popen_mock.assert_not_called()
         scan_thread_mock.assert_not_called()
         host_refresh_mock.assert_not_called()
+
+    def test_legacy_background_pause_can_be_resumed(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            set_background_work_paused(connection, is_paused=True)
+        with patch("mediaforce.web.app.load_config", return_value=self.config):
+            app = web_app.create_app(self.config.paths.config_path)
+        endpoint = self._endpoint(app, "/api/background-work/resume", "api_resume_background_work")
+        response = asyncio.run(endpoint())
+        self.assertEqual(response.status_code, 200)
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertFalse(background_work_is_paused(connection))
 
     @staticmethod
     def _endpoint(app: FastAPI, path: str, name: str) -> Callable[..., Any]:
