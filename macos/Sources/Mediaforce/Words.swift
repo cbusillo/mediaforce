@@ -1093,6 +1093,8 @@ extension Words {
         let computer = file.waitReason?.computer ?? "the computer"
         return switch file.waitReason?.code ?? file.validation {
         case "check_failed", "failed": "The compressed copy didn't pass its check, so the original stays in the library."
+        case "publish_failed": "The compressed copy passed its check, but Mediaforce couldn't publish it after several tries. Check this file."
+        case "publish_unsafe": "Publishing stopped, and Mediaforce couldn't put the files back. Check and restore this file before publishing it."
         case "not_made_again": notMadeAgain(file.waitReason?.blockers ?? [])
         case "size_held": "It came out much smaller than its sample. Keep this copy, or make it again."
         case "stopped": "It was stopped before it finished."
@@ -1120,6 +1122,8 @@ extension Words {
     private static func waitLabel(_ file: ItemFacts.File) -> String {
         switch file.waitReason?.code ?? file.validation {
         case "check_failed", "failed": "Didn't pass its check"
+        case "publish_failed": "Couldn't publish"
+        case "publish_unsafe": "Files need restoring"
         case "not_made_again": "Couldn't be made again"
         case "size_held": "Much smaller than its sample"
         case "stopped": "Stopped"

@@ -80,6 +80,21 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(Set(reason[5...8]).count, 4)
     }
 
+    func testStoppedPublishingSaysWhyItNeedsAttention() throws {
+        let season = try facts([
+            file(1, stage: "needs_you", bytes: 100, waitReason: #"{"code": "publish_failed"}"#),
+            file(2, stage: "needs_you", bytes: 100, waitReason: #"{"code": "publish_unsafe"}"#),
+            file(3, stage: "published", bytes: 100),
+        ])
+
+        XCTAssertEqual(season.waiting.map(\.libraryItemId), [1, 2])
+        XCTAssertTrue(Words.fileState(season.files[0]).localizedCaseInsensitiveContains("publish"))
+        XCTAssertTrue(Words.waitingReason(season.files[0]).contains("passed its check"))
+        XCTAssertTrue(Words.fileState(season.files[1]).localizedCaseInsensitiveContains("restor"))
+        XCTAssertTrue(Words.waitingReason(season.files[1]).contains("before publishing"))
+        XCTAssertNotEqual(Words.waitingReason(season.files[0]), Words.waitingReason(season.files[1]))
+    }
+
     func testASizeQuestionNamesBothSizes() throws {
         let question = #"{"job_id": "job-7", "rel_path": "x", "goal_bytes": 300000000, "smallest_quality_safe_bytes": 420000000, "reason": "quality_needs_more"}"#
         let season = try facts([file(7, stage: "needs_you", bytes: 900, question: question)])
