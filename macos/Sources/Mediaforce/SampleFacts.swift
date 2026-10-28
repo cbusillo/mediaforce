@@ -20,6 +20,7 @@ struct SampleFacts: Decodable, Sendable {
     // The latest a running sample should be ready by, from comparable finished samples; nil when they can't tell.
     let readyInSeconds: Int?
     let sizeChoices: [SizeChoice]
+    let balanceChoices: [BalanceChoice]
 
     struct Moment: Decodable, Sendable, Hashable {
         let atSeconds: Double
@@ -38,6 +39,14 @@ struct SampleFacts: Decodable, Sendable {
         var id: String { key }
     }
 
+    struct BalanceChoice: Decodable, Sendable, Identifiable {
+        let key: String
+        let label: String
+        let detail: String
+        let selected: Bool
+        var id: String { key }
+    }
+
     enum Action: Hashable {
         case approve, makeAgain, makeSample, chooseSize, tryAnotherSize, openSample, startCompressing
         case checkFiles, replaceOriginals, retryUnfinished, decideMotion
@@ -49,6 +58,10 @@ struct SampleFacts: Decodable, Sendable {
     static let sampleMakingStates: Set<String> = ["making_test", "sample_waiting"]
 
     var isInProgress: Bool { state.map(Self.inProgressStates.contains) ?? false }
+
+    var canChooseBalance: Bool {
+        actions.contains { [.makeSample, .makeAgain, .chooseSize, .tryAnotherSize].contains($0) }
+    }
 
     var estimatedSavedBytes: Int64? {
         guard estimatedEpisodeBytes > 0, seasonEpisodeCount > 0 else { return nil }

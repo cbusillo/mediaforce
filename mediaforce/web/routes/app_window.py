@@ -19,7 +19,7 @@ def register_app_window_routes(
         other_media_payload: Callable[[], dict[str, Any]],
         sample_payload: Callable[[str], dict[str, Any] | None],
         approve_sample_action: Callable[[str, Collection[str], str], dict[str, Any]],
-        make_sample_action: Callable[[str, str | None], dict[str, Any]],
+        make_sample_action: Callable[[str, str | None, str | None], dict[str, Any]],
         compress_season_action: Callable[[str], dict[str, Any]],
         item_payload: Callable[[str], dict[str, Any] | None] | None = None,
         player_file: Callable[[int, str], Path | None] | None = None,
@@ -107,5 +107,9 @@ def register_app_window_routes(
     async def api_app_sample_make(prefix: str, request: Request) -> JSONResponse:
         body = await request_body(request)
         size = body.get("size")
-        result = await run_in_threadpool(make_sample_action, prefix.strip("/"), size if isinstance(size, str) else None)
+        balance = body.get("balance")
+        result = await run_in_threadpool(
+            make_sample_action, prefix.strip("/"), size if isinstance(size, str) else None,
+            balance if isinstance(balance, str) else None,
+        )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)

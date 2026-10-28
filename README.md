@@ -98,6 +98,10 @@ facts and approval controls: how many files were tested and which seasons or
 picture formats were not. It uses that sample's record, even when today's
 remaining files differ. Older samples without recorded coverage say so.
 Every production file still passes its own quality and final-output checks.
+The same page offers the season's existing plain-language balance choices. A
+chosen balance is applied together with a chosen size whenever a fresh sample
+is made; requests without an explicit choice keep the current choice or the
+automatic balanced default.
 
 ## Layout
 

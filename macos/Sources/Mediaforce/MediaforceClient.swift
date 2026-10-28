@@ -63,8 +63,8 @@ struct MediaforceClient: Sendable {
         try await sampleAction(prefix, "approve", body: ["confirm": confirm, "reviewed_draft_hash": draftHash])
     }
 
-    func makeSample(_ prefix: String, size: String?) async throws -> SampleActionResult {
-        try await sampleAction(prefix, "make", body: ["size": size ?? NSNull()])
+    func makeSample(_ prefix: String, size: String?, balance: String?) async throws -> SampleActionResult {
+        try await sampleAction(prefix, "make", body: ["size": size ?? NSNull(), "balance": balance ?? NSNull()])
     }
 
     func compressSeason(_ prefix: String) async throws -> SampleActionResult {

@@ -73,7 +73,9 @@ struct KindPage: View {
         asking = true
         Task {
             do {
-                if try await !model.client.makeSample(show.sampleSeason, size: nil).ok { openSample(show.sampleSeason) }
+                if try await !model.client.makeSample(show.sampleSeason, size: nil, balance: nil).ok {
+                    openSample(show.sampleSeason)
+                }
             } catch {
                 model.notice = .unanswered
             }
