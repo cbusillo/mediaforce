@@ -450,6 +450,7 @@ extension Words {
     static let startOver = "Start over"
     static let hear = "Hear"
     static let momentChoice = "Moment"
+    static let sampleCoverageUnknown = "Coverage was not recorded for this sample."
 
     /// The sample's headline; a kind's page names the season, since its title names the kind.
     static func sampleHeadline(_ facts: SampleFacts, namesSeason: Bool, now: Date) -> String {

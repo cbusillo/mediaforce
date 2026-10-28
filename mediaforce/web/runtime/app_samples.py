@@ -36,6 +36,9 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
         "action": page_state.get("primary_action"),
         "failure": page_state.get("failure"),
         "moments": _moments(calibration),
+        "coverage_summary": object_dict(
+            object_dict(calibration.get("sample_item")).get("representative_selection")
+        ).get("coverage_summary"),
         "episode_bytes": int_value(sample_item.get("source_size_bytes")),
         "estimated_episode_bytes": int_value(
             object_dict(calibration.get("sample_result")).get("predicted_total_size_bytes")

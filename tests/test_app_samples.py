@@ -106,6 +106,22 @@ def test_facts_offer_only_playable_moments_and_the_sizes_that_can_be_chosen() ->
     assert sample_facts(not_playable, _status())["moments"] == []
 
 
+def test_sample_coverage_comes_from_the_reviewed_sample_not_todays_selection() -> None:
+    saved_selection = {"coverage_summary": "Tested 1 of 106 files. Not yet tested: Season 3, H.264 video."}
+    current_selection = {"coverage_summary": "Tested 1 of 1 file. No season, video format, or resolution here is untested."}
+    folder = _folder(
+        prefix="tv/House",
+        representative_selection=current_selection,
+        sample_item={"representative_selection": current_selection},
+        calibration={**_folder()["calibration"], "sample_item": {"representative_selection": saved_selection}},
+    )
+    assert sample_facts(folder, _status())["coverage_summary"] == saved_selection["coverage_summary"]
+    folder["calibration"]["sample_item"] = {"source_size_bytes": 1}
+    assert sample_facts(folder, _status())["coverage_summary"] is None
+    folder["calibration"].pop("sample_item")
+    assert sample_facts(folder, _status())["coverage_summary"] is None
+
+
 def test_the_real_approval_check_refuses_a_changed_draft_and_asks_again_for_an_important_change(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(folder_actions, "production_action_blocker", lambda *_args: None)
     calibration = {

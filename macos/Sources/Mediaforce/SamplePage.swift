@@ -59,6 +59,9 @@ struct SampleWork: View {
                     SampleComparison(moments: facts.moments, client: model.client)
                 }
                 SampleFactsGrid(facts: facts)
+                Text(facts.coverageSummary ?? Words.sampleCoverageUnknown)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 SampleActions(
                     facts: facts, working: working, askingSize: askingSize, approve: startApproval, make: { make(size: $0) },
                     compress: compress, openItem: { openItem(prefix) }
