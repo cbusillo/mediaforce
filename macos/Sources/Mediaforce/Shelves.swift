@@ -147,6 +147,14 @@ struct SampleShelf: View {
                         }
                         .buttonStyle(.plain)
                         .pointerStyle(.link)
+                        .overlay(alignment: .topTrailing) {
+                            if samples.waitingOnYou.contains(where: { $0.id == sample.id }) {
+                                WaitingMark()
+                                    .padding(2)
+                                    .background(Circle().fill(Color(nsColor: .textBackgroundColor)))
+                                    .padding(5)
+                            }
+                        }
                         .help([Words.season(sample.show, sample.season), Words.sampleFailure(sample.failure)].compactMap { $0 }.joined(separator: ": "))
                         if let action = Words.sampleAction(sample.action) {
                             let open = { openSample(sample.prefix) }
@@ -214,10 +222,12 @@ struct BiggestTable: View {
                             Button(show.show) { open(.item(show.showPrefix)) }
                                 .buttonStyle(QuietLinkStyle(primary: true))
                             if let note = waitingNote(show), let prefix = show.waitingSamplePrefix {
-                                Button(note) { open(.sample(prefix)) }
-                                    .buttonStyle(.plain)
-                                    .font(.caption)
-                                    .foregroundStyle(Color.accentColor)
+                                HStack(spacing: 4) {
+                                    WaitingMark()
+                                    Button(note) { open(.sample(prefix)) }
+                                        .buttonStyle(QuietLinkStyle())
+                                }
+                                .font(.caption)
                             }
                         }
                     }
@@ -279,8 +289,11 @@ struct Computers: View {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(computer.name ?? computer.key)
                                     .foregroundStyle(.primary)
-                                Text(Words.computerState(computer.state))
-                                    .font(.caption)
+                                HStack(spacing: 4) {
+                                    if Words.computerNeedsYou(computer.state) { WaitingMark() }
+                                    Text(Words.computerState(computer.state))
+                                }
+                                .font(.caption)
                             }
                         }
                         .buttonStyle(QuietLinkStyle())

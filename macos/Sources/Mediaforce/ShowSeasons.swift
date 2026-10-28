@@ -20,8 +20,11 @@ struct ShowSeasons: View {
                         Text(Words.size(season.bytes))
                             .monospacedDigit()
                             .gridColumnAlignment(.trailing)
-                        Text(Words.tvSeasonState(season))
-                            .help(Words.sampleFailure(season.failure) ?? "")
+                        HStack(alignment: .firstTextBaseline, spacing: 5) {
+                            if LibraryStateGroup([season]) == .needsYou { WaitingMark() }
+                            Text(Words.tvSeasonState(season))
+                        }
+                        .help(Words.sampleFailure(season.failure) ?? "")
                         Button(Words.seasonButton(season)) {
                             if season.opensSample {
                                 openSample(season.prefix)
