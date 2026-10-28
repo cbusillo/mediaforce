@@ -1335,7 +1335,8 @@ extension Words {
     static let tableView = "Show as a table"
     static let posterView = "Show as posters"
     static let searchMedia = "Search"
-    static let noMatchingMedia = "Nothing matches. Try another kind, state or search."
+    static let noMatchingMedia = "Nothing matches."
+    static let clearFilters = "Clear Filters"
 
     static func mediaKind(_ kind: MediaKind) -> String {
         switch kind {

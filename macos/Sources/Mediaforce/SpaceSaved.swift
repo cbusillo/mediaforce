@@ -125,7 +125,10 @@ struct SpotCheck: View {
                 VStack(spacing: 10) {
                     Text(loaded.failedToLoad ? Words.spotCheckUnanswered : Words.spotCheckNoEpisode)
                         .foregroundStyle(.secondary)
-                    Button(Words.tryAgain) { Task { await load() } }
+                    // Asking again only helps when Mediaforce didn't answer; a show with no backup to compare moves on with Next.
+                    if loaded.failedToLoad {
+                        Button(Words.tryAgain) { Task { await load() } }
+                    }
                 }
                 .frame(maxWidth: 760, minHeight: 200)
             }
