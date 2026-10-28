@@ -42,7 +42,7 @@ struct KindPage: View {
                     Text(Words.kindNothingToWatch).foregroundStyle(.secondary)
                 }
                 if !offering {
-                    KindDecision(kind: kind, setting: setting, model: model)
+                    KindDecision(kind: kind, setting: setting, model: model, openItem: openItem)
                 }
                 KindShows(kind: kind, playing: offering ? kind.sampleShow : setting?.show, leftOut: leftOut, posters: model.posters,
                           choose: { chosen = $0 }, open: openItem, openLeftOut: openLeftOut,
@@ -83,23 +83,30 @@ struct KindPage: View {
     }
 }
 
-/// The decision, one plain line under the player: whose setting it would use and the one button.
+/// The decision, one plain line under the player: whose setting it would use, which opens that show, and the one button.
 struct KindDecision: View {
     let kind: KindsFacts.Kind
     let setting: KindsFacts.Setting?
     let model: MainWindowModel
+    let openItem: (String) -> Void
     @State private var working = false
     @State private var refusal: String?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
             if let approval = kind.approval {
-                Label(Words.kindDecided(approval), systemImage: "checkmark")
-                    .labelStyle(KindCheckLabel())
+                Label {
+                    Button(Words.kindDecided(approval)) { openItem(approval.showPrefix) }
+                        .buttonStyle(QuietLinkStyle(primary: true))
+                } icon: {
+                    Image(systemName: "checkmark")
+                }
+                .labelStyle(KindCheckLabel())
                 Spacer(minLength: 12)
                 Button(Words.stopUsingKind) { act { try await $0.stopKind(kind.kind) } }
             } else if let setting {
-                Text(Words.showSetting(setting.name, setting))
+                Button(Words.showSetting(setting.name, setting)) { openItem(setting.show) }
+                    .buttonStyle(QuietLinkStyle(primary: true))
                 Spacer(minLength: 12)
                 if kind.oneTime {
                     Text(Words.decidedShowByShow(kind.kind)).foregroundStyle(.secondary)

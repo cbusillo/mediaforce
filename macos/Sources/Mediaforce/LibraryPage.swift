@@ -11,7 +11,7 @@ struct LibraryPage: View {
             VStack(alignment: .leading, spacing: 0) {
                 // Only when there is something to explain; the title bar already says what the work is doing.
                 if Words.workExplanation(facts) != nil || facts.lastChange != nil {
-                    WorkStatus(facts: facts)
+                    WorkStatus(facts: facts, open: open)
                         .padding(.bottom, 22)
                 }
                 StorageBar(facts: facts, open: open)
