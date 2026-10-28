@@ -112,8 +112,11 @@ class LoginItemTests(unittest.TestCase):
         ):
             enable_login_item(self.paths, runner=_run)
 
-        self.assertEqual([call[1] for call in calls], ["bootout", "print", "enable", "bootstrap"])
+        self.assertEqual([call[1] for call in calls], ["bootout", "print", "enable", "bootstrap", "kickstart"])
         self.assertEqual(calls[3][-1], str(self.paths.plist))
+        # Registered is not running: launchd can defer the first spawn, so the job is started explicitly, never killed.
+        self.assertEqual(calls[4][-1], calls[0][-1])
+        self.assertNotIn("-k", calls[4])
         self.assertEqual(rotation_call_count, 2)
         self.assertTrue(self.paths.stdout_log.with_name("web.log.1").exists())
 
@@ -138,6 +141,19 @@ class LoginItemTests(unittest.TestCase):
             enable_login_item(self.paths, runner=_run)
 
         self.assertEqual(bootstrap_attempts, 2)
+
+    def test_enable_fails_when_the_registered_job_cannot_be_started(self) -> None:
+        def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+            if command[1] == "print":
+                return subprocess.CompletedProcess(command, 113, "", "not loaded")
+            if command[1] == "kickstart":
+                return subprocess.CompletedProcess(command, 113, "", "Could not find service")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch("mediaforce.ops.login_item._require_supported_platform"), self.assertRaisesRegex(
+                LoginItemError, "Could not find service"
+        ):
+            enable_login_item(self.paths, runner=_run)
 
     def test_disable_tolerates_not_loaded_result(self) -> None:
         runner = Mock(

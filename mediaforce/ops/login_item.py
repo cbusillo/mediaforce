@@ -285,14 +285,15 @@ def _wait_until_unloaded(runner: CommandRunner, target: str) -> None:
 
 
 def _bootstrap(runner: CommandRunner, domain: str, plist_path: Path) -> None:
+    """Register the login item, then start it: launchd may defer a registered job's first spawn indefinitely."""
     command = ["/bin/launchctl", "bootstrap", domain, str(plist_path)]
     result = runner(command)
-    if result.returncode == 0:
-        return
     if result.returncode == 5:
         time.sleep(0.25)
         result = runner(command)
     _require_success(result, "bootstrap the login item")
+    # Without -k, a job launchd already started keeps running.
+    _require_success(runner(["/bin/launchctl", "kickstart", f"{domain}/{LOGIN_ITEM_LABEL}"]), "start the login item")
 
 
 def _require_success(result: subprocess.CompletedProcess[str], action: str) -> None:
