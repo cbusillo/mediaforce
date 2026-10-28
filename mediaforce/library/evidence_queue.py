@@ -7,12 +7,12 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Sequence
 
-from sqlalchemy import and_, bindparam, case, func, or_, select, true, update
+from sqlalchemy import and_, bindparam, case, false, func, or_, select, true, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import evidence_queue_state, library_item_evidence_state, library_items, source_admissions, source_measurements
+from mediaforce.core.db_tables import evidence_queue_state, library_item_evidence_state, library_items, source_admissions, source_measurements, source_versions
 from mediaforce.core.evidence import stable_source_id
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.core.utils import timestamp
@@ -554,6 +554,7 @@ def original_intake_hold(
     connection: DBClient, *, batch_id: str, priority: int, excluded_media_roots: Collection[str] = (),
     allowed_running_item: int | None = None,
     max_running_files: int = 1,
+    allow_original_digests: bool = True,
 ) -> Literal["cancelled", "paused", "higher_priority"] | None:
     state = load_evidence_queue_state(connection)
     if (state["batch_id"] != batch_id or state["cancel_requested"]
@@ -562,7 +563,7 @@ def original_intake_hold(
     if background_work_is_paused(connection) or state["is_paused"]:
         return "paused"
     urgent = next_evidence_work_query(batch_id, timestamp(), excluded_media_roots=excluded_media_roots,
-                                     allowed_running_item=allowed_running_item).where(
+                                     allowed_running_item=allowed_running_item, allow_original_digests=allow_original_digests).where(
         library_item_evidence_state.c.work_priority < priority,
     )
     if max_running_files > 1:
@@ -709,7 +710,7 @@ def cancel_evidence_queue(connection: DBClient, *, updated_at: str | None = None
 
 
 def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_roots: Collection[str] = (),
-                             allowed_running_item: int | None = None) -> Any:
+                             allowed_running_item: int | None = None, allow_original_digests: bool = True) -> Any:
     query = (
         select(library_item_evidence_state.c.library_item_id, library_item_evidence_state.c.evidence_kind)
         .where(
@@ -736,6 +737,15 @@ def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_root
     if allowed_running_item is not None:
         running_items = running_items.where(running.c.library_item_id != allowed_running_item)
     query = query.where(library_item_evidence_state.c.library_item_id.not_in(running_items))
+    if not allow_original_digests:
+        cached = select(library_items.c.id).select_from(library_items.join(
+            source_versions, source_versions.c.version_id == library_items.c.active_source_version_id,
+        )).where(source_versions.c.sha256.is_not(None), source_versions.c.sha256 != "")
+        query = query.where(or_(
+            func.coalesce(library_item_evidence_state.c.work_reason, "") != EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
+            _observed_original_receipt_exists(), library_item_evidence_state.c.library_item_id.in_(cached),
+            library_item_evidence_state.c.library_item_id == allowed_running_item if allowed_running_item is not None else false(),
+        ))
     return query.where(
         or_(library_item_evidence_state.c.library_item_id.not_in(blocked_items), ~_evidence_requires_computer()),
         or_(~_evidence_requires_source(), library_item_evidence_state.c.library_item_id.not_in(source_waiting_items)),
@@ -817,6 +827,7 @@ def claim_next_evidence_work(
         now: datetime | None = None,
         excluded_media_roots: Collection[str] = (),
         max_running_files: int = 1,
+        allow_original_digests: bool = True,
 ) -> EvidenceWorkClaim | None:
     if not 1 <= max_running_files <= MAX_CONCURRENT_EVIDENCE_FILES:
         raise ValueError(f"Evidence concurrency must be between one and {MAX_CONCURRENT_EVIDENCE_FILES} files.")
@@ -847,7 +858,7 @@ def claim_next_evidence_work(
         # A check queued before its file was kept original would only measure what no one will encode.
         _release_kept_motion_work(connection, batch_id=batch_id, updated_at=now_iso)
         candidate = connection.execute(next_evidence_work_query(
-            batch_id, now_iso, excluded_media_roots=excluded_media_roots,
+            batch_id, now_iso, excluded_media_roots=excluded_media_roots, allow_original_digests=allow_original_digests,
         )).mappings().fetchone()
         if candidate is None:
             _refresh_evidence_queue_state(connection, batch_id=batch_id, updated_at=now_iso)

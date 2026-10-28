@@ -97,6 +97,18 @@ qualify their own next file while other units analyze, retaining the full
 device-bound digest and all admission checks. They do not each prefetch the same
 queued original, avoiding redundant digest reads and preparation cancellation.
 
+A new full-file original hash runs on the controller only within that computer's
+own work window. An open measuring computer does not open the controller's
+window. New hashes wait in the existing queue without taking leases or spending
+attempts; valid cached hashes and measured results remain usable by another
+computer whose window is open. The full hash still belongs to the controller
+and retains its source-identity checks. Admission and serial prefetch recheck
+the controller's window before reading new bytes. A hash already under way
+follows that window's finish-current-file setting; a hard close defers it without
+spending an attempt. Priority selection excludes new hashes that cannot start,
+so they do not interrupt eligible work. With no configured controller computer,
+the existing local behavior remains available.
+
 ## Durable state
 
 `library_item_evidence_state` owns one independent work unit for each

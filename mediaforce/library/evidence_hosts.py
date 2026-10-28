@@ -1,19 +1,76 @@
 """Which encode computer measures a file, so evidence work never runs on the controller once one is set up."""
 
-from collections.abc import Mapping
-from dataclasses import asdict
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.process_control import ManagedProcessController, ScheduleWindowClosedError
+from mediaforce.core.schedule_deadline import parse_schedule_close_deadline
 from mediaforce.core.type_defs import object_list
 from mediaforce.encoding.helpers import resolve_item_source_path
-from mediaforce.hosts.config import _host_priority, configured_remote_host_execution_mode, host_media_access_for_host
+from mediaforce.hosts.config import _host_priority, configured_remote_host_execution_mode, host_media_access_for_host, host_targets_current_machine
 from mediaforce.hosts.types import FFMPEG_MISSING_ISSUE
 from mediaforce.remote import collect_host_statuses
 
 EVIDENCE_HOST_WAIT_REASON = "Waiting for a computer that can measure this file."
 _ENCODE_CAPABILITY = "encode_queue"
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerDigestWindow:
+    admitted: bool = True
+    closes_at: datetime | None = None
+    finish_current_file: bool = False
+    label: str = "This computer"
+
+    @property
+    def is_open(self) -> bool:
+        return self.admitted and (self.closes_at is None or datetime.now(UTC) < self.closes_at)
+
+    def require_open(self) -> None:
+        if not self.is_open:
+            raise ScheduleWindowClosedError(f"Waiting for {self.label}'s work window to check a new original.")
+
+    @contextmanager
+    def guard(self, controller: ManagedProcessController) -> Iterator[None]:
+        self.require_open()
+        if self.finish_current_file:
+            yield
+        else:
+            with controller.activity_guard(self.require_open):
+                yield
+                controller.throw_if_cancelled()
+
+
+def controller_digest_window(
+        config: MediaforceConfig,
+        collect_rows: Callable[[MediaforceConfig], list[dict[str, Any]]],
+) -> ControllerDigestWindow:
+    """Local content reads follow this computer's window, independently of the measuring computer."""
+    controllers = [host for host in config.remote_hosts if isinstance(host, dict)
+                   and (host.get("mode") == "local" or host_targets_current_machine(host))]
+    if not controllers:
+        return ControllerDigestWindow()
+    rows = collect_rows(config)
+    windows: list[ControllerDigestWindow] = []
+    for host in controllers:
+        row = next((row for row in rows if (row.get("key") == host.get("host")
+                    or (host.get("label") and row.get("label") == host["label"]))), {})
+        try:
+            closes_at = parse_schedule_close_deadline(row.get("schedule_closes_at"))
+        except ValueError:
+            row, closes_at = {}, None
+        windows.append(ControllerDigestWindow(row.get("schedule_open") is True, closes_at,
+                                             row.get("finish_current_file") is True,
+                                             str(host.get("label") or "This computer")))
+    # Aliases for this computer cannot open a window another configured alias has closed.
+    return ControllerDigestWindow(all(window.is_open for window in windows),
+                                  min((window.closes_at for window in windows if window.closes_at is not None), default=None),
+                                  all(window.finish_current_file for window in windows), windows[0].label)
 
 
 def remote_evidence_hosts(config: MediaforceConfig) -> list[dict[str, Any]]:

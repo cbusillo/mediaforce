@@ -1,6 +1,7 @@
 import json
 import logging
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -226,6 +227,7 @@ def commit_readable_source(
 def assess_source_input(
     config: MediaforceConfig, item_id: int, controller: ManagedProcessController, check_cancelled: Callable[[], None],
     *, before_commit: Callable[[DBClient], None] | None = None,
+    digest_guard: Callable[[], AbstractContextManager[None]] = nullcontext,
 ) -> None:
     with open_db(config.paths.db_path) as connection:
         item = cast(
@@ -268,7 +270,8 @@ def assess_source_input(
     if saved.get("sha256") and all(saved.get(key) == before[key] for key in ("path", "stat", "size_bytes", "sample_fingerprint")):
         before["sha256"] = saved["sha256"]
     else:
-        before = observe_file(path, full_digest=True, check_cancelled=check_cancelled)
+        with digest_guard():
+            before = observe_file(path, full_digest=True, check_cancelled=check_cancelled)
     if not saved.get("sha256") or saved.get("stat") != before["stat"]:
         with open_db(config.paths.db_path) as connection:
             connection.commit()
