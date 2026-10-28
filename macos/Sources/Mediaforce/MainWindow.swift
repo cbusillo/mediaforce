@@ -248,9 +248,11 @@ struct MainWindow: View {
                     }
                 }
             } else {
-                ServerStatusView(state: model.connection, lastHeard: model.lastHeard, problem: model.problem) {
+                ServerStatusView(state: model.connection, lastHeard: model.lastHeard, problem: model.problem,
+                                 headlineInTitleBar: true) {
                     Task { await model.refresh() }
                 }
+                .navigationTitle(Words.serverHeadline(ServerSituation(model.connection, serviceInstalled: BackgroundService.isInstalled)))
             }
         }
         .frame(minWidth: 1100, minHeight: 700)
