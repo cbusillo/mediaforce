@@ -107,7 +107,13 @@ the controller's window before reading new bytes. A hash already under way
 follows that window's finish-current-file setting; a hard close defers it without
 spending an attempt. Priority selection excludes new hashes that cannot start,
 so they do not interrupt eligible work. With no configured controller computer,
-the existing local behavior remains available.
+the existing local behavior remains available. Waiting rows use `waiting_window`
+with their next due time and a plain reason, without taking a lease or changing
+their attempt budget. The normal autostart preparation refreshes those waits
+before counting runnable work, including when a changed schedule opens early.
+The Mac's current work explanation includes each distinct window reason while
+other eligible work continues. All default, web and CLI workers read the same
+schedule-aware computer projection.
 
 ## Durable state
 

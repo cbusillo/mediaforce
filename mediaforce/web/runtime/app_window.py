@@ -14,6 +14,7 @@ from mediaforce.core.db_tables import encode_jobs, item_events, library_items, m
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, count_pending_encode_work, load_queue_state
 from mediaforce.library.candidate_selection import SEASON_PATTERN
 from mediaforce.library.background_work import background_work_is_paused
+from mediaforce.library.evidence_queue import evidence_window_wait_reasons
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
@@ -513,6 +514,7 @@ def _work(
         "running_count": running_count,
         "running_seasons": _running_seasons(connection),
         "waiting_count": waiting_count,
+        "original_check_wait_reasons": evidence_window_wait_reasons(connection),
         "storage": [
             {"mount_point": mount.get("mount_point"), "status": mount.get("status"), "failure": mount.get("last_failure_kind")}
             for mount in controller_storage.get("mounts") or []

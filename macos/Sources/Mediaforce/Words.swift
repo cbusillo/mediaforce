@@ -194,6 +194,7 @@ extension Words {
         if work.stopReasons.contains("no_computer_ready") { return "Waiting for a computer" }
         if work.runningCount > 0 { return "Compressing" }
         if work.waitingCount > 0 { return "Waiting to start" }
+        if !work.originalCheckWaitReasons.isEmpty { return "Waiting to check new originals" }
         return facts.samples.waitingOnYou.isEmpty ? "All caught up" : "Waiting for you"
     }
 
@@ -211,6 +212,7 @@ extension Words {
         if work.stopReasons.contains("no_computer_ready") {
             sentences.append("Work is waiting and no computer can take it right now. See Computers for why.")
         }
+        sentences.append(contentsOf: work.originalCheckWaitReasons)
         if sentences.isEmpty, work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
             sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
         }

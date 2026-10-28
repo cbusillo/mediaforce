@@ -320,6 +320,7 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
         EVIDENCE_WORK_PRIORITY_REPRESENTATIVE,
         EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
         EVIDENCE_QUEUE_ACTIVE_STATUSES,
+        EVIDENCE_WORK_ACTIVE_STATUSES,
         load_evidence_queue_state,
         queue_decision_evidence_work,
     )
@@ -346,7 +347,7 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
         library_item_evidence_state.c.work_source_fingerprint
         == func.coalesce(library_items.c.content_version_fingerprint, library_items.c.fingerprint),
         or_(
-            library_item_evidence_state.c.work_status.in_(("queued", "running", "retry_wait", "waiting_source", "waiting_host")),
+            library_item_evidence_state.c.work_status.in_(EVIDENCE_WORK_ACTIVE_STATUSES),
             library_item_evidence_state.c.work_status == "failed",
             (library_item_evidence_state.c.work_status == "cancelled")
             & (library_item_evidence_state.c.retry_not_before > timestamp()),

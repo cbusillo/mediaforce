@@ -16,6 +16,7 @@ from mediaforce.library.evidence_queue import (
     EvidenceWorkClaim,
     next_evidence_work_query,
     original_intake_hold,
+    refresh_controller_digest_waits,
     waiting_evidence_host_roots,
 )
 from mediaforce.library.source_intake import assess_source_input
@@ -56,17 +57,16 @@ class SourceAdmissionPrefetcher:
     def _prepare_next(self, config: MediaforceConfig, claim: EvidenceWorkClaim, roots: frozenset[str]) -> None:
         window = controller_digest_window(config, self._evidence_host_rows)
         with open_db(config.paths.db_path) as connection:
-            item_id = self._next_item(config, connection, claim, roots, allow_original_digests=window.is_open)
+            refresh_controller_digest_waits(connection, window)
+            item_id = self._next_item(config, connection, claim, roots)
         if item_id is not None:
             self._prepare(config, claim, item_id, roots)
 
     @staticmethod
-    def _next_item(config: MediaforceConfig, connection: DBClient, claim: EvidenceWorkClaim, roots: Collection[str],
-                   *, allow_original_digests: bool = True, preparing_item: int | None = None) -> int | None:
+    def _next_item(config: MediaforceConfig, connection: DBClient, claim: EvidenceWorkClaim, roots: Collection[str]) -> int | None:
         if remote_evidence_hosts(config):
             roots = set(roots) | waiting_evidence_host_roots(connection, batch_id=claim.batch_id)
-        candidate = connection.execute(next_evidence_work_query(claim.batch_id, timestamp(), excluded_media_roots=roots,
-            allow_original_digests=allow_original_digests, allowed_running_item=preparing_item).where(
+        candidate = connection.execute(next_evidence_work_query(claim.batch_id, timestamp(), excluded_media_roots=roots).where(
             library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
             library_item_evidence_state.c.library_item_id != claim.library_item_id,
         )).mappings().first()
@@ -90,16 +90,13 @@ class SourceAdmissionPrefetcher:
 
     def _prepare(self, config: MediaforceConfig, claim: EvidenceWorkClaim, item_id: int, roots: frozenset[str]) -> None:
         controller = ManagedProcessController()
-        window = controller_digest_window(config, self._evidence_host_rows)
         last_check = 0.0
 
         def require_runnable(connection: DBClient) -> None:
             self._check_stopped()
             if (original_intake_hold(connection, batch_id=claim.batch_id, priority=claim.work_priority,
-                    excluded_media_roots=roots, allowed_running_item=claim.library_item_id,
-                    allow_original_digests=window.is_open) is not None
-                    or self._next_item(config, connection, claim, roots, allow_original_digests=window.is_open,
-                                       preparing_item=item_id) != item_id):
+                    excluded_media_roots=roots, allowed_running_item=claim.library_item_id) is not None
+                    or self._next_item(config, connection, claim, roots) != item_id):
                 raise ProcessCancelledError("Original admission preparation is no longer runnable")
 
         def check_cancelled() -> None:

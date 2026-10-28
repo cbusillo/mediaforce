@@ -19,17 +19,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import library_items
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ProcessDeadlineEnforcementError, ScheduleWindowClosedError
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ProcessDeadlineEnforcementError
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, reclassify_cadence_summary
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, fingerprint_video_decode_timed_out, reclassify_media_fingerprint_summary
 from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaConnections, RemoteMediaHostUnavailableError
-from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, controller_digest_window, \
+from mediaforce.library.evidence_hosts import ControllerDigestWindowClosed, EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, controller_digest_window, \
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host, unmeasurable_evidence_roots
 from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, MAX_CONCURRENT_EVIDENCE_FILES, SOURCE_ROOT_WAIT_REASON, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
     current_library_item_source_fingerprint, evidence_queue_summary, extend_evidence_claim, heartbeat_evidence_work, \
     load_evidence_queue_state, load_evidence_work_claim, mark_evidence_attempt_started, original_intake_hold, recover_evidence_queue, \
-    transition_evidence_work, waiting_evidence_host_roots
+    refresh_controller_digest_waits, transition_evidence_work, waiting_evidence_host_roots
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, parse_evidence_summary, \
     sync_library_item_evidence_state
@@ -127,13 +127,13 @@ def process_evidence_queue_once(
     worker_id = _evidence_worker_id()
     with open_db(current_config.paths.db_path) as connection:
         recover_evidence_queue(connection, reclaim_all_running=False)
+        refresh_controller_digest_waits(connection, digest_window)
         claim = claim_next_evidence_work(
             connection,
             worker_id=worker_id,
             lease_seconds=runtime_deps.lease_seconds,
             excluded_media_roots=roots,
             max_running_files=max_running_files,
-            allow_original_digests=digest_window.is_open,
         )
     if claim is None:
         return 0
@@ -376,7 +376,6 @@ def _run_evidence_claim(
             claim = active_claim
             claims[0] = claim
             started.add(claim.evidence_kind)
-            digest_window = controller_digest_window(config, deps.evidence_host_rows)
             last_guard_check = 0.0
 
             def guard_intake() -> None:
@@ -389,7 +388,7 @@ def _run_evidence_claim(
                 with open_db(config.paths.db_path) as database:
                     admission_hold = original_intake_hold(database, batch_id=claim.batch_id, priority=claim.work_priority,
                         excluded_media_roots=excluded_media_roots, allowed_running_item=claim.library_item_id,
-                        max_running_files=max_running_files, allow_original_digests=digest_window.is_open)
+                        max_running_files=max_running_files)
                 if admission_hold == "cancelled":
                     raise ProcessCancelledError("Evidence work was cancelled.")
                 if shutting_down:
@@ -511,10 +510,12 @@ def _run_evidence_claim(
                         if analysis_target.command_runner else None)
         if measurement_before != measurement_after:
             raise RuntimeError("Source changed during evidence measurement")
-    except (EvidenceWorkDeferred, ScheduleWindowClosedError) as exc:
+    except (EvidenceWorkDeferred, ControllerDigestWindowClosed) as exc:
         stop_heartbeats()
         for owned in claims:
-            _defer_claim(config, owned, deps, work_status="retry_wait", reason=str(exc), restore_attempt=owned.evidence_kind in started)
+            _defer_claim(config, owned, deps,
+                         work_status="waiting_window" if isinstance(exc, ControllerDigestWindowClosed) else "retry_wait",
+                         reason=str(exc), restore_attempt=owned.evidence_kind in started)
         return len(claims)
     except ProcessCancelledError:
         stop_heartbeats()

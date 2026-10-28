@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Sequence
 
-from sqlalchemy import and_, bindparam, case, false, func, or_, select, true, update
+from sqlalchemy import and_, bindparam, case, func, or_, select, true, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
@@ -20,7 +20,7 @@ from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.evidence_acquisition import DEFAULT_UNCERTAINTY_FRONTIER_LIMIT, \
     FingerprintAcquisitionPlan, load_fingerprint_acquisition_items, plan_fingerprint_acquisition
-from mediaforce.library.evidence_hosts import EVIDENCE_HOST_WAIT_REASON
+from mediaforce.library.evidence_hosts import ControllerDigestWindow, EVIDENCE_HOST_WAIT_REASON
 from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANALYSIS_REQUIRED, \
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, EvidenceKind
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
@@ -41,7 +41,7 @@ EVIDENCE_BACKGROUND_RETRY_SECONDS = 15 * 60
 SOURCE_ROOT_WAIT_REASON = "Source root is unavailable; evidence work will resume without consuming an attempt."
 
 EVIDENCE_QUEUE_ACTIVE_STATUSES = ("queued", "running", "paused", "cancel_requested")
-EVIDENCE_WORK_CLAIMABLE_STATUSES = ("queued", "retry_wait", "waiting_source", "waiting_host")
+EVIDENCE_WORK_CLAIMABLE_STATUSES = ("queued", "retry_wait", "waiting_source", "waiting_host", "waiting_window")
 EVIDENCE_WORK_ACTIVE_STATUSES = (*EVIDENCE_WORK_CLAIMABLE_STATUSES, "running")
 EVIDENCE_WORK_TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 EvidenceHeartbeatStatus = Literal["active", "cancel_requested", "claim_lost"]
@@ -388,7 +388,7 @@ def queue_decision_evidence_work(
                 and (require_measurement or str(row.get("state") or "") == EVIDENCE_STATE_ANALYSIS_REQUIRED)
                 and current_source_fingerprint
                 and str(row.get("work_source_fingerprint") or "") == current_source_fingerprint
-                and row_status in {"retry_wait", "waiting_source", "waiting_host", "failed"}
+                and row_status in {"retry_wait", "waiting_source", "waiting_host", "waiting_window", "failed"}
             )
             if preserve_retry_state and row_status == "failed":
                 connection.execute(
@@ -554,7 +554,6 @@ def original_intake_hold(
     connection: DBClient, *, batch_id: str, priority: int, excluded_media_roots: Collection[str] = (),
     allowed_running_item: int | None = None,
     max_running_files: int = 1,
-    allow_original_digests: bool = True,
 ) -> Literal["cancelled", "paused", "higher_priority"] | None:
     state = load_evidence_queue_state(connection)
     if (state["batch_id"] != batch_id or state["cancel_requested"]
@@ -563,7 +562,7 @@ def original_intake_hold(
     if background_work_is_paused(connection) or state["is_paused"]:
         return "paused"
     urgent = next_evidence_work_query(batch_id, timestamp(), excluded_media_roots=excluded_media_roots,
-                                     allowed_running_item=allowed_running_item, allow_original_digests=allow_original_digests).where(
+                                     allowed_running_item=allowed_running_item).where(
         library_item_evidence_state.c.work_priority < priority,
     )
     if max_running_files > 1:
@@ -710,7 +709,7 @@ def cancel_evidence_queue(connection: DBClient, *, updated_at: str | None = None
 
 
 def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_roots: Collection[str] = (),
-                             allowed_running_item: int | None = None, allow_original_digests: bool = True) -> Any:
+                             allowed_running_item: int | None = None) -> Any:
     query = (
         select(library_item_evidence_state.c.library_item_id, library_item_evidence_state.c.evidence_kind)
         .where(
@@ -737,19 +736,48 @@ def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_root
     if allowed_running_item is not None:
         running_items = running_items.where(running.c.library_item_id != allowed_running_item)
     query = query.where(library_item_evidence_state.c.library_item_id.not_in(running_items))
-    if not allow_original_digests:
-        cached = select(library_items.c.id).select_from(library_items.join(
-            source_versions, source_versions.c.version_id == library_items.c.active_source_version_id,
-        )).where(source_versions.c.sha256.is_not(None), source_versions.c.sha256 != "")
-        query = query.where(or_(
-            func.coalesce(library_item_evidence_state.c.work_reason, "") != EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
-            _observed_original_receipt_exists(), library_item_evidence_state.c.library_item_id.in_(cached),
-            library_item_evidence_state.c.library_item_id == allowed_running_item if allowed_running_item is not None else false(),
-        ))
     return query.where(
         or_(library_item_evidence_state.c.library_item_id.not_in(blocked_items), ~_evidence_requires_computer()),
         or_(~_evidence_requires_source(), library_item_evidence_state.c.library_item_id.not_in(source_waiting_items)),
     )
+
+
+def refresh_controller_digest_waits(connection: DBClient, window: ControllerDigestWindow) -> None:
+    """Use the queue's existing due-time mechanism for this computer's window, without leasing waiting files."""
+    state = load_evidence_queue_state(connection)
+    batch = str(state.get("batch_id") or "")
+    if not batch or state["status"] not in EVIDENCE_QUEUE_ACTIVE_STATUSES:
+        return
+    now = datetime.now(UTC)
+    now_iso = now.isoformat(timespec="seconds")
+    owned = library_item_evidence_state.c.work_batch_id == batch
+    if window.is_open:
+        connection.execute(update(library_item_evidence_state).where(
+            owned, library_item_evidence_state.c.work_status == "waiting_window",
+        ).values(work_status="queued", retry_not_before=None, last_error=None, updated_at=now_iso))
+        return
+    cached = select(library_items.c.id).select_from(library_items.join(
+        source_versions, source_versions.c.version_id == library_items.c.active_source_version_id,
+    )).where(source_versions.c.sha256.is_not(None), source_versions.c.sha256 != "")
+    opens_at = window.next_opens_at
+    retry_at = opens_at if opens_at is not None and opens_at > now else now + timedelta(seconds=EVIDENCE_BACKGROUND_RETRY_SECONDS)
+    connection.execute(update(library_item_evidence_state).where(
+        owned, library_item_evidence_state.c.work_status.in_(("queued", "retry_wait", "waiting_window")),
+        _evidence_due_now(now_iso),
+        library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
+        or_(library_item_evidence_state.c.work_status == "waiting_window",
+            and_(~_observed_original_receipt_exists(), library_item_evidence_state.c.library_item_id.not_in(cached))),
+    ).values(work_status="waiting_window", retry_not_before=retry_at.isoformat(timespec="seconds"),
+             last_error=window.waiting_reason, updated_at=now_iso))
+
+
+def evidence_window_wait_reasons(connection: DBClient) -> list[str]:
+    batch = str(load_evidence_queue_state(connection).get("batch_id") or "")
+    return [str(reason) for reason in connection.execute(select(library_item_evidence_state.c.last_error).where(
+        library_item_evidence_state.c.work_batch_id == batch,
+        library_item_evidence_state.c.work_status == "waiting_window",
+        library_item_evidence_state.c.last_error.is_not(None),
+    ).distinct().order_by(library_item_evidence_state.c.last_error)).scalars()]
 
 
 def _evidence_requires_computer() -> Any:
@@ -827,7 +855,6 @@ def claim_next_evidence_work(
         now: datetime | None = None,
         excluded_media_roots: Collection[str] = (),
         max_running_files: int = 1,
-        allow_original_digests: bool = True,
 ) -> EvidenceWorkClaim | None:
     if not 1 <= max_running_files <= MAX_CONCURRENT_EVIDENCE_FILES:
         raise ValueError(f"Evidence concurrency must be between one and {MAX_CONCURRENT_EVIDENCE_FILES} files.")
@@ -858,7 +885,7 @@ def claim_next_evidence_work(
         # A check queued before its file was kept original would only measure what no one will encode.
         _release_kept_motion_work(connection, batch_id=batch_id, updated_at=now_iso)
         candidate = connection.execute(next_evidence_work_query(
-            batch_id, now_iso, excluded_media_roots=excluded_media_roots, allow_original_digests=allow_original_digests,
+            batch_id, now_iso, excluded_media_roots=excluded_media_roots,
         )).mappings().fetchone()
         if candidate is None:
             _refresh_evidence_queue_state(connection, batch_id=batch_id, updated_at=now_iso)
