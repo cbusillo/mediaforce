@@ -72,6 +72,8 @@ final class TVShowsTests: XCTestCase {
             season(4, state: "needs_help", tone: "attention", action: "choose_size"),
             season(5, state: "needs_test", tone: "quiet", action: "make_sample"),
             season(6, state: "ready_to_make", tone: "ready", action: "queue_encode"),
+            season(10, state: "making_test", tone: "active"),
+            season(11, state: "sample_waiting", tone: "active"),
         ]
         let opensItem = [
             season(7, state: "needs_help", tone: "attention", action: "retry_encode"),
@@ -79,7 +81,7 @@ final class TVShowsTests: XCTestCase {
             season(9, state: "ready_to_finish", tone: "ready", action: "promote_outputs"),
         ]
         let decoded = try show(opensSample + opensItem).seasons
-        XCTAssertEqual(decoded.map(\.opensSample), Array(repeating: true, count: 6) + Array(repeating: false, count: 3))
+        XCTAssertEqual(decoded.map(\.opensSample), Array(repeating: true, count: 8) + Array(repeating: false, count: 3))
         XCTAssertTrue(decoded.filter { !$0.opensSample }.allSatisfy { Words.seasonButton($0) == Words.openItem })
         XCTAssertFalse(decoded.filter(\.opensSample).contains { Words.seasonButton($0) == Words.openItem })
     }
