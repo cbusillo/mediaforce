@@ -54,7 +54,8 @@ struct ItemPage: View {
                                 }
                             }
                             if let show {
-                                ShowSeasons(show: show, openSample: openSample, openItem: openItem)
+                                ShowSeasons(show: show, waitingSamples: Set(model.facts?.samples.waitingOnYou.map(\.prefix) ?? []),
+                                            openSample: openSample, openItem: openItem)
                             }
                             if !facts.waiting.isEmpty {
                                 WaitingBox(files: facts.waiting) { file, action in

@@ -144,17 +144,18 @@ struct SampleShelf: View {
                                 headline: sample.season.map { "Season \($0)" } ?? sample.show,
                                 detail: Words.sampleState(sample)
                             )
+                            // Inside the button, so VoiceOver reads it with the poster.
+                            .overlay(alignment: .topTrailing) {
+                                if samples.waitingOnYou.contains(where: { $0.id == sample.id }) {
+                                    WaitingMark()
+                                        .padding(2)
+                                        .background(Circle().fill(Color(nsColor: .textBackgroundColor)))
+                                        .padding(5)
+                                }
+                            }
                         }
                         .buttonStyle(.plain)
                         .pointerStyle(.link)
-                        .overlay(alignment: .topTrailing) {
-                            if samples.waitingOnYou.contains(where: { $0.id == sample.id }) {
-                                WaitingMark()
-                                    .padding(2)
-                                    .background(Circle().fill(Color(nsColor: .textBackgroundColor)))
-                                    .padding(5)
-                            }
-                        }
                         .help([Words.season(sample.show, sample.season), Words.sampleFailure(sample.failure)].compactMap { $0 }.joined(separator: ": "))
                         if let action = Words.sampleAction(sample.action) {
                             let open = { openSample(sample.prefix) }
@@ -223,7 +224,8 @@ struct BiggestTable: View {
                                 .buttonStyle(QuietLinkStyle(primary: true))
                             if let note = waitingNote(show), let prefix = show.waitingSamplePrefix {
                                 HStack(spacing: 4) {
-                                    WaitingMark()
+                                    // The note beside it already says it waits.
+                                    WaitingMark().accessibilityHidden(true)
                                     Button(note) { open(.sample(prefix)) }
                                         .buttonStyle(QuietLinkStyle())
                                 }
@@ -290,7 +292,7 @@ struct Computers: View {
                                 Text(computer.name ?? computer.key)
                                     .foregroundStyle(.primary)
                                 HStack(spacing: 4) {
-                                    if Words.computerNeedsYou(computer.state) { WaitingMark() }
+                                    if Words.computerNeedsYou(computer.state) { WaitingMark().accessibilityHidden(true) }
                                     Text(Words.computerState(computer.state))
                                 }
                                 .font(.caption)
