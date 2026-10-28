@@ -2,7 +2,6 @@ import asyncio
 import multiprocessing
 import json
 import re
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -13,7 +12,6 @@ from typing import Any
 from unittest.mock import Mock, patch
 
 from fastapi.routing import APIRoute
-from sqlalchemy import func
 from sqlalchemy import select
 
 from mediaforce.advisor import (
@@ -46,7 +44,6 @@ from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import learning_artifacts
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
-from mediaforce.core.db_tables import tuning_sessions
 from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.type_defs import object_dict
@@ -64,43 +61,14 @@ from mediaforce.tuning.tuning_memory import (
 from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view, \
     with_quality_risk_intent
 from mediaforce.tuning.calibration_jobs import list_queue_summary, load_job, \
-    load_latest_failed_target_size_sample_job, save_job, update_job_telemetry
+    load_latest_failed_target_size_sample_job, sample_failures_in_a_row, save_job, update_job_telemetry
 from mediaforce.tuning.compression_intent import CompressionIntentV1
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
-from mediaforce.web.app import (
-    _advice_file,
-    _build_multimodal_review_pack,
-    _build_review_compare_video_from_pairs,
-    _build_seed_policy_payload,
-    _build_review_compare_video,
-    _download_review_compare_action,
-    _ffmpeg_concat_file_line,
-    _maybe_seed_baseline_policy,
-    _build_tuning_runtime_toolbelt,
-    _calibration_file,
-    _clear_folder_tuning_state,
-    _folder_display_policy,
-    _request_triggers_periodic_cleanup,
-    _run_periodic_cleanup,
-    _review_compare_bundle_entries,
-    _review_compare_pair_entries,
-    _multimodal_review_pack_public_view,
-    _operator_requested_experiment,
-    _planned_audio_review_context,
-    _proposal_file,
-    _review_pack_dir,
-    _upsert_override,
-)
+from mediaforce.web.app import _build_multimodal_review_pack, _build_seed_policy_payload, _maybe_seed_baseline_policy, _build_tuning_runtime_toolbelt, _folder_display_policy, _request_triggers_periodic_cleanup, _run_periodic_cleanup, _multimodal_review_pack_public_view, _operator_requested_experiment, _planned_audio_review_context, _review_pack_dir, _upsert_override
 from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, calibration_completion_status, \
     run_calibration_job
-from mediaforce.web.runtime.completed_runtime import (
-    ORIGINALS_REMOVED_EVENT,
-    clear_completed_backups_action,
-    completed_page_payload,
-    confirm_originals_removed_action,
-    record_deleted_original_backups,
-)
+from mediaforce.web.runtime.completed_runtime import ORIGINALS_REMOVED_EVENT, completed_page_payload, record_deleted_original_backups
 from mediaforce.web.runtime.dashboard_payloads import dashboard_summary_payload, reconcile_pending_review_samples
 from mediaforce.library.media_scopes import MediaScopeConflict
 from mediaforce.web.runtime.folder_ai_tuning import (
@@ -922,122 +890,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(len(saved_jobs), 1)
         self.assertEqual(saved_jobs[0]["action"], "ai_tune")
 
-    def test_build_review_compare_video_concatenates_all_compare_clips(self) -> None:
-        review_run_dir = self.config.paths.review_dir / "sample-run"
-        review_run_dir.mkdir(parents=True, exist_ok=True)
-        compare_clip_1 = review_run_dir / "compare-01.mkv"
-        compare_clip_2 = review_run_dir / "compare-02.mkv"
-        compare_clip_3 = review_run_dir / "compare-03.mkv"
-        compare_clip_1.write_bytes(b"compare1")
-        compare_clip_2.write_bytes(b"compare2")
-        compare_clip_3.write_bytes(b"compare3")
-
-        commands: list[list[str]] = []
-
-        def fake_run(command: list[str], **_kwargs: object) -> object:
-            commands.append(command)
-            output_path = Path(command[-1])
-            output_path.write_bytes(b"mov")
-            return type("Result", (), {"returncode": 0, "stderr": ""})()
-
-        with patch("mediaforce.web.app.subprocess.run", side_effect=fake_run), patch(
-                "mediaforce.web.app.ffmpeg_binary", return_value="ffmpeg"
-        ):
-            bundle_path, download_name = _build_review_compare_video(
-                config=self.config,
-                prefix="tv/Suits/Season 5",
-                compare_clips=[compare_clip_1, compare_clip_2, compare_clip_3],
-            )
-        self.addCleanup(bundle_path.unlink, missing_ok=True)
-
-        self.assertEqual(download_name, "tv-suits-season-5-full-review-compare.mov")
-        self.assertTrue(commands)
-        self.assertEqual(
-            commands[0][:18],
-            [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(bundle_path.with_suffix('.txt')),
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a:0?",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-            ],
-        )
-        concat_list = bundle_path.with_suffix('.txt')
-        self.assertFalse(concat_list.exists())
-        self.assertEqual(bundle_path.suffix, ".mov")
-        self.assertEqual(bundle_path.read_bytes(), b"mov")
-
-    def test_build_review_compare_video_from_pairs_renders_native_compare_clips(self) -> None:
-        review_run_dir = self.config.paths.review_dir / "sample-run"
-        review_run_dir.mkdir(parents=True, exist_ok=True)
-        source_clip = review_run_dir / "source-01.mp4"
-        preview_clip = review_run_dir / "encoded-01.mp4"
-        wide_source_clip = review_run_dir / "source-02.mp4"
-        wide_preview_clip = review_run_dir / "encoded-02.mp4"
-        source_clip.write_bytes(b"source")
-        preview_clip.write_bytes(b"preview")
-        wide_source_clip.write_bytes(b"wide-source")
-        wide_preview_clip.write_bytes(b"wide-preview")
-        commands: list[list[str]] = []
-        geometry_by_path = {
-            source_clip: {"width": 1280, "height": 720},
-            preview_clip: {"width": 1280, "height": 720},
-            wide_source_clip: {"width": 3840, "height": 1606},
-            wide_preview_clip: {"width": 3840, "height": 1606},
-        }
-
-        def fake_run(command: list[str], **_kwargs: object) -> object:
-            commands.append(command)
-            if command[0] == "ffprobe":
-                geometry = geometry_by_path[Path(command[-1])]
-                return type(
-                    "Result",
-                    (),
-                    {"returncode": 0, "stdout": json.dumps({"streams": [geometry]}), "stderr": ""},
-                )()
-            output_path = Path(command[-1])
-            output_path.write_bytes(b"video")
-            return type("Result", (), {"returncode": 0, "stderr": ""})()
-
-        with patch("mediaforce.web.app.subprocess.run", side_effect=fake_run), patch(
-                "mediaforce.web.app.ffmpeg_binary", return_value="ffmpeg"
-        ):
-            bundle_path, download_name, cleanup_path = _build_review_compare_video_from_pairs(
-                config=self.config,
-                prefix="tv/Suits/Season 5",
-                retained_pairs=[(source_clip, preview_clip), (wide_source_clip, wide_preview_clip)],
-            )
-        self.addCleanup(lambda: shutil.rmtree(cleanup_path, ignore_errors=True))
-
-        self.assertEqual(download_name, "tv-suits-season-5-full-review-compare.mov")
-        self.assertEqual(bundle_path.parent, cleanup_path)
-        self.assertEqual(len([command for command in commands if command[0] == "ffprobe"]), 4)
-        render_commands = [command for command in commands if "-filter_complex" in command]
-        self.assertEqual(len(render_commands), 2)
-        render_command = render_commands[0]
-        self.assertEqual(render_command[render_command.index("-i") + 1], str(source_clip))
-        self.assertEqual(render_command[render_command.index("-i", render_command.index("-i") + 1) + 1], str(preview_clip))
-        for command in render_commands:
-            filter_complex = command[command.index("-filter_complex") + 1]
-            self.assertIn("xstack=inputs=2", filter_complex)
-            self.assertIn("pad=7680:1606", filter_complex)
-            self.assertNotIn("scale=", filter_complex)
-            self.assertNotIn("-ss", command)
-        self.assertTrue(bundle_path.exists())
-
     def test_merge_review_pairs_preserves_chronological_order(self) -> None:
         merged_pairs = _merge_review_pairs(
             [
@@ -1069,149 +921,6 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual([pair["timestamp_seconds"] for pair in merged_pairs], [10.0, 20.0])
         self.assertEqual(merged_pairs[1]["compare_clip"]["path"], "/review-media/run/compare-20.mkv")
-
-    def test_review_compare_pair_entries_reads_retained_source_and_preview_clips(self) -> None:
-        review_run_dir = self.config.paths.review_dir / "sample-run"
-        review_run_dir.mkdir(parents=True, exist_ok=True)
-        source_clip = review_run_dir / "source-01.mp4"
-        preview_clip = review_run_dir / "encoded-01.mp4"
-        source_clip.write_bytes(b"source")
-        preview_clip.write_bytes(b"preview")
-        stale_compare_clip = review_run_dir / "compare-01.mkv"
-        stale_compare_clip.write_bytes(b"stale-low-resolution-compare")
-
-        calibration = {
-            "compare_clips": [{"path": "/review-media/sample-run/compare-01.mkv"}],
-            "review_pairs": [
-                {
-                    "source_clip": {"path": "/review-media/sample-run/source-01.mp4"},
-                    "preview_clip": {"path": "/review-media/sample-run/encoded-01.mp4"},
-                    "compare_clip": {"path": "/review-media/sample-run/compare-01.mkv"},
-                }
-            ],
-        }
-
-        entries = _review_compare_pair_entries(self.config, calibration)
-
-        self.assertEqual(entries, [(source_clip.resolve(), preview_clip.resolve())])
-
-    def test_download_review_compare_prefers_full_size_retained_pairs(self) -> None:
-        review_run_dir = self.config.paths.review_dir / "sample-run"
-        review_run_dir.mkdir(parents=True, exist_ok=True)
-        source_clip = review_run_dir / "source-01.mp4"
-        preview_clip = review_run_dir / "encoded-01.mp4"
-        stale_compare_clip = review_run_dir / "compare-01.mkv"
-        source_clip.write_bytes(b"source")
-        preview_clip.write_bytes(b"preview")
-        stale_compare_clip.write_bytes(b"stale-low-resolution-compare")
-        bundle_path = self.root / "full-size-review.mov"
-        bundle_path.write_bytes(b"bundle")
-        cleanup_path = self.root / "download-cleanup"
-
-        calibration_path = _calibration_file(self.config, "tv/Suits/Season 5")
-        calibration_path.parent.mkdir(parents=True, exist_ok=True)
-        calibration_path.write_text(json.dumps({
-            "review_pairs": [
-                {
-                    "source_clip": {"path": "/review-media/sample-run/source-01.mp4"},
-                    "preview_clip": {"path": "/review-media/sample-run/encoded-01.mp4"},
-                    "compare_clip": {"path": "/review-media/sample-run/compare-01.mkv"},
-                }
-            ],
-            "compare_clips": [{"path": "/review-media/sample-run/compare-01.mkv"}],
-        }))
-
-        with patch(
-                "mediaforce.web.app._build_review_compare_video_from_pairs",
-                return_value=(bundle_path, "full-size.mov", cleanup_path),
-        ) as pair_builder, patch(
-            "mediaforce.web.app._build_review_compare_video",
-            side_effect=AssertionError("download used stale resized compare clips"),
-        ):
-            response = _download_review_compare_action(self.config, "tv/Suits/Season 5")
-
-        pair_builder.assert_called_once_with(
-            config=self.config,
-            prefix="tv/Suits/Season 5",
-            retained_pairs=[(source_clip.resolve(), preview_clip.resolve())],
-        )
-        self.assertIn('filename="full-size.mov"', response.headers["content-disposition"])
-
-    def test_download_review_compare_uses_existing_compare_set_when_retained_pairs_are_partial(self) -> None:
-        review_run_dir = self.config.paths.review_dir / "sample-run"
-        review_run_dir.mkdir(parents=True, exist_ok=True)
-        source_clip = review_run_dir / "source-01.mp4"
-        preview_clip = review_run_dir / "encoded-01.mp4"
-        compare_clip_1 = review_run_dir / "compare-01.mkv"
-        compare_clip_2 = review_run_dir / "compare-02.mkv"
-        source_clip.write_bytes(b"source")
-        preview_clip.write_bytes(b"preview")
-        compare_clip_1.write_bytes(b"compare1")
-        compare_clip_2.write_bytes(b"compare2")
-        bundle_path = self.root / "full-existing-review.mov"
-        bundle_path.write_bytes(b"bundle")
-
-        calibration_path = _calibration_file(self.config, "tv/Suits/Season 5")
-        calibration_path.parent.mkdir(parents=True, exist_ok=True)
-        calibration_path.write_text(json.dumps({
-            "review_pairs": [
-                {
-                    "source_clip": {"path": "/review-media/sample-run/source-01.mp4"},
-                    "preview_clip": {"path": "/review-media/sample-run/encoded-01.mp4"},
-                    "compare_clip": {"path": "/review-media/sample-run/compare-01.mkv"},
-                }
-            ],
-            "compare_clips": [
-                {"path": "/review-media/sample-run/compare-01.mkv"},
-                {"path": "/review-media/sample-run/compare-02.mkv"},
-            ],
-        }))
-
-        with patch(
-                "mediaforce.web.app._build_review_compare_video_from_pairs",
-                side_effect=AssertionError("partial retained pairs dropped compare moments"),
-        ), patch(
-            "mediaforce.web.app._build_review_compare_video",
-            return_value=(bundle_path, "existing-full.mov"),
-        ) as compare_builder:
-            response = _download_review_compare_action(self.config, "tv/Suits/Season 5")
-
-        compare_builder.assert_called_once_with(
-            config=self.config,
-            prefix="tv/Suits/Season 5",
-            compare_clips=[compare_clip_1.resolve(), compare_clip_2.resolve()],
-        )
-        self.assertIn('filename="existing-full.mov"', response.headers["content-disposition"])
-
-    def test_review_compare_bundle_entries_prefers_compare_clips_over_review_pairs(self) -> None:
-        review_run_dir = self.config.paths.review_dir / "sample-run"
-        review_run_dir.mkdir(parents=True, exist_ok=True)
-        compare_clip_1 = review_run_dir / "compare-01.mkv"
-        compare_clip_2 = review_run_dir / "compare-02.mkv"
-        compare_clip_1.write_bytes(b"compare1")
-        compare_clip_2.write_bytes(b"compare2")
-
-        calibration = {
-            "compare_clips": [
-                {"path": "/review-media/sample-run/compare-01.mkv"},
-                {"path": "/review-media/sample-run/compare-02.mkv"},
-            ],
-            "review_pairs": [
-                {
-                    "compare_clip": {"path": "/review-media/sample-run/compare-01.mkv"},
-                }
-            ],
-        }
-
-        entries = _review_compare_bundle_entries(self.config, calibration)
-
-        self.assertEqual(entries, [compare_clip_1.resolve(), compare_clip_2.resolve()])
-
-    def test_ffmpeg_concat_file_line_escapes_single_quotes(self) -> None:
-        path = Path("/tmp/it's fine/compare clip.mkv")
-        line = _ffmpeg_concat_file_line(path)
-
-        self.assertEqual(line, "file '/tmp/it'\\''s fine/compare clip.mkv'\n")
 
     def test_request_note_tuning_uses_structured_runtime_path_and_self_check(self) -> None:
         responses = [
@@ -1817,6 +1526,51 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(result["archive_cleanup"]["archive_root"], "")
         self.assertFalse(result["archive_cleanup"]["has_cleanup"])
 
+    def test_deleting_backups_records_removal_so_the_folder_is_cleaned(self) -> None:
+        from mediaforce.web import app as web_app
+
+        for episode in ("Episode 01.mkv", "Episode 02.mkv"):
+            self._insert_promoted_artifact(
+                rel_path=f"tv/Example Show/Season 1/{episode}",
+                promoted_at="2026-04-10T10:00:00+00:00",
+                archived_size_bytes=3,
+                bytes_saved=12,
+            )
+        removed_paths: list[Path] = []
+
+        result = clear_archive_cleanup_action(
+            self.config,
+            on_removed=removed_paths.append,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            recorded = record_deleted_original_backups(
+                connection, removed_paths, folder_group=web_app._folder_group,
+            )
+            repeated = record_deleted_original_backups(
+                connection, removed_paths, folder_group=web_app._folder_group,
+            )
+            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+
+        self.assertEqual(result["removed_count"], 2)
+        self.assertEqual((recorded, repeated), (2, 0))
+        self.assertEqual(payload["folders"][0]["cleanup_state"], "cleaned")
+        self.assertEqual(payload["folders"][0]["originals_removed_count"], 2)
+
+
+    def test_failures_in_a_row_count_only_the_newest_unbroken_run_of_samples(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertEqual(sample_failures_in_a_row(connection, "tv/Show", limit=3), 0)
+            for minute, (job_id, status, lane) in enumerate((
+                ("old-failure", "failed", "sample"), ("made", "completed", "sample"),
+                ("stopped", "stopped", "sample"), ("full", "completed", "full"), ("failed", "failed", "sample"),
+            )):
+                save_job(connection, {
+                    "job_id": job_id, "prefix": "tv/Show", "status": status, "lane": lane,
+                    "created_at": f"2026-10-01T00:0{minute}:00Z", "updated_at": "2026-10-01T01:00:00Z",
+                })
+            self.assertEqual(sample_failures_in_a_row(connection, "tv/Show", limit=3), 2)
+            self.assertEqual(sample_failures_in_a_row(connection, "tv/Show", limit=1), 1)
+
     def test_completed_page_payload_groups_promoted_folders_and_active_backups(self) -> None:
         from mediaforce.web import app as web_app
 
@@ -2090,155 +1844,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["folders"][0]["archived_backup_size_bytes"], 0)
         self.assertEqual(payload["folders"][0]["total_bytes_saved"], 12)
 
-    def test_confirm_originals_removed_marks_missing_backups_cleaned(self) -> None:
-        from mediaforce.web import app as web_app
-
-        self._insert_promoted_artifact(
-            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
-            promoted_at="2026-04-10T10:00:00+00:00",
-            archived_size_bytes=3,
-            bytes_saved=12,
-        )
-        archived_path = self.config.archive_root / "tv/Example Show/Season 1/Episode 01.mkv"
-        archived_path.unlink()
-
-        with open_db(self.config.paths.db_path) as connection:
-            before = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
-            self.assertEqual(before["folders"][0]["cleanup_state"], "unknown")
-
-            result = confirm_originals_removed_action(
-                connection,
-                folder_group=web_app._folder_group,
-                archive_root=self.config.archive_root,
-                prefixes=["tv/Example Show/Season 1"],
-                valid_prefixes={"tv/Example Show/Season 1"},
-            )
-            after = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
-            event_count = connection.execute(
-                select(func.count())
-                .select_from(item_events)
-                .where(item_events.c.event_type == ORIGINALS_REMOVED_EVENT)
-            ).scalar_one()
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["resolved_count"], 1)
-        self.assertIn("Nothing was deleted", result["message"])
-        self.assertEqual(after["folders"][0]["cleanup_state"], "cleaned")
-        self.assertEqual(after["folders"][0]["missing_backup_count"], 0)
-        self.assertEqual(after["folders"][0]["originals_removed_count"], 1)
-        self.assertEqual(event_count, 1)
-
-    def test_confirm_originals_removed_leaves_existing_backups_ready(self) -> None:
-        from mediaforce.web import app as web_app
-
-        self._insert_promoted_artifact(
-            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
-            promoted_at="2026-04-10T10:00:00+00:00",
-            archived_size_bytes=3,
-            bytes_saved=12,
-        )
-
-        with open_db(self.config.paths.db_path) as connection:
-            result = confirm_originals_removed_action(
-                connection,
-                folder_group=web_app._folder_group,
-                archive_root=self.config.archive_root,
-                prefixes=["tv/Example Show/Season 1"],
-                valid_prefixes={"tv/Example Show/Season 1"},
-            )
-            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
-            event_count = connection.execute(
-                select(func.count())
-                .select_from(item_events)
-                .where(item_events.c.event_type == ORIGINALS_REMOVED_EVENT)
-            ).scalar_one()
-
-        self.assertEqual(result["resolved_count"], 0)
-        self.assertEqual(payload["folders"][0]["cleanup_state"], "ready")
-        self.assertEqual(payload["folders"][0]["archived_backup_count"], 1)
-        self.assertEqual(event_count, 0)
-
-    def test_deleting_backups_records_removal_so_the_folder_is_cleaned(self) -> None:
-        from mediaforce.web import app as web_app
-
-        for episode in ("Episode 01.mkv", "Episode 02.mkv"):
-            self._insert_promoted_artifact(
-                rel_path=f"tv/Example Show/Season 1/{episode}",
-                promoted_at="2026-04-10T10:00:00+00:00",
-                archived_size_bytes=3,
-                bytes_saved=12,
-            )
-        removed_paths: list[Path] = []
-
-        result = clear_completed_backups_action(
-            self.config,
-            folder_group=web_app._folder_group,
-            prefixes=["tv/Example Show/Season 1"],
-            valid_prefixes={"tv/Example Show/Season 1"},
-            on_removed=removed_paths.append,
-        )
-        with open_db(self.config.paths.db_path) as connection:
-            recorded = record_deleted_original_backups(
-                connection, removed_paths, folder_group=web_app._folder_group,
-            )
-            repeated = record_deleted_original_backups(
-                connection, removed_paths, folder_group=web_app._folder_group,
-            )
-            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
-
-        self.assertEqual(result["removed_count"], 2)
-        self.assertEqual((recorded, repeated), (2, 0))
-        self.assertEqual(payload["folders"][0]["cleanup_state"], "cleaned")
-        self.assertEqual(payload["folders"][0]["originals_removed_count"], 2)
-
-    def test_clear_completed_backups_action_removes_selected_prefixes(self) -> None:
-        from mediaforce.web import app as web_app
-
-        season_one_backup = self.config.archive_root / "tv/Example Show/Season 1/Episode 01.mkv"
-        season_two_backup = self.config.archive_root / "tv/Example Show/Season 2/Episode 01.mkv"
-        self._insert_promoted_artifact(
-            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
-            promoted_at="2026-04-10T10:00:00+00:00",
-            archived_size_bytes=3,
-            bytes_saved=12,
-        )
-        self._insert_promoted_artifact(
-            rel_path="tv/Example Show/Season 2/Episode 01.mkv",
-            promoted_at="2026-04-11T10:00:00+00:00",
-            archived_size_bytes=5,
-            bytes_saved=18,
-        )
-
-        result = clear_completed_backups_action(
-            self.config,
-            folder_group=web_app._folder_group,
-            prefixes=["tv/Example Show/Season 1"],
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["removed_count"], 1)
-        self.assertEqual(result["removed_prefix_count"], 1)
-        self.assertFalse(season_one_backup.exists())
-        self.assertTrue(season_two_backup.exists())
-
-    def test_clear_completed_backups_action_rejects_unknown_prefixes(self) -> None:
-        from mediaforce.web import app as web_app
-
-        self._insert_promoted_artifact(
-            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
-            promoted_at="2026-04-10T10:00:00+00:00",
-            archived_size_bytes=3,
-            bytes_saved=12,
-        )
-
-        with self.assertRaisesRegex(ValueError, "Unknown completed-folder prefix"):
-            clear_completed_backups_action(
-                self.config,
-                folder_group=web_app._folder_group,
-                prefixes=["tv"],
-                valid_prefixes={"tv/Example Show/Season 1"},
-            )
-
     def test_completed_route_returns_payload(self) -> None:
         from mediaforce.web import app as web_app
 
@@ -2263,52 +1868,6 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.body), expected_payload)
-
-    def test_app_proposal_alignment_wrapper_accepts_quality_increase_flag(self) -> None:
-        from mediaforce.web import app as web_app
-
-        captured: list[dict[str, object]] = []
-
-        def fake_proposal_alignment_issue(**kwargs: object) -> None:
-            captured.append(dict(kwargs))
-            return None
-
-        def fake_preview_action(_config: MediaforceConfig, deps: FolderAiTuneDeps, *_args: object) -> dict[str, object]:
-            deps.proposal_alignment_issue(
-                operator_request={"request_type": "size_budget"},
-                request_disposition="honored",
-                current_policy={"video": {"target_vmaf": 92.0}},
-                preview_policy={"video": {"target_vmaf": 95.0}},
-                allow_measured_size_quality_increase=True,
-            )
-            return {"ok": True}
-
-        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                "mediaforce.web.app.purge_transient_artifacts"
-        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-            "mediaforce.web.app._start_encode_queue_worker"
-        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
-            "mediaforce.web.app.proposal_alignment_issue",
-            side_effect=fake_proposal_alignment_issue,
-        ), patch(
-            "mediaforce.web.app.folder_ai_tune_preview_action",
-            side_effect=fake_preview_action,
-        ):
-            app = web_app.create_app(self.root / "config.toml")
-            preview_route = next(
-                route
-                for route in app.routes
-                if isinstance(route, APIRoute) and route.path == "/api/folders/{prefix:path}/ai-tune/preview"
-            )
-
-            class _FakeRequest:
-                async def json(self) -> dict[str, str]:
-                    return {"note": "raise quality", "host_key": "host-1"}
-
-            response = asyncio.run(preview_route.endpoint("tv/show", _FakeRequest()))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(captured[0]["allow_measured_size_quality_increase"])
 
     def test_sample_confirmation_blocks_infeasible_target_before_saving_job(self) -> None:
         saved_jobs: list[dict[str, Any]] = []
@@ -2404,216 +1963,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("80%", result["message"])
         self.assertEqual(saved_jobs, [])
 
-    def test_completed_cleanup_route_passes_selected_prefixes(self) -> None:
-        from mediaforce.web import app as web_app
-
-        captured: list[list[str] | None] = []
-
-        def fake_clear_completed_backups_action(
-                _config: MediaforceConfig,
-                *,
-                folder_group: object,
-                prefixes: list[str] | None = None,
-                valid_prefixes: set[str] | None = None,
-                on_removed: object = None,
-        ) -> dict[str, object]:
-            _ = folder_group, valid_prefixes
-            self.assertTrue(callable(on_removed))
-            captured.append(prefixes)
-            return {
-                "ok": True,
-                "message": "done",
-                "removed_count": 1,
-                "removed_size_bytes": 3,
-                "removed_prefix_count": 1,
-            }
-
-        expected_payload = {"folders": [], "completed_count": 0, "folders_with_backups_count": 0, "archive_cleanup": {}}
-
-        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                "mediaforce.web.app.purge_transient_artifacts"
-        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-            "mediaforce.web.app._start_encode_queue_worker"
-        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
-            "mediaforce.web.app.clear_completed_backups_action",
-            side_effect=fake_clear_completed_backups_action,
-        ), patch("mediaforce.web.app.completed_page_payload", return_value=expected_payload):
-            app = web_app.create_app(self.root / "config.toml")
-            route = next(
-                route
-                for route in app.routes
-                if isinstance(route, APIRoute) and route.path == "/api/completed/backups/clear"
-            )
-            assert isinstance(route, APIRoute)
-
-            class _FakeRequest:
-                def __init__(self, payload: dict[str, object]) -> None:
-                    self._payload = payload
-
-                async def json(self) -> dict[str, object]:
-                    return self._payload
-
-            response = asyncio.run(route.endpoint(_FakeRequest({"prefixes": ["tv/Example Show/Season 1"]})))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(captured, [["tv/Example Show/Season 1"]])
-        self.assertEqual(json.loads(response.body)["completed"], expected_payload)
-
-    def test_completed_cleanup_route_tolerates_missing_archive_root(self) -> None:
-        from mediaforce.web import app as web_app
-
-        config = MediaforceConfig(
-            raw={
-                "state": {},
-                "media": {
-                    "source_roots": {"tv": str(self.root / "source" / "tv")},
-                    "staging_root": str(self.root / "staging"),
-                },
-                "remote_hosts": [],
-            },
-            paths=self.config.paths,
-        )
-
-        expected_payload = {
-            "folders": [],
-            "completed_count": 0,
-            "folders_with_backups_count": 0,
-            "archive_cleanup": {"archive_root": "", "file_count": 0, "total_size_bytes": 0, "has_cleanup": False},
-        }
-
-        with patch("mediaforce.web.app.load_config", return_value=config), patch(
-            "mediaforce.web.app.purge_transient_artifacts"
-        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-            "mediaforce.web.app._start_encode_queue_worker"
-        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
-            "mediaforce.web.app.completed_page_payload", return_value=expected_payload
-        ), patch("mediaforce.web.app.list_completed_folders", return_value=[]), patch(
-            "mediaforce.web.app.clear_completed_backups_action",
-            return_value={
-                "ok": True,
-                "message": "No original backups are waiting in the Cleanup folder.",
-                "removed_count": 0,
-                "removed_size_bytes": 0,
-                "removed_prefix_count": 0,
-            },
-        ) as clear_mock:
-            app = web_app.create_app(self.root / "config.toml")
-            route = next(
-                route
-                for route in app.routes
-                if isinstance(route, APIRoute) and route.path == "/api/completed/backups/clear"
-            )
-            assert isinstance(route, APIRoute)
-
-            class _FakeRequest:
-                def __init__(self, payload: dict[str, object]) -> None:
-                    self._payload = payload
-
-                async def json(self) -> dict[str, object]:
-                    return self._payload
-
-            response = asyncio.run(route.endpoint(_FakeRequest({})))
-
-        self.assertEqual(response.status_code, 200)
-        clear_mock.assert_called_once()
-        self.assertEqual(json.loads(response.body)["completed"], expected_payload)
-
-    def test_completed_cleanup_route_rejects_malformed_prefix_payload(self) -> None:
-        from mediaforce.web import app as web_app
-
-        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                "mediaforce.web.app.purge_transient_artifacts"
-        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-            "mediaforce.web.app._start_encode_queue_worker"
-        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]):
-            app = web_app.create_app(self.root / "config.toml")
-            route = next(
-                route
-                for route in app.routes
-                if isinstance(route, APIRoute) and route.path == "/api/completed/backups/clear"
-            )
-            assert isinstance(route, APIRoute)
-
-            class _FakeRequest:
-                def __init__(self, payload: object) -> None:
-                    self._payload = payload
-
-                async def json(self) -> object:
-                    return self._payload
-
-            response = asyncio.run(route.endpoint(_FakeRequest({"prefixes": "tv/Example Show/Season 1"})))
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            json.loads(response.body),
-            {"ok": False, "message": "Completed-folder prefixes must be provided as a list."},
-        )
-
-    def test_completed_cleanup_route_rejects_unknown_selected_prefix(self) -> None:
-        from mediaforce.web import app as web_app
-
-        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                "mediaforce.web.app.purge_transient_artifacts"
-        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-            "mediaforce.web.app._start_encode_queue_worker"
-        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
-            "mediaforce.web.app.list_completed_folders",
-            return_value=[],
-        ):
-            app = web_app.create_app(self.root / "config.toml")
-            route = next(
-                route
-                for route in app.routes
-                if isinstance(route, APIRoute) and route.path == "/api/completed/backups/clear"
-            )
-            assert isinstance(route, APIRoute)
-
-            class _FakeRequest:
-                def __init__(self, payload: dict[str, object]) -> None:
-                    self._payload = payload
-
-                async def json(self) -> dict[str, object]:
-                    return self._payload
-
-            response = asyncio.run(route.endpoint(_FakeRequest({"prefixes": ["tv"]})))
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            json.loads(response.body),
-            {
-                "ok": False,
-                "message": "Completed cleanup request could not be processed. Review the selected folders and try again.",
-            },
-        )
-
-    def test_completed_cleanup_route_rejects_malformed_json(self) -> None:
-        from mediaforce.web import app as web_app
-
-        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                "mediaforce.web.app.purge_transient_artifacts"
-        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-            "mediaforce.web.app._start_encode_queue_worker"
-        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]):
-            app = web_app.create_app(self.root / "config.toml")
-            route = next(
-                route
-                for route in app.routes
-                if isinstance(route, APIRoute) and route.path == "/api/completed/backups/clear"
-            )
-            assert isinstance(route, APIRoute)
-
-            class _FakeRequest:
-                async def json(self) -> object:
-                    raise json.JSONDecodeError("bad", "{", 0)
-
-            response = asyncio.run(route.endpoint(_FakeRequest()))
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            json.loads(response.body),
-            {"ok": False, "message": "Completed cleanup requests must be valid JSON."},
-        )
-
     def test_archive_cleanup_route_passes_transcode_root_to_action(self) -> None:
         from mediaforce.web import app as web_app
 
@@ -2708,46 +2057,6 @@ class TuningRuntimeTests(unittest.TestCase):
             },
         )
         self.assertEqual(captured, ["/Volumes/media/transcode-alt"])
-
-    def test_settings_route_can_skip_archive_cleanup_summary(self) -> None:
-        from mediaforce.web import app as web_app
-
-        archive_cleanup_calls = 0
-
-        def fake_archive_cleanup_summary(
-                _config: MediaforceConfig,
-                *,
-                transcode_root: str | None = None,
-        ) -> dict[str, object]:
-            nonlocal archive_cleanup_calls
-            archive_cleanup_calls += 1
-            return {
-                "archive_root": str((Path(transcode_root) / "_replaced") if transcode_root else self.config.archive_root),
-                "file_count": 0,
-                "total_size_bytes": 0,
-                "has_cleanup": False,
-            }
-
-        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                "mediaforce.web.app.purge_transient_artifacts"
-        ), patch("mediaforce.web.app._start_calibration_queue_worker"), patch(
-            "mediaforce.web.app._start_encode_queue_worker"
-        ), patch("mediaforce.web.app._refresh_host_status_cache", return_value=[]), patch(
-            "mediaforce.web.app.archive_cleanup_summary",
-            side_effect=fake_archive_cleanup_summary,
-        ):
-            app = web_app.create_app(self.root / "config.toml")
-            route = next(
-                route for route in app.routes if isinstance(route, APIRoute) and route.path == "/api/settings"
-            )
-            assert isinstance(route, APIRoute)
-
-            response = route.endpoint(include_archive_cleanup=0)
-
-        self.assertEqual(response.status_code, 200)
-        body = json.loads(response.body)
-        self.assertIsNone(body["archive_cleanup"])
-        self.assertEqual(archive_cleanup_calls, 0)
 
     def test_run_periodic_cleanup_starts_background_thread_without_blocking(self) -> None:
         started = threading.Event()
@@ -7417,107 +6726,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(response.proposed_policy["video"]["min_target_vmaf"], 87.5)
         self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 8)
 
-    def test_clear_folder_tuning_state_removes_thread_and_artifacts(self) -> None:
-        prefix = "tv/House/Season 2"
-        review_root = self.config.paths.review_dir / "run-123"
-        preview_path = review_root / "item-00" / "encoded-01.mp4"
-        preview_path.parent.mkdir(parents=True, exist_ok=True)
-        preview_path.write_text("preview")
-        review_pack_dir = _review_pack_dir(self.config, prefix, "request-1")
-        review_pack_image = review_pack_dir / "review-video-moment-01.png"
-        review_pack_image.parent.mkdir(parents=True, exist_ok=True)
-        review_pack_image.write_text("pack")
-        calibration_path = _calibration_file(self.config, prefix)
-        calibration_path.parent.mkdir(parents=True, exist_ok=True)
-        calibration_path.write_text(
-            json.dumps(
-                {
-                    "mode": "sample",
-                    "job_id": "job-1",
-                    "preview_clips": [{"path": "/review-media/run-123/item-00/encoded-01.mp4"}],
-                    "source_clips": [],
-                    "compare_clips": [],
-                }
-            )
-        )
-        _advice_file(self.config, prefix).write_text(json.dumps({"summary": "Bench summary"}))
-        _proposal_file(self.config, prefix).write_text(json.dumps({"proposal_id": "prop-1"}))
-
-        with open_db(self.config.paths.db_path) as connection:
-            session_id = record_tuning_session(
-                connection,
-                prefix=prefix,
-                note="try smaller",
-                response={
-                    "summary": "Draft smaller",
-                    "diagnosis": "Need a leaner sample",
-                    "confidence": "medium",
-                    "evidence_checked": [],
-                    "prompt_version": "tune-v2",
-                    "raw": "{}",
-                },
-                applied_policy={"video": {"target_vmaf": 90.0}},
-                toolbelt={},
-                created_at="2026-03-30T00:00:00+00:00",
-            )
-            artifact_path = self.root / "learned-memory" / "artifact.md"
-            artifact_path.parent.mkdir(parents=True, exist_ok=True)
-            artifact_path.write_text("artifact")
-            connection.execute(
-                learning_artifacts.insert().values(
-                    artifact_id="artifact-1",
-                    session_id=session_id,
-                    prefix=prefix,
-                    title="artifact",
-                    artifact_path=str(artifact_path),
-                    summary="summary",
-                    tags_json="[]",
-                    created_at="2026-03-30T00:00:00+00:00",
-                    updated_at="2026-03-30T00:00:00+00:00",
-                )
-            )
-            connection.execute(
-                calibration_jobs.insert().values(
-                    job_id="job-1",
-                    prefix=prefix,
-                    status="failed",
-                    lane="sample",
-                    action="ai_tune",
-                    host_json="{}",
-                    notes="note",
-                    policy_json="{}",
-                    sample_item_json="{}",
-                    created_at="2026-03-30T00:00:00+00:00",
-                    updated_at="2026-03-30T00:00:00+00:00",
-                )
-            )
-
-            result = _clear_folder_tuning_state(connection, config=self.config, prefix=prefix)
-
-            self.assertTrue(result["ok"])
-            self.assertEqual(
-                connection.execute(
-                    select(func.count()).select_from(tuning_sessions).where(tuning_sessions.c.prefix == prefix)
-                ).scalar_one(),
-                0,
-            )
-            self.assertEqual(
-                connection.execute(
-                    select(func.count()).select_from(calibration_jobs).where(calibration_jobs.c.prefix == prefix)
-                ).scalar_one(),
-                0,
-            )
-
-        self.assertFalse(calibration_path.exists())
-        self.assertFalse(_advice_file(self.config, prefix).exists())
-        self.assertFalse(_proposal_file(self.config, prefix).exists())
-        self.assertFalse(preview_path.exists())
-        self.assertFalse(review_root.exists())
-        self.assertFalse(review_pack_image.exists())
-        self.assertFalse(review_pack_dir.exists())
-        self.assertFalse(_review_pack_dir(self.config, prefix).exists())
-        self.assertFalse((self.root / "learned-memory" / "artifact.md").exists())
-
     def test_multimodal_review_pack_public_view_uses_review_media_urls(self) -> None:
         pack_dir = _review_pack_dir(self.config, "tv/House/Season 2", "request-1")
         image_path = pack_dir / "review-video-moment-01.png"
@@ -7635,30 +6843,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(first.parent, second.parent)
         self.assertEqual(first.parent, _review_pack_dir(self.config, "tv/House/Season 2"))
-
-    def test_clear_folder_tuning_state_refuses_active_job(self) -> None:
-        prefix = "tv/House/Season 2"
-        with open_db(self.config.paths.db_path) as connection:
-            connection.execute(
-                calibration_jobs.insert().values(
-                    job_id="job-active",
-                    prefix=prefix,
-                    status="queued",
-                    lane="sample",
-                    action="ai_tune",
-                    host_json="{}",
-                    notes="note",
-                    policy_json="{}",
-                    sample_item_json="{}",
-                    created_at="2026-03-30T00:00:00+00:00",
-                    updated_at="2026-03-30T00:00:00+00:00",
-                )
-            )
-
-            result = _clear_folder_tuning_state(connection, config=self.config, prefix=prefix)
-
-            self.assertFalse(result["ok"])
-            self.assertIn("still active", result["message"])
 
     def test_learning_artifact_round_trip(self) -> None:
         sample_item = {

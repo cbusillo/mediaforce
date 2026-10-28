@@ -27,6 +27,7 @@ def register_app_window_routes(
         approve_kind_action: Callable[[str, str], dict[str, Any]] | None = None,
         stop_kind_action: Callable[[str], dict[str, Any]] | None = None,
 ) -> None:
+
     @app.get("/api/app/main-window")
     def api_app_main_window() -> JSONResponse:
         return JSONResponse(main_window_payload())

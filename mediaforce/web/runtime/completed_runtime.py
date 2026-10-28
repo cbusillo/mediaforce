@@ -8,12 +8,9 @@ from typing import Any
 from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
-from mediaforce.encoding.staging import safe_unlink
-from mediaforce.encoding.delivery_lock import archive_activity
-from mediaforce.web.runtime.archive_cleanup import archive_path_needs_recovery, recovery_archive_paths
-from mediaforce.library.media_scopes import media_scope_from_prefix, path_matches_scope
+from mediaforce.library.media_scopes import media_scope_from_prefix
 FolderGroup = tuple[str, str, str, str]
 ORIGINALS_REMOVED_EVENT = "originals_removed_confirmed"
 HISTORY_DETAIL_MAX_CHARS = 320
@@ -237,102 +234,6 @@ def list_completed_folders(
     )
 
 
-def confirm_originals_removed_action(
-        connection: DBClient,
-        *,
-        folder_group: Callable[[str], FolderGroup | None],
-        archive_root: Path | None,
-        prefixes: list[str] | None,
-        valid_prefixes: set[str] | None = None,
-) -> dict[str, Any]:
-    normalized_prefixes = _normalized_prefixes(prefixes)
-    if not normalized_prefixes:
-        raise ValueError("At least one completed folder must be selected.")
-    if valid_prefixes is not None:
-        unknown_prefixes = sorted(prefix for prefix in normalized_prefixes if prefix not in valid_prefixes)
-        if unknown_prefixes:
-            raise ValueError(
-                "Unknown completed-folder prefix"
-                f"{'es' if len(unknown_prefixes) != 1 else ''}: {', '.join(unknown_prefixes)}"
-            )
-    if archive_root is None:
-        return {
-            "ok": True,
-            "message": "Archive settings are missing, so nothing was marked resolved.",
-            "resolved_count": 0,
-            "resolved_prefix_count": 0,
-        }
-
-    resolved_archive_root = archive_root.resolve()
-    confirmed_item_ids = confirmed_originals_removed_item_ids(connection)
-    rows = connection.execute(
-        select(
-            library_items.c.id,
-            library_items.c.rel_path,
-            staged_artifacts.c.archived_source_path,
-        )
-        .select_from(
-            staged_artifacts.join(
-                library_items,
-                staged_artifacts.c.library_item_id == library_items.c.id,
-            )
-        )
-        .where(staged_artifacts.c.promoted_at.is_not(None))
-    ).mappings().fetchall()
-
-    now = datetime.now(UTC).isoformat(timespec="seconds")
-    resolved_count = 0
-    resolved_prefixes: set[str] = set()
-    for row in rows:
-        rel_path = str(row["rel_path"] or "")
-        group = folder_group(rel_path)
-        if group is None or group[0] not in normalized_prefixes:
-            continue
-        library_item_id = int(row["id"])
-        if library_item_id in confirmed_item_ids:
-            continue
-        archived_source_path = _clean_text(row["archived_source_path"])
-        if not archived_source_path:
-            continue
-        archived_path = Path(archived_source_path)
-        if not _path_is_within_root(archived_path, resolved_archive_root):
-            continue
-        if archived_path.is_file():
-            continue
-        connection.execute(
-            item_events.insert().values(
-                library_item_id=library_item_id,
-                created_at=now,
-                event_type=ORIGINALS_REMOVED_EVENT,
-                details_json=json.dumps(
-                    {
-                        "prefix": group[0],
-                        "archived_source_path": archived_source_path,
-                        "note": "Operator marked already-missing original backups handled after checking the finished files.",
-                    }
-                ),
-            )
-        )
-        confirmed_item_ids.add(library_item_id)
-        resolved_count += 1
-        resolved_prefixes.add(group[0])
-
-    if resolved_count > 0:
-        connection.commit()
-    message = (
-        f"Marked {len(resolved_prefixes)} finished folder"
-        f"{'s' if len(resolved_prefixes) != 1 else ''} as handled. Nothing was deleted."
-        if resolved_count > 0
-        else "No missing original backups needed to be marked handled. Nothing was deleted."
-    )
-    return {
-        "ok": True,
-        "message": message,
-        "resolved_count": resolved_count,
-        "resolved_prefix_count": len(resolved_prefixes),
-    }
-
-
 def record_deleted_original_backups(
         connection: DBClient,
         removed_paths: list[Path],
@@ -460,166 +361,6 @@ def list_completed_history_events(
         if len(history) >= limit:
             break
     return history
-
-
-def clear_completed_backups_action(
-        config: MediaforceConfig,
-        *,
-        folder_group: Callable[[str], FolderGroup | None],
-        prefixes: list[str] | None = None,
-        valid_prefixes: set[str] | None = None,
-        on_removed: Callable[[Path], None] | None = None,
-) -> dict[str, Any]:
-    with archive_activity(config.paths.db_path, cleanup=True) as available:
-        if not available:
-            return {"ok": False, "message": "Files are being published. Retry cleanup when they finish.",
-                    "removed_count": 0, "removed_size_bytes": 0, "removed_prefix_count": 0}
-        return _clear_completed_backups_action(config, folder_group=folder_group, prefixes=prefixes,
-                                              valid_prefixes=valid_prefixes, on_removed=on_removed)
-
-
-def _clear_completed_backups_action(
-        config: MediaforceConfig,
-        *,
-        folder_group: Callable[[str], FolderGroup | None],
-        prefixes: list[str] | None = None,
-        valid_prefixes: set[str] | None = None,
-        on_removed: Callable[[Path], None] | None = None,
-) -> dict[str, Any]:
-    archive_root = _configured_archive_root(config)
-    normalized_prefixes = _normalized_prefixes(prefixes)
-    if prefixes is not None and not normalized_prefixes:
-        raise ValueError("At least one completed-folder prefix must be provided for selected cleanup.")
-    if normalized_prefixes is not None and valid_prefixes is not None:
-        unknown_prefixes = sorted(prefix for prefix in normalized_prefixes if prefix not in valid_prefixes)
-        if unknown_prefixes:
-            raise ValueError(
-                "Unknown completed-folder prefix"
-                f"{'es' if len(unknown_prefixes) != 1 else ''}: {', '.join(unknown_prefixes)}"
-            )
-
-    if archive_root is None:
-        return {
-            "ok": True,
-            "message": "No original backups are waiting in the Cleanup folder.",
-            "removed_count": 0,
-            "removed_size_bytes": 0,
-            "removed_prefix_count": 0,
-        }
-
-    if not archive_root.exists():
-        return {
-            "ok": True,
-            "message": "No original backups are waiting in the Cleanup folder.",
-            "removed_count": 0,
-            "removed_size_bytes": 0,
-            "removed_prefix_count": 0,
-        }
-
-    removed_count = 0
-    removed_size_bytes = 0
-    removed_prefixes: set[str] = set()
-    selected_paths = _selected_archive_paths(config, normalized_prefixes)
-    protected = recovery_archive_paths(config, archive_root)
-    preserved_count = 0
-    for path in archive_root.rglob("*"):
-        if not path.is_file():
-            continue
-        rel_path = path.relative_to(archive_root).as_posix()
-        if normalized_prefixes is not None and not (
-            _path_matches_prefixes(rel_path, normalized_prefixes) or path.resolve() in selected_paths
-        ):
-            continue
-        if archive_path_needs_recovery(path, protected):
-            preserved_count += 1
-            continue
-        selected_prefix = selected_paths.get(path.resolve())
-        group = folder_group(rel_path)
-        if selected_prefix is not None:
-            removed_prefixes.add(selected_prefix)
-        elif group is not None:
-            removed_prefixes.add(group[0])
-        try:
-            removed_size_bytes += path.stat().st_size
-        except FileNotFoundError:
-            pass
-        safe_unlink(path)
-        removed_count += 1
-        if on_removed is not None:
-            on_removed(path)
-
-    _prune_empty_dirs(archive_root)
-
-    if removed_count <= 0:
-        return {
-            "ok": True,
-            "message": "No original backups matched the selected finished folders."
-                       + (" Kept originals needed by unpublished files. Inspect and restore those files before cleanup."
-                          if preserved_count else ""),
-            "preserved_count": preserved_count,
-            "removed_count": 0,
-            "removed_size_bytes": 0,
-            "removed_prefix_count": 0,
-        }
-
-    if normalized_prefixes is None:
-        message = f"Deleted {removed_count} original backup{'s' if removed_count != 1 else ''}."
-    else:
-        message = (
-            f"Deleted {removed_count} original backup{'s' if removed_count != 1 else ''} "
-            f"from {len(removed_prefixes)} finished folder{'s' if len(removed_prefixes) != 1 else ''}."
-        )
-    if preserved_count:
-        message += " Kept originals needed by unpublished files. Inspect and restore those files before cleanup."
-    return {
-        "ok": True,
-        "message": message,
-        "preserved_count": preserved_count,
-        "removed_count": removed_count,
-        "removed_size_bytes": removed_size_bytes,
-        "removed_prefix_count": len(removed_prefixes),
-    }
-
-
-def _selected_archive_paths(config: MediaforceConfig, prefixes: set[str] | None) -> dict[Path, str]:
-    """Use the owning item's current path when a rollback's filename differs."""
-    if prefixes is None or not config.paths.db_path.is_file():
-        return {}
-    with open_db(config.paths.db_path) as connection:
-        rows = connection.execute(
-            select(library_items.c.id, library_items.c.rel_path, staged_artifacts.c.archived_source_path)
-            .join(staged_artifacts, library_items.c.id == staged_artifacts.c.library_item_id)
-            .where(staged_artifacts.c.promoted_at.is_not(None))
-        ).mappings().all()
-        item_prefixes = {int(row["id"]): next(prefix for prefix in prefixes if path_matches_scope(str(row["rel_path"]), prefix))
-                         for row in rows if _path_matches_prefixes(str(row["rel_path"]), prefixes)}
-        paths = {Path(str(row["archived_source_path"])).resolve(): item_prefixes[int(row["id"])] for row in rows
-                 if int(row["id"]) in item_prefixes and row["archived_source_path"]}
-        for event in connection.execute(select(item_events.c.library_item_id, item_events.c.details_json).where(
-            item_events.c.event_type.in_(("promotion_completed", "promotion_rollback_retained"))
-        )).mappings():
-            retained = _event_details(event["details_json"]).get("retained_archive_backup_path")
-            if int(event["library_item_id"]) in item_prefixes and retained:
-                paths[Path(str(retained)).resolve()] = item_prefixes[int(event["library_item_id"])]
-        return paths
-
-
-def _normalized_prefixes(prefixes: list[str] | None) -> set[str] | None:
-    if prefixes is None:
-        return None
-    normalized = set()
-    for prefix in prefixes:
-        if not isinstance(prefix, str):
-            raise ValueError("Completed-folder prefixes must be strings.")
-        cleaned = prefix.strip().strip("/")
-        if not cleaned:
-            raise ValueError("Completed-folder prefixes may not be blank.")
-        normalized.add(cleaned)
-    return normalized
-
-
-def _path_matches_prefixes(rel_path: str, prefixes: set[str]) -> bool:
-    return any(path_matches_scope(rel_path, prefix) for prefix in prefixes)
 
 
 def _configured_archive_root(config: MediaforceConfig) -> Path | None:
@@ -785,16 +526,6 @@ def _int_or_none(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 0 else None
-
-
-def _prune_empty_dirs(root: Path) -> None:
-    for path in sorted(root.rglob("*"), reverse=True):
-        if not path.is_dir():
-            continue
-        try:
-            path.rmdir()
-        except OSError:
-            continue
 
 
 def _clean_text(value: Any) -> str:
