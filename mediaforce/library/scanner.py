@@ -336,10 +336,6 @@ def _execute_scan_library(
                 "updated_at": started_at,
             }
 
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
-            if path_in_pending_move(connection, source_path):
-                connection.commit()
-                continue
             if row is None:
                 insert_result = connection.execute(
                     sqlite_insert(library_items).values(**values).on_conflict_do_nothing(

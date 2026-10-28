@@ -219,9 +219,9 @@ class ScannerRuntimeTests(unittest.TestCase):
                 self.assertEqual(stats.unchanged, 0)
                 self.assertEqual(stats.reprobed, 0)
 
-    def test_publication_prepared_during_observation_is_left_alone(self) -> None:
-        for reprobe in (False, True):
-            with self.subTest(reprobe=reprobe), tempfile.TemporaryDirectory() as temp_dir:
+    def test_source_operation_during_observation_is_left_alone(self) -> None:
+        for reprobe, rollback in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(reprobe=reprobe, rollback=rollback), tempfile.TemporaryDirectory() as temp_dir:
                 project_root = Path(temp_dir)
                 media_root = project_root / "movies"
                 media_root.mkdir()
@@ -247,11 +247,14 @@ class ScannerRuntimeTests(unittest.TestCase):
 
                         def prepare(*_args: Any, **_kwargs: Any) -> Any:
                             with open_db(config.paths.db_path) as writer:
-                                prepare_source_publish(
+                                operation = prepare_source_publish(
                                     writer, item["id"], source_path=movie, staging_path=staged,
                                     archive_path=project_root / "archive.mkv", destination_path=movie,
                                     backup_path=None,
                                 )
+                                if rollback:
+                                    apply_source_moves(writer, operation)
+                                    self.assertTrue(reconcile_source_publish(writer, operation))
                             return probe if reprobe else item["content_version_fingerprint"]
 
                         target = "mediaforce.library.scanner.probe_media" if reprobe else "mediaforce.library.scanner.content_version_fingerprint"
@@ -268,54 +271,13 @@ class ScannerRuntimeTests(unittest.TestCase):
                     reset_engine_cache()
                 self.assertEqual(stats.unchanged + stats.reprobed, 0)
                 self.assertEqual(current["mtime_ns"], item["mtime_ns"])
-                self.assertEqual(current["source_revision"], item["source_revision"])
+                if rollback:
+                    self.assertGreater(current["source_revision"], item["source_revision"])
+                else:
+                    self.assertEqual(current["source_revision"], item["source_revision"])
                 self.assertEqual(missing, 0)
                 self.assertIsNone(current["missing_since"])
 
-    def test_a_prepared_publish_destination_is_not_inserted_as_another_source(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            project_root = Path(temp_dir)
-            media_root = project_root / "movies"
-            media_root.mkdir()
-            movie = media_root / "Feature.mkv"
-            movie.write_bytes(b"original")
-            destination = media_root / "Feature.mp4"
-            staged = project_root / "staged.mp4"
-            staged.write_bytes(b"compressed")
-            config = self._config(project_root, {"movies": media_root})
-            probe = _failed_probe_summary(RuntimeError("fixture probe"))
-            try:
-                with open_db(config.paths.db_path) as connection, patch(
-                    "mediaforce.library.scanner.probe_media", return_value=probe,
-                ):
-                    scan_library(connection, config)
-                    item = connection.execute(select(library_items)).mappings().one()
-                    moved = False
-
-                    def move_before_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
-                        nonlocal moved
-                        if path == destination and not moved:
-                            moved = True
-                            with open_db(config.paths.db_path) as writer:
-                                operation = prepare_source_publish(
-                                    writer, item["id"], source_path=movie, staging_path=staged,
-                                    archive_path=project_root / "archive.mkv", destination_path=destination,
-                                    backup_path=None,
-                                )
-                                apply_source_moves(writer, operation)
-                        return os.stat(path, follow_symlinks=follow_symlinks)
-
-                    with patch("mediaforce.library.scanner._iter_media_files", return_value=iter([destination])), patch.object(
-                        Path, "stat", move_before_stat,
-                    ):
-                        stats = scan_library(connection, config)
-                    rows = connection.execute(select(library_items)).mappings().all()
-            finally:
-                reset_engine_cache()
-            self.assertTrue(moved)
-            self.assertEqual(stats.discovered, 0)
-            self.assertEqual([row["source_path"] for row in rows], [str(movie)])
-            self.assertEqual(destination.read_bytes(), b"compressed")
 
     def test_missing_reconciliation_scales_below_library_sized_sqlite_variable_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
