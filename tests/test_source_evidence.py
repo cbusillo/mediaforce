@@ -739,6 +739,7 @@ def test_worker_commit_checks_identity_instead_of_revision(connection: DBClient,
 def test_publish_missing_source_keeps_previous_success_behavior(connection: DBClient, tmp_path: Path,
                                                                occupied_archive: bool, missing_at: str) -> None:
     history = _history(connection, tmp_path)
+    connection.execute(update(library_items).where(library_items.c.id == history["id"]).values(missing_since=timestamp()))
     if missing_at == "before":
         history["path"].unlink()
     if occupied_archive:
@@ -767,6 +768,7 @@ def test_publish_missing_source_keeps_previous_success_behavior(connection: DBCl
                                      allowed=True, waiting_reason=None, required_by_volume={}))
     assert published.read_bytes() == b"ready output"
     assert connection.execute(select(library_items.c.status)).scalar_one() == "promoted"
+    assert connection.execute(select(library_items.c.missing_since)).scalar_one() is None
     assert history["archive"].exists() == occupied_archive
     if occupied_archive:
         assert history["archive"].read_bytes() == b"older rollback"
