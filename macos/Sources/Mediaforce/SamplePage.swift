@@ -41,6 +41,7 @@ struct SampleWork: View {
     @State private var confirming: String?
     // The sample can't be made until a size is chosen, so the page offers the sizes right there.
     @State private var askingSize = false
+    @State private var selectedBalance: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -63,6 +64,21 @@ struct SampleWork: View {
                     Text(coverage)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if !facts.balanceChoices.isEmpty {
+                    Picker(Words.sampleBalance, selection: Binding(
+                        get: {
+                            selectedBalance ?? facts.balanceChoices.first(where: \.selected)?.key
+                                ?? facts.balanceChoices.first(where: { $0.key == "balanced" })?.key
+                        },
+                        set: { selectedBalance = $0 }
+                    )) {
+                        ForEach(facts.balanceChoices) { choice in
+                            Text(choice.label).tag(Optional(choice.key))
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
                 SampleActions(
                     facts: facts, working: working, askingSize: askingSize, approve: startApproval, make: { make(size: $0) },
@@ -153,10 +169,10 @@ struct SampleWork: View {
 
     private func make(size: String?) {
         act {
-            let result = try await $0.makeSample(prefix, size: size)
+            let result = try await $0.makeSample(prefix, size: size, balance: selectedBalance)
             askingSize = result.code == "choose_size" && facts?.sizeChoices.isEmpty == false
             if result.ok || askingSize { return nil }
-            return result.code == "choose_balance" ? .chooseBalance : .sampleRefused
+            return .sampleRefused
         }
     }
 

@@ -2815,12 +2815,14 @@ def create_app(
         payloads = _season_payloads(normalized_prefix)
         return sample_facts(*payloads) if payloads else None
 
-    def _make_app_sample_action(normalized_prefix: str, size: str | None) -> dict[str, Any]:
+    def _make_app_sample_action(
+            normalized_prefix: str, size: str | None, balance: str | None,
+    ) -> dict[str, Any]:
         payloads = _season_payloads(normalized_prefix)
         if payloads is None:
             return {"ok": False, "code": "refused"}
         return make_sample(
-            *payloads, size, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action,
+            *payloads, size, balance, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action,
         )
 
     register_app_window_routes(

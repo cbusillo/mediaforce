@@ -11,7 +11,7 @@ final class SampleTests: XCTestCase {
                       "sample": {"url": "/review-media/Lucifer S2/preview.mp4", "size_bytes": 700000}}],
          "episode_bytes": 3853264012, "estimated_episode_bytes": 296440462, "season_bytes": 60000000000,
          "season_episode_count": 16, "goal_bytes": 293736333, "size_status": "over_target", "draft_hash": "draft-1",
-         "size_choices": \(choices)}
+         "balance_choices": [{"key": "reference", "label": "Preserve the reference", "selected": false}, {"key": "balanced", "label": "Balance size and detail", "selected": true}], "size_choices": \(choices)}
         """
     }
 
@@ -23,6 +23,8 @@ final class SampleTests: XCTestCase {
         let facts = try decode(Self.facts())
         XCTAssertEqual(facts.moments.first?.sample.sizeBytes, 700_000)
         XCTAssertEqual(facts.sizeChoices.map(\.key), ["smaller"])
+        XCTAssertEqual(facts.balanceChoices.map(\.label), ["Preserve the reference", "Balance size and detail"])
+        XCTAssertEqual(facts.balanceChoices.first(where: \.selected)?.key, "balanced")
         XCTAssertEqual(facts.estimatedSavedBytes, 60_000_000_000 - 296_440_462 * 16)
         XCTAssertFalse(facts.isInProgress)
     }
@@ -166,9 +168,17 @@ final class SampleClientTests: XCTestCase {
 
     func testAServerErrorOnAnActionThrows() async {
         do {
-            _ = try await client(status: 500, body: "").makeSample("tv/Lucifer/Season 2", size: nil)
+            _ = try await client(status: 500, body: "").makeSample("tv/Lucifer/Season 2", size: nil, balance: "balanced")
             XCTFail("a server error must throw")
         } catch {}
+    }
+
+    func testMakingASampleSendsTheChosenSizeAndBalance() async throws {
+        _ = try await client(status: 200, body: #"{"ok": true}"#)
+            .makeSample("tv/Lucifer/Season 2", size: "smaller", balance: "reference")
+        let sent = try XCTUnwrap(StubServerBody.json(try XCTUnwrap(Self.requests.first)))
+        XCTAssertEqual(sent["size"] as? String, "smaller")
+        XCTAssertEqual(sent["balance"] as? String, "reference")
     }
 
     func testReviewClipsLoadFromTheServer() {

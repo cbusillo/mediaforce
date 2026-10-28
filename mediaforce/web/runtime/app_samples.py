@@ -57,6 +57,10 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
             {"key": choice["key"], "target_bytes": int_value(object_dict(choice["resolved_size_goal"]).get("target_size_bytes"))}
             for choice in _size_choices(folder)
         ],
+        "balance_choices": [
+            {"key": choice["key"], "label": choice["title"], "selected": bool(choice.get("selected"))}
+            for choice in _balance_choices(folder)
+        ],
     }
 
 
@@ -105,6 +109,7 @@ def make_sample(
         folder: Mapping[str, Any],
         status: Mapping[str, Any],
         size: str | None,
+        balance: str | None = None,
         *,
         ai_tune: AiTuneFn,
         retry_saved: RetrySampleFn,
@@ -115,7 +120,7 @@ def make_sample(
     if size is None and action == "choose_size":
         return {"ok": False, "code": "choose_size"}
     result: Mapping[str, Any] = {}
-    if size is None and action == "retry_sample":
+    if size is None and balance is None and action == "retry_sample":
         try:
             result = retry_saved(prefix, "", "")
         except HTTPException:
@@ -124,7 +129,7 @@ def make_sample(
         # A saved request that can't run again, such as one under older settings or on a computer gone since, is asked
         # for anew.
         if not result.get("ok"):
-            request = _sample_request(folder, size, remake=action == "review_sample")
+            request = _sample_request(folder, size, balance, remake=action == "review_sample")
             if isinstance(request, str):
                 return {"ok": False, "code": request}
             note, operator_intent = request
@@ -149,10 +154,22 @@ def samples_to_remake(cards: Iterable[Mapping[str, Any]], failed_in_a_row: Calla
 
 
 def _sample_request(
-        folder: Mapping[str, Any], size: str | None, *, remake: bool,
+        folder: Mapping[str, Any], size: str | None, balance: str | None, *, remake: bool,
 ) -> tuple[str, dict[str, Any] | None] | str:
+    balances = _balance_choices(folder)
+    if balance is not None:
+        balance_choice = next((option for option in balances if option["key"] == balance), None)
+        if balance_choice is None:
+            return "choose_balance"
+    else:
+        balance_choice = next((option for option in balances if option.get("selected")), None) or next(
+            (option for option in balances if option.get("key") == DEFAULT_BALANCE), None
+        )
     if size is None and remake:
-        return _measured_request(folder), _current_operator_intent(folder)
+        intent = _current_operator_intent(folder)
+        if balance is not None and intent is not None:
+            intent = with_compression_intent(intent, object_dict(balance_choice.get("compression_intent")))
+        return _measured_request(folder), intent
     choices = _size_choices(folder)
     if size:
         choice = next((option for option in choices if option["key"] == size), None)
@@ -160,13 +177,11 @@ def _sample_request(
         choice = next((option for option in choices if not option.get("requires_explicit_selection")), None)
     if choice is None:
         return "choose_size"
-    balances = object_list(folder.get("compression_intent_options"))
-    balance = next((option for option in balances if option.get("selected")), None) or next(
-        (option for option in balances if option.get("key") == DEFAULT_BALANCE), None
-    )
-    if balance is None:
+    if balance_choice is None:
         return "choose_balance"
-    intent = with_compression_intent(object_dict(choice["operator_intent"]), object_dict(balance.get("compression_intent")))
+    intent = with_compression_intent(
+        object_dict(choice["operator_intent"]), object_dict(balance_choice.get("compression_intent"))
+    )
     resolution = None if size else _current_resolution(folder)
     if resolution is not None:
         # A sample made at the season's own size keeps its resolution; a size the owner picks brings its own.
@@ -220,6 +235,14 @@ def _size_choices(folder: Mapping[str, Any]) -> list[dict[str, Any]]:
                 and mode in ("normalized", "absolute")):
             choices.append(option)
     return choices
+
+
+def _balance_choices(folder: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        option for option in object_list(folder.get("compression_intent_options"))
+        if isinstance(option.get("key"), str) and isinstance(option.get("title"), str)
+        and object_dict(option.get("compression_intent"))
+    ]
 
 
 def _goal_bytes(folder: Mapping[str, Any]) -> int:

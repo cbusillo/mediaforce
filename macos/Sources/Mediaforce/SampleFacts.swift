@@ -20,6 +20,7 @@ struct SampleFacts: Decodable, Sendable {
     // The latest a running sample should be ready by, from comparable finished samples; nil when they can't tell.
     let readyInSeconds: Int?
     let sizeChoices: [SizeChoice]
+    let balanceChoices: [BalanceChoice]
 
     struct Moment: Decodable, Sendable, Hashable {
         let atSeconds: Double
@@ -35,6 +36,13 @@ struct SampleFacts: Decodable, Sendable {
     struct SizeChoice: Decodable, Sendable, Identifiable {
         let key: String
         let targetBytes: Int64
+        var id: String { key }
+    }
+
+    struct BalanceChoice: Decodable, Sendable, Identifiable {
+        let key: String
+        let label: String
+        let selected: Bool
         var id: String { key }
     }
 

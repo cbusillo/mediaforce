@@ -363,6 +363,7 @@ extension Words {
     static let approveSample = "Approve and compress the season"
     static let makeSampleAgain = "Make sample again"
     static let makeSample = "Make sample"
+    static let sampleBalance = "Balance of size and detail"
     static let startCompressing = "Start compressing"
     static let tryAnotherSize = "Try another size"
     static let chooseSizeHeadline = "Choose a size"
@@ -563,10 +564,6 @@ extension ActionNotice {
         message: "The sample is approved, but this season needs a choice Mediaforce can't ask for here yet, so it isn't compressing."
     )
 
-    static let chooseBalance = ActionNotice(
-        title: "Choose this season's balance first",
-        message: "This season needs its balance of size and detail chosen before a new sample, and Mediaforce can't ask for it here yet."
-    )
 }
 
 extension Words {

@@ -60,8 +60,8 @@ def _folder(**fields: Any) -> dict[str, Any]:
         },
         "size_goal_options": [_option("recommended", 293.736), _option("smaller", 220.3), _option("legacy", 100, mode="ambiguous")],
         "compression_intent_options": [
-            {"key": "reference", "selected": False, "compression_intent": {"schema_version": 1, "level": "reference", "confirmed": True}},
-            {"key": "balanced", "selected": True, "compression_intent": {"schema_version": 1, "level": "balanced", "confirmed": False}},
+            {"key": "reference", "title": "Preserve the reference", "selected": False, "compression_intent": {"schema_version": 1, "level": "reference", "confirmed": True}},
+            {"key": "balanced", "title": "Balance size and detail", "selected": True, "compression_intent": {"schema_version": 1, "level": "balanced", "confirmed": False}},
         ],
         **fields,
     }
@@ -101,6 +101,10 @@ def test_facts_offer_only_playable_moments_and_the_sizes_that_can_be_chosen() ->
     assert (facts["episode_bytes"], facts["estimated_episode_bytes"]) == (3_853_264_012, 296_440_462)
     assert (facts["season_bytes"], facts["season_episode_count"], facts["goal_bytes"]) == (60_000_000_000, 16, 293_736_333)
     assert [choice["key"] for choice in facts["size_choices"]] == ["recommended", "smaller"]
+    assert facts["balance_choices"] == [
+        {"key": "reference", "label": "Preserve the reference", "selected": False},
+        {"key": "balanced", "label": "Balance size and detail", "selected": True},
+    ]
 
     not_playable = _folder(calibration={**_folder()["calibration"], "browser_review_ready": False})
     assert sample_facts(not_playable, _status())["moments"] == []
@@ -212,9 +216,9 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
 def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() -> None:
     calls: list[tuple[Any, ...]] = []
 
-    def make(folder: dict[str, Any], status: dict[str, Any], size: str | None) -> dict[str, Any]:
+    def make(folder: dict[str, Any], status: dict[str, Any], size: str | None, balance: str | None = None) -> dict[str, Any]:
         return make_sample(
-            folder, status, size,
+            folder, status, size, balance,
             ai_tune=lambda *args: calls.append(("new", *args)) or {"ok": True},
             retry_saved=lambda *args: calls.append(("retry", *args)) or {"ok": True},
         )
@@ -229,6 +233,13 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert "220 MB" in note and "300.0" not in note
     assert intent["compression_intent"] == {"schema_version": 1, "level": "balanced", "confirmed": True}
 
+    assert make(_folder(), _status(), "smaller", "reference")["ok"] is True
+    assert calls.pop()[4]["compression_intent"] == {
+        "schema_version": 1, "level": "reference", "confirmed": True,
+    }
+    assert make(_folder(), _status(), "smaller", "not-offered") == {"ok": False, "code": "choose_balance"}
+    assert calls == []
+
     assert make(_folder(), _status(), None)["ok"] is True
     _kind, _prefix, note, _host, intent, _token = calls.pop()
     assert "294 MB" in note and "1.4 times" in note
@@ -240,8 +251,8 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
 
     # A season that never chose its balance is made as close to its size goal as still looks right.
     unchosen = _folder(compression_intent_options=[
-        {"key": "reference", "selected": False, "compression_intent": {"level": "reference"}},
-        {"key": "balanced", "selected": False, "compression_intent": {"level": "balanced"}},
+        {"key": "reference", "title": "Preserve the reference", "selected": False, "compression_intent": {"level": "reference"}},
+        {"key": "balanced", "title": "Balance size and detail", "selected": False, "compression_intent": {"level": "balanced"}},
     ])
     assert make(unchosen, _status("needs_help", "make_sample", "missing_clips"), None)["ok"] is True
     assert calls.pop()[4]["compression_intent"]["level"] == "balanced"
@@ -266,6 +277,9 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert refused_retry == {"ok": True, "code": None}
     assert [call[0] for call in calls] == ["retry", "new"]
     calls.clear()
+
+    assert make(_folder(), _status("needs_help", "retry_sample"), None, "reference")["ok"] is True
+    assert calls.pop()[4]["compression_intent"]["level"] == "reference"
 
     def computer_gone(*_args: Any) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="That computer is gone.")
