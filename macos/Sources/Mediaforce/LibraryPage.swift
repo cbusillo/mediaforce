@@ -22,11 +22,12 @@ struct LibraryPage: View {
                         if !facts.samples.waitingOnYou.isEmpty || !facts.samples.approvedNotStarted.isEmpty {
                             SampleShelf(facts: facts, posters: posters) { open(.sample($0)) }
                         }
-                        Latest(events: Array(facts.events.prefix(4)), open: open)
+                        Latest(events: Array(facts.events.prefix(4)), posters: posters, open: open)
                     }
                     .frame(width: 556, alignment: .leading)
                     VStack(alignment: .leading, spacing: 26) {
-                        BiggestTable(shows: Array(facts.biggestNotStarted.prefix(BiggestTable.rowLimit)), samples: facts.samples.waitingOnYou, open: open)
+                        BiggestTable(shows: Array(facts.biggestNotStarted.prefix(BiggestTable.rowLimit)), samples: facts.samples.waitingOnYou,
+                                     posters: posters, open: open)
                         Computers(computers: facts.computers) { open(.computer($0)) }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
