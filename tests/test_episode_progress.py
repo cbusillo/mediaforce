@@ -246,6 +246,19 @@ class SeasonEpisodeProgressTests(unittest.TestCase):
             "Episode 04.mkv": ("compressing", None),
         })
 
+    def test_stopped_publishing_does_not_hide_new_work_or_a_published_file(self) -> None:
+        stopped, running, published = (_item(1, "ready_to_promote"), _item(2), _item(3, "complete"))
+        episodes = season_episode_progress(
+            [stopped, running, published],
+            {stopped.rel_path: _run("stopped"), running.rel_path: _run("running")},
+            {},
+            publish_stopped={item.item_id: "failed" for item in [stopped, running, published]},
+        )
+        self.assertEqual(_stages(episodes), {
+            "Episode 01.mkv": "needs_you", "Episode 02.mkv": "compressing", "Episode 03.mkv": "published",
+        })
+        self.assertEqual(episodes[0]["wait_reason"], {"code": "publish_failed"})
+
     def test_missing_files_are_left_out(self) -> None:
         self.assertEqual(season_episode_progress([_item(1, "missing")], {}, {}), [])
 

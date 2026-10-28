@@ -4,6 +4,7 @@ Each episode gets one stage. Its run in the season's latest encode run says what
 its library and staged state say what already happened or why nothing will.
 """
 
+import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -128,7 +129,12 @@ def load_season_episode_progress(
         for item_id, row in staged.items()
         if (blockers := not_remade_blockers(row["validation_json"])) is not None
     }
-    return season_episode_progress(items, run_by_rel_path, bytes_saved, validation, not_remade)
+    publish_stopped = {
+        item_id: state
+        for item_id, row in staged.items()
+        if (state := _stopped_publish_state(row["validation_json"])) is not None
+    }
+    return season_episode_progress(items, run_by_rel_path, bytes_saved, validation, not_remade, publish_stopped)
 
 
 def season_episode_progress(
@@ -137,6 +143,7 @@ def season_episode_progress(
         bytes_saved: Mapping[int, int],
         validation: Mapping[int, str] | None = None,
         not_remade: Mapping[int, list[str]] | None = None,
+        publish_stopped: Mapping[int, str] | None = None,
 ) -> list[dict[str, Any]]:
     """`validation` names each staged file's check outcome: "size_held" or "failed" wait on the owner, "remaking" does not.
 
@@ -144,6 +151,7 @@ def season_episode_progress(
     """
     validation = validation or {}
     not_remade = not_remade or {}
+    publish_stopped = publish_stopped or {}
     episodes = [
         _episode(
             item,
@@ -151,6 +159,7 @@ def season_episode_progress(
             bytes_saved.get(item.item_id),
             validation.get(item.item_id),
             not_remade.get(item.item_id),
+            publish_stopped.get(item.item_id),
         )
         for item in items
         if item.state != "missing"
@@ -165,6 +174,7 @@ def _episode(
         bytes_saved: int | None,
         validation: str | None,
         not_remade: list[str] | None,
+        publish_stopped: str | None,
 ) -> dict[str, Any]:
     """One episode's stage; one that waits on the owner says why in ``wait_reason``, a code for the app to word."""
     episode: dict[str, Any] = {
@@ -199,6 +209,10 @@ def _episode(
         # The owner settled it; a run stopped for that choice is not a question for them.
         episode["stage"] = "kept_original"
         episode["detail"] = item.blocker
+        return episode
+    if publish_stopped is not None:
+        episode["stage"] = "needs_you"
+        episode["wait_reason"] = {"code": f"publish_{publish_stopped}"}
         return episode
     if run is not None and run_status in _OWNER_RUN_STATUSES | {"queued", "retry_backoff"}:
         reason, label, needs_owner = unfinished_child_reason(run)
@@ -267,3 +281,12 @@ def _staged_rows(connection: DBClient, item_ids: list[int]) -> dict[int, Mapping
         .where(staged_artifacts.c.library_item_id.in_(item_ids))
     ).mappings().fetchall()
     return {int(row["library_item_id"]): row for row in rows}
+
+
+def _stopped_publish_state(raw_validation: Any) -> str | None:
+    try:
+        payload = object_dict(json.loads(str(raw_validation or "{}")))
+    except json.JSONDecodeError:
+        return None
+    state = object_dict(payload.get("automatic_publish")).get("state")
+    return str(state) if payload.get("passed") is not False and state in {"failed", "unsafe"} else None
