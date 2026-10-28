@@ -653,8 +653,7 @@ class EvidenceWorkerTests(unittest.TestCase):
             start_evidence_work(db, self.config, "tv")
             resume_evidence_queue(db)
         analyze = Mock()
-        deps = replace(self._deps(analyze), lease_seconds=EVIDENCE_JOB_LEASE_SECONDS,
-                       read_probe=Mock(side_effect=RuntimeError("probe failed")))
+        deps = replace(self._deps(analyze), read_probe=Mock(side_effect=RuntimeError("probe failed")))
         self.assertEqual(process_evidence_queue_once(config_path=self.config.paths.config_path,
             config=self.config, deps=deps, max_work_items=2), 2)
         analyze.assert_not_called()
@@ -1802,7 +1801,7 @@ class EvidenceWorkerTests(unittest.TestCase):
             analyze_evidence=analyzer,
             read_probe=Mock(return_value={}),
             logger=Mock(),
-            lease_seconds=1,
+            lease_seconds=EVIDENCE_JOB_LEASE_SECONDS,
             heartbeat_seconds=heartbeat_seconds,
             retry_base_delay_seconds=1,
             retry_max_delay_seconds=2,
