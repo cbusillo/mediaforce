@@ -42,6 +42,7 @@ struct SampleFacts: Decodable, Sendable {
     struct BalanceChoice: Decodable, Sendable, Identifiable {
         let key: String
         let label: String
+        let detail: String
         let selected: Bool
         var id: String { key }
     }
@@ -57,6 +58,10 @@ struct SampleFacts: Decodable, Sendable {
     static let sampleMakingStates: Set<String> = ["making_test", "sample_waiting"]
 
     var isInProgress: Bool { state.map(Self.inProgressStates.contains) ?? false }
+
+    var canChooseBalance: Bool {
+        actions.contains { [.makeSample, .makeAgain, .chooseSize, .tryAnotherSize].contains($0) }
+    }
 
     var estimatedSavedBytes: Int64? {
         guard estimatedEpisodeBytes > 0, seasonEpisodeCount > 0 else { return nil }

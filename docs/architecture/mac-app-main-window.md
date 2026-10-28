@@ -73,7 +73,9 @@ payloads as the season web page: the page state codes, the playable
 the clips play in a browser), `episode_bytes` (the sampled episode now),
 `estimated_episode_bytes`, `season_bytes` and `season_episode_count` (what
 compressing would take), `goal_bytes`, `size_status`, `draft_hash`, and the
-`size_choices` keys with their per-episode `target_bytes`.
+`size_choices` keys with their per-episode `target_bytes`, and `balance_choices`
+with each choice's key, label, detail and selected state. Balance controls apply
+to making a sample and appear beside those actions.
 
 `POST .../approve` with `confirm` (`high_impact`, `size_tradeoff`) and
 `reviewed_draft_hash` approves the sample and starts compressing the season,
@@ -87,15 +89,17 @@ sample is no longer the draft the Director watched (nothing is approved), or
 compressing (action `queue_encode`), the same way approval does, and answers
 `{"ok": true, "compressing": bool}`. Approve and compress both add `reason`,
 the queue's code when compressing did not start, such as
-`confirm_compression_goal` or `confirm_legacy_size` (a choice the app says is
-needed but has no step for yet) or `free_space_reserve`.
+`confirm_compression_goal` or `confirm_legacy_size` (the app offers size choices
+to make a fresh sample at that goal) or `free_space_reserve`.
 
-`POST .../make` with `size` (a choice key, or null) makes the sample again: it
+`POST .../make` with `size` and `balance` (choice keys, or null) makes the sample again: it
 retries the saved request when the sample failed for a reason a retry fixes,
 remakes a reviewed sample at its measured goal, or asks for a new sample at
-the chosen or recommended size. It answers `409` with `choose_size` when a
-size must be chosen, `choose_balance` when the season has no size and detail
-balance chosen yet (the app says so; it has no step for it yet), or `refused`.
+the chosen or recommended size. An explicit balance starts a fresh sample at
+that size instead of replaying a saved request. Without an explicit balance,
+the current choice or automatic balanced default remains in effect. It answers
+`409` with `choose_size` when a size must be chosen, `choose_balance` for an
+unavailable balance choice, or `refused`.
 
 ## TV shows
 

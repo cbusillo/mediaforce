@@ -11,7 +11,7 @@ final class SampleTests: XCTestCase {
                       "sample": {"url": "/review-media/Lucifer S2/preview.mp4", "size_bytes": 700000}}],
          "episode_bytes": 3853264012, "estimated_episode_bytes": 296440462, "season_bytes": 60000000000,
          "season_episode_count": 16, "goal_bytes": 293736333, "size_status": "over_target", "draft_hash": "draft-1",
-         "balance_choices": [{"key": "reference", "label": "Preserve the reference", "selected": false}, {"key": "balanced", "label": "Balance size and detail", "selected": true}], "size_choices": \(choices)}
+         "balance_choices": [{"key": "reference", "label": "Preserve the reference", "detail": "Keep detail within the goal.", "selected": false}, {"key": "balanced", "label": "Balance size and detail", "detail": "Use a balanced sample.", "selected": true}], "size_choices": \(choices)}
         """
     }
 
@@ -27,6 +27,7 @@ final class SampleTests: XCTestCase {
         XCTAssertEqual(facts.balanceChoices.first(where: \.selected)?.key, "balanced")
         XCTAssertEqual(facts.estimatedSavedBytes, 60_000_000_000 - 296_440_462 * 16)
         XCTAssertFalse(facts.isInProgress)
+        XCTAssertTrue(facts.canChooseBalance)
     }
 
     func testEachStateShowsOnlyItsActions() throws {
@@ -34,6 +35,7 @@ final class SampleTests: XCTestCase {
         XCTAssertEqual(try decode(Self.facts(state: "needs_help", action: "retry_sample", choices: "[]")).actions, [.makeSample])
         XCTAssertEqual(try decode(Self.facts(state: "needs_help", action: "choose_size")).actions, [.chooseSize])
         XCTAssertEqual(try decode(Self.facts(state: "making_test", action: nil)).actions, [.openSample])
+        XCTAssertFalse(try decode(Self.facts(state: "making_test", action: nil)).canChooseBalance)
         XCTAssertEqual(try decode(Self.facts(state: "sample_waiting", action: nil)).actions, [.openSample])
         XCTAssertEqual(try decode(Self.facts(state: "making_season", action: nil)).actions, [])
         XCTAssertTrue(try decode(Self.facts(state: "sample_waiting", action: nil)).isInProgress)

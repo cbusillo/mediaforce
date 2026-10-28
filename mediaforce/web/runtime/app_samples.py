@@ -58,7 +58,8 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
             for choice in _size_choices(folder)
         ],
         "balance_choices": [
-            {"key": choice["key"], "label": choice["title"], "selected": bool(choice.get("selected"))}
+            {"key": choice["key"], "label": choice["title"], "detail": str(choice.get("detail") or ""),
+             "selected": bool(choice.get("selected"))}
             for choice in _balance_choices(folder)
         ],
     }
@@ -165,11 +166,8 @@ def _sample_request(
         balance_choice = next((option for option in balances if option.get("selected")), None) or next(
             (option for option in balances if option.get("key") == DEFAULT_BALANCE), None
         )
-    if size is None and remake:
-        intent = _current_operator_intent(folder)
-        if balance is not None and intent is not None:
-            intent = with_compression_intent(intent, object_dict(balance_choice.get("compression_intent")))
-        return _measured_request(folder), intent
+    if size is None and remake and balance is None:
+        return _measured_request(folder), _current_operator_intent(folder)
     choices = _size_choices(folder)
     if size:
         choice = next((option for option in choices if option["key"] == size), None)

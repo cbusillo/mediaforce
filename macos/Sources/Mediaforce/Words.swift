@@ -363,7 +363,7 @@ extension Words {
     static let approveSample = "Approve and compress the season"
     static let makeSampleAgain = "Make sample again"
     static let makeSample = "Make sample"
-    static let sampleBalance = "Balance of size and detail"
+    static let sampleBalance = "Next sample"
     static let startCompressing = "Start compressing"
     static let tryAnotherSize = "Try another size"
     static let chooseSizeHeadline = "Choose a size"

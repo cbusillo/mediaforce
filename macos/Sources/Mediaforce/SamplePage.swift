@@ -65,7 +65,7 @@ struct SampleWork: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if !facts.balanceChoices.isEmpty {
+                if (facts.canChooseBalance || askingSize) && !facts.balanceChoices.isEmpty {
                     Picker(Words.sampleBalance, selection: Binding(
                         get: {
                             selectedBalance ?? facts.balanceChoices.first(where: \.selected)?.key
@@ -74,7 +74,10 @@ struct SampleWork: View {
                         set: { selectedBalance = $0 }
                     )) {
                         ForEach(facts.balanceChoices) { choice in
-                            Text(choice.label).tag(Optional(choice.key))
+                            Text(choice.label)
+                                .help(choice.detail)
+                                .accessibilityHint(choice.detail)
+                                .tag(Optional(choice.key))
                         }
                     }
                     .pickerStyle(.radioGroup)
@@ -164,12 +167,17 @@ struct SampleWork: View {
 
     private func compressingNotice(_ result: SampleActionResult) -> ActionNotice? {
         if result.compressing == true { return nil }
+        if result.needsChoice && facts?.sizeChoices.isEmpty == false {
+            askingSize = true
+            return nil
+        }
         return result.needsChoice ? .compressNeedsChoice : .approvedNotCompressing
     }
 
     private func make(size: String?) {
         act {
             let result = try await $0.makeSample(prefix, size: size, balance: selectedBalance)
+            if result.ok { selectedBalance = nil }
             askingSize = result.code == "choose_size" && facts?.sizeChoices.isEmpty == false
             if result.ok || askingSize { return nil }
             return .sampleRefused

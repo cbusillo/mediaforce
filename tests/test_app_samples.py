@@ -102,8 +102,8 @@ def test_facts_offer_only_playable_moments_and_the_sizes_that_can_be_chosen() ->
     assert (facts["season_bytes"], facts["season_episode_count"], facts["goal_bytes"]) == (60_000_000_000, 16, 293_736_333)
     assert [choice["key"] for choice in facts["size_choices"]] == ["recommended", "smaller"]
     assert facts["balance_choices"] == [
-        {"key": "reference", "label": "Preserve the reference", "selected": False},
-        {"key": "balanced", "label": "Balance size and detail", "selected": True},
+        {"key": "reference", "label": "Preserve the reference", "detail": "", "selected": False},
+        {"key": "balanced", "label": "Balance size and detail", "detail": "", "selected": True},
     ]
 
     not_playable = _folder(calibration={**_folder()["calibration"], "browser_review_ready": False})
@@ -237,6 +237,11 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert calls.pop()[4]["compression_intent"] == {
         "schema_version": 1, "level": "reference", "confirmed": True,
     }
+    for remake_folder in (_folder(), _folder(resolved_operator_intent={})):
+        assert make(remake_folder, _status("ready_to_compare", "review_sample"), None, "reference")["ok"] is True
+        _kind, _prefix, note, _host, intent, _token = calls.pop()
+        assert intent["compression_intent"]["level"] == "reference"
+
     assert make(_folder(), _status(), "smaller", "not-offered") == {"ok": False, "code": "choose_balance"}
     assert calls == []
 
