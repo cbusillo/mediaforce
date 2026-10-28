@@ -57,32 +57,38 @@ struct ComparePlayer: View {
                 .help(Words.fullScreenHelp)
             }
             .labelStyle(.iconOnly)
-            .disabled(players.preparing || players.failed)
+            .disabled(unplayable)
             HStack(spacing: 14) {
-                if players.comparing {
-                    Picker(Words.viewLabel, selection: $layout) {
-                        ForEach(CompareLayout.allCases) { Text(Words.playerLayout($0)).tag($0) }
+                Group {
+                    if players.comparing {
+                        Picker(Words.viewLabel, selection: $layout) {
+                            ForEach(CompareLayout.allCases) { Text(Words.playerLayout($0)).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .fixedSize()
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .fixedSize()
                 }
-                momentButtons
-                if players.comparing {
-                    Picker(Words.hear, selection: Bindable(players).hearOriginal) {
-                        Text(names.original).tag(true)
-                        Text(names.compressed).tag(false)
+                .disabled(unplayable)
+                // A sample's other clips stay open to choose when one of them can't play.
+                momentButtons.disabled(moments == .episode && unplayable)
+                Group {
+                    if players.comparing {
+                        Picker(Words.hear, selection: Bindable(players).hearOriginal) {
+                            Text(names.original).tag(true)
+                            Text(names.compressed).tag(false)
+                        }
+                        .pickerStyle(.segmented)
+                        .fixedSize()
                     }
-                    .pickerStyle(.segmented)
-                    .fixedSize()
+                    Spacer()
+                    Toggle(Words.actualSize, isOn: $view.actualSize)
+                        .toggleStyle(.button)
+                        .help(Words.actualSizeHelp)
                 }
-                Spacer()
-                Toggle(Words.actualSize, isOn: $view.actualSize)
-                    .toggleStyle(.button)
-                    .help(Words.actualSizeHelp)
+                .disabled(unplayable)
             }
             .controlSize(.small)
-            .disabled(players.preparing || players.failed)
         }
         .task(id: moments) {
             guard case .clips(let clips) = moments, !clips.isEmpty else { return }
@@ -130,6 +136,8 @@ struct ComparePlayer: View {
         players.opensAt = 0
         players.load(compressed: model.client.reviewMedia(moment.sample.url), original: model.client.reviewMedia(moment.original.url))
     }
+
+    private var unplayable: Bool { players.preparing || players.failed }
 
     // The moment the picture is nearest to, so the choice follows the timeline.
     private var currentMoment: Int {
