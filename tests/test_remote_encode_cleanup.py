@@ -97,7 +97,7 @@ def test_mounted_controller_file_is_kept_until_remote_writer_is_gone(tmp_path: P
     runner = Mock(return_value=_result(status=255))
     with patch("mediaforce.web.runtime.encode_runtime.run_remote_command", runner):
         result = encode_runtime._remove_stale_staging_path(
-            output, host={"mode": "ssh", "host": "fixture"}, prefer_remote=False,
+            output, host={"mode": "ssh", "host": "fixture"},
         )
     assert result.outcome == encode_runtime._StagingPathCleanupOutcome.CLEANUP_DEFERRED
     assert output.read_text() == "unfinished"

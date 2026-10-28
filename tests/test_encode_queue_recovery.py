@@ -5,7 +5,6 @@ import hashlib
 import io
 import json
 import os
-import re
 import shutil
 import shlex
 import socket
@@ -31040,7 +31039,7 @@ raise SystemExit(0)
                 manifest_items = json.loads(Path(part["manifest_path"]).read_text())["items"]
                 if [manifest_items[index]["library_item_id"] for index in part["manifest_indexes"]] == [item_id]:
                     return part
-        self.fail(f"No queue part for item {item_id}")
+        raise AssertionError(f"No queue part for item {item_id}")
 
     def test_season_retry_waits_for_a_sleeping_computer_and_finishes_in_its_window(self) -> None:
         queue_config = self._complete_queue_config()
