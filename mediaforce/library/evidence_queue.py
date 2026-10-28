@@ -553,6 +553,7 @@ def _evidence_due_now(now_iso: str) -> Any:
 def original_intake_hold(
     connection: DBClient, *, batch_id: str, priority: int, excluded_media_roots: Collection[str] = (),
     allowed_running_item: int | None = None,
+    max_running_files: int = 1,
 ) -> Literal["cancelled", "paused", "higher_priority"] | None:
     state = load_evidence_queue_state(connection)
     if (state["batch_id"] != batch_id or state["cancel_requested"]
@@ -560,12 +561,28 @@ def original_intake_hold(
         return "cancelled"
     if background_work_is_paused(connection) or state["is_paused"]:
         return "paused"
-    if connection.execute(next_evidence_work_query(batch_id, timestamp(), excluded_media_roots=excluded_media_roots,
-                                                  allowed_running_item=allowed_running_item).where(
+    urgent = next_evidence_work_query(batch_id, timestamp(), excluded_media_roots=excluded_media_roots,
+                                     allowed_running_item=allowed_running_item).where(
         library_item_evidence_state.c.work_priority < priority,
-    )).first() is not None:
-        return "higher_priority"
-    return None
+    )
+    if max_running_files > 1:
+        running = select(
+            library_item_evidence_state.c.library_item_id,
+            func.min(library_item_evidence_state.c.work_priority).label("priority"),
+        ).where(
+            library_item_evidence_state.c.work_batch_id == batch_id,
+            library_item_evidence_state.c.work_status == "running",
+        ).group_by(library_item_evidence_state.c.library_item_id).subquery()
+        victim = select(running, func.count().over().label("file_count")).order_by(
+            running.c.priority.desc(), running.c.library_item_id.desc(),
+        ).limit(1).subquery()
+        urgent = urgent.outerjoin(victim, true()).where(or_(
+            library_item_evidence_state.c.library_item_id == allowed_running_item,
+            and_(victim.c.file_count >= max_running_files, victim.c.library_item_id == allowed_running_item,
+                 victim.c.priority > library_item_evidence_state.c.work_priority),
+        ))
+    return "higher_priority" if connection.execute(urgent).first() is not None else None
+
 
 def runnable_evidence_work_count(connection: DBClient) -> int:
     """Claimable items in the current batch, or zero when anything holds the queue back."""

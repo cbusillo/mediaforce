@@ -67,6 +67,18 @@ request queues work. Empty units report the progress generation they observed
 before claiming so a late exit cannot miss newly queued work. An unexpected worker
 failure cancels its peers through a private stop signal without setting the app's
 shutdown flag; app shutdown is also observed synchronously before claiming.
+Urgent work for another file uses a free slot without interrupting admissions.
+When every slot is occupied, the least important running file is the only one
+that may yield at an existing admission or companion checkpoint. Importance is
+the minimum priority of its running rows, with a stable item-ID tie break.
+Urgent eligibility, capacity and election share one SQL read snapshot. Its
+finished result keeps its lease through validation and commit. If the elected
+file is already analyzing, the urgent file waits for that existing boundary or
+completion; priority does not cancel analysis. An urgent queued sibling still
+preempts its own file because another slot cannot claim that sibling. Serial
+prefetch keeps its read-only priority checks, including inside admission's
+commit transaction. External work wakes idle slots on the existing autostart
+poll, within 30 seconds.
 Foreground item limits retain their serial behavior. The bound follows the
 one/two/three-unit trial on [#1136](https://github.com/cbusillo/mediaforce/issues/1136).
 

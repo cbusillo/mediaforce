@@ -141,6 +141,7 @@ def process_evidence_queue_once(
         deps=runtime_deps,
         excluded_media_roots=roots,
         max_work_items=max_work_items,
+        max_running_files=max_running_files,
     )
 
 
@@ -309,6 +310,7 @@ def _run_evidence_claim(
         deps: EvidenceWorkerDeps,
         excluded_media_roots: Collection[str] = (),
         max_work_items: int | None = 1,
+        max_running_files: int = 1,
 ) -> int:
     with open_db(config.paths.db_path) as connection:
         active_claim = _reload_owned_claim(connection, claim)
@@ -383,7 +385,8 @@ def _run_evidence_claim(
                 last_guard_check = now
                 with open_db(config.paths.db_path) as database:
                     admission_hold = original_intake_hold(database, batch_id=claim.batch_id, priority=claim.work_priority,
-                        excluded_media_roots=excluded_media_roots, allowed_running_item=claim.library_item_id)
+                        excluded_media_roots=excluded_media_roots, allowed_running_item=claim.library_item_id,
+                        max_running_files=max_running_files)
                 if admission_hold == "cancelled":
                     raise ProcessCancelledError("Evidence work was cancelled.")
                 if shutting_down:
@@ -463,7 +466,8 @@ def _run_evidence_claim(
                     claims[claims.index(owned)] = active
                     owned = active
                     hold = original_intake_hold(connection, batch_id=owned.batch_id, priority=owned.work_priority,
-                        excluded_media_roots=excluded_media_roots, allowed_running_item=owned.library_item_id)
+                        excluded_media_roots=excluded_media_roots, allowed_running_item=owned.library_item_id,
+                        max_running_files=max_running_files)
                 if hold == "cancelled":
                     raise ProcessCancelledError("Evidence work was cancelled.")
                 if hold in {"higher_priority", "paused"} or (deps.shutdown_event is not None and deps.shutdown_event.is_set()):
