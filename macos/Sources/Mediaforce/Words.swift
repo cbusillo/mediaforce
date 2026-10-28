@@ -452,6 +452,11 @@ extension Words {
     static let momentChoice = "Moment"
     static let sampleCoverageUnknown = "Coverage was not recorded for this sample."
 
+    static func sampleCoverage(_ facts: SampleFacts) -> String? {
+        guard facts.draftHash != nil, !SampleFacts.sampleMakingStates.contains(facts.state ?? "") else { return nil }
+        return facts.coverageSummary ?? sampleCoverageUnknown
+    }
+
     /// The sample's headline; a kind's page names the season, since its title names the kind.
     static func sampleHeadline(_ facts: SampleFacts, namesSeason: Bool, now: Date) -> String {
         let ready = facts.readyInSeconds.map { " Ready by about \(readyBy(now.addingTimeInterval(TimeInterval($0))))." } ?? ""

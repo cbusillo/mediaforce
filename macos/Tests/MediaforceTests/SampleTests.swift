@@ -54,17 +54,26 @@ final class SampleTests: XCTestCase {
         }
     }
 
-    func testSavedCoverageDecodesWithoutInferringCoverageForOlderSamples() throws {
+    func testCoverageDescribesOnlyASavedSampleWhileNotMakingAnother() throws {
         let summary = "Tested 1 of 106 files. Not yet tested: Season 3, H.264 video."
         let data = Data(Self.facts().utf8)
         var payload = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         payload["coverage_summary"] = summary
         let recorded = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: JSONSerialization.data(withJSONObject: payload))
-        XCTAssertEqual(recorded.coverageSummary, summary)
-        XCTAssertNil(try decode(Self.facts()).coverageSummary)
+        XCTAssertEqual(Words.sampleCoverage(recorded), summary)
+        XCTAssertEqual(Words.sampleCoverage(try decode(Self.facts())), Words.sampleCoverageUnknown)
         payload["coverage_summary"] = NSNull()
         let unrecorded = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: JSONSerialization.data(withJSONObject: payload))
-        XCTAssertNil(unrecorded.coverageSummary)
+        XCTAssertEqual(Words.sampleCoverage(unrecorded), Words.sampleCoverageUnknown)
+        for state in SampleFacts.sampleMakingStates {
+            payload["state"] = state
+            let running = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: JSONSerialization.data(withJSONObject: payload))
+            XCTAssertNil(Words.sampleCoverage(running))
+        }
+        payload["state"] = "needs_test"
+        payload["draft_hash"] = NSNull()
+        let notMade = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: JSONSerialization.data(withJSONObject: payload))
+        XCTAssertNil(Words.sampleCoverage(notMade))
     }
 
     func testAnApprovalHoldsOnlyForTheSampleTheOwnerWatched() throws {
