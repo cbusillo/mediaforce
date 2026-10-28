@@ -24,12 +24,17 @@ frames before copying them to CPU memory. The GPU still decodes the entire
 sampled range. Each range records its decoder; unsupported or incomplete
 hardware decoding uses the complete software pass. A timeout stops further
 analysis for that file and leaves its result unknown for the queue to retry,
-while later queue items remain free to continue. After a video decoder timeout,
-the next attempt uses software; an audio timeout does not change the video
-decoder. End-of-file hardware samples must contain matching signal and edge
+while later queue items remain free to continue. After a video-containing command timeout, including a combined video/audio
+command, the next attempt uses software; an independent audio timeout does not
+change the video decoder. A combined timeout cannot identify which stream stalled,
+so recovery is conservative and the result stays unknown until a complete retry. End-of-file hardware samples must contain matching signal and edge
 counts meeting the expected available frames, without reducing the decode cap.
-Audio and
-cadence retain their measurements and safety decisions.
+A video range also measures the first audio stream in that command, using the
+same seek point and audio duration. A shorter video window keeps the independent
+audio pass so its audio is not truncated. If a combined command fails, the worker
+retries video independently and runs the independent audio check; a failed audio
+graph cannot erase valid video measurements. Audio and cadence retain their
+measurements and safety decisions.
 
 The worker reuses an SSH master per unchanged encode-computer configuration
 within its run. Sockets live in private short temporary directories. The worker starts a
