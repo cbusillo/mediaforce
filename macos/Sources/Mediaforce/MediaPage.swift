@@ -135,6 +135,23 @@ struct MediaPoster: View {
     let posters: PosterStore
     let width: CGFloat
 
+    init(row: MediaRow, posters: PosterStore, width: CGFloat) {
+        self.row = row
+        self.posters = posters
+        self.width = width
+    }
+
+    /// A show's or movie's poster where only its title folder is known.
+    init(titlePrefix: String, name: String, kind: MediaKind, posters: PosterStore, width: CGFloat) {
+        self.init(row: MediaRow(id: titlePrefix, name: name, kind: kind, detail: "", bytes: 0, saved: nil, state: .readyToCompress),
+                  posters: posters, width: width)
+    }
+
+    /// The show or movie a season, file or folder path belongs to: its first two folders.
+    static func titlePrefix(_ path: String) -> String {
+        path.split(separator: "/").prefix(2).joined(separator: "/")
+    }
+
     var body: some View {
         Group {
             if row.kind != .other, let image = posters.image(for: row.posterPrefix ?? row.id) {

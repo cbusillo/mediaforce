@@ -138,8 +138,10 @@ struct WaitingLine: View {
     }
 
     private var showPrefix: String? {
-        guard case .sample(let prefix) = notice.opens else { return nil }
-        return prefix.split(separator: "/").prefix(2).joined(separator: "/")
+        switch notice.opens {
+        case .sample(let prefix), .item(let prefix): MediaPoster.titlePrefix(prefix)
+        default: nil
+        }
     }
 
     private var symbol: String {

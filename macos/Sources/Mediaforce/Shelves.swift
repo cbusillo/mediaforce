@@ -192,9 +192,12 @@ struct BiggestTable: View {
     static let headerHeight: CGFloat = 28
     static let rowHeight: CGFloat = 24
     static let noteHeight: CGFloat = 16
+    // A poster as tall as a row.
+    static let posterWidth: CGFloat = 14
 
     let shows: [MainWindowFacts.NotStartedShow]
     let samples: [MainWindowFacts.Sample]
+    let posters: PosterStore
     let open: (Place) -> Void
 
     var body: some View {
@@ -204,14 +207,17 @@ struct BiggestTable: View {
                 .font(.headline)
             Table(shows) {
                 TableColumn("Show") { (show: MainWindowFacts.NotStartedShow) in
-                    VStack(alignment: .leading, spacing: 1) {
-                        Button(show.show) { open(.item(show.showPrefix)) }
-                            .buttonStyle(QuietLinkStyle(primary: true))
-                        if let note = waitingNote(show), let prefix = show.waitingSamplePrefix {
-                            Button(note) { open(.sample(prefix)) }
-                                .buttonStyle(.plain)
-                                .font(.caption)
-                                .foregroundStyle(Color.accentColor)
+                    HStack(spacing: 8) {
+                        MediaPoster(titlePrefix: show.showPrefix, name: show.show, kind: .tv, posters: posters, width: Self.posterWidth)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Button(show.show) { open(.item(show.showPrefix)) }
+                                .buttonStyle(QuietLinkStyle(primary: true))
+                            if let note = waitingNote(show), let prefix = show.waitingSamplePrefix {
+                                Button(note) { open(.sample(prefix)) }
+                                    .buttonStyle(.plain)
+                                    .font(.caption)
+                                    .foregroundStyle(Color.accentColor)
+                            }
                         }
                     }
                     .padding(.vertical, waitingNote(show) == nil ? 0 : 2)
@@ -289,19 +295,24 @@ struct Computers: View {
 
 struct Latest: View {
     let events: [MainWindowFacts.Event]
+    let posters: PosterStore
     let open: (Place) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Latest")
                 .font(.headline)
-            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 8) {
+            // Centred on each row, so the poster sits beside its line.
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
                 ForEach(events) { event in
                     GridRow {
                         Text(Words.moment(event.at))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                             .fixedSize()
+                        MediaPoster(titlePrefix: MediaPoster.titlePrefix(event.season?.prefix ?? event.relPath),
+                                    name: Words.eventSentence(event), kind: event.season == nil ? .movies : .tv,
+                                    posters: posters, width: 16)
                         if let season = event.season {
                             Button(Words.eventSentence(event)) { open(.item(season.prefix)) }
                                 .buttonStyle(QuietLinkStyle(primary: true))
