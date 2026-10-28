@@ -192,7 +192,7 @@ struct BiggestTable: View {
     static let headerHeight: CGFloat = 28
     static let rowHeight: CGFloat = 24
     static let noteHeight: CGFloat = 16
-    // A poster as tall as a row.
+    // A poster that fits inside a row.
     static let posterWidth: CGFloat = 14
 
     let shows: [MainWindowFacts.NotStartedShow]
@@ -302,24 +302,26 @@ struct Latest: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Latest")
                 .font(.headline)
-            // Centred on each row, so the poster sits beside its line.
-            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 8) {
                 ForEach(events) { event in
                     GridRow {
                         Text(Words.moment(event.at))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                             .fixedSize()
-                        MediaPoster(titlePrefix: MediaPoster.titlePrefix(event.season?.prefix ?? event.relPath),
-                                    name: Words.eventSentence(event), kind: event.season == nil ? .movies : .tv,
-                                    posters: posters, width: 16)
-                        if let season = event.season {
-                            Button(Words.eventSentence(event)) { open(.item(season.prefix)) }
-                                .buttonStyle(QuietLinkStyle(primary: true))
-                                .fixedSize(horizontal: false, vertical: true)
-                        } else {
-                            Text(Words.eventSentence(event))
-                                .fixedSize(horizontal: false, vertical: true)
+                        // The poster sits centred beside the sentence; the row keeps the time on its first line.
+                        HStack(spacing: 8) {
+                            MediaPoster(titlePrefix: MediaPoster.titlePrefix(event.relPath), name: Words.eventSentence(event),
+                                        kind: MediaKind(rawValue: String(event.relPath.split(separator: "/").first ?? "")) ?? .other,
+                                        posters: posters, width: 16)
+                            if let season = event.season {
+                                Button(Words.eventSentence(event)) { open(.item(season.prefix)) }
+                                    .buttonStyle(QuietLinkStyle(primary: true))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Text(Words.eventSentence(event))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
                 }

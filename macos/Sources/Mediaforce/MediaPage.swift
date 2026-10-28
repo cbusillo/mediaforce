@@ -174,6 +174,8 @@ struct MediaPoster: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: width > 60 ? 6 : 3, style: .continuous))
+        // A small poster sits beside its name, which already says it.
+        .accessibilityHidden(width <= 60)
     }
 }
 
