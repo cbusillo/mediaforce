@@ -341,7 +341,9 @@ Queue pause, resume and cancellation retain their existing durable state.
 
 A global background pause saved by the retired web page appears as paused in
 the Mac app. Resume clears that pause along with the encode-queue pause;
-explicitly paused evidence batches remain paused until resumed through the CLI.
+explicitly paused evidence batches retain their saved choice. Existing limitation:
+the Mac app does not yet expose an evidence-only pause or resume it. The CLI
+recovery below remains available; [native visibility and recovery](https://github.com/cbusillo/mediaforce/issues/1196) are follow-up work.
 
 Create a paused folder pilot:
 
