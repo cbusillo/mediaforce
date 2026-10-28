@@ -685,7 +685,7 @@ def _read_manifest_files(path: str, _mtime_ns: int, _size: int) -> tuple[EncodeR
     files: list[EncodeRunFile] = []
     for raw in object_list(payload.get("items")):
         item = object_dict(raw)
-        item_id = item.get("library_item_id")
-        stable_id = int(item_id) if isinstance(item_id, int) and not isinstance(item_id, bool) and item_id > 0 else 0
+        item_id = item.get("library_item_id", 0)
+        stable_id = item_id if isinstance(item_id, int) and not isinstance(item_id, bool) and item_id > 0 else 0
         files.append(EncodeRunFile(stable_id, str(item.get("rel_path") or "").strip()))
     return tuple(files)
