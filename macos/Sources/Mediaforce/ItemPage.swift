@@ -285,21 +285,19 @@ struct WaitingFiles: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(files) { file in
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    WaitingMark()
-                    Text("\(Words.fileName(file)): \(Words.waitingReason(file))")
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 12)
-                    HStack(spacing: 8) {
-                        if let question = file.sizeQuestion {
-                            Button(Words.keepTheOriginal) { act(file, .keepOriginal) }
-                            Button(Words.allowLarger(question)) { act(file, .allowLarger) }
-                        } else if file.validation == "size_held" {
-                            Button(Words.keepThisCopy) { act(file, .keepThisCopy) }
-                            Button(Words.makeItAgain) { act(file, .makeAgain) }
-                        }
+                DecisionLine {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        WaitingMark()
+                        Text("\(Words.fileName(file)): \(Words.waitingReason(file))")
                     }
-                    .fixedSize()
+                } buttons: {
+                    if let question = file.sizeQuestion {
+                        Button(Words.keepTheOriginal) { act(file, .keepOriginal) }
+                        Button(Words.allowLarger(question)) { act(file, .allowLarger) }
+                    } else if file.validation == "size_held" {
+                        Button(Words.keepThisCopy) { act(file, .keepThisCopy) }
+                        Button(Words.makeItAgain) { act(file, .makeAgain) }
+                    }
                 }
             }
         }

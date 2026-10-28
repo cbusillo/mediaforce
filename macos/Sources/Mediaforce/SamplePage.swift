@@ -53,23 +53,20 @@ struct SampleWork: View {
                                   names: PictureNames(compressed: Words.sample),
                                   gettingReady: Words.gettingSampleReady, couldNotPlay: Words.couldNotPlaySample)
                 }
-                // The decision, one plain line under the player with its buttons beside it, as on a kind's page.
-                HStack(alignment: .firstTextBaseline, spacing: 14) {
+                // The decision, under the player.
+                DecisionLine {
                     // On a kind's page the headline names the season, so it opens the season's page.
-                    Group {
-                        if namesSeason {
-                            Button(Words.sampleHeadline(facts, namesSeason: true, now: .now)) { openItem(prefix) }
-                                .buttonStyle(QuietLinkStyle(primary: true))
-                        } else {
-                            Text(Words.sampleHeadline(facts, namesSeason: false, now: .now))
-                        }
+                    if namesSeason {
+                        Button(Words.sampleHeadline(facts, namesSeason: true, now: .now)) { openItem(prefix) }
+                            .buttonStyle(QuietLinkStyle(primary: true))
+                    } else {
+                        Text(Words.sampleHeadline(facts, namesSeason: false, now: .now))
                     }
-                    .fixedSize(horizontal: false, vertical: true)
+                } buttons: {
                     if facts.isInProgress {
                         ProgressView()
                             .controlSize(.small)
                     }
-                    Spacer(minLength: 12)
                     SampleActions(
                         facts: facts, working: working, approve: startApproval, make: { make(size: $0) },
                         compress: compress, openItem: { openItem(prefix) }
@@ -234,7 +231,7 @@ struct SizeChoices: View {
     }
 }
 
-/// The sample's buttons, beside its decision line.
+/// The sample's buttons, in its decision line.
 struct SampleActions: View {
     let facts: SampleFacts
     let working: Bool
@@ -274,7 +271,6 @@ struct SampleActions: View {
                 }
             }
         }
-        .fixedSize()
         .disabled(working)
     }
 }
