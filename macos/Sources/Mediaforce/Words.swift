@@ -1268,7 +1268,7 @@ extension Words {
         switch mode {
         case "on": "Yes"
         case "off": "No"
-        default: "Look it up"
+        default: "As listed online"
         }
     }
 
