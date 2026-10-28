@@ -635,22 +635,27 @@ def encode_run_manifest_files(run: Mapping[str, Any], *, strict_indexes: bool = 
     files = _manifest_files(Path(str(run.get("manifest_path") or "")).expanduser())
     if not files:
         return []
+    indexes = encode_run_manifest_indexes(run, len(files), strict_indexes=strict_indexes)
+    chosen = [files[index] for index in indexes]
+    if strict_indexes and any(not (item.library_item_id > 0 or item.rel_path) for item in chosen):
+        return []
+    return chosen
+
+
+def encode_run_manifest_indexes(run: Mapping[str, Any], item_count: int, *, strict_indexes: bool = False) -> list[int]:
     indexes = run.get("manifest_indexes")
-    if strict_indexes:
-        if not isinstance(indexes, list) and (run.get("job_kind") == "shard" or indexes is not None):
-            return []
-        if isinstance(indexes, list) and (not indexes or any(
-            not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(files)
-            or not (files[index].library_item_id > 0 or files[index].rel_path) for index in indexes
-        )):
-            return []
-        if indexes is None and any(not (item.library_item_id > 0 or item.rel_path) for item in files):
-            return []
+    if strict_indexes and (
+        (not isinstance(indexes, list) and (run.get("job_kind") == "shard" or indexes is not None))
+        or (isinstance(indexes, list) and (not indexes or any(
+            not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < item_count for index in indexes
+        )))
+    ):
+        return []
     if isinstance(indexes, list):
-        chosen = [files[index] for index in indexes if isinstance(index, int) and 0 <= index < len(files)]
+        chosen = [index for index in indexes if isinstance(index, int) and 0 <= index < item_count]
         if chosen:
             return chosen
-    return list(files)
+    return list(range(item_count))
 
 
 def encode_run_rel_paths(run: Mapping[str, Any]) -> list[str]:

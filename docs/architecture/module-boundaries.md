@@ -169,8 +169,9 @@ Guidance:
       file follows its newest runnable-job outcome across scopes, using saved
       manifest IDs and indexes, with paths for legacy manifests. A question or
       Stop holds that file while its siblings continue. A newer completion
-      settles only that file's older question; retained restart-stopped writer
-      custody still waits for its own reconciliation. Unknown membership holds
+      settles only that file's older question; retained writer custody still
+      waits for its own bound reconciliation. Cleanup keeps the saved file
+      membership while a referenced job remains unfinished. Unknown membership holds
       the overlapping scope. Only eligible IDs join a new run, leaving prior
       question and custody records intact; admission rechecks those IDs inside
       its transaction. Finished staged files follow their existing workflow

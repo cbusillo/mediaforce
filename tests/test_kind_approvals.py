@@ -737,6 +737,43 @@ def test_a_newer_completion_does_not_reconcile_an_earlier_restart_stopped_writer
     assert chosen is not None and chosen.files == (item_id,)
 
 
+@pytest.mark.parametrize("status,failure_kind", [
+    ("stopped", None), ("needs_attention", "worker_restart"), ("needs_attention", "stale_lease"),
+])
+def test_a_newer_completion_cannot_hide_other_retained_writer_custody(
+        tmp_path: Path, status: str, failure_kind: str | None,
+) -> None:
+    config = _config(tmp_path)
+    config.raw["media"].update({"staging_root": str(tmp_path / "staging"), "output_container": "mkv"})
+    item_id = _waiting_episode(config, EPISODE, 1_000)
+    children = _stored_folder_run(config, "tv/Thriller", {item_id: EPISODE}, {item_id: (status, None)})
+    _stored_folder_run(config, SEASON, {item_id: EPISODE}, {}, name="later-completion",
+                       created_at="2026-10-27T00:00:00+00:00")
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == children[item_id]).values(
+            last_failure_kind=failure_kind, host_json=json.dumps({"host": "writer.example", "mode": "ssh"}),
+            attempt_count=1, started_at="2026-10-26T00:00:00+00:00",
+        ))
+    load = _loader({SEASON: _approved(config)}, {})
+
+    assert _next(config, load) is None
+
+    from mediaforce.web.runtime.encode_runtime import _remote_cleanup_receipt
+
+    with open_db(config.paths.db_path) as connection:
+        job = load_encode_job(connection, children[item_id])
+        assert job is not None
+        items = json.loads(Path(job["manifest_path"]).read_text())["items"]
+        receipt = _remote_cleanup_receipt(config, job, items)
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == children[item_id]).values(
+            progress_json=json.dumps({"remote_cleanup_verified": receipt}),
+        ))
+    assert _next(config, load) is not None
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == children[item_id]).values(attempt_count=2))
+    assert _next(config, load) is None
+
+
 def test_a_catalog_path_change_does_not_hide_a_stopped_writer_for_the_same_item(tmp_path: Path) -> None:
     config = _config(tmp_path)
     item_id = _waiting_episode(config, EPISODE, 1_000)

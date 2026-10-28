@@ -40,7 +40,7 @@ from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCa
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 from mediaforce.web.runtime.production_holds import approval_identity
-from mediaforce.web.runtime.encode_runtime import CONTROLLER_RESTART_STOP_REASON, unfinished_child_reason
+from mediaforce.web.runtime.encode_runtime import encode_writer_cleanup_pending, retained_encode_writer_filter, unfinished_child_reason
 
 APPROVABLE_KINDS = ("darker_live_action", "bright_live_action")
 KIND_IS_ONE_TIME_CODE = "kind_is_one_time"
@@ -185,7 +185,7 @@ KIND_RETRY_SECONDS = 6 * 3600.0
 
 
 def background_queue_blocker(
-        connection: DBClient, *, library_item_ids: Collection[int] | None = None,
+        connection: DBClient, *, library_item_ids: Collection[int] | None = None, config: MediaforceConfig | None = None,
 ) -> dict[str, Any] | None:
     """Why the background queue waits: the owner paused work, or a production run is queued or running."""
     active = connection.execute(select(encode_jobs.c.job_id).where(
@@ -195,7 +195,7 @@ def background_queue_blocker(
         return {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
     if library_item_ids is not None:
         files = _waiting_files(connection, library_item_ids=library_item_ids)
-        if set(library_item_ids) != {int(item["id"]) for item in files} or _files_waiting_for_owner(connection, files):
+        if set(library_item_ids) != {int(item["id"]) for item in files} or _files_waiting_for_owner(connection, files, config=config):
             return {"ok": False, "code": KIND_QUEUE_WAITS_CODE}
     return None
 
@@ -206,7 +206,7 @@ def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tup
     Files the owner chose to keep original are finished, so they never bring a season back.
     """
     rows = _waiting_files(connection)
-    blocked = _files_waiting_for_owner(connection, rows)
+    blocked = _files_waiting_for_owner(connection, rows, config=config)
     waiting: dict[str, tuple[int, list[int]]] = {}
     for item in rows:
         season = season_prefix_of(config, str(item["rel_path"]))
@@ -237,7 +237,9 @@ def _waiting_files(connection: DBClient, *, library_item_ids: Collection[int] | 
     return [item for item in rows if int(item["id"]) not in kept]
 
 
-def _files_waiting_for_owner(connection: DBClient, files: list[dict[str, Any]]) -> frozenset[int]:
+def _files_waiting_for_owner(
+        connection: DBClient, files: list[dict[str, Any]], *, config: MediaforceConfig | None = None,
+) -> frozenset[int]:
     if not files:
         return frozenset()
     all_files = {int(item["id"]): str(item["rel_path"]) for item in files}
@@ -246,19 +248,22 @@ def _files_waiting_for_owner(connection: DBClient, files: list[dict[str, Any]]) 
     parents = set(connection.execute(select(encode_jobs.c.parent_job_id).where(
         encode_jobs.c.parent_job_id.is_not(None),
     )).scalars())
-    rows = connection.execute(select(encode_jobs).where(encode_jobs.c.status.in_(RECENT_ENCODE_JOB_STATUSES)).order_by(
+    rows = connection.execute(select(encode_jobs, retained_encode_writer_filter().label("retained_writer")).where(
+        encode_jobs.c.status.in_(RECENT_ENCODE_JOB_STATUSES),
+    ).order_by(
         encode_jobs.c.created_at.desc(), literal_column("rowid").desc(),
     )).mappings()
     for row in rows:
         if row["job_kind"] == "folder" and row["job_id"] in parents:
             continue
-        custody_hold = row["status"] == "stopped" and row["terminal_reason"] == CONTROLLER_RESTART_STOP_REASON
-        if not remaining and not custody_hold:
+        if not remaining and not row["retained_writer"]:
             continue
         job = {**row, "progress": json.loads(row["progress_json"] or "{}"),
-               "manifest_indexes": json.loads(row["manifest_indexes_json"]) if row["manifest_indexes_json"] else None}
+               "manifest_indexes": json.loads(row["manifest_indexes_json"]) if row["manifest_indexes_json"] else None,
+               "host": object_dict(json.loads(row["host_json"] or "{}"))}
+        custody_hold = bool(row["retained_writer"]) and encode_writer_cleanup_pending(config, job)
         reason, _label, needs_owner = unfinished_child_reason(job) if job["status"] != "completed" else ("", "", False)
-        held = needs_owner or reason == "size_exception_declined"
+        held = custody_hold or needs_owner or reason == "size_exception_declined"
         references = encode_run_manifest_files(job, strict_indexes=True)
         if not references and not held:
             continue
