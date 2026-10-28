@@ -18,6 +18,8 @@ enum Words {
         switch code {
         case "ready": "Ready"
         case "busy": "Compressing"
+        case "finishing_file": "Finishing this file, then waiting for its work window"
+        case "schedule_disabled": "Work is turned off for this computer"
         case "checking": "Checking this computer"
         case "outside_schedule": "Waiting for its work window"
         case "cooling_down": "Resting after repeated failures"
@@ -104,7 +106,7 @@ enum Words {
     static let workWindowsItem = "Work windows"
 
     /// States where a computer is fine as it is; every other state has something to fix.
-    private static let computerStatesFine: Set<String> = ["ready", "busy", "outside_schedule", "not_encoding", "checking", "away", "reconnecting", "unreachable"]
+    private static let computerStatesFine: Set<String> = ["ready", "busy", "finishing_file", "schedule_disabled", "outside_schedule", "not_encoding", "checking", "away", "reconnecting", "unreachable"]
 
     static func computerNeedsYou(_ state: String?) -> Bool {
         state.map { !computerStatesFine.contains($0) } ?? false

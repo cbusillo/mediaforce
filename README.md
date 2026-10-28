@@ -680,7 +680,10 @@ Work windows can instead allow the current file to finish: enable **Finish the
 current file when the window closes** in Settings → Computers → Work windows.
 A file admitted before closing finishes its encode, checks and normal publication;
 no next file starts until the window opens again. This avoids throwing away a
-partial encode on a computer used for other work during the day. Manual
+partial encode on a computer used for other work during the day. Duration
+estimates still hold back files unlikely to fit before closing; the option
+protects a running file when that estimate was too short. Legacy multi-file
+jobs retain their hard stop; new queue work is one file per job. Manual
 `Bypass scheduler` requests still explicitly override the work window.
 
 Bounded host schedules are hard execution windows. A non-bypassed quality

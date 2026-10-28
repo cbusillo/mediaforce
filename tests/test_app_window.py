@@ -273,6 +273,9 @@ def test_computer_states_are_codes(connection: DBClient) -> None:
         _computer("studio", active_encode_count=1, active_flag="busy"),
         _computer("mbp"),
         _computer("night", schedule_open=False, active_flag="idle"),
+        _computer("off", schedule_open=False, schedule_profile="never"),
+        _computer("finishing", schedule_open=False, active_encode_count=1, finish_current_file=True),
+        _computer("bypassed", schedule_open=False, active_encode_count=1, finish_current_file=True, running_jobs=[{"bypass_schedule": True}]),
         _computer("cooling", active_flag="cooldown"),
         _computer("sampler", capabilities=["sample_calibration"]),
         _computer("mini", available=False, check_failure="password_needed"),
@@ -286,7 +289,7 @@ def test_computer_states_are_codes(connection: DBClient) -> None:
     states = [(computer["key"], computer["state"]) for computer in _payload(connection, computers=computers)["computers"]]
 
     assert states == [
-        ("studio", "busy"), ("mbp", "ready"), ("night", "outside_schedule"), ("cooling", "cooling_down"),
+        ("studio", "busy"), ("mbp", "ready"), ("night", "outside_schedule"), ("off", "schedule_disabled"), ("finishing", "finishing_file"), ("bypassed", "busy"), ("cooling", "cooling_down"),
         ("sampler", "not_encoding"), ("mini", "password_needed"), ("server", "storage_unreachable"),
         ("odd", "not_ready"), ("staging", "storage_unreachable"), ("refused", "not_ready"), ("new", "checking"),
     ]

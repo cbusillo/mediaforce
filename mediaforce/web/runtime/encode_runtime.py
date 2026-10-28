@@ -3282,7 +3282,9 @@ def _selected_encode_schedule_close_deadline(
         job: dict[str, Any],
         host_payload: dict[str, Any],
 ) -> str | None:
-    if bool(job.get("bypass_schedule")) or host_payload.get("finish_current_file") is True:
+    if bool(job.get("bypass_schedule")):
+        return None
+    if host_payload.get("finish_current_file") and int_value(job.get("item_count")) == 1:
         return None
     deadline = parse_schedule_close_deadline(host_payload.get("schedule_closes_at"))
     return deadline.isoformat(timespec="seconds") if deadline is not None else None
@@ -4144,8 +4146,11 @@ def load_next_runnable_encode_job(
         if host_estimate is not None and not bool(candidate_job.get("bypass_schedule")):
             candidate_job["admission_estimate"] = _encode_duration_estimate_payload(host_estimate)
         schedule_close_deadline_at = _selected_encode_schedule_close_deadline(candidate_job, candidate_host)
-        schedule_close_deadline = parse_schedule_close_deadline(schedule_close_deadline_at)
-        if schedule_close_deadline is not None and schedule_close_deadline <= now:
+        admission_closes_at = (
+            None if candidate_job.get("bypass_schedule")
+            else parse_schedule_close_deadline(candidate_host.get("schedule_closes_at"))
+        )
+        if admission_closes_at is not None and admission_closes_at <= now:
             candidate_job.update(
                 {
                     "waiting_reason": SCHEDULE_CLOSE_WAITING_REASON,

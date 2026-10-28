@@ -451,7 +451,6 @@ def schedule_profile_options(*, schedule_profiles: list[dict[str, Any]]) -> list
                 "all_day_days_of_week": row.get("all_day_days_of_week"),
                 "start_hour": row.get("start_hour"),
                 "end_hour": row.get("end_hour"),
-                "finish_current_file": row.get("finish_current_file"),
             }
         )
         options.append(

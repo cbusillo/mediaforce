@@ -201,13 +201,17 @@ Settings → Computers:
 - Assign it only to the existing M4 Mac Studio computer. Do not identify it
   by a guessed address or replace a schedule other computers still use.
 - Read the saved settings back. Check Activity's Computers row outside the
-  window: `Waiting for its work window`. No new ordinary queued file or
+  window: it waits, or says it is finishing the current file first. No new ordinary queued file or
   sample starts on that computer until midnight in its own timezone.
 
 At 5:00 AM, a file already running finishes normally, including quality
 checks and publication, even if this takes it past 5:00 AM. There is no
 checkpoint to resume a partial encode safely. Finishing the file preserves
-that work; the next file waits for midnight. Originals and rollback copies
+that work at the window boundary; the next file waits for midnight. Duration
+estimates still hold back files unlikely to finish before 5:00 AM. A service
+restart can interrupt a file under the existing recovery rules; do not deploy
+until the documented idle gate passes. Legacy multi-file jobs retain their
+hard stop; normal queue work is already one file per job. Originals and rollback copies
 stay under the existing publication and cleanup rules. A deliberate bypass
 request still overrides the schedule and must not be used for ordinary
 night-window work. No launchd, energy, sleep or other system setting changes

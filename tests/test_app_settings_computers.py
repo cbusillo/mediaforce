@@ -236,9 +236,10 @@ def test_computer_facts_read_the_file_as_it_is_now(computers_app: tuple[FastAPI,
     assert saved["encode_queue"]["schedule_profiles"][0]["label"] == "Late nights"
 
 
+@pytest.mark.parametrize("day", ["2026-10-28", "2026-11-01", "2027-03-14"])
 @pytest.mark.parametrize("finish_current_file", [False, True])
 def test_saved_night_window_reaches_dispatch_for_only_the_selected_computer(
-    computers_app: tuple[FastAPI, Path], finish_current_file: bool,
+    computers_app: tuple[FastAPI, Path], finish_current_file: bool, day: str,
 ) -> None:
     app, runtime_settings_path = computers_app
     before = json.loads(runtime_settings_path.read_text())
@@ -258,10 +259,12 @@ def test_saved_night_window_reaches_dispatch_for_only_the_selected_computer(
         available=True, message="Ready", missing_paths=[], schedule_timezone="America/New_York",
     )
     for hour, minute, second, allowed in [(23, 59, 59, False), (0, 0, 0, True), (4, 59, 59, True), (5, 0, 0, False)]:
-        now = datetime(2026, 10, 28, hour, minute, second, tzinfo=ZoneInfo("America/New_York"))
+        now = datetime.fromisoformat(day).replace(hour=hour, minute=minute, second=second, tzinfo=ZoneInfo("America/New_York"))
         with open_db(config.paths.db_path) as connection, patch("mediaforce.web.app._safe_collect_host_statuses", return_value=[status]):
             rows = web_app._host_runtime_rows(connection, config, now=now)
         assert rows[0]["queue_active"] is allowed
         assert rows[0]["finish_current_file"] is finish_current_file
         if allowed:
-            assert (_selected_encode_schedule_close_deadline({}, rows[0]) is None) is finish_current_file
+            closes_at = datetime.fromisoformat(rows[0]["schedule_closes_at"])
+            assert closes_at == datetime.fromisoformat(day).replace(hour=5, tzinfo=ZoneInfo("America/New_York"))
+            assert (_selected_encode_schedule_close_deadline({"item_count": 1}, rows[0]) is None) is finish_current_file
