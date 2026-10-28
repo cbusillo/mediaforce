@@ -80,3 +80,23 @@ struct LibraryStatePicker: View {
     }
 }
 
+/// A decision as one plain line with its buttons beside it, as on a kind's page. When the buttons leave the line too
+/// little room, they move under it instead of squeezing it.
+struct DecisionLine<Line: View, Buttons: View>: View {
+    @ViewBuilder let line: Line
+    @ViewBuilder let buttons: Buttons
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                line
+                Spacer(minLength: 12)
+                HStack(spacing: 8) { buttons }.fixedSize()
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                line.fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) { buttons }.fixedSize()
+            }
+        }
+    }
+}

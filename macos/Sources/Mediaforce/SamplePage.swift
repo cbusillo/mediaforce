@@ -48,28 +48,36 @@ struct SampleWork: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             if let facts {
-                // On a kind's page the headline names the season, so it opens the season's page.
-                Group {
+                if !facts.moments.isEmpty {
+                    ComparePlayer(players: players, model: model, moments: .clips(facts.moments),
+                                  names: PictureNames(compressed: Words.sample),
+                                  gettingReady: Words.gettingSampleReady, couldNotPlay: Words.couldNotPlaySample)
+                }
+                // The decision, under the player.
+                DecisionLine {
+                    // On a kind's page the headline names the season, so it opens the season's page.
                     if namesSeason {
                         Button(Words.sampleHeadline(facts, namesSeason: true, now: .now)) { openItem(prefix) }
                             .buttonStyle(QuietLinkStyle(primary: true))
                     } else {
                         Text(Words.sampleHeadline(facts, namesSeason: false, now: .now))
                     }
+                } buttons: {
+                    if facts.isInProgress {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    SampleActions(
+                        facts: facts, working: working, approve: startApproval, make: { make(size: $0) },
+                        compress: compress, openItem: { openItem(prefix) }
+                    )
                 }
-                .font(.title3.weight(.semibold))
                 if let failure = Words.sampleFailure(facts.failure), facts.state == "needs_help" {
                     Text(failure)
                         .foregroundStyle(.secondary)
                 }
-                if facts.isInProgress {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-                if !facts.moments.isEmpty {
-                    ComparePlayer(players: players, model: model, moments: .clips(facts.moments),
-                                  names: PictureNames(compressed: Words.sample),
-                                  gettingReady: Words.gettingSampleReady, couldNotPlay: Words.couldNotPlaySample)
+                if facts.actions.contains(.chooseSize) || (askingSize && !facts.sizeChoices.isEmpty) {
+                    SizeChoices(facts: facts, working: working) { make(size: $0) }
                 }
                 SampleFactsGrid(facts: facts)
                 if let coverage = Words.sampleCoverage(facts) {
@@ -77,10 +85,6 @@ struct SampleWork: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                SampleActions(
-                    facts: facts, working: working, askingSize: askingSize, approve: startApproval, make: { make(size: $0) },
-                    compress: compress, openItem: { openItem(prefix) }
-                )
             } else if unreadable {
                 Text(Words.staleNotice(.failing, lastHeard: nil))
                     .foregroundStyle(.secondary)
@@ -207,10 +211,30 @@ struct SampleFactsGrid: View {
     }
 }
 
+/// The sizes to choose from when the sample can't be made until one is chosen.
+struct SizeChoices: View {
+    let facts: SampleFacts
+    let working: Bool
+    let make: (String?) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(Words.chooseSizeHeadline)
+                .font(.headline)
+            HStack(spacing: 10) {
+                ForEach(facts.sizeChoices) { choice in
+                    Button(Words.sizeChoice(choice)) { make(choice.key) }
+                }
+            }
+        }
+        .disabled(working)
+    }
+}
+
+/// The sample's buttons, in its decision line.
 struct SampleActions: View {
     let facts: SampleFacts
     let working: Bool
-    let askingSize: Bool
     let approve: () -> Void
     let make: (String?) -> Void
     let compress: () -> Void
@@ -218,44 +242,32 @@ struct SampleActions: View {
 
     var body: some View {
         let actions = facts.actions
-        VStack(alignment: .leading, spacing: 10) {
-            if actions.contains(.chooseSize) || (askingSize && !facts.sizeChoices.isEmpty) {
-                Text(Words.chooseSizeHeadline)
-                    .font(.headline)
-                HStack(spacing: 10) {
+        HStack(spacing: 10) {
+            if actions.contains(.approve) {
+                Button(Words.approveSample, action: approve)
+                    .buttonStyle(.borderedProminent)
+            }
+            if actions.contains(.startCompressing) {
+                Button(Words.startCompressing, action: compress)
+                    .buttonStyle(.borderedProminent)
+            }
+            // Checking, replacing, retrying and motion choices live on the season's page.
+            if let next = actions.first(where: SampleFacts.seasonPageActions.contains) {
+                Button(Words.workAction(next), action: openItem)
+                    .buttonStyle(.borderedProminent)
+            }
+            if actions.contains(.makeSample) {
+                Button(Words.makeSample) { make(nil) }
+                    .buttonStyle(.borderedProminent)
+            }
+            if actions.contains(.makeAgain) {
+                Button(Words.makeSampleAgain) { make(nil) }
+            }
+            if actions.contains(.tryAnotherSize) {
+                Menu(Words.tryAnotherSize) {
                     ForEach(facts.sizeChoices) { choice in
                         Button(Words.sizeChoice(choice)) { make(choice.key) }
                     }
-                }
-            }
-            HStack(spacing: 10) {
-                if actions.contains(.approve) {
-                    Button(Words.approveSample, action: approve)
-                        .buttonStyle(.borderedProminent)
-                }
-                if actions.contains(.startCompressing) {
-                    Button(Words.startCompressing, action: compress)
-                        .buttonStyle(.borderedProminent)
-                }
-                // Checking, replacing, retrying and motion choices live on the season's page.
-                if let next = actions.first(where: SampleFacts.seasonPageActions.contains) {
-                    Button(Words.workAction(next), action: openItem)
-                        .buttonStyle(.borderedProminent)
-                }
-                if actions.contains(.makeSample) {
-                    Button(Words.makeSample) { make(nil) }
-                        .buttonStyle(.borderedProminent)
-                }
-                if actions.contains(.makeAgain) {
-                    Button(Words.makeSampleAgain) { make(nil) }
-                }
-                if actions.contains(.tryAnotherSize) {
-                    Menu(Words.tryAnotherSize) {
-                        ForEach(facts.sizeChoices) { choice in
-                            Button(Words.sizeChoice(choice)) { make(choice.key) }
-                        }
-                    }
-                    .fixedSize()
                 }
             }
         }
