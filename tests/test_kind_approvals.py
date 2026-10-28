@@ -20,6 +20,7 @@ from mediaforce.core.db_tables import calibration_jobs, encode_jobs, library_ite
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
 from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
+from mediaforce.web.runtime.encode_runtime import CONTROLLER_RESTART_STOP_REASON, KEPT_ORIGINAL_TERMINAL_REASON
 from mediaforce.library.content_kinds import season_evidence, season_grouping
 from mediaforce.library.source_evidence import append_version
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
@@ -250,12 +251,17 @@ def _waiting_episode(config: MediaforceConfig, rel_path: str, size_bytes: int, *
     return int(result.inserted_primary_key[0])
 
 
-def _encode_job(config: MediaforceConfig, prefix: str, status: str) -> None:
+def _encode_job(
+        config: MediaforceConfig, prefix: str, status: str, *, job_id: str | None = None, parent_job_id: str | None = None,
+        terminal_reason: str | None = None, job_kind: str = "single", created_at: str = "2026-10-26T00:00:00+00:00",
+) -> str:
+    job_id = job_id or f"{prefix}-{status}"
     with open_db(config.paths.db_path) as connection:
         connection.execute(encode_jobs.insert().values(
-            job_id=f"{prefix}-{status}", prefix=prefix, status=status, manifest_path="run.json", host_json="{}",
-            created_at="2026-10-26T00:00:00+00:00", updated_at="2026-10-26T00:00:00+00:00",
+            job_id=job_id, prefix=prefix, status=status, manifest_path="run.json", host_json="{}", job_kind=job_kind,
+            parent_job_id=parent_job_id, terminal_reason=terminal_reason, created_at=created_at, updated_at=created_at,
         ))
+    return job_id
 
 
 def _next(config: MediaforceConfig, load: KindAwareLoader, *, now: float = 0.0) -> KindSeason | None:
@@ -567,7 +573,7 @@ def test_automatic_folder_admission_preserves_approval_and_queue_guards(tmp_path
     assert _next(config, _loader({SEASON: approval}, {})) is None
 
 
-@pytest.mark.parametrize("scope", [SEASON, "tv/Thriller", "tv"])
+@pytest.mark.parametrize("scope", [SEASON, "tv/Thriller", "tv", ""])
 def test_automatic_admission_respects_a_stop_on_its_containing_scope(tmp_path: Path, scope: str) -> None:
     config = _config(tmp_path)
     _waiting_episode(config, EPISODE, 1_000)
@@ -590,3 +596,36 @@ def test_a_file_problem_in_a_show_run_does_not_hold_other_seasons(tmp_path: Path
     _encode_job(config, "tv/Thriller", "needs_attention")
 
     assert _next(config, _loader({"tv/Thriller": _approved(config)}, {})) is not None
+
+
+@pytest.mark.parametrize("scope", [SEASON, "tv/Thriller", "tv", ""])
+@pytest.mark.parametrize("reason", [KEPT_ORIGINAL_TERMINAL_REASON, CONTROLLER_RESTART_STOP_REASON])
+def test_a_parent_stopped_by_one_file_does_not_hold_other_files(tmp_path: Path, scope: str, reason: str) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    parent = _encode_job(config, scope, "stopped", job_kind="folder", terminal_reason=reason)
+    _encode_job(config, scope, "completed", job_id="completed-child", parent_job_id=parent, job_kind="shard")
+    _encode_job(config, scope, "stopped", job_id="stopped-child", parent_job_id=parent, job_kind="shard", terminal_reason=reason)
+
+    assert _next(config, _loader({SEASON: _approved(config)}, {})) is not None
+
+
+def test_an_owner_stopped_child_is_not_hidden_by_another_childs_derived_stop_reason(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    scope = "tv/Thriller"
+    parent = _encode_job(config, scope, "stopped", job_kind="folder", terminal_reason=KEPT_ORIGINAL_TERMINAL_REASON)
+    _encode_job(config, scope, "stopped", job_id="kept-child", parent_job_id=parent, job_kind="shard",
+                terminal_reason=KEPT_ORIGINAL_TERMINAL_REASON)
+    _encode_job(config, scope, "stopped", job_id="owner-child", parent_job_id=parent, job_kind="shard")
+
+    assert _next(config, _loader({SEASON: _approved(config)}, {})) is None
+
+
+def test_a_newer_containing_run_supersedes_an_older_season_failure(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    _encode_job(config, SEASON, "needs_attention", created_at="2026-10-25T00:00:00+00:00")
+    _encode_job(config, "tv/Thriller", "completed")
+
+    assert _next(config, _loader({SEASON: _approved(config)}, {})) is not None

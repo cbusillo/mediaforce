@@ -165,8 +165,12 @@ Guidance:
     - the background choice of the next waiting season a current folder, show,
       or kind approval covers,
       largest first and one at a time: never while work is paused or a run is
-      queued or running (checked again inside the queueing transaction), never
-      a season whose last run ended badly, and not again for a season already
+      queued or running (checked again inside the queueing transaction). The
+      newest containing-scope parent run governs: an owner Stop still waits,
+      while a child stopped for a kept original or controller restart does not
+      hold its siblings. A failed or attention-needed run on the exact season
+      waits until a newer containing run supersedes it. Selection does not
+      repeat a season already
       tried under the same approval with the same waiting files; attempts are
       kept beside the kind approvals, and a refused season is retried after
       six hours

@@ -176,7 +176,7 @@ class KindAwareLoader:
 
 
 # A run that ended badly leaves its season for the Director; the background queue never retries it.
-_UNSETTLED_RUN_STATUSES = ("failed", "stopped", "needs_attention")
+_UNSETTLED_RUN_STATUSES = ("failed", "needs_attention")
 KIND_QUEUE_WAITS_CODE = "kind_queue_waits"
 # A refused season is tried again after this long, in case what refused it (such as free space) has cleared.
 KIND_RETRY_SECONDS = 6 * 3600.0
@@ -215,13 +215,24 @@ def _waiting_seasons(connection: DBClient, config: MediaforceConfig) -> list[tup
 
 def _latest_run_unsettled(connection: DBClient, season: str) -> bool:
     run = connection.execute(
-        select(encode_jobs.c.prefix, encode_jobs.c.status).where(
+        select(encode_jobs.c.job_id, encode_jobs.c.prefix, encode_jobs.c.status, encode_jobs.c.terminal_reason).where(
             encode_jobs.c.prefix.in_(["", *approval_prefixes(season)]), encode_jobs.c.parent_job_id.is_(None),
         ).order_by(encode_jobs.c.created_at.desc()).limit(1)
     ).mappings().first()
-    return bool(run and (run["status"] == "stopped" or (
-        run["prefix"] == season and run["status"] in _UNSETTLED_RUN_STATUSES
-    )))
+    if run is None:
+        return False
+    if run["status"] != "stopped":
+        return run["prefix"] == season and run["status"] in _UNSETTLED_RUN_STATUSES
+    return _run_stopped_by_owner(connection, str(run["job_id"]), run["terminal_reason"])
+
+
+def _run_stopped_by_owner(connection: DBClient, job_id: str, terminal_reason: str | None) -> bool:
+    children = connection.execute(select(encode_jobs.c.status, encode_jobs.c.terminal_reason).where(
+        encode_jobs.c.parent_job_id == job_id,
+    )).mappings().all()
+    if not children:
+        return terminal_reason is None
+    return any(child["status"] == "stopped" and child["terminal_reason"] is None for child in children)
 
 
 def _attempts_file(config: MediaforceConfig) -> Path:
