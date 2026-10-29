@@ -6,7 +6,7 @@ import unittest
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 from unittest.mock import patch
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
@@ -100,7 +100,7 @@ class LibraryLifecycleTests(unittest.TestCase):
             loaded: list[str] = []
             load_rows = candidate_selection._load_rows
 
-            def recording_load_rows(*args, **kwargs):
+            def recording_load_rows(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
                 rows = load_rows(*args, **kwargs)
                 loaded.extend(str(row["rel_path"]) for row in rows)
                 return rows
@@ -763,7 +763,7 @@ class LibraryLifecycleTests(unittest.TestCase):
 
             single = build_folder_workflow_state(connection, season)
             bulk = build_folder_workflow_states(connection, ["tv/Show", season, other_season])
-            episodes = load_season_episode_progress(connection, single.items, [])
+            episodes = load_season_episode_progress(connection, single.items, config=config)
 
         self.assertEqual(single.state, "blocked")
         self.assertEqual(single.primary_lane, "blocked")

@@ -1095,15 +1095,23 @@ extension Words {
     }
 
     static func waitingReason(_ file: ItemFacts.File) -> String {
+        var reasons: [String] = []
         if let question = file.sizeQuestion {
-            return "To look right it needs \(size(question.smallestQualitySafeBytes)), more than its \(size(question.goalBytes)) goal."
+            reasons.append("To look right it needs \(size(question.smallestQualitySafeBytes)), more than its \(size(question.goalBytes)) goal.")
+        } else if file.stage == "needs_you" {
+            reasons.append(waitingReason(file.waitReason, validation: file.validation))
         }
-        let computer = file.waitReason?.computer ?? "the computer"
-        return switch file.waitReason?.code ?? file.validation {
+        reasons.append(contentsOf: (file.additionalWaitReasons ?? []).map { waitingReason($0) })
+        return reasons.joined(separator: " ")
+    }
+
+    private static func waitingReason(_ reason: ItemFacts.WaitReason?, validation: String? = nil) -> String {
+        let computer = reason?.computer ?? "the computer"
+        return switch reason?.code ?? validation {
         case "check_failed", "failed": "The compressed copy didn't pass its check, so the original stays in the library."
         case "publish_failed": "Mediaforce couldn't check or publish this copy after several tries. Check this file."
         case "publish_unsafe": "Publishing stopped, and Mediaforce couldn't put the files back. Check and restore this file before publishing it."
-        case "not_made_again": notMadeAgain(file.waitReason?.blockers ?? [])
+        case "not_made_again": notMadeAgain(reason?.blockers ?? [])
         case "size_held": "It came out much smaller than its sample. Keep this copy, or make it again."
         case "stopped": "It was stopped before it finished."
         case "restart_stopped":

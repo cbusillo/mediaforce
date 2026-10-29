@@ -117,7 +117,6 @@ from mediaforce.library import workflow_state as workflow_state_runtime
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
 from mediaforce.web.runtime.app_item import item_payload
 from mediaforce.library.workflow_state import build_folder_workflow_state
-from mediaforce.encoding.encode_queue import list_encode_runs_for_prefix
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition, motion_hold_files_payload
 from mediaforce.library.motion_holds import queue_motion_holds
 from mediaforce.library.evidence_state import library_item_source_fingerprint, sync_library_item_evidence_state
@@ -8089,7 +8088,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         with open_db(self.config.paths.db_path) as connection:
             workflow = build_folder_workflow_state(connection, season)
-            episodes = load_season_episode_progress(connection, workflow.items, list_encode_runs_for_prefix(connection, season))
+            episodes = load_season_episode_progress(connection, workflow.items, config=self.config)
 
         self.assertEqual(
             [

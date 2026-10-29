@@ -21,7 +21,6 @@ from mediaforce.core.binaries import ffmpeg_binary, ffprobe_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import library_items, motion_keep_decisions, staged_artifacts
-from mediaforce.encoding.encode_queue import list_encode_runs_for_prefix
 from mediaforce.library.candidate_selection import encode_candidate_decisions, scope_lifecycle_payload_from_decisions, \
     workflow_eligibility
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope
@@ -66,7 +65,7 @@ def item_payload(
             return None
         episodes = {
             episode["rel_path"]: episode
-            for episode in load_season_episode_progress(connection, items, list_encode_runs_for_prefix(connection, scope.prefix))
+            for episode in load_season_episode_progress(connection, items, config=config)
         }
         ids = [item.item_id for item in items]
         sizes = {
@@ -111,6 +110,7 @@ def item_payload(
             "stage": episode.get("stage") or "not_started",
             "validation": episode.get("validation"),
             "wait_reason": episode.get("wait_reason"),
+            "additional_wait_reasons": episode.get("additional_wait_reasons", []),
             "kept_reason": kept.get(item.item_id),
             "held_reason": "motion_pattern" if item.motion_held else None,
             "percent_complete": episode.get("percent_complete"),
