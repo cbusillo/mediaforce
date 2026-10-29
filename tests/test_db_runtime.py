@@ -6705,30 +6705,36 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertEqual(row["queue_name"], "heavy")
             self.assertIn("queue_name", object_dict(row))
 
-    def test_open_db_adds_cadence_evidence_column_to_previous_revision(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = Path(temp_dir) / "library.sqlite3"
-            with open_db(db_path):
-                pass
-            reset_engine_cache()
+    def test_open_db_restores_evidence_columns_from_previous_revisions(self) -> None:
+        for column, revision in (
+                ("cadence_summary_json", "20260403_0004"),
+                ("media_fingerprint_json", "20260711_0006"),
+                ("content_version_fingerprint", "20260712_0008"),
+        ):
+            with self.subTest(column=column, revision=revision):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    db_path = Path(temp_dir) / "library.sqlite3"
+                    with open_db(db_path):
+                        pass
+                    reset_engine_cache()
 
-            raw_connection = sqlite3.connect(db_path)
-            try:
-                raw_connection.execute("ALTER TABLE library_items DROP COLUMN cadence_summary_json")
-                raw_connection.execute(
-                    "UPDATE alembic_version SET version_num = ?",
-                    ("20260403_0004",),
-                )
-                raw_connection.commit()
-            finally:
-                raw_connection.close()
+                    raw_connection = sqlite3.connect(db_path)
+                    try:
+                        raw_connection.execute(f"ALTER TABLE library_items DROP COLUMN {column}")
+                        raw_connection.execute(
+                            "UPDATE alembic_version SET version_num = ?",
+                            (revision,),
+                        )
+                        raw_connection.commit()
+                    finally:
+                        raw_connection.close()
 
-            with open_db(db_path) as connection:
-                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
-                columns = {str(column["name"]) for column in inspect(connection).get_columns("library_items")}
+                    with open_db(db_path) as connection:
+                        version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
+                        columns = {str(column["name"]) for column in inspect(connection).get_columns("library_items")}
 
-            self.assertEqual(version, CURRENT_DB_REVISION)
-            self.assertIn("cadence_summary_json", columns)
+                    self.assertEqual(version, CURRENT_DB_REVISION)
+                    self.assertIn(column, columns)
 
     def test_open_db_adds_attachment_summary_columns_to_previous_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -6871,31 +6877,6 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 "Background scan was interrupted by a web process restart.",
             )
             self.assertEqual(interrupted_row["completed_at"], "2026-07-30T13:01:00+00:00")
-
-    def test_open_db_adds_media_fingerprint_column_to_previous_revision(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = Path(temp_dir) / "library.sqlite3"
-            with open_db(db_path):
-                pass
-            reset_engine_cache()
-
-            raw_connection = sqlite3.connect(db_path)
-            try:
-                raw_connection.execute("ALTER TABLE library_items DROP COLUMN media_fingerprint_json")
-                raw_connection.execute(
-                    "UPDATE alembic_version SET version_num = ?",
-                    ("20260711_0006",),
-                )
-                raw_connection.commit()
-            finally:
-                raw_connection.close()
-
-            with open_db(db_path) as connection:
-                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
-                columns = {str(column["name"]) for column in inspect(connection).get_columns("library_items")}
-
-            self.assertEqual(version, CURRENT_DB_REVISION)
-            self.assertIn("media_fingerprint_json", columns)
 
     def test_open_db_indexes_and_backfills_pending_calibration_reviews(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7067,31 +7048,6 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertIn("content_version_changed_at", library_columns)
             self.assertIn("plex_item_metadata", table_names)
             self.assertIn("series_metadata", table_names)
-
-    def test_open_db_adds_content_version_fingerprint_to_previous_revision(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = Path(temp_dir) / "library.sqlite3"
-            with open_db(db_path):
-                pass
-            reset_engine_cache()
-
-            raw_connection = sqlite3.connect(db_path)
-            try:
-                raw_connection.execute("ALTER TABLE library_items DROP COLUMN content_version_fingerprint")
-                raw_connection.execute(
-                    "UPDATE alembic_version SET version_num = ?",
-                    ("20260712_0008",),
-                )
-                raw_connection.commit()
-            finally:
-                raw_connection.close()
-
-            with open_db(db_path) as connection:
-                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
-                columns = {str(column["name"]) for column in inspect(connection).get_columns("library_items")}
-
-            self.assertEqual(version, CURRENT_DB_REVISION)
-            self.assertIn("content_version_fingerprint", columns)
 
     def test_open_db_moves_missing_status_to_presence_field(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

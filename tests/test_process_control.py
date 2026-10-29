@@ -133,74 +133,44 @@ class ProcessControlTests(TestCase):
         self.assertEqual(result.stdout, "trusted-fork-complete\n")
 
     @skipUnless(sys.platform == "darwin", "requires trusted Darwin process groups")
-    def test_trusted_local_orchestrator_fails_closed_for_session_change(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            child_pid_path = root / "detached-child.pid"
-            script_path = _write_ab_av1_script(
-                root,
-                "\n".join((
-                    "from pathlib import Path",
-                    "import os",
-                    "import sys",
-                    "import time",
-                    "child_pid = os.fork()",
-                    "if child_pid == 0:",
-                    "    Path(sys.argv[1]).write_text(str(os.getpid()))",
-                    "    os.setsid()",
-                    "    time.sleep(10)",
-                    "    os._exit(0)",
-                    "os.waitpid(child_pid, 0)",
-                )),
-            )
+    def test_trusted_local_orchestrator_fails_closed_for_detachment(self) -> None:
+        for detach_call, pid_name in (
+                ("os.setsid()", "detached-child.pid"),
+                ("os.setpgid(0, 0)", "regrouped-child.pid"),
+        ):
+            with self.subTest(detach_call=detach_call):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    child_pid_path = root / pid_name
+                    script_path = _write_ab_av1_script(
+                        root,
+                        "\n".join((
+                            "from pathlib import Path",
+                            "import os",
+                            "import sys",
+                            "import time",
+                            "child_pid = os.fork()",
+                            "if child_pid == 0:",
+                            "    Path(sys.argv[1]).write_text(str(os.getpid()))",
+                            f"    {detach_call}",
+                            "    time.sleep(10)",
+                            "    os._exit(0)",
+                            "os.waitpid(child_pid, 0)",
+                        )),
+                    )
 
-            with self.assertRaises(ProcessDeadlineEnforcementError):
-                run_trusted_local_orchestrator_command(
-                    [str(script_path), str(child_pid_path)],
-                    process_controller=ManagedProcessController(),
-                )
+                    with self.assertRaises(ProcessDeadlineEnforcementError):
+                        run_trusted_local_orchestrator_command(
+                            [str(script_path), str(child_pid_path)],
+                            process_controller=ManagedProcessController(),
+                        )
 
-            self.assertTrue(child_pid_path.exists())
-            child_pid = int(child_pid_path.read_text())
-            exit_deadline = time.monotonic() + 2
-            while _pid_is_alive(child_pid) and time.monotonic() < exit_deadline:
-                time.sleep(0.02)
-            self.assertFalse(_pid_is_alive(child_pid))
-
-    @skipUnless(sys.platform == "darwin", "requires trusted Darwin process groups")
-    def test_trusted_local_orchestrator_fails_closed_for_process_group_change(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            child_pid_path = root / "regrouped-child.pid"
-            script_path = _write_ab_av1_script(
-                root,
-                "\n".join((
-                    "from pathlib import Path",
-                    "import os",
-                    "import sys",
-                    "import time",
-                    "child_pid = os.fork()",
-                    "if child_pid == 0:",
-                    "    Path(sys.argv[1]).write_text(str(os.getpid()))",
-                    "    os.setpgid(0, 0)",
-                    "    time.sleep(10)",
-                    "    os._exit(0)",
-                    "os.waitpid(child_pid, 0)",
-                )),
-            )
-
-            with self.assertRaises(ProcessDeadlineEnforcementError):
-                run_trusted_local_orchestrator_command(
-                    [str(script_path), str(child_pid_path)],
-                    process_controller=ManagedProcessController(),
-                )
-
-            self.assertTrue(child_pid_path.exists())
-            child_pid = int(child_pid_path.read_text())
-            exit_deadline = time.monotonic() + 2
-            while _pid_is_alive(child_pid) and time.monotonic() < exit_deadline:
-                time.sleep(0.02)
-            self.assertFalse(_pid_is_alive(child_pid))
+                    self.assertTrue(child_pid_path.exists())
+                    child_pid = int(child_pid_path.read_text())
+                    exit_deadline = time.monotonic() + 2
+                    while _pid_is_alive(child_pid) and time.monotonic() < exit_deadline:
+                        time.sleep(0.02)
+                    self.assertFalse(_pid_is_alive(child_pid))
 
     @skipUnless(sys.platform == "darwin", "requires trusted Darwin process groups")
     def test_trusted_local_orchestrator_deadline_kills_same_group_children(self) -> None:
