@@ -397,7 +397,6 @@ extension Words {
     static let resume = "Resume"
     static let pausedBar = "Mediaforce is paused. Nothing new starts."
     static let checksPausedBar = "Checks are paused."
-    static let none = "None"
     static let next = "Next"
     static let looksGood = "Looks Good"
     static let appName = "Mediaforce"
@@ -427,8 +426,6 @@ extension Words {
     static let spotCheckNoEpisode = "None of this show's episodes still has its original backup to compare."
     static let spotCheckUnanswered = "Mediaforce didn't answer, so this show can't play yet."
     static let spaceSaved = "Space saved"
-    static let originalBackups = "Original backups"
-    static let originalBackupsHelp = "When a season is replaced, its originals wait here until you delete them on Space saved."
     static let spotCheckFirst = "Spot-check before deleting"
     static let spotCheckBackups = "Spot-check what these backups hold"
 

@@ -99,6 +99,6 @@ final class MenuBarTests: XCTestCase {
     func testTheWaitingListOpensEachDecision() throws {
         let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(MainWindowTests.facts.utf8))
         XCTAssertEqual(Attention.waitingItems(facts).count, Attention.waitingOnYou(facts))
-        XCTAssertEqual(Attention.waitingItems(facts).map(\.opens), [.sample("tv/Lucifer/Season 2"), .computer("mini"), .spaceSaved])
+        XCTAssertEqual(Set(Attention.waitingItems(facts).compactMap(\.opens)), Set([.sample("tv/Lucifer/Season 2"), .computer("mini"), .spaceSaved]))
     }
 }

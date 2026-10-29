@@ -4,8 +4,6 @@ import SwiftUI
 struct MediaforceApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
-    @Environment(\.openWindow) private var openWindow
-
     var body: some Scene {
         // One window, so the menu bar can bring it forward instead of opening another.
         Window(Words.appName, id: MainWindow.id) {
@@ -22,10 +20,7 @@ struct MediaforceApp: App {
         MenuBarExtra {
             MenuBarPanel(model: appDelegate.model)
         } label: {
-            Image(nsImage: MenuBarGlyph.image(waiting: appDelegate.model.facts.map(Attention.waitingOnYou) ?? 0 > 0))
-                .onChange(of: appDelegate.model.requestedPlace) { _, place in
-                    if place != nil { openWindow(id: MainWindow.id) }
-                }
+            MenuBarLabel(model: appDelegate.model)
         }
         .menuBarExtraStyle(.window)
         Settings {

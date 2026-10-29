@@ -381,7 +381,6 @@ struct Sidebar: View {
                 }
             }
             .listStyle(.sidebar)
-
         }
     }
 }

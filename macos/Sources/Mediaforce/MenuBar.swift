@@ -1,12 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// The menu bar panel: a Mediaforce switch that turns work on and off, a line saying what it is doing, what waits
-/// for the Director with each line opening its page, then plain rows to look for new files, open the window and
-/// open Settings.
+/// The menu bar panel: work status, one link to Needs you, and the app's controls.
 struct MenuBarPanel: View {
     let model: MainWindowModel
-    @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
@@ -88,14 +85,13 @@ struct MenuBarPanel: View {
     }
 
     /// Brings the main window forward, on a page when one is named, and closes the panel.
-    private func open(_ place: Place?) {
+    private func open(_ place: Place) {
         NSApp.keyWindow?.close()
         if case .computer(let key) = place {
             model.settingsRequest = SettingsRequest(computer: key)
             openSettings()
         } else {
-            if let place { model.requestedPlace = place }
-            openWindow(id: MainWindow.id)
+            model.requestedPlace = place
         }
         NSApp.activate()
     }
@@ -126,6 +122,18 @@ struct MenuRowStyle: ButtonStyle {
                 .foregroundStyle(isEnabled ? .primary : .secondary)
                 .onHover { hovering = $0 }
         }
+    }
+}
+
+struct MenuBarLabel: View {
+    let model: MainWindowModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Image(nsImage: MenuBarGlyph.image(waiting: model.facts.map(Attention.waitingOnYou) ?? 0 > 0))
+            .onChange(of: model.requestedPlace) { _, place in
+                if place != nil { openWindow(id: MainWindow.id) }
+            }
     }
 }
 
