@@ -6,7 +6,7 @@ import sys
 import threading
 import typing
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -33,6 +33,8 @@ from mediaforce.library.evidence_queue import (
     claim_next_evidence_work,
     resume_evidence_queue,
     original_intake_hold,
+    refresh_controller_digest_waits,
+    original_check_wait_reasons,
     queue_decision_evidence_work,
     runnable_evidence_work_count,
     start_evidence_work,
@@ -115,6 +117,30 @@ def _discover(config: MediaforceConfig) -> int:
         return queue_original_intake(database, config)
 
 
+def _cache_unadmitted_original(config: MediaforceConfig, item_id: int) -> None:
+    from mediaforce.core.process_control import ManagedProcessController
+    from mediaforce.library.source_intake import assess_source_input
+
+    with patch("mediaforce.library.source_intake.probe_evidence_source", side_effect=RuntimeError("probe failed")):
+        with pytest.raises(RuntimeError, match="probe failed"):
+            assess_source_input(config, item_id, ManagedProcessController(), lambda: None)
+
+
+def _touch_catalog_source(config: MediaforceConfig, item_id: int, path: Path) -> None:
+    info = path.stat()
+    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
+    with open_db(config.paths.db_path) as database:
+        database.execute(update(library_items).where(library_items.c.id == item_id).values(mtime_ns=path.stat().st_mtime_ns))
+
+
+def _assert_unadmitted_window_wait(database: DBClient, item_id: int, *, status: str = "waiting_window") -> None:
+    state = database.execute(select(library_item_evidence_state).where(
+        library_item_evidence_state.c.library_item_id == item_id)).mappings().one()
+    assert state["work_status"] == status
+    assert state["attempt_count"] == 0
+    assert database.execute(select(source_admissions)).first() is None
+
+
 @pytest.mark.parametrize("size", [0, 1, 65535, 65536, 65537, 131072, 1048577])
 def test_remote_samples_equal_descriptor_samples(tmp_path: Path, size: int) -> None:
     path = tmp_path / "source"
@@ -179,6 +205,433 @@ def test_no_computer_waits_before_reading_an_original_digest(tmp_path: Path) -> 
         assert state["attempt_count"] == 0
         assert db.execute(select(source_admissions)).first() is None
     probe.assert_not_called()
+
+
+@pytest.mark.parametrize("controller_open", [False, None])
+def test_remote_measuring_window_does_not_admit_a_new_controller_digest(tmp_path: Path, controller_open: bool | None) -> None:
+    config = _config(tmp_path)
+    config.raw["remote_hosts"] = [
+        {"host": "localhost", "label": "Controller", "mode": "local"},
+        {"host": "measuring.example", "mode": "ssh", "source_roots": {"tv": str(config.source_root_map["tv"])}},
+    ]
+    item_id, path = _source(config)
+    _discover(config)
+    controller_row: dict[str, Any] = {"key": "localhost", "label": "Controller", "available": True}
+    if controller_open is not None:
+        controller_row["schedule_open"] = controller_open
+    rows = [controller_row, {"key": "measuring.example", "available": True,
+                             "capabilities": ["encode_queue"], "schedule_open": True}]
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=lambda _path, kind, **_kw: _summary(kind),
+                              logger=Mock(), evidence_host_rows=lambda _config: rows)
+    with patch("mediaforce.hosts.config._host_lookup_targets_current_machine", side_effect=lambda host: host == "localhost"), patch(
+        "mediaforce.library.source_intake.observe_file", wraps=observe_file
+    ) as observe, patch("mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()), patch(
+        "mediaforce.library.evidence_worker._analysis_target",
+        side_effect=lambda _config, _claim, source, *_args: SimpleNamespace(source_path=source, command_runner=None),
+    ), patch("mediaforce.encoding.remote_media.run_remote_command", side_effect=AssertionError("no real SSH")):
+        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps) == 0
+        assert not any(call.kwargs.get("full_digest") for call in observe.call_args_list)
+        with open_db(config.paths.db_path) as database:
+            _assert_unadmitted_window_wait(database, item_id)
+            assert runnable_evidence_work_count(database) == 0
+            from mediaforce.library.evidence_hosts import controller_digest_window
+            from test_app_window import _payload
+            reason = controller_digest_window(config, deps.evidence_host_rows).waiting_reason
+            assert _payload(database)["work"]["original_check_wait_reasons"] == [reason]
+        controller_row["schedule_open"] = True
+        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps) == 1
+        assert any(call.args[0] == path and call.kwargs.get("full_digest") for call in observe.call_args_list)
+    with open_db(config.paths.db_path) as database:
+        assert load_source_evidence(database, item_id).original_version_id is not None
+
+
+@pytest.mark.parametrize("changed_stat", [False, True])
+def test_cached_controller_digest_can_feed_remote_measurement_outside_controller_window(tmp_path: Path, changed_stat: bool) -> None:
+    config = _config(tmp_path)
+    blocked, _ = _source(config, "unread")
+    cached, cached_path = _source(config, "cached")
+    _cache_unadmitted_original(config, cached)
+    if changed_stat:
+        _touch_catalog_source(config, cached, cached_path)
+    config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"},
+        {"host": "measuring.example", "mode": "ssh", "source_roots": {"tv": str(config.source_root_map["tv"])}}]
+    _discover(config)
+    measured: list[Path] = []
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config,
+        analyze_evidence=lambda path, kind, **_kw: (measured.append(path), _summary(kind))[1], logger=Mock(),
+        evidence_host_rows=lambda _config: [{"key": "localhost", "schedule_open": False},
+            {"key": "measuring.example", "available": True, "schedule_open": True, "capabilities": ["encode_queue"]}])
+    with patch("mediaforce.library.source_intake.observe_file", wraps=observe_file) as observe, patch(
+        "mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()
+    ), patch("mediaforce.library.evidence_worker._analysis_target",
+        side_effect=lambda _config, _claim, path, *_args: SimpleNamespace(source_path=path, command_runner=None)):
+        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps) == (0 if changed_stat else 1)
+    assert measured == ([] if changed_stat else [cached_path])
+    assert not any(call.kwargs.get("full_digest") for call in observe.call_args_list)
+    with open_db(config.paths.db_path) as database:
+        blocked_state = database.execute(select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == blocked)).mappings().one()
+        assert blocked_state["work_status"] == "waiting_window"
+        assert blocked_state["attempt_count"] == 0
+        assert (load_source_evidence(database, cached).original_version_id is not None) == (not changed_stat)
+        if changed_stat:
+            state = database.execute(select(library_item_evidence_state).where(
+                library_item_evidence_state.c.library_item_id == cached)).mappings().one()
+            assert state["work_status"] == "waiting_window"
+            assert state["attempt_count"] == 0
+
+
+@pytest.mark.parametrize("finish_current_file", [True, False])
+def test_controller_digest_obeys_the_current_file_close_policy(tmp_path: Path, finish_current_file: bool) -> None:
+    config = _config(tmp_path)
+    config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"}]
+    item_id, _path = _source(config)
+    _discover(config)
+    opened = datetime.now(UTC)
+    closed = opened + timedelta(minutes=1)
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=lambda _path, kind, **_kw: _summary(kind),
+        logger=Mock(), evidence_host_rows=lambda _config: [{"key": "localhost", "schedule_open": True,
+            "schedule_closes_at": closed.isoformat(), "finish_current_file": finish_current_file}])
+    with patch("mediaforce.library.evidence_hosts.datetime") as clock:
+        clock.now.return_value = opened
+
+        def observe(path: Path, **kwargs: Any) -> dict[str, Any]:
+            if kwargs.get("full_digest"):
+                clock.now.return_value = closed
+                kwargs["check_cancelled"]()
+            return observe_file(path, **kwargs)
+
+        with patch("mediaforce.library.source_intake.observe_file", side_effect=observe), patch(
+            "mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()
+        ), patch("mediaforce.library.evidence_worker._analysis_target",
+            side_effect=lambda _config, _claim, path, *_args: SimpleNamespace(source_path=path, command_runner=None)):
+            assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps)
+    with open_db(config.paths.db_path) as database:
+        assert (load_source_evidence(database, item_id).original_version_id is not None) == finish_current_file
+        if not finish_current_file:
+            state = database.execute(select(library_item_evidence_state).where(
+                library_item_evidence_state.c.library_item_id == item_id)).mappings().one()
+            assert state["work_status"] == "retry_wait"
+            assert state["attempt_count"] == 0
+
+
+def test_controller_window_closing_after_claim_does_not_spend_an_attempt(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"}]
+    item_id, _path = _source(config)
+    _discover(config)
+    def computer_rows(_config: MediaforceConfig) -> list[dict[str, Any]]:
+        with open_db(config.paths.db_path) as claim_database:
+            claimed = claim_database.execute(select(library_item_evidence_state.c.work_status).where(
+                library_item_evidence_state.c.library_item_id == item_id)).scalar_one() == "running"
+        return [{"key": "localhost", "schedule_open": not claimed}]
+
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
+                              evidence_host_rows=computer_rows)
+    with patch("mediaforce.library.source_intake.observe_file", wraps=observe_file) as observe:
+        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps)
+    assert not any(call.kwargs.get("full_digest") for call in observe.call_args_list)
+    with open_db(config.paths.db_path) as database:
+        _assert_unadmitted_window_wait(database, item_id, status="retry_wait")
+
+
+def test_window_waits_do_not_unpair_eligible_remote_measurements(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    waiting, _ = _source(config, "waiting")
+    ready, ready_path = _source(config, "ready")
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        rebuild_library_item_evidence_states(database)
+        for requested_kind in EVIDENCE_KINDS:
+            queue_decision_evidence_work(database, config, "tv/ready.mkv", library_item_ids=[ready], evidence_kind=requested_kind,
+                work_reason="operator_scope", require_measurement=True, priority=50, start_new_batch=True)
+        database.execute(update(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == waiting).values(work_priority=0))
+    config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"}]
+    measured: list[str] = []
+    read_probe = Mock(return_value=_probe())
+
+    def analyze(path: Path, kind: str, **kwargs: Any) -> dict[str, object]:
+        assert path == ready_path and kwargs["probe_payload"] is read_probe.return_value
+        measured.append(kind)
+        return _summary(kind)
+
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock(), read_probe=read_probe,
+        evidence_host_rows=lambda _config: [{"key": "localhost", "schedule_open": False}])
+    with patch("mediaforce.library.evidence_worker._analysis_target",
+        side_effect=lambda _config, _claim, path, *_args: SimpleNamespace(source_path=path, command_runner=None)):
+        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps, max_work_items=2) == 2
+    assert set(measured) == set(EVIDENCE_KINDS)
+    read_probe.assert_called_once()
+    with open_db(config.paths.db_path) as database:
+        state = database.execute(select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == waiting,
+            library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
+        assert state["work_status"] == "waiting_window"
+        assert state["attempt_count"] == 0
+
+
+def test_autostart_waits_without_a_runner_and_wakes_when_the_controller_window_opens(tmp_path: Path) -> None:
+    from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, start_ready_evidence_work
+
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    _discover(config)
+    config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"}]
+    row = {"key": "localhost", "schedule_open": False}
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
+                              evidence_host_rows=lambda _config: [row])
+    runner = BoundedEvidenceRunner(config.paths.config_path, deps=deps)
+    with patch.object(runner, "wake", return_value=False), patch.object(runner, "start", return_value=True) as start:
+        for _ in range(2):
+            assert not start_ready_evidence_work(config.paths.db_path, runner)
+        start.assert_not_called()
+        with open_db(config.paths.db_path) as database:
+            state = database.execute(select(library_item_evidence_state).where(
+                library_item_evidence_state.c.library_item_id == item_id)).mappings().one()
+            assert state["work_status"] == "waiting_window"
+            assert state["attempt_count"] == 0
+        row["schedule_open"] = True
+        assert start_ready_evidence_work(config.paths.db_path, runner)
+        start.assert_called_once_with(max_work_items=None)
+
+
+@pytest.mark.parametrize("earlier_batch", [False, True])
+@pytest.mark.parametrize("claimed_wait", [False, True])
+def test_a_remote_decision_takes_over_an_original_window_wait(tmp_path: Path, earlier_batch: bool, claimed_wait: bool) -> None:
+    from mediaforce.library.evidence_hosts import ControllerDigestWindow
+
+    config = _config(tmp_path)
+    item_id, path = _source(config)
+    _discover(config)
+    window = ControllerDigestWindow(admitted=False, next_opens_at=datetime.now(UTC) + timedelta(hours=1))
+    with open_db(config.paths.db_path) as database:
+        refresh_controller_digest_waits(database, window)
+        if claimed_wait:
+            database.execute(update(library_item_evidence_state).values(work_status="retry_wait", attempt_count=2))
+        if earlier_batch:
+            database.execute(update(library_item_evidence_state).values(work_batch_id="earlier-batch"))
+        queue_decision_evidence_work(database, config, "tv/source.mkv", library_item_ids=[item_id],
+            evidence_kind="media_fingerprint", work_reason="decision_required", priority=0,
+            require_measurement=True, start_new_batch=True)
+        assert original_check_wait_reasons(database) == []
+        assert runnable_evidence_work_count(database) == 1
+        assert database.execute(select(library_item_evidence_state.c.attempt_count)).scalar_one() == (2 if claimed_wait else 0)
+    config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"}]
+    analyze = Mock(return_value=_summary("media_fingerprint"))
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=analyze, logger=Mock(),
+        evidence_host_rows=lambda _config: [{"key": "localhost", "schedule_open": False}])
+    with patch("mediaforce.library.source_intake.observe_file", side_effect=AssertionError("a decision needs no new local hash")), patch(
+        "mediaforce.library.evidence_worker._analysis_target",
+        side_effect=lambda _config, _claim, source, *_args: SimpleNamespace(source_path=source, command_runner=None),
+    ):
+        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps) == 1
+    assert analyze.call_args.args[0] == path
+    with open_db(config.paths.db_path) as database:
+        assert original_check_wait_reasons(database) == []
+        state = database.execute(select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == item_id)).mappings().one()
+        assert state["work_status"] == "completed"
+
+
+@pytest.mark.parametrize("early_open", [False, True])
+def test_a_replaced_cached_file_keeps_its_window_retry_cooldown(tmp_path: Path, early_open: bool) -> None:
+    from mediaforce.library.evidence_hosts import ControllerDigestWindow
+
+    config = _config(tmp_path)
+    item_id, path = _source(config)
+    _cache_unadmitted_original(config, item_id)
+    _discover(config)
+    original_stat = path.stat()
+    replacement = path.with_suffix(".replacement")
+    replacement.write_bytes(path.read_bytes())
+    os.utime(replacement, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    replacement.replace(path)
+    config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"}]
+    opens_at = datetime.now(UTC) + timedelta(hours=3)
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
+        evidence_host_rows=lambda _config: [{"key": "localhost", "schedule_open": False, "schedule_next_opens_at": opens_at.isoformat()}])
+    with patch("mediaforce.library.source_intake.observe_file", wraps=observe_file) as observe:
+        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps) == 1
+        assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps) == 0
+    assert not any(call.kwargs.get("full_digest") for call in observe.call_args_list)
+    with open_db(config.paths.db_path) as database:
+        state = database.execute(select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == item_id)).mappings().one()
+        assert state["work_status"] == "retry_wait"
+        assert datetime.fromisoformat(state["retry_not_before"]) >= opens_at.replace(microsecond=0)
+        assert state["attempt_count"] == 0
+        assert original_check_wait_reasons(database) == [ControllerDigestWindow().waiting_reason]
+        refresh_controller_digest_waits(database, ControllerDigestWindow(admitted=early_open, next_opens_at=opens_at))
+        assert runnable_evidence_work_count(database) == int(early_open)
+
+
+@pytest.mark.parametrize("earlier_batch", [False, True])
+def test_remote_check_failure_keeps_its_backoff_when_a_request_changes_priority(tmp_path: Path, earlier_batch: bool) -> None:
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    _discover(config)
+    retry_at = (datetime.now(UTC) + timedelta(minutes=1)).isoformat(timespec="seconds")
+    with open_db(config.paths.db_path) as database:
+        database.execute(update(library_item_evidence_state).values(work_reason="operator_scope", work_status="retry_wait",
+            retry_not_before=retry_at, last_error="The computer is busy.", attempt_count=2))
+        if earlier_batch:
+            database.execute(update(library_item_evidence_state).values(work_batch_id="earlier-batch"))
+        queue_decision_evidence_work(database, config, "tv/source.mkv", library_item_ids=[item_id],
+            evidence_kind="media_fingerprint", work_reason="decision_required", priority=0,
+            require_measurement=True, start_new_batch=True)
+        state = database.execute(select(library_item_evidence_state)).mappings().one()
+        assert state["work_status"] == "retry_wait"
+        assert state["retry_not_before"] == retry_at
+        assert state["attempt_count"] == 2
+
+
+def test_original_retry_reasons_use_the_existing_plain_failure_formatter(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _source(config)
+    _discover(config)
+    error = "RuntimeError: ffprobe could not inspect /private/technical/path"
+    with open_db(config.paths.db_path) as database:
+        database.execute(update(library_item_evidence_state).values(work_status="retry_wait", last_error=error))
+        reasons = original_check_wait_reasons(database)
+        assert reasons and all(reasons)
+        assert not any("/private/technical/path" in reason for reason in reasons)
+
+
+@pytest.mark.parametrize("qualification", ["cache", "stale_cache", "receipt"])
+def test_window_wait_releases_new_source_qualification_but_keeps_a_stale_cache(tmp_path: Path, qualification: str) -> None:
+    from mediaforce.library.evidence_hosts import ControllerDigestWindow
+
+    config = _config(tmp_path)
+    item_id, path = _source(config)
+    _discover(config)
+    window = ControllerDigestWindow(admitted=False, next_opens_at=datetime.now(UTC) + timedelta(hours=1))
+    with open_db(config.paths.db_path) as database:
+        refresh_controller_digest_waits(database, window)
+    if qualification == "receipt":
+        with open_db(config.paths.db_path) as database:
+            item = database.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
+            observation = observe_file(path)
+            record_current_measurement(database, item, kind="media_fingerprint", summary=_summary("media_fingerprint"),
+                provenance={"before": observation, "after": observation}, binding="observed")
+    else:
+        _cache_unadmitted_original(config, item_id)
+        if qualification == "stale_cache":
+            _touch_catalog_source(config, item_id, path)
+    with open_db(config.paths.db_path) as database:
+        refresh_controller_digest_waits(database, window)
+        state = database.execute(select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == item_id)).mappings().one()
+        if qualification in {"stale_cache", "receipt"}:
+            assert state["work_status"] == "waiting_window"
+            assert runnable_evidence_work_count(database) == 0
+        else:
+            assert state["work_status"] == "queued"
+            assert state["retry_not_before"] is None
+            assert original_check_wait_reasons(database) == []
+            assert runnable_evidence_work_count(database) == 1
+
+
+def test_loop_discovery_marks_original_window_waits_before_returning(tmp_path: Path) -> None:
+    from mediaforce.library.evidence_worker import _discover_originals
+
+    config = _config(tmp_path)
+    item_id, _path = _source(config)
+    config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"}]
+    deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
+        evidence_host_rows=lambda _config: [{"key": "localhost", "schedule_open": False}])
+    assert _discover_originals(config, deps) == 1
+    with open_db(config.paths.db_path) as database:
+        _assert_unadmitted_window_wait(database, item_id)
+        assert runnable_evidence_work_count(database) == 0
+
+
+def test_a_finished_digest_is_kept_when_the_window_closes_after_its_last_read(tmp_path: Path) -> None:
+    import hashlib
+    from mediaforce.core.process_control import ManagedProcessController
+    from mediaforce.library.evidence_hosts import ControllerDigestWindow
+
+    config = _config(tmp_path)
+    _item_id, path = _source(config)
+    opened = datetime.now(UTC)
+    closed = opened + timedelta(seconds=1)
+    controller = ManagedProcessController()
+    window = ControllerDigestWindow(closes_at=closed)
+    with patch("mediaforce.library.evidence_hosts.datetime") as clock:
+        clock.now.return_value = opened
+        with window.guard(controller):
+            observed = observe_file(path, full_digest=True, check_cancelled=controller.throw_if_cancelled)
+            clock.now.return_value = closed
+    assert observed["sha256"] == f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+
+
+def _controller_prefetch_input(config: MediaforceConfig) -> tuple[EvidenceWorkClaim, int]:
+    _source(config, "current")
+    waiting, _path = _source(config, "next")
+    _discover(config)
+    with open_db(config.paths.db_path) as database:
+        claim = claim_next_evidence_work(database, worker_id="test", lease_seconds=60)
+    assert claim is not None
+    config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"}]
+    return claim, waiting
+
+
+@pytest.mark.parametrize("closes_after_selection", [False, True])
+def test_prefetch_checks_controller_window_before_a_new_digest(tmp_path: Path, closes_after_selection: bool) -> None:
+    from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher
+
+    config = _config(tmp_path)
+    claim, waiting = _controller_prefetch_input(config)
+    observed = threading.Event()
+    logger = Mock()
+
+    def rows(_config: MediaforceConfig) -> list[dict[str, Any]]:
+        return [{"key": "localhost", "schedule_open": closes_after_selection and not observed.is_set()}]
+
+    def observe_source(path: Path, **kwargs: Any) -> dict[str, Any]:
+        observed.set()
+        return observe_file(path, **kwargs)
+
+    with patch("mediaforce.library.source_intake.observe_file", side_effect=observe_source) as observe, SourceAdmissionPrefetcher(
+        stop_event=None, logger=logger, evidence_host_rows=rows
+    ) as prefetch:
+        prefetch.start(config, claim)
+        prefetch.wait()
+    assert not any(call.kwargs.get("full_digest") for call in observe.call_args_list)
+    logger.error.assert_not_called()
+    with open_db(config.paths.db_path) as database:
+        assert load_source_evidence(database, waiting).original_version_id is None
+        state = database.execute(select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == waiting)).mappings().one()
+        assert state["work_status"] == ("queued" if closes_after_selection else "waiting_window")
+        assert state["attempt_count"] == 0
+
+
+@pytest.mark.parametrize("finish_current_file", [True, False])
+def test_prefetched_digest_obeys_window_close_policy(tmp_path: Path, finish_current_file: bool) -> None:
+    from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher
+
+    config = _config(tmp_path)
+    claim, waiting = _controller_prefetch_input(config)
+    opened, closed = datetime.now(UTC), datetime.now(UTC) + timedelta(minutes=1)
+    rows = lambda _config: [{"key": "localhost", "schedule_open": True,
+        "schedule_closes_at": closed.isoformat(), "finish_current_file": finish_current_file}]
+    with patch("mediaforce.library.evidence_hosts.datetime") as clock:
+        clock.now.return_value = opened
+
+        def observe(path: Path, **kwargs: Any) -> dict[str, Any]:
+            if kwargs.get("full_digest"):
+                clock.now.return_value = closed
+                kwargs["check_cancelled"]()
+            return observe_file(path, **kwargs)
+
+        with patch("mediaforce.library.source_intake.observe_file", side_effect=observe), patch(
+            "mediaforce.library.source_intake.probe_evidence_source", return_value=_probe()
+        ), SourceAdmissionPrefetcher(stop_event=None, logger=Mock(), evidence_host_rows=rows) as prefetch:
+            prefetch.start(config, claim)
+            prefetch.wait()
+    with open_db(config.paths.db_path) as database:
+        assert (load_source_evidence(database, waiting).original_version_id is not None) == finish_current_file
 
 
 def test_computer_schedule_is_checked_again_after_original_admission(tmp_path: Path) -> None:

@@ -71,6 +71,17 @@ final class MainWindowTests: XCTestCase {
         XCTAssertEqual(Words.size(661_000_000), "661 MB")
     }
 
+    func testOriginalCheckWindowWaitIsShownWithOtherWorkReasons() throws {
+        var payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Self.facts.utf8)) as? [String: Any])
+        var work = try XCTUnwrap(payload["work"] as? [String: Any])
+        let reason = "New originals wait for the named computer."
+        work["original_check_wait_reasons"] = [reason]
+        payload["work"] = work
+        let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: JSONSerialization.data(withJSONObject: payload))
+        XCTAssertEqual(facts.work.originalCheckWaitReasons, [reason])
+        XCTAssertTrue(try XCTUnwrap(Words.workExplanation(facts)).contains(reason))
+    }
+
     func testEveryReasonWorkIsStoppedIsSaid() throws {
         let json = MainWindowTests.facts.replacingOccurrences(of: #""paused_by_owner": false"#, with: #""paused_by_owner": true"#)
         let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(json.utf8))

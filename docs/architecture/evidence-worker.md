@@ -97,6 +97,37 @@ qualify their own next file while other units analyze, retaining the full
 device-bound digest and all admission checks. They do not each prefetch the same
 queued original, avoiding redundant digest reads and preparation cancellation.
 
+A new full-file original hash runs on the controller only within that computer's
+own work window. An open measuring computer does not open the controller's
+window. New hashes wait in the existing queue without taking leases or spending
+attempts; valid cached hashes and measured results remain usable by another
+computer whose window is open. The full hash still belongs to the controller
+and retains its source-identity checks. Admission and serial prefetch recheck
+the controller's window before reading new bytes. A hash already under way
+follows that window's finish-current-file setting; a hard close defers it without
+spending an attempt. Priority selection excludes new hashes that cannot start,
+so they do not interrupt eligible work. With no configured controller computer,
+the existing local behavior remains available. Waiting rows use `waiting_window`
+with their next due time and a plain reason, without taking a lease or changing
+their attempt budget. The normal autostart preparation refreshes those waits
+before counting runnable work, including when a changed schedule opens early.
+Loop discovery refreshes them before returning too. A decision check or a newly
+qualified source leaves its old window wait as soon as it no longer needs a new
+hash; a cached identity that no longer matches the catalog stays held. The
+descriptor observation remains the final authority before any cached hash is
+reused. If that observation finds a replaced file whose catalog facts did not
+change, the attempted check waits until the next opening instead of being
+released and reclaimed throughout the closed window. A missing opening uses the
+existing background retry delay. Opening the schedule early releases that wait;
+its reason stays visible too. A measurement receipt alone never stands in for
+the full original hash. A full
+hash that already finished is retained when the window closes after its last
+read; hard-close guards still stop the next chunk from being read.
+The Mac's current work explanation includes each distinct window reason while
+other eligible work continues. All default, web and CLI workers read the same
+schedule-aware computer projection. Standalone defaults use the current host
+collector so a cold status cache cannot masquerade as unavailable computers.
+
 ## Durable state
 
 `library_item_evidence_state` owns one independent work unit for each
