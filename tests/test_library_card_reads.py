@@ -1,13 +1,17 @@
-"""Reading every season at once decides what reading each season alone decides (#1030)."""
-
+import copy
 from collections.abc import Iterator
 from pathlib import Path
+import tomllib
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items
 from mediaforce.library import workflow_state
+from mediaforce.library.candidate_selection import CandidateDecision
 from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, scopes_overlap
 from mediaforce.web import app as web_app
 
@@ -32,6 +36,29 @@ def connection(tmp_path: Path) -> Iterator[DBClient]:
     with open_db(tmp_path / "library.sqlite3") as db:
         yield db
     reset_engine_cache()
+
+
+@pytest.fixture
+def config(tmp_path: Path) -> MediaforceConfig:
+    with (Path(__file__).parent / "fixtures/defaults.toml").open("rb") as handle:
+        raw = copy.deepcopy(tomllib.load(handle))
+    raw["media"]["libraries"] = [
+        {"key": "shows", "path": str(tmp_path / "shows"), "type": "tv", "availability": "production"},
+        {"key": "anime", "path": str(tmp_path / "anime"), "type": "tv", "availability": "production"},
+        {"key": "films", "path": str(tmp_path / "films"), "type": "movie", "availability": "production"},
+    ]
+    return MediaforceConfig(
+        raw=raw,
+        paths=ConfigPaths(
+            project_root=tmp_path,
+            config_path=tmp_path / "config.toml",
+            db_path=tmp_path / "library.sqlite3",
+            run_manifest_dir=tmp_path / "runs",
+            web_state_dir=tmp_path / "web",
+            review_dir=tmp_path / "review",
+            runtime_settings_path=tmp_path / "runtime.json",
+        ),
+    )
 
 
 def _scopes(prefixes: list[str]) -> list[MediaScope]:
@@ -93,6 +120,60 @@ def test_season_group_by_folder_matches_grouping_each_file() -> None:
     assert [group(path) for path in paths] == [
         web_app._tv_season_folder_group(path, library_types=library_types) for path in paths
     ]
+
+
+
+def patch_attr(target: Any, name: str, *args: Any, **kwargs: Any) -> Any:
+    return patch.object(target, name, *args, **kwargs)
+
+
+def test_tv_root_projection_matches_full_projection_and_reads_mutations(
+        connection: DBClient, config: MediaforceConfig,
+) -> None:
+    _item(connection, "shows/Show 1/Season 1/e1.mkv")
+    _item(connection, "anime/Show 2/Season 1/e1.mkv")
+    _item(connection, "films/Film/Film.mkv")
+    original_project_candidates = web_app.project_candidates
+
+    def project_all_rows(
+            db: DBClient,
+            candidate_config: MediaforceConfig,
+            *,
+            prefixes: list[str] | None = None,
+    ) -> list[CandidateDecision]:
+        assert prefixes == ["anime", "shows"]
+        return original_project_candidates(db, candidate_config)
+
+    projected = web_app._list_library_detail_cards(config, connection)
+    with patch_attr(web_app, "project_candidates", side_effect=project_all_rows):
+        full = web_app._list_library_detail_cards(config, connection)
+
+    assert projected == full
+    assert {card.prefix for card in projected} == {
+        "anime/Show 2/Season 1", "shows/Show 1/Season 1",
+    }
+
+    _item(connection, "shows/Show 1/Season 1/e2.mkv")
+    refreshed = web_app._list_library_detail_cards(config, connection)
+    with patch_attr(web_app, "project_candidates", side_effect=project_all_rows):
+        refreshed_full = web_app._list_library_detail_cards(config, connection)
+
+    assert refreshed == refreshed_full
+    assert {card.prefix: card.item_count for card in refreshed} == {
+        "anime/Show 2/Season 1": 1, "shows/Show 1/Season 1": 2,
+    }
+
+
+def test_tv_detail_cards_are_empty_without_tv_roots(
+        connection: DBClient, config: MediaforceConfig,
+) -> None:
+    config.raw["media"]["libraries"] = [config.raw["media"]["libraries"][2]]
+    _item(connection, "films/Film/Film.mkv")
+
+    with patch_attr(web_app, "project_candidates") as project:
+        assert web_app._list_library_detail_cards(config, connection) == []
+
+    project.assert_not_called()
 
 
 def _item(connection: DBClient, rel_path: str) -> None:
