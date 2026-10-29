@@ -1801,7 +1801,7 @@ class EvidenceWorkerTests(unittest.TestCase):
             analyze_evidence=analyzer,
             read_probe=Mock(return_value={}),
             logger=Mock(),
-            lease_seconds=1,
+            lease_seconds=EVIDENCE_JOB_LEASE_SECONDS,
             heartbeat_seconds=heartbeat_seconds,
             retry_base_delay_seconds=1,
             retry_max_delay_seconds=2,
