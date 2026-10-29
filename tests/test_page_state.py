@@ -729,3 +729,6 @@ def test_running_show_only_flags_seasons_with_their_own_decisions(config: Mediaf
         _insert_encode_job(connection, "new-success", prefix=SHOW, kind="shard", status="completed",
                            parent="parent", manifest=manifest, index=len(problem_files) - 1)
         assert _page_state(connection, config, season_2, {})["needs_you"] is False
+
+        manifest.unlink()
+        assert _page_state(connection, config, quiet_season, {})["needs_you"] is True

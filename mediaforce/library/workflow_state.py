@@ -743,6 +743,7 @@ def _scoped_owner_groups(
         settled_paths: frozenset[str],
 ) -> Callable[[DBRow, list[dict[str, Any]]], list[dict[str, Any]]]:
     by_id = {str(row["job_id"]): row for row in rows}
+
     def scoped_groups(run: DBRow, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
         owner_groups = [group for group in groups if group.get("needs_owner")]
         if not _job_is_wider(scope, str(run["prefix"] or "")):
@@ -756,7 +757,10 @@ def _scoped_owner_groups(
                     newest_by_file.setdefault(path, str(row["job_id"]))
         result = []
         for group in owner_groups:
-            if "child_job_ids" not in group:
+            child_ids = group.get("child_job_ids") or []
+            if not child_ids or any(
+                str(job_id) not in by_id or not part_files(by_id[str(job_id)]) for job_id in child_ids
+            ):
                 result.append(group)
                 continue
             files = {
