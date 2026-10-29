@@ -53,10 +53,6 @@ struct ItemPage: View {
                                     }
                                 }
                             }
-                            if let show {
-                                ShowSeasons(show: show, waitingSamples: Set(model.facts?.samples.waitingOnYou.map(\.prefix) ?? []),
-                                            openSample: openSample, openItem: openItem)
-                            }
                             if !facts.waiting.isEmpty {
                                 WaitingFiles(files: facts.waiting) { file, action in
                                     Task { await act(action, file) }
@@ -72,13 +68,20 @@ struct ItemPage: View {
                             if facts.sound != nil || facts.stillAiring != nil {
                                 ShowChoices(facts: facts, openShow: openItem) { change in Task { await save(change) } }
                             }
+                            if let show {
+                                ShowSeasons(show: show, waitingSamples: Set(model.facts?.samples.waitingOnYou.map(\.prefix) ?? []),
+                                            openSample: openSample, openItem: openItem)
+                            }
                         }
                         .padding(.horizontal, 28)
                         .padding(.vertical, 20)
                     }
                     .frame(maxWidth: .infinity)
                     Divider()
-                    FileList(files: facts.files, selected: $selected)
+                    FileList(files: facts.files, selected: Binding(
+                        get: { selectedFile(facts)?.id },
+                        set: { selected = $0 }
+                    ))
                         .frame(width: 330)
                 }
             } else if refreshFailed {
