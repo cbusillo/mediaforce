@@ -3,7 +3,7 @@ import json
 import unittest
 from typing import Any
 
-from mediaforce.core.evidence import build_evidence_envelope, evidence_staleness
+from mediaforce.core.evidence import EVIDENCE_VERSION, build_evidence_envelope, evidence_staleness
 from mediaforce.library.representatives import (
     FINGERPRINT_DIMENSIONS,
     TECHNICAL_PROFILE_DIMENSIONS,
@@ -209,7 +209,7 @@ class RepresentativeSelectionTests(unittest.TestCase):
         )
 
         self.assertEqual(envelope["evidence_id"], reversed_envelope["evidence_id"])
-        self.assertEqual(envelope["version"], 1)
+        self.assertEqual(envelope["version"], EVIDENCE_VERSION)
         self.assertEqual(envelope["measurement"]["sample_job_id"], "sample-job-123")
         self.assertNotIn("/Volumes/private-media", json.dumps(envelope, sort_keys=True))
 
@@ -361,14 +361,21 @@ class RepresentativeSelectionTests(unittest.TestCase):
         self.assertEqual(payload["coverage"]["meaningful_cluster_fraction"], 1.0)
         self.assertNotEqual(payload["confidence"]["level"], "high")
 
-    def test_untested_format_and_resolution_read_in_familiar_words(self) -> None:
+    def test_untested_format_and_resolution_are_reported(self) -> None:
         items = [self._item(index) for index in range(1, 9)]
         items.append(self._item(9, video_codec="hevc", width=3840, height=2160))
 
         selection = select_representatives(items, prefix="tv/Example/Season 1")
 
         self.assertEqual(selection.primary_item()["video_codec"], "h264")
-        self.assertIn("Not yet tested: HEVC (H.265) video, 4K.", selection.payload["coverage_summary"])
+        self.assertEqual(
+            {(group["kind"], group["value"]) for group in selection.payload["coverage"]["untested_groups"]},
+            {("video_format", "hevc"), ("resolution", "2160p")},
+        )
+        summary = selection.payload["coverage_summary"]
+        for group in selection.payload["coverage"]["untested_groups"]:
+            self.assertIn(group["label"], summary)
+            self.assertNotIn(group["value"], summary)
 
     def test_single_sample_of_uniform_season_keeps_high_confidence(self) -> None:
         selection = select_representatives([self._item(index) for index in range(1, 6)], prefix="tv/Example/Season 1")

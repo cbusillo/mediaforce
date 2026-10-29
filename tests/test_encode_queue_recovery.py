@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import shlex
 import socket
@@ -5544,25 +5545,30 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNone(transition.current_closes_at)
         self.assertEqual(transition.next_opens_at, web_app._parse_iso("2026-07-23T22:00:00+00:00"))
 
-    def test_scheduler_transition_handles_spring_forward_boundary(self) -> None:
-        policy = web_app._normalize_encode_queue_scheduler(
-            {
-                "mode": "night",
-                "start_hour": 0,
-                "end_hour": 4,
-                "timezone": "host_local",
-                "days_of_week": ["sun"],
-            }
-        )
+    def test_scheduler_transition_handles_clock_change_boundaries(self) -> None:
+        for end_hour, observed_at, closes_at in (
+                (4, "2026-03-08T06:30:00+00:00", "2026-03-08T08:00:00+00:00"),
+                (2, "2026-11-01T05:30:00+00:00", "2026-11-01T07:00:00+00:00"),
+        ):
+            with self.subTest(observed_at=observed_at):
+                policy = web_app._normalize_encode_queue_scheduler(
+                    {
+                        "mode": "night",
+                        "start_hour": 0,
+                        "end_hour": end_hour,
+                        "timezone": "host_local",
+                        "days_of_week": ["sun"],
+                    }
+                )
 
-        transition = web_app._evaluate_encode_schedule_transition(
-            policy,
-            now=web_app._parse_iso("2026-03-08T06:30:00+00:00"),
-            host_payload={"schedule_timezone": "America/New_York"},
-        )
+                transition = web_app._evaluate_encode_schedule_transition(
+                    policy,
+                    now=web_app._parse_iso(observed_at),
+                    host_payload={"schedule_timezone": "America/New_York"},
+                )
 
-        self.assertTrue(transition.is_open)
-        self.assertEqual(transition.current_closes_at, web_app._parse_iso("2026-03-08T08:00:00+00:00"))
+                self.assertTrue(transition.is_open)
+                self.assertEqual(transition.current_closes_at, web_app._parse_iso(closes_at))
 
     def test_scheduler_transition_advances_nonexistent_opening_boundary(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
@@ -5590,26 +5596,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(before_transition.next_opens_at, web_app._parse_iso("2026-03-08T07:00:00+00:00"))
         self.assertTrue(after_transition.is_open)
         self.assertEqual(after_transition.current_closes_at, web_app._parse_iso("2026-03-08T09:00:00+00:00"))
-
-    def test_scheduler_transition_handles_fall_back_boundary(self) -> None:
-        policy = web_app._normalize_encode_queue_scheduler(
-            {
-                "mode": "night",
-                "start_hour": 0,
-                "end_hour": 2,
-                "timezone": "host_local",
-                "days_of_week": ["sun"],
-            }
-        )
-
-        transition = web_app._evaluate_encode_schedule_transition(
-            policy,
-            now=web_app._parse_iso("2026-11-01T05:30:00+00:00"),
-            host_payload={"schedule_timezone": "America/New_York"},
-        )
-
-        self.assertTrue(transition.is_open)
-        self.assertEqual(transition.current_closes_at, web_app._parse_iso("2026-11-01T07:00:00+00:00"))
 
     def test_scheduler_max_window_uses_full_cross_midnight_duration(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
@@ -16468,71 +16454,47 @@ raise SystemExit(0)
             summary,
         )
 
-    def test_decorate_encode_queue_for_scheduler_attempt_summary_respects_started_at(self) -> None:
-        manifest_path = self.root / "started-at-manifest.json"
-        manifest_path.write_text(json.dumps({"items": [{"duration_seconds": 60.0, "source_size_bytes": 1000}]}))
-        encode_queue = {
-            "state": {"is_paused": False, "stop_requested": False},
-            "running": [],
-            "queued": [],
-            "recent": [
-                {
-                    "job_id": "started-job",
-                    "prefix": "tv/House/Season 2",
-                    "status": "needs_attention",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 1,
-                    "host": {},
-                    "attempt_count": 0,
-                    "started_at": "2026-04-03T21:14:17+00:00",
-                    "progress": {
-                        "progress_state": "needs_attention",
-                        "overall_completed_duration_seconds": 12.0,
-                    },
+    def test_decorate_encode_queue_attempt_numbers_cover_start_and_cap(self) -> None:
+        for attempt_count, status, expected_attempt in (
+                (0, "needs_attention", 1),
+                (web_app.ENCODE_JOB_MAX_ATTEMPTS + 4, "retry_backoff", web_app.ENCODE_JOB_MAX_ATTEMPTS),
+        ):
+            with self.subTest(attempt_count=attempt_count, status=status):
+                manifest_path = self.root / "attempt-summary-manifest.json"
+                manifest_path.write_text(json.dumps({"items": [{"duration_seconds": 60.0, "source_size_bytes": 1000}]}))
+                encode_queue = {
+                    "state": {"is_paused": False, "stop_requested": False},
+                    "running": [],
+                    "queued": [],
+                    "recent": [
+                        {
+                            "job_id": "attempt-summary-job",
+                            "prefix": "tv/House/Season 2",
+                            "status": status,
+                            "manifest_path": str(manifest_path),
+                            "item_count": 1,
+                            "host": {},
+                            "attempt_count": attempt_count,
+                            "started_at": "2026-04-03T21:14:17+00:00",
+                            "progress": {
+                                "progress_state": status,
+                                "overall_completed_duration_seconds": 12.0,
+                            },
+                        }
+                    ],
+                    "queued_count": 0,
+                    "running_count": 0,
+                    "retry_backoff_count": int(status == "retry_backoff"),
+                    "needs_attention_count": int(status == "needs_attention"),
                 }
-            ],
-            "queued_count": 0,
-            "running_count": 0,
-            "retry_backoff_count": 0,
-            "needs_attention_count": 1,
-        }
 
-        decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
+                decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
 
-        self.assertEqual(decorated["recent"][0]["attempt_summary"], "attempt 1 of 3")
-
-    def test_decorate_encode_queue_for_scheduler_attempt_summary_clamps_to_max(self) -> None:
-        manifest_path = self.root / "clamped-attempt-manifest.json"
-        manifest_path.write_text(json.dumps({"items": [{"duration_seconds": 60.0, "source_size_bytes": 1000}]}))
-        encode_queue = {
-            "state": {"is_paused": False, "stop_requested": False},
-            "running": [],
-            "queued": [],
-            "recent": [
-                {
-                    "job_id": "retrying-host-job",
-                    "prefix": "tv/House/Season 2",
-                    "status": "retry_backoff",
-                    "manifest_path": str(manifest_path),
-                    "item_count": 1,
-                    "host": {},
-                    "attempt_count": 7,
-                    "started_at": "2026-04-03T21:14:17+00:00",
-                    "progress": {
-                        "progress_state": "retry_backoff",
-                        "overall_completed_duration_seconds": 12.0,
-                    },
-                }
-            ],
-            "queued_count": 0,
-            "running_count": 0,
-            "retry_backoff_count": 1,
-            "needs_attention_count": 0,
-        }
-
-        decorated = web_app._decorate_encode_queue_for_scheduler(self.config, encode_queue)
-
-        self.assertEqual(decorated["recent"][0]["attempt_summary"], "attempt 3 of 3")
+                summary = decorated["recent"][0]["attempt_summary"]
+                self.assertEqual(
+                    [int(value) for value in re.findall(r"-?\d+", summary)],
+                    [expected_attempt, web_app.ENCODE_JOB_MAX_ATTEMPTS],
+                )
 
     def test_encode_queue_summary_copy_labels_eta_as_estimated(self) -> None:
         encode_queue = {

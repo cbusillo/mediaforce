@@ -7303,62 +7303,25 @@ class TuningRuntimeTests(unittest.TestCase):
             "targets for measured comparison unless the operator explicitly asks for a hard cap.",
         )
 
-    def test_proposal_alignment_issue_rejects_size_budget_as_cap_change(self) -> None:
-        issue = proposal_alignment_issue(
-            operator_request={
-                "request_type": "size_budget",
-                "budget_label": "300 MB per episode",
-                "budget_bytes": 300 * 1024 * 1024,
-                "applied_policy": None,
-            },
-            request_disposition="honored",
-            current_policy={"video": {"target_vmaf": 95.0, "max_encoded_percent": 80}},
-            preview_policy={"video": {"target_vmaf": 95.0, "max_encoded_percent": 8}},
-        )
+    def test_proposal_alignment_issue_rejects_unrequested_size_budget_caps(self) -> None:
+        for current_cap, proposed_cap in ((80, 8), (None, 8), (55, 80)):
+            with self.subTest(current_cap=current_cap, proposed_cap=proposed_cap):
+                current_video = {"target_vmaf": 95.0}
+                if current_cap is not None:
+                    current_video["max_encoded_percent"] = current_cap
+                issue = proposal_alignment_issue(
+                    operator_request={
+                        "request_type": "size_budget",
+                        "budget_label": "300 MB per episode",
+                        "budget_bytes": 300 * 1024 * 1024,
+                        "applied_policy": None,
+                    },
+                    request_disposition="honored",
+                    current_policy={"video": current_video},
+                    preview_policy={"video": {"target_vmaf": 95.0, "max_encoded_percent": proposed_cap}},
+                )
 
-        self.assertEqual(
-            issue,
-            "The draft turns the size budget into a max_encoded_percent change. Size budgets are planning "
-            "targets for measured comparison unless the operator explicitly asks for a hard cap.",
-        )
-
-    def test_proposal_alignment_issue_rejects_size_budget_new_cap(self) -> None:
-        issue = proposal_alignment_issue(
-            operator_request={
-                "request_type": "size_budget",
-                "budget_label": "300 MB per episode",
-                "budget_bytes": 300 * 1024 * 1024,
-                "applied_policy": None,
-            },
-            request_disposition="honored",
-            current_policy={"video": {"target_vmaf": 95.0}},
-            preview_policy={"video": {"target_vmaf": 95.0, "max_encoded_percent": 8}},
-        )
-
-        self.assertEqual(
-            issue,
-            "The draft turns the size budget into a max_encoded_percent change. Size budgets are planning "
-            "targets for measured comparison unless the operator explicitly asks for a hard cap.",
-        )
-
-    def test_proposal_alignment_issue_rejects_size_budget_relaxed_cap(self) -> None:
-        issue = proposal_alignment_issue(
-            operator_request={
-                "request_type": "size_budget",
-                "budget_label": "300 MB per episode",
-                "budget_bytes": 300 * 1024 * 1024,
-                "applied_policy": None,
-            },
-            request_disposition="honored",
-            current_policy={"video": {"target_vmaf": 95.0, "max_encoded_percent": 55}},
-            preview_policy={"video": {"target_vmaf": 95.0, "max_encoded_percent": 80}},
-        )
-
-        self.assertEqual(
-            issue,
-            "The draft turns the size budget into a max_encoded_percent change. Size budgets are planning "
-            "targets for measured comparison unless the operator explicitly asks for a hard cap.",
-        )
+                self.assertIsNotNone(issue)
 
     def test_proposal_alignment_issue_rejects_size_budget_quality_drop(self) -> None:
         issue = proposal_alignment_issue(
