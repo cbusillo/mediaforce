@@ -19,7 +19,7 @@ import unittest
 from collections import Counter
 from collections.abc import Collection, Iterator, Mapping
 from concurrent.futures import Future
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -172,10 +172,25 @@ def _record_advice_payload(
 
 
 class EncodeQueueRecoveryTests(unittest.TestCase):
+    database_template: sqlite3.Connection
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.database_template = sqlite3.connect(":memory:")
+        cls.addClassCleanup(cls.database_template.close)
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "template.sqlite3"
+            with open_db(database_path):
+                pass
+            with closing(sqlite3.connect(database_path)) as connection:
+                connection.backup(cls.database_template)
+
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         self.config = self._build_config()
+        with closing(sqlite3.connect(self.config.paths.db_path)) as connection:
+            self.database_template.backup(connection)
         # Queue fixtures are local storage; mount policy has its own dedicated tests.
         for target in (
                 "mediaforce.web.runtime.controller_storage_recovery.finder_mount_roots_for_paths",
@@ -406,7 +421,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             web_app._recover_encode_queue(connection, self.config)
 
             job = load_encode_job(connection, "job-restart")
-            self.assertIsNotNone(job)
             assert job is not None
             self.assertEqual(job["status"], "retry_backoff")
             self.assertEqual(job["last_failure_kind"], "worker_restart")
@@ -446,7 +460,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             web_app._reconcile_encode_jobs(connection, self.config)
 
             job = load_encode_job(connection, "job-stale")
-            self.assertIsNotNone(job)
             assert job is not None
             self.assertEqual(job["status"], "retry_backoff")
             self.assertEqual(job["last_failure_kind"], "stale_lease")
@@ -694,7 +707,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             web_app._reconcile_encode_jobs(connection, self.config)
 
             job = load_encode_job(connection, "job-backoff")
-            self.assertIsNotNone(job)
             assert job is not None
             self.assertEqual(job["status"], "queued")
             self.assertIsNone(job["retry_not_before"])
@@ -731,7 +743,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             job = load_encode_job(connection, "job-backoff-cleanup")
             item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "queued")
         self.assertFalse(staging_path.exists())
@@ -759,7 +770,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             job = load_encode_job(connection, "job-missing-manifest")
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "needs_attention")
         self.assertEqual(job["terminal_reason"], "manifest_unreadable")
@@ -787,7 +797,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             job = load_encode_job(connection, "job-corrupt-manifest")
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "needs_attention")
         self.assertEqual(job["terminal_reason"], "manifest_unreadable")
@@ -839,7 +848,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             job = load_encode_job(connection, "job-remote-cleanup")
             staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "retry_backoff")
         self.assertIsNotNone(job["retry_not_before"])
@@ -942,7 +950,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             job = load_encode_job(connection, "job-local-cleanup")
             staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "needs_attention")
         self.assertEqual(job["terminal_reason"], "deterministic")
@@ -998,7 +1005,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             job = load_encode_job(connection, "job-remote-transport")
             staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "retry_backoff")
         self.assertIsNotNone(job["retry_not_before"])
@@ -1051,7 +1057,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             job = load_encode_job(connection, "job-remote-rm-rejection")
             staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "needs_attention")
         self.assertEqual(job["terminal_reason"], "deterministic")
@@ -1101,7 +1106,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             job = load_encode_job(connection, "job-restart-sweep")
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "retry_backoff")
         visited = {call.args[1] for call in sweep_mock.call_args_list}
@@ -1462,7 +1466,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-b")
         self.assertIsNone(waiting_reason)
@@ -1566,7 +1569,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-b")
         self.assertIsNone(waiting_reason)
@@ -1634,7 +1636,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-a")
         self.assertIsNone(waiting_reason)
@@ -1797,7 +1798,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "ct103")
         self.assertIsNone(waiting_reason)
@@ -1879,11 +1879,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                         host_payload, waiting_reason = web_app._select_encode_host(connection, config, job)
                     if expected_key is None:
                         self.assertIsNone(host_payload)
-                        self.assertIsNotNone(waiting_reason)
                         assert waiting_reason is not None
                         self.assertEqual(waiting_reason, "waiting for remote-a.internal to recover from repeated failures")
                     else:
-                        self.assertIsNotNone(host_payload)
                         assert host_payload is not None
                         self.assertEqual(host_payload["key"], expected_key)
                         self.assertIsNone(waiting_reason)
@@ -1989,7 +1987,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-b")
         self.assertIsNone(waiting_reason)
@@ -2052,7 +2049,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-a")
         self.assertIsNone(waiting_reason)
@@ -2124,7 +2120,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-a")
         self.assertIsNone(waiting_reason)
@@ -2239,7 +2234,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
             updated = load_encode_job(connection, "job-deterministic")
-            self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated["status"], "needs_attention")
             self.assertEqual(updated["terminal_reason"], "deterministic")
@@ -2383,7 +2377,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             updated = load_encode_job(connection, "job-quality-near-miss")
             manifest = json.loads(manifest_path.read_text())
 
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "retry_backoff")
         self.assertIsNone(updated["terminal_reason"])
@@ -2878,7 +2871,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             updated = load_encode_job(connection, "job-final-size-miss")
 
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "needs_attention")
         analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
@@ -2902,7 +2894,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "status=missing_target, actual=112263931, target=None, lower=None, upper=None."
         )
 
-        self.assertIsNotNone(analysis)
         assert analysis is not None
         self.assertEqual(analysis["kind"], "final_size_target_miss")
         self.assertEqual(analysis["retry_strategy"], "fresh_goal_required")
@@ -2941,7 +2932,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             ),
         )
 
-        self.assertIsNotNone(analysis)
         assert analysis is not None
         self.assertEqual(analysis["kind"], "final_size_target_miss")
         self.assertEqual(analysis["retry_strategy"], "fresh_goal_required")
@@ -3062,7 +3052,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         for job in jobs:
             with self.subTest(manifest_path=job["manifest_path"]):
                 blocker = folder_actions_runtime._final_size_requeue_contract_blocker(job, current)
-                self.assertIsNotNone(blocker)
                 assert blocker is not None
                 self.assertEqual(blocker["code"], "final_size_recovery_contract_unchanged")
 
@@ -3222,7 +3211,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             updated = load_encode_job(connection, "job-quality-large-miss")
 
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "needs_attention")
         failure_analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
@@ -3345,7 +3333,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             updated = load_encode_job(connection, "job-quality-multi-miss")
             manifest = json.loads(manifest_path.read_text())
 
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "retry_backoff")
         failure_analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
@@ -3428,7 +3415,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             updated = load_encode_job(connection, "job-quality-partial-miss")
             manifest = json.loads(manifest_path.read_text())
 
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "needs_attention")
         failure_analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
@@ -3579,7 +3565,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             updated = load_encode_job(connection, "job-controller-media")
 
         self.assertEqual(failure_kind, "controller_media_access")
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "needs_attention")
         self.assertEqual(updated["terminal_reason"], "controller_media_access")
@@ -3641,7 +3626,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             save_encode_job(connection, updated)
 
         self.assertEqual(failure_kind, "ssh_transport")
-        self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated["status"], "retry_backoff")
         self.assertEqual(updated["last_failure_kind"], "ssh_transport")
@@ -3660,7 +3644,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             still_waiting = load_encode_job(connection, "job-host-reboot")
             still_waiting_item_status = self._library_item_value(connection, item_id, library_items.c.status)
 
-        self.assertIsNotNone(still_waiting)
         assert still_waiting is not None
         self.assertEqual(still_waiting["status"], "retry_backoff")
         self.assertIn("to remove an unfinished file it left", str(still_waiting["waiting_reason"]))
@@ -3688,7 +3671,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             recovered = load_encode_job(connection, "job-host-reboot")
             recovered_item_status = self._library_item_value(connection, item_id, library_items.c.status)
 
-        self.assertIsNotNone(recovered)
         assert recovered is not None
         self.assertEqual(recovered["status"], "queued")
         self.assertIsNone(recovered["retry_not_before"])
@@ -4144,7 +4126,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
             updated = load_encode_job(connection, "job-host-retry")
-            self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated["status"], "retry_backoff")
             self.assertIsNone(updated["terminal_reason"])
@@ -4187,7 +4168,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
             updated = load_encode_job(connection, "job-host-repeat")
-            self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated["status"], "retry_backoff")
             self.assertEqual(updated["last_host"]["failure_streak"], 2)
@@ -4225,7 +4205,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
             updated = load_encode_job(connection, "job-host-repeat-alias")
-            self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated["status"], "retry_backoff")
             self.assertEqual(updated["last_host"]["failure_streak"], 2)
@@ -4295,7 +4274,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
             with patch("mediaforce.web.app._host_runtime_rows", return_value=statuses):
                 host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, job)
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "remote-b")
         self.assertIsNone(waiting_reason)
@@ -4372,7 +4350,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             selected, recovered_reason = web_app._select_encode_host(connection, self.config, job)
         self.assertIsNone(blocked)
         self.assertEqual(reason, "Controller storage is reconnecting.")
-        self.assertIsNotNone(selected)
         assert selected is not None
         self.assertEqual(selected["key"], "remote-a")
         self.assertIsNone(recovered_reason)
@@ -4412,7 +4389,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ):
             host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, {})
 
-        self.assertIsNotNone(host_payload)
         assert host_payload is not None
         self.assertEqual(host_payload["key"], "stream-host")
         self.assertIsNone(waiting_reason)
@@ -4587,7 +4563,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
             updated = load_encode_job(connection, "job-host-permission")
-            self.assertIsNotNone(updated)
             assert updated is not None
             self.assertEqual(updated["status"], "needs_attention")
             self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
@@ -4996,7 +4971,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         job = {"job_id": "job-1", "bypass_schedule": False}
         with patch("mediaforce.web.app._host_runtime_rows", return_value=[host]):
             selected_host, waiting_reason = web_app._select_encode_host(cast(Any, None), self.config, job)
-        self.assertIsNotNone(selected_host)
         assert selected_host is not None
         self.assertEqual(selected_host["key"], "ct103")
         self.assertIsNone(waiting_reason)
@@ -5077,7 +5051,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ):
             selected_host, waiting_reason = web_app._select_encode_host(connection, self.config, job)
 
-        self.assertIsNotNone(selected_host)
         assert selected_host is not None
         self.assertEqual(selected_host["key"], "tv-only")
         self.assertIsNone(waiting_reason)
@@ -5435,7 +5408,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             web_app._run_encode_job(config_path=self.config.paths.config_path, job_id="job-stop-failure")
         with open_db(self.config.paths.db_path) as connection:
             job = load_encode_job(connection, "job-stop-failure")
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "completed")
         self.assertIsNone(job["error"])
@@ -5465,7 +5437,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         stop_mock.assert_not_called()
         with open_db(self.config.paths.db_path) as connection:
             job = load_encode_job(connection, "job-reset-streak")
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "completed")
         self.assertNotIn("failure_streak", job["last_host"])
@@ -5646,7 +5617,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 with patch.object(web_app.threading, "Thread", return_value=fake_thread):
                     job = web_app._maybe_schedule_scan(connection, self.config, prefix=None)
 
-            self.assertIsNotNone(job)
             assert job is not None
             self.assertEqual(job["status"], "queued")
             fake_thread.start.assert_called_once()
@@ -5654,12 +5624,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             stale_row = connection.execute(
                 select(scan_runs.c.completed_at).where(scan_runs.c.scan_id == "scan-stale")
             ).mappings().fetchone()
-            self.assertIsNotNone(stale_row)
             assert stale_row is not None
             self.assertIsNotNone(stale_row["completed_at"])
 
             refreshed_job = web_app._load_scan_job_state(self.config, None)
-            self.assertIsNotNone(refreshed_job)
             assert refreshed_job is not None
             self.assertEqual(refreshed_job["status"], "queued")
             self.assertNotEqual(refreshed_job["job_id"], "scan-stale-job")
@@ -5673,7 +5641,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ), patch.object(web_app.threading, "Thread", return_value=fake_thread):
             job = web_app._maybe_schedule_scan(connection, self.config, prefix=None, force=True)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "queued")
         fake_thread.start.assert_called_once()
@@ -5705,7 +5672,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ):
             job = web_app._maybe_schedule_scan(connection, self.config, prefix=None, force=True)
 
-        self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job["status"], "queued")
         self.assertNotEqual(job["job_id"], "recent-failure")
@@ -8578,54 +8544,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(len(matching_cards), 1)
         self.assertEqual(matching_cards[0].estimated_savings_bytes, 1024 * 1024 * 1024)
 
-    def test_project_env_loader_sets_defaults_without_overriding_shell_env(self) -> None:
-        env_path = self.root / "projects" / "media-encoding" / ".env"
-        with patch.object(web_app, "DEFAULT_CONFIG_PATH", env_path.parent / "config" / "defaults.toml"):
-            with patch.object(Path, "exists", autospec=True) as exists_mock:
-                exists_mock.side_effect = lambda path: path == env_path
-                with patch.object(Path, "read_text", autospec=True, return_value=(
-                        "MEDIAFORCE_WEB_HOST=0.0.0.0\n"
-                        "MEDIAFORCE_WEB_PORT=8777\n"
-                        "MEDIAFORCE_WEB_RELOAD=true\n"
-                )):
-                    with patch.dict(os.environ, {"MEDIAFORCE_WEB_PORT": "9999"}, clear=True):
-                        web_app._load_project_env_file()
-                        self.assertEqual(os.environ["MEDIAFORCE_WEB_HOST"], "0.0.0.0")
-                        self.assertEqual(os.environ["MEDIAFORCE_WEB_PORT"], "9999")
-                        self.assertEqual(os.environ["MEDIAFORCE_WEB_RELOAD"], "true")
-
     def test_default_web_host_and_reload_use_neutral_fallbacks(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(web_app._default_web_host(), "127.0.0.1")
             self.assertFalse(web_app._default_web_reload_enabled())
-
-    def test_mediaforce_env_controls_host_and_reload(self) -> None:
-        with patch.dict(os.environ, {"MEDIAFORCE_WEB_HOST": "0.0.0.0", "MEDIAFORCE_WEB_RELOAD": "true"}, clear=True):
-            self.assertEqual(web_app._default_web_host(), "0.0.0.0")
-            self.assertTrue(web_app._default_web_reload_enabled())
-
-    def test_web_startup_cli_args_override_environment_defaults(self) -> None:
-        with patch.dict(
-                os.environ,
-                {
-                    "MEDIAFORCE_WEB_HOST": "0.0.0.0",
-                    "MEDIAFORCE_WEB_PORT": "8777",
-                    "MEDIAFORCE_WEB_RELOAD": "true",
-                },
-                clear=True,
-        ):
-            args = web_app._parse_web_startup_args([
-                "--host",
-                "127.0.0.9",
-                "--port",
-                "8777",
-                "--no-reload",
-            ])
-            settings = web_app._web_startup_settings(args)
-
-        self.assertEqual(settings.host, "127.0.0.9")
-        self.assertEqual(settings.port, 8777)
-        self.assertFalse(settings.reload_enabled)
 
     def test_web_startup_shell_env_overrides_project_env_file(self) -> None:
         env_path = self.root / ".env"
@@ -8646,6 +8568,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def test_main_uses_cli_values_for_uvicorn(self) -> None:
         config = self.config
+        requested_port = 8778
         with patch.dict(
                 os.environ,
                 {
@@ -8657,16 +8580,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ), patch("mediaforce.web.app.load_config", return_value=config), patch(
                 "mediaforce.web.app.create_app", return_value=object()
         ) as create_app_mock, patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
-            web_app.main(["--host", "127.0.0.9", "--port", "8777", "--no-reload"])
+            web_app.main(["--host", "127.0.0.9", "--port", str(requested_port), "--no-reload"])
 
         create_app_mock.assert_called_once_with(
             config.paths.config_path,
             runtime_host="127.0.0.9",
-            runtime_port=8777,
+            runtime_port=requested_port,
         )
         uvicorn_run_mock.assert_called_once()
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["host"], "127.0.0.9")
-        self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 8777)
+        self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], requested_port)
         self.assertNotIn("reload", uvicorn_run_mock.call_args.kwargs)
 
     def test_main_uses_cli_config_path_for_reload_app(self) -> None:
@@ -15826,36 +15749,6 @@ raise SystemExit(0)
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
 
-    def test_run_crf_search_removes_scoped_remote_temp_dir_after_completion(self) -> None:
-        host = {"mode": "ssh", "host": "cbusillo@stream-host"}
-        remote_results = [
-            subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
-            subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="crf 28 xpsnr 41.5", stderr=""),
-            subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
-        ]
-
-        with patch("mediaforce.quality.run_remote_command", side_effect=remote_results) as remote_command_mock:
-            quality.run_crf_search(
-                Path("/tmp/input.mkv"),
-                source_codec="hevc",
-                preferred_metric="xpsnr",
-                metric_target=41.0,
-                preset=4,
-                pixel_format="yuv420p10le",
-                sample_every="12m",
-                sample_duration="20s",
-                min_crf=20,
-                max_crf=35,
-                max_encoded_percent=70,
-                svt_params=[],
-                thorough=False,
-                host=host,
-                quality_temp_dir=Path("/tmp/mediaforce-transcode"),
-            )
-
-        scoped_temp_dir = remote_command_mock.call_args_list[0].args[1][2]
-        self.assertEqual(remote_command_mock.call_args_list[2].args[1], ["rm", "-rf", scoped_temp_dir])
-
     def test_run_crf_search_surfaces_remote_temp_cleanup_failure(self) -> None:
         host = {"mode": "ssh", "host": "cbusillo@stream-host"}
         remote_results = [
@@ -16813,7 +16706,6 @@ raise SystemExit(0)
         self.assertIsNone(
             execution._update_ffmpeg_progress_state(progress_state, "out_time_ms=45000000\n", elapsed_seconds=5.0))
         snapshot = execution._update_ffmpeg_progress_state(progress_state, "progress=continue\n", elapsed_seconds=5.0)
-        self.assertIsNotNone(snapshot)
         assert snapshot is not None
         self.assertEqual(snapshot["fps"], 23.4)
         self.assertEqual(snapshot["speed"], 2.5)
@@ -18359,7 +18251,6 @@ raise SystemExit(0)
                 audio_policy={"convert_to_opus_codecs": ["aac"], "surround_5_1_opus_bitrate": "256k"},
             )
 
-        self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result["action"], "libopus")
         self.assertEqual(result["bitrate"], "256k")
@@ -18592,7 +18483,6 @@ raise SystemExit(0)
         self.assertFalse(second.acquire())
 
         owner = second.owner_metadata()
-        self.assertIsNotNone(owner)
         assert owner is not None
         self.assertEqual(owner["worker_name"], "background-workers")
 
@@ -18635,7 +18525,6 @@ raise SystemExit(0)
         ) as start_catalog, patch("mediaforce.web.app._start_evidence_autostart_worker") as start_autostart:
             runtime = web_app._start_background_workers(self.config)
 
-        self.assertIsNotNone(runtime)
         assert runtime is not None
         self.assertIs(runtime.lease, lease)
         self.assertEqual(runtime.handles, (storage_handle, host_recovery_handle, calibration_handle, encode_handle, catalog_handle))
@@ -19236,14 +19125,15 @@ raise SystemExit(0)
             alias = root / "config-alias.toml"
             original.write_text("config", encoding="utf-8")
             os.link(original, alias)
+            paths = replace(self.config.paths, db_path=root / "absent.sqlite3")
             first_config = replace(
-                self.config, paths=replace(self.config.paths,
+                self.config, paths=replace(paths,
                     config_path=original,
                     web_state_dir=root / "first-state",
                 )
             )
             second_config = replace(
-                self.config, paths=replace(self.config.paths,
+                self.config, paths=replace(paths,
                     config_path=alias,
                     web_state_dir=root / "second-state",
                 )
@@ -19443,7 +19333,6 @@ raise SystemExit(0)
             ):
                 job = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
 
-            self.assertIsNotNone(job)
             assert job is not None
             self.assertEqual(job["job_id"], "job-queued-runtime")
             self.assertEqual(job["host"]["key"], "local")
@@ -19487,7 +19376,6 @@ raise SystemExit(0)
                 ):
                     claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
 
-                self.assertIsNotNone(claimed)
                 assert claimed is not None
                 self.assertEqual(claimed["status"], "running")
                 self.assertEqual(claimed["attempt_count"], 1)
@@ -19579,7 +19467,6 @@ raise SystemExit(0)
             ):
                 claimed = encode_runtime.claim_next_runnable_encode_job(connection, self.config, deps)
 
-            self.assertIsNotNone(claimed)
             assert claimed is not None
             self.assertEqual(claimed["status"], "running")
             self.assertIsNone(claimed["schedule_close_deadline_at"])
@@ -21604,7 +21491,6 @@ raise SystemExit(0)
             self.assertIsNone(job)
             select_host.assert_not_called()
             blocked = load_encode_job(connection, "job-browse-only")
-            self.assertIsNotNone(blocked)
             assert blocked is not None
             self.assertEqual(blocked["waiting_reason"], encode_runtime.LIBRARY_NOT_COMPRESSING_WAITING_REASON)
 
@@ -21715,7 +21601,6 @@ raise SystemExit(0)
             self.assertEqual(len(manifest_reads), 1)
             parent = load_encode_job(connection, "folder-waiting")
             shards = [load_encode_job(connection, f"shard-waiting-{index}") for index in range(3)]
-            self.assertIsNotNone(parent)
             assert parent is not None
             self.assertEqual(parent["waiting_reason"], "waiting for an available computer")
             self.assertTrue(all(shard is not None for shard in shards))
@@ -21737,7 +21622,6 @@ raise SystemExit(0)
             ) as sync_parent, patch.object(Path, "read_text", tracked_read_text):
                 selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
 
-            self.assertIsNotNone(selected)
             assert selected is not None
             self.assertEqual(selected["job_id"], "shard-waiting-2")
             deps.host_runtime_rows.assert_called_once()
@@ -28390,7 +28274,6 @@ raise SystemExit(0)
 
             latest_job = load_latest_terminal_encode_job_for_prefix(connection, "tv/show")
 
-        self.assertIsNotNone(latest_job)
         assert latest_job is not None
         self.assertEqual(latest_job["job_id"], "newer-terminal")
 
@@ -29204,7 +29087,6 @@ raise SystemExit(0)
             )
 
             parent_job = load_encode_job(connection, "parent-folder")
-            self.assertIsNotNone(parent_job)
             assert parent_job is not None
             encode_runtime.prepare_terminal_encode_job_for_requeue(
                 connection,
@@ -29314,7 +29196,6 @@ raise SystemExit(0)
             )
 
             parent_job = load_encode_job(connection, "legacy-parent-folder")
-            self.assertIsNotNone(parent_job)
             assert parent_job is not None
             encode_runtime.prepare_terminal_encode_job_for_requeue(
                 connection,
@@ -29394,7 +29275,6 @@ raise SystemExit(0)
             )
 
             parent_job = load_encode_job(connection, "orphan-parent-folder")
-            self.assertIsNotNone(parent_job)
             assert parent_job is not None
             encode_runtime.prepare_terminal_encode_job_for_requeue(
                 connection,
@@ -31099,7 +30979,6 @@ raise SystemExit(0)
 
             payload = web_app._load_job_state(connection, self.config, prefix)
 
-        self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(payload["status"], "stopped")
         self.assertEqual(payload["action"], "ai_tune")
@@ -31150,10 +31029,8 @@ raise SystemExit(0)
             latest_payload = web_app._load_job_state(connection, self.config, prefix)
             retryable_payload = web_app._load_retryable_sample_job_state(connection, self.config, prefix)
 
-        self.assertIsNotNone(latest_payload)
         assert latest_payload is not None
         self.assertEqual(latest_payload["job_id"], "stopped-full-job")
-        self.assertIsNotNone(retryable_payload)
         assert retryable_payload is not None
         self.assertEqual(retryable_payload["job_id"], "stopped-sample-job")
         self.assertEqual(retryable_payload["lane"], "sample")
@@ -31204,7 +31081,6 @@ raise SystemExit(0)
             latest_payload = web_app._load_job_state(connection, self.config, prefix)
             retryable_payload = web_app._load_retryable_sample_job_state(connection, self.config, prefix)
 
-        self.assertIsNotNone(latest_payload)
         assert latest_payload is not None
         self.assertEqual(latest_payload["job_id"], "completed-sample-job")
         self.assertIsNone(retryable_payload)
@@ -31250,11 +31126,9 @@ raise SystemExit(0)
                 prefix,
             )
 
-        self.assertIsNotNone(latest_payload)
         assert latest_payload is not None
         self.assertEqual(latest_payload["job_id"], "bound-exhausted-sample-job")
         self.assertIsNone(retryable_payload)
-        self.assertIsNotNone(failed_target_payload)
         assert failed_target_payload is not None
         self.assertEqual(failed_target_payload["job_id"], "bound-exhausted-sample-job")
 
@@ -31321,7 +31195,6 @@ raise SystemExit(0)
 
         self.assertIsNone(retryable_payload)
         self.assertIsNone(failed_target_payload)
-        self.assertIsNotNone(failed_payload)
         assert failed_payload is not None
         self.assertEqual(failed_payload["job_id"], "failed-sample-job")
         self.assertEqual(failed_payload["error"], "Error: Failed to find a suitable crf")
