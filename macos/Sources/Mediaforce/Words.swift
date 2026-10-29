@@ -1,10 +1,12 @@
 import Foundation
 
 enum Words {
+    static let library = "Library"
+
     static func backTitle(_ place: Place) -> String {
         switch place {
-        case .library: "Library"
-        case .spaceSaved: "Space saved"
+        case .library: library
+        case .spaceSaved: spaceSaved
         case .media: media
         case .kind(let code): kindName(code)
         case .seasonsWithoutKind: seasonsWithoutKindTitle

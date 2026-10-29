@@ -4,6 +4,7 @@ struct SamplePage: View {
     let prefix: String
     let model: MainWindowModel
     let openItem: (String) -> Void
+    var namePage: (String) -> Void = { _ in }
     @State private var facts: SampleFacts?
 
     var body: some View {
@@ -11,6 +12,7 @@ struct SamplePage: View {
         PageFrame(title: names.season, subtitle: names.show) {
             SampleWork(prefix: prefix, model: model, facts: $facts, openItem: openItem)
         }
+        .onChange(of: names.season, initial: true) { _, title in namePage(title) }
     }
 
     /// The season names the page and its show is the subtitle, as on the season's own page.

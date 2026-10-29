@@ -153,6 +153,8 @@ actions, or a season for season actions.
 The Mac app's back button names the page you came from and returns to it,
 including Media, Space saved, a kind, or another show, season or sample.
 Choosing a page in the sidebar starts a new browsing path.
+Opening a page from a notification or the menu bar keeps a way back to the
+page already open in the window.
 
 Folder calibration now uses a size-first review flow by default. The checked-in
 defaults aim for roughly 300 MB per 45-minute episode at up to 1080p, then use

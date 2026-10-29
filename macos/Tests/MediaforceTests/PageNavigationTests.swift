@@ -49,4 +49,21 @@ final class PageNavigationTests: XCTestCase {
         XCTAssertEqual(Words.backTitle(.item("tv/Example/\(folder)")), folder)
         XCTAssertTrue(Words.backTitle(.sample("tv/Example/\(folder)")).contains(folder))
     }
+
+    func testBackUsesTheTitleThePageDisplayedInsteadOfItsFolder() {
+        var navigation = PageNavigation()
+        let season = Place.item("tv/Example/S02")
+        let sample = Place.sample("tv/Example/S02")
+        let title = "Season 2"
+        navigation.open(season)
+        navigation.name(season, title)
+        navigation.open(sample)
+        XCTAssertEqual(navigation.backTitle, title)
+        navigation.name(sample, title)
+        navigation.open(.spaceSaved)
+        XCTAssertEqual(navigation.back, sample)
+        XCTAssertEqual(navigation.backTitle, title)
+        navigation.goBack()
+        XCTAssertEqual(navigation.place, sample)
+    }
 }

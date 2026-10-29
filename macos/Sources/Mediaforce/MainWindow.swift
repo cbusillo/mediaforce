@@ -202,9 +202,12 @@ struct MainWindow: View {
                                 // Deleting backups changes what the page shows, so it reads its facts again at once.
                                 .id(facts.originalBackups.count)
                         // A new page for each prefix, so none shows the last one's name or facts while its own loads.
-                        case .sample(let prefix): SamplePage(prefix: prefix, model: model) { go(.item($0)) }.id(prefix)
+                        case .sample(let prefix):
+                            SamplePage(prefix: prefix, model: model, openItem: { go(.item($0)) },
+                                       namePage: { navigation.name(.sample(prefix), $0) }).id(prefix)
                         case .item(let prefix):
-                            ItemPage(prefix: prefix, model: model, openSample: { go(.sample($0)) }, openItem: { go(.item($0)) })
+                            ItemPage(prefix: prefix, model: model, openSample: { go(.sample($0)) }, openItem: { go(.item($0)) },
+                                     namePage: { navigation.name(.item(prefix), $0) })
                                 .id(prefix)
                         case .media: MediaPage(model: model) { go(.item($0)) }
                         case .seasonsWithoutKind:
@@ -234,9 +237,9 @@ struct MainWindow: View {
                     ToolbarItem(placement: .navigation) {
                         PauseButton(facts: facts, model: model)
                     }
-                    if let back = navigation.back {
+                    if let title = navigation.backTitle {
                         ToolbarItem(placement: .navigation) {
-                            Button(Words.backTitle(back), systemImage: "chevron.backward") { navigation.goBack() }
+                            Button(title, systemImage: "chevron.backward") { navigation.goBack() }
                         }
                     }
                 }
@@ -252,11 +255,7 @@ struct MainWindow: View {
         // Initial too: the menu bar may ask for a page while it opens this window.
         .onChange(of: model.requestedPlace, initial: true) { _, requested in
             guard let requested else { return }
-            if case .computer(let key) = requested {
-                openComputer(key)
-            } else {
-                go(requested)
-            }
+            go(requested)
             model.requestedPlace = nil
         }
         .alert(item: Bindable(model).notice) { notice in
@@ -352,9 +351,9 @@ struct Sidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $place) {
-                Label("Library", systemImage: "books.vertical")
+                Label(Words.library, systemImage: "books.vertical")
                     .tag(Place.library)
-                SidebarRow(title: "Space saved", symbol: "arrow.down.right.and.arrow.up.left", trailing: Words.size(facts.spaceSaved.bytes))
+                SidebarRow(title: Words.spaceSaved, symbol: "arrow.down.right.and.arrow.up.left", trailing: Words.size(facts.spaceSaved.bytes))
                     .tag(Place.spaceSaved)
                 // No count: the page counts shows, titles and folders, while the facts count other media by file.
                 Label(Words.media, systemImage: "film.stack")
