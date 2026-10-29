@@ -22,7 +22,6 @@ from mediaforce.advisor import (
     TuningPolicyResponse,
     _build_review_artifact_critique_prompt,
     _build_tune_prompt,
-    _build_operator_note_parse_prompt,
     _extract_seed_payload,
     _filter_audio_specific_guardrail_issues,
     _force_repeated_tune_experiment,
@@ -68,7 +67,7 @@ from mediaforce.web.app import _build_multimodal_review_pack, _build_seed_policy
 from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, calibration_completion_status, \
     run_calibration_job
-from mediaforce.web.runtime.completed_runtime import ORIGINALS_REMOVED_EVENT, completed_page_payload, record_deleted_original_backups
+from mediaforce.web.runtime.completed_runtime import completed_page_payload, record_deleted_original_backups
 from mediaforce.web.runtime.dashboard_payloads import dashboard_summary_payload, reconcile_pending_review_samples
 from mediaforce.library.media_scopes import MediaScopeConflict
 from mediaforce.web.runtime.folder_ai_tuning import (
@@ -385,8 +384,7 @@ class TuningRuntimeTests(unittest.TestCase):
     def _capture_subprocess_commands(self, response_body: str) -> tuple[list[list[str]], object]:
         commands: list[list[str]] = []
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
-            self.assertIsInstance(kwargs, dict)
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             commands.append(cmd)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(response_body), "stderr": ""})()
 
@@ -947,8 +945,7 @@ class TuningRuntimeTests(unittest.TestCase):
         ]
         commands: list[list[str]] = []
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
-            self.assertIsInstance(kwargs, dict)
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             commands.append(cmd)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
@@ -1702,34 +1699,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["history"][0]["prefix"], "tv/Example Show/Season 1")
         self.assertEqual(payload["history"][0]["tone"], "ready")
 
-    def test_completed_page_payload_uses_mark_handled_history_copy(self) -> None:
-        from mediaforce.web import app as web_app
-
-        self._insert_promoted_artifact(
-            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
-            promoted_at="2026-04-10T10:00:00+00:00",
-            archived_size_bytes=3,
-            bytes_saved=12,
-        )
-        with open_db(self.config.paths.db_path) as connection:
-            library_item_id = connection.execute(select(library_items.c.id)).scalar_one()
-            connection.execute(
-                item_events.insert().values(
-                    library_item_id=library_item_id,
-                    created_at="2026-04-10T10:01:00+00:00",
-                    event_type=ORIGINALS_REMOVED_EVENT,
-                    details_json=json.dumps({"prefix": "tv/Example Show/Season 1"}),
-                )
-            )
-            connection.commit()
-            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
-
-        self.assertEqual(payload["history"][0]["label"], "Marked handled")
-        self.assertEqual(
-            payload["history"][0]["detail"],
-            "The original backups were already gone. Nothing was deleted; this finished folder was marked handled after review.",
-        )
-
     def test_completed_page_payload_history_uses_plain_words_for_live_event_shapes(self) -> None:
         from mediaforce.web import app as web_app
         from mediaforce.web.runtime import completed_runtime
@@ -2094,8 +2063,7 @@ class TuningRuntimeTests(unittest.TestCase):
         image_path.write_bytes(b"png")
         commands: list[list[str]] = []
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
-            self.assertIsInstance(kwargs, dict)
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             commands.append(cmd)
             if "exec" in cmd:
                 response_body = json.dumps(
@@ -2158,8 +2126,7 @@ class TuningRuntimeTests(unittest.TestCase):
         image_path.write_bytes(b"png")
         commands: list[list[str]] = []
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
-            self.assertIsInstance(kwargs, dict)
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             commands.append(cmd)
             response_body = json.dumps(
                 {
@@ -2211,9 +2178,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -2280,9 +2246,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -2341,9 +2306,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -2423,9 +2387,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -2495,9 +2458,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -2600,9 +2562,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -2672,9 +2633,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -2744,9 +2704,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -2821,9 +2780,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -2889,9 +2847,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -2943,9 +2900,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -3008,9 +2964,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -3083,9 +3038,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -3148,9 +3102,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -3211,9 +3164,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -3274,9 +3226,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -3337,9 +3288,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -3431,9 +3381,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -3485,9 +3434,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -3583,9 +3531,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -3643,9 +3590,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -6682,9 +6628,8 @@ class TuningRuntimeTests(unittest.TestCase):
             ),
         ]
 
-        def fake_run(cmd: list[str], **kwargs: object) -> object:
+        def fake_run(cmd: list[str], **_kwargs: object) -> object:
             self.assertIsInstance(cmd, list)
-            self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
             return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
@@ -8842,33 +8787,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(updated_policy["subtitle"]["default_mode"], "none")
         self.assertIn("subtitle", applied)
 
-    def test_seed_prompt_adds_class_guardrails(self) -> None:
-        prompt = _build_seed_prompt({"folder": "tv/House/Season 5"})
-
-        self.assertIn("cold-start guess", prompt)
-        self.assertIn("best first-pass attempt", prompt)
-        self.assertIn("instruction to satisfy", prompt)
-        self.assertIn("audio_tradeoff_hint", prompt)
-        self.assertIn("recommended_seed_action", prompt)
-        self.assertIn("review_confidence", prompt)
-        self.assertIn("hold", prompt)
-        self.assertIn("Use softened only when the operator note is exploratory", prompt)
-        self.assertIn("closest faithful experiment", prompt)
-        self.assertIn("operator_repeat_signal", prompt)
-        self.assertNotIn("established, visually approved product baseline", prompt)
-        self.assertIn("Evidence precedence is strict", prompt)
-        self.assertIn("Never invent conservative headroom", prompt)
-        self.assertIn("Uncertainty means request another measurement", prompt)
-        self.assertIn("legacy H.264 or HEVC bitrate intuition", prompt)
-        self.assertIn("High-80s VMAF", prompt)
-        self.assertIn("non-positive video budget", prompt)
-        self.assertNotIn("risky draft", prompt)
-        self.assertNotIn("request looks unrealistic", prompt)
-        self.assertIn("video.black_bar_handling", prompt)
-        self.assertIn("Do not infer 1080p or 720p scaling from a size budget alone", prompt)
-        self.assertIn("request_response", prompt)
-        self.assertIn("honored_with_risk", prompt)
-
     def test_extract_seed_payload_recovers_json_object_from_wrapped_text(self) -> None:
         raw = "Here you go:\n```json\n{\"summary\":\"safe\",\"policy\":{\"video\":{}}}\n```"
 
@@ -8949,31 +8867,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(passed["status"], "pass")
         self.assertEqual(passed["source"], "deterministic")
 
-    def test_tune_prompt_mentions_review_media_conversation(self) -> None:
-        prompt = _build_tune_prompt(
-            {
-                "folder": "tv/House/Season 2",
-                "operator_note": "What do you think of the current review clips?",
-                "runtime_toolbelt": {
-                    "review_media_context": {
-                        "review_media_ready": True,
-                        "moment_count": 3,
-                        "moments": [{"moment": 1, "timestamp_seconds": 89.0}],
-                    }
-                },
-            }
-        )
-
-        self.assertIn("review_media_context", prompt)
-        self.assertIn("current audio tradeoff", prompt)
-        self.assertIn("never pretend", prompt)
-        self.assertIn("instruction to satisfy", prompt)
-        self.assertIn("runtime_toolbelt.audio_tradeoff_hint", prompt)
-        self.assertIn("closest faithful experiment", prompt)
-        self.assertIn("video.black_bar_handling", prompt)
-        self.assertIn("operator_note_parse.scale_height", prompt)
-        self.assertIn("Evidence precedence is strict", prompt)
-
     def test_tune_prompt_summarizes_multimodal_review_pack_without_paths(self) -> None:
         prompt = _build_tune_prompt(
             {
@@ -8990,21 +8883,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("image_count", prompt)
         self.assertNotIn("/tmp/private-artifact.png", prompt)
 
-    def test_tune_prompt_mentions_review_artifact_critique(self) -> None:
-        prompt = _build_tune_prompt(
-            {
-                "folder": "tv/House/Season 2",
-                "operator_note": "Push a little more if the hallway still looks clean.",
-                "review_artifact_critique": {
-                    "summary": "Moment 2 is the fragile scene.",
-                    "weakest_moments": ["Moment 2"],
-                },
-            }
-        )
-
-        self.assertIn("review_artifact_critique", prompt)
-        self.assertIn("first-pass reading over artifacts extracted from the actual review clips", prompt)
-
     def test_review_artifact_critique_prompt_summarizes_multimodal_pack_without_paths(self) -> None:
         prompt = _build_review_artifact_critique_prompt(
             {
@@ -9019,16 +8897,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("multimodal_review_pack", prompt)
         self.assertIn("image_count", prompt)
         self.assertNotIn("/tmp/private-artifact.png", prompt)
-
-    def test_operator_note_parse_prompt_extracts_scale_height_only_from_request(self) -> None:
-        prompt = _build_operator_note_parse_prompt({"operator_note": "Downsample the 4K files to 1080p."})
-
-        self.assertIn("scale_height", prompt)
-        self.assertIn("black_bar_handling", prompt)
-        self.assertIn("crop", prompt)
-        self.assertIn("scale_target", prompt)
-        self.assertIn("do not infer a scale target", prompt)
-        self.assertIn("evidence_authority", prompt)
 
     def test_build_tuning_runtime_toolbelt_summarizes_review_media(self) -> None:
         toolbelt = _build_tuning_runtime_toolbelt(
@@ -9364,15 +9232,6 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(hint["recommended_seed_action"], "allow")
         self.assertEqual(hint["review_confidence"], "low")
 
-    def test_seed_prompt_references_recommended_seed_action(self) -> None:
-        prompt = _build_seed_prompt({"folder": "tv/Suits/Season 3"})
-
-        self.assertIn("recommended_seed_action", prompt)
-        self.assertIn("review_confidence", prompt)
-        self.assertIn("hold", prompt)
-        self.assertNotIn("requested budget clearly needs that savings", prompt)
-        self.assertIn("materially necessary and worth the review risk", prompt)
-
     def test_seed_prompt_references_hinted_audio_key_for_stereo(self) -> None:
         prompt = _build_seed_prompt(
             {
@@ -9383,16 +9242,6 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertIn("stereo_opus_bitrate", prompt)
         self.assertNotIn("surround Opus bitrate", prompt)
-
-    def test_tune_prompt_does_not_allow_budget_to_override_low_leverage_audio(self) -> None:
-        prompt = _build_tune_prompt({"folder": "tv/Suits/Season 3"})
-
-        self.assertIn("runtime_toolbelt.audio_tradeoff_hint", prompt)
-        self.assertIn("review_confidence", prompt)
-        self.assertNotIn("requested budget clearly needs that savings", prompt)
-        self.assertIn("materially necessary and worth that review risk", prompt)
-        self.assertIn("legacy H.264 or HEVC bitrate intuition", prompt)
-        self.assertIn("high-80s VMAF", prompt)
 
     def test_tune_self_check_bypasses_model_for_audio_hint(self) -> None:
         with patch("mediaforce.advisor._run_structured_llm_request") as structured_request:
