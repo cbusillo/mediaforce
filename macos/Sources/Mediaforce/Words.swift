@@ -1,6 +1,19 @@
 import Foundation
 
 enum Words {
+    static func backTitle(_ place: Place) -> String {
+        switch place {
+        case .library: "Library"
+        case .spaceSaved: "Space saved"
+        case .media: media
+        case .kind(let code): kindName(code)
+        case .seasonsWithoutKind: seasonsWithoutKindTitle
+        case .item(let prefix): prefix.split(separator: "/").last.map(String.init) ?? prefix
+        case .sample(let prefix): "Sample: \(prefix.split(separator: "/").last.map(String.init) ?? prefix)"
+        case .computer: "Computers"
+        }
+    }
+
     static func size(_ bytes: Int64) -> String {
         let value = Double(bytes)
         if value >= 1e12 { return (value / 1e12).formatted(.number.precision(.fractionLength(2))) + " TB" }

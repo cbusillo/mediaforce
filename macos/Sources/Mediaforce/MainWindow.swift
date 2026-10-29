@@ -155,13 +155,6 @@ enum Place: Hashable {
 
     static let notificationKey = "opens"
 
-    var opensFromList: Bool {
-        switch self {
-        case .sample, .item: true
-        default: false
-        }
-    }
-
     var notificationValue: String {
         switch self {
         case .sample(let prefix): "sample:\(prefix)"
@@ -192,35 +185,35 @@ struct MainWindow: View {
     static let id = "main"
 
     let model: MainWindowModel
-    @State private var place: Place? = .library
+    @State private var navigation = PageNavigation()
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Group {
             if let facts = model.facts {
                 NavigationSplitView {
-                    Sidebar(place: $place, facts: facts, model: model)
+                    Sidebar(place: Binding(get: { navigation.place }, set: { navigation.select($0) }), facts: facts, model: model)
                         .navigationSplitViewColumnWidth(214)
                 } detail: {
                     Group {
-                        switch place {
+                        switch navigation.place {
                         case .spaceSaved:
-                            SpaceSavedPage(facts: facts, model: model) { place = .item($0) }
+                            SpaceSavedPage(facts: facts, model: model) { go(.item($0)) }
                                 // Deleting backups changes what the page shows, so it reads its facts again at once.
                                 .id(facts.originalBackups.count)
                         // A new page for each prefix, so none shows the last one's name or facts while its own loads.
-                        case .sample(let prefix): SamplePage(prefix: prefix, model: model) { place = .item($0) }.id(prefix)
+                        case .sample(let prefix): SamplePage(prefix: prefix, model: model) { go(.item($0)) }.id(prefix)
                         case .item(let prefix):
-                            ItemPage(prefix: prefix, model: model, openSample: { place = .sample($0) }, openItem: { place = .item($0) })
+                            ItemPage(prefix: prefix, model: model, openSample: { go(.sample($0)) }, openItem: { go(.item($0)) })
                                 .id(prefix)
-                        case .media: MediaPage(model: model) { place = .item($0) }
+                        case .media: MediaPage(model: model) { go(.item($0)) }
                         case .seasonsWithoutKind:
-                            MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { place = .media }) { place = .item($0) }
+                            MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { go(.media) }) { go(.item($0)) }
                         case .kind(let code):
                             if let kind = model.kinds?.kinds.first(where: { $0.kind == code }) {
                                 KindPage(kind: kind, leftOut: model.kinds?.leftOut.count ?? 0, model: model,
-                                         openItem: { place = .item($0) }, openSample: { place = .sample($0) },
-                                         openLeftOut: { place = .seasonsWithoutKind })
+                                         openItem: { go(.item($0)) }, openSample: { go(.sample($0)) },
+                                         openLeftOut: { go(.seasonsWithoutKind) })
                             }
                         default: LibraryPage(facts: facts, posters: model.posters) { go($0) }
                         }
@@ -241,9 +234,9 @@ struct MainWindow: View {
                     ToolbarItem(placement: .navigation) {
                         PauseButton(facts: facts, model: model)
                     }
-                    if place?.opensFromList == true {
+                    if let back = navigation.back {
                         ToolbarItem(placement: .navigation) {
-                            Button("Library", systemImage: "chevron.backward") { place = .library }
+                            Button(Words.backTitle(back), systemImage: "chevron.backward") { navigation.goBack() }
                         }
                     }
                 }
@@ -262,7 +255,7 @@ struct MainWindow: View {
             if case .computer(let key) = requested {
                 openComputer(key)
             } else {
-                place = requested
+                go(requested)
             }
             model.requestedPlace = nil
         }
@@ -273,7 +266,7 @@ struct MainWindow: View {
 
     /// Opens a place from a link on a page: a page of this window, or Settings › Computers for a computer.
     private func go(_ requested: Place) {
-        if case .computer(let key) = requested { openComputer(key) } else { place = requested }
+        if case .computer(let key) = requested { openComputer(key) } else { navigation.open(requested) }
     }
 
     /// Computers live in Settings › Computers; this opens it, on one computer when it names one.

@@ -150,6 +150,10 @@ and cancels the remainder. See `docs/architecture/evidence-worker.md`.
 The TV library (`/` or `/folders`) lists shows. Open a show for show-wide
 actions, or a season for season actions.
 
+The Mac app's back button names the page you came from and returns to it,
+including Media, Space saved, a kind, or another show, season or sample.
+Choosing a page in the sidebar starts a new browsing path.
+
 Folder calibration now uses a size-first review flow by default. The checked-in
 defaults aim for roughly 300 MB per 45-minute episode at up to 1080p, then use
 sampled metrics as guardrails and representative picture-and-sound clips as the
