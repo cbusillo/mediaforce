@@ -86,7 +86,10 @@ def load_season_episode_progress(
             if episode["rel_path"] in waiting_to_publish and episode["stage"] == "checking":
                 episode["stage"] = "waiting"
                 code = CONTROLLER_WORK_WINDOW_WAIT if window.next_opens_at is not None else CONTROLLER_WORK_WINDOW_DISABLED
-                episode["additional_wait_reasons"].append({"code": code})
+                if code == CONTROLLER_WORK_WINDOW_WAIT:
+                    episode["wait_reason"] = {"code": code}
+                else:
+                    episode["additional_wait_reasons"].append({"code": code})
     outcomes_by_path = {item.rel_path: outcomes[item.item_id] for item in items if item.item_id in outcomes}
     for episode in episodes:
         outcome = outcomes_by_path.get(episode["rel_path"])

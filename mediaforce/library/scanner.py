@@ -80,11 +80,15 @@ def scan_library(
         *,
         process_controller: ManagedProcessController | None = None,
         scan_id: str | None = None,
+        work_window_check: Callable[[], None] | None = None,
 ) -> ScanStats:
-    window = controller_work_schedule(config)
+    if work_window_check is None:
+        window = controller_work_schedule(config)
 
-    def check_work_window() -> None:
-        require_controller_work_window(config, window=window)
+        def check_work_window() -> None:
+            require_controller_work_window(config, window=window)
+    else:
+        check_work_window = work_window_check
 
     check_work_window()
     _throw_if_scan_cancelled(process_controller)

@@ -94,8 +94,9 @@ the online flow. The source database is unchanged until the backup passes its
 integrity check.
 After that verified backup, the script pauses the encode queue through
 the database's custody guards, then releases its runtime lease before starting
-the candidate. The ordinary health check, app installation and queue resume
-follow. A failure leaves the service stopped. The saved plist and backup remain
+the candidate. The ordinary health check and app installation follow. The queue resumes only
+if it was running before the stopped deployment; an existing pause is preserved.
+A failure leaves the service stopped. The saved plist and backup remain
 available for the rollback procedure below.
 
 ### Rollback and cleanup ownership

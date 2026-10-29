@@ -135,7 +135,8 @@ def backup_database(database: Path, destination: Path, *, pause_queue: bool = Fa
                 raise RuntimeError("database backup failed quick_check")
 
 
-def require_stopped_idle_controller(config: MediaforceConfig) -> None:
+def require_stopped_idle_controller(config: MediaforceConfig) -> bool:
+    """Verify stopped custody and return whether the queue was already paused."""
     require_closed_listener()
     with open_readonly_db(config.paths.db_path) as connection:
         counts = [
@@ -147,8 +148,10 @@ def require_stopped_idle_controller(config: MediaforceConfig) -> None:
                 "SELECT COUNT(*) FROM library_item_evidence_state WHERE work_status = 'running'",
             )
         ]
+        was_paused = bool(load_queue_state(connection)["is_paused"])
     if any(counts):
         raise RuntimeError("stopped controller still records running work; reconcile that work before deploying")
+    return was_paused
 
 
 def require_closed_listener() -> None:
@@ -199,6 +202,7 @@ def _deploy(
 ) -> None:
     import plistlib
 
+    resume_queue = stopped_config is None
     if stopped_config is None:
         require_paused_idle_dashboard(_api(base_url, "/api/dashboard?preview_limit=0"))
     plist = LoginItemPaths(project_root=source, home=home).plist
@@ -230,7 +234,7 @@ def _deploy(
     if stopped_config is None:
         require_paused_idle_dashboard(_api(base_url, "/api/dashboard?preview_limit=0"))
     else:
-        require_stopped_idle_controller(stopped_config)
+        resume_queue = not require_stopped_idle_controller(stopped_config)
     disable_login_item(paths)
     candidate_started = False
     port_closed = False
@@ -273,7 +277,8 @@ def _deploy(
         install_mac_app(candidate)
     finally:
         # A lost resume response is uncertain; leave the healthy candidate running.
-        _api(base_url, "/api/encode-queue/resume", post=True)
+        if resume_queue:
+            _api(base_url, "/api/encode-queue/resume", post=True)
 
 
 def main() -> None:

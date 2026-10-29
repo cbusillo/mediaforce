@@ -148,6 +148,55 @@ class OperatorWorkTests(unittest.TestCase):
             request.deps.save_catalog_signature.assert_called_once()
             request.deps.reset_folder_card_cache.assert_called_once()
 
+    def test_active_scan_obeys_new_closed_settings_before_starting_another_file(self) -> None:
+        from mediaforce.library.scanner import _failed_probe_summary
+
+        with controller_clock(datetime(2026, 10, 29, 9, tzinfo=UTC)):
+            request = self._resumable_request()
+            self.config.raw.update(video={}, audio={}, subtitle={}, planning={}, validation={}, overrides=[])
+            closed = replace(self.config, raw=copy.deepcopy(self.config.raw))
+            self.config.raw["remote_hosts"][0]["schedule_profile"] = "always"
+            show = self.config.source_root_map["tv"] / "Show"
+            show.mkdir()
+            for name in ("first.mkv", "second.mkv"):
+                (show / name).write_bytes(b"fixture")
+            current = self.config
+            initial_id = request.job["job_id"]
+
+            def load(_path: Path) -> MediaforceConfig:
+                # Every current-settings/window check must happen outside SQLite write work.
+                with open_db(self.config.paths.db_path) as admission_connection:
+                    admission_connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    admission_connection.rollback()
+                return current
+
+            def finish_probe(*_args: object, **_kwargs: object) -> Any:
+                nonlocal current
+                current = closed
+                return _failed_probe_summary(RuntimeError("fixture"))
+
+            with patch("mediaforce.web.runtime.job_runtime.load_config", side_effect=load), patch(
+                "mediaforce.web.runtime.job_runtime.purge_transient_artifacts"
+            ), patch("mediaforce.library.scanner.probe_media", side_effect=finish_probe) as probe:
+                successor_id = job_runtime_module._run_scan_job_pass(
+                    config=self.config, prefix="tv/Show", job_id=initial_id,
+                    process_controller=request.started.call_args.kwargs["process_controller"], deps=request.deps,
+                )
+            probe.assert_called_once()
+            self.assertNotEqual(successor_id, initial_id)
+            self.assertEqual(request.job["job_id"], successor_id, request.job)
+            self.assertEqual(request.job["status"], "queued")
+            self.assertTrue(request.job["resume_after_interruption"])
+            self.assertTrue(request.job["waiting_for_window"])
+            self.assertEqual(request.job["prefix"], "tv/Show")
+            with open_db(self.config.paths.db_path) as connection:
+                items = connection.execute(select(library_items)).mappings().all()
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0]["last_scan_id"], initial_id)
+                run = connection.execute(select(scan_runs).where(scan_runs.c.scan_id == initial_id)).mappings().one()
+                self.assertEqual(run["reprobed_count"], 1)
+                self.assertEqual(run["status"], "failed")
+
     def test_shutdown_keeps_a_waiting_request_for_startup_recovery(self) -> None:
         with controller_clock(datetime(2026, 10, 29, 9, tzinfo=UTC)):
             request = self._resumable_request()

@@ -120,3 +120,10 @@ def test_cli_reports_a_window_refusal_without_a_traceback(argv: list[str], capsy
     output = capsys.readouterr()
     assert output.out.strip()
     assert not output.err
+
+
+def test_controller_window_uses_the_configured_host_timezone() -> None:
+    with controller_clock(datetime(2026, 10, 29, 8, tzinfo=UTC)), patch(
+        "mediaforce.web.runtime.encode_scheduler.system_timezone", return_value=ZoneInfo("UTC")
+    ):
+        assert controller_work_schedule(_config()).is_open

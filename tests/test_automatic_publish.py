@@ -58,7 +58,8 @@ def config(tmp_path: Path) -> Iterator[MediaforceConfig]:
             runtime_reservation_dir=tmp_path / "reservations",
         ),
     )
-    yield result
+    with patch("mediaforce.web.runtime.automatic_publish.load_config", return_value=result):
+        yield result
     reset_engine_cache()
 
 
@@ -1313,7 +1314,8 @@ def test_publication_window_wait_is_shown_and_clears_without_a_database_write(co
         assert waiting is not None
         [file] = waiting["files"]
         assert file["stage"] == "waiting"
-        assert {"code": CONTROLLER_WORK_WINDOW_WAIT} in file["additional_wait_reasons"]
+        assert file["wait_reason"] == {"code": CONTROLLER_WORK_WINDOW_WAIT}
+        assert not file["additional_wait_reasons"]
         clock.now.return_value = datetime(2026, 10, 30, 4, tzinfo=UTC)
         resumed = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
         assert resumed is not None
@@ -1356,3 +1358,19 @@ def test_no_future_local_window_is_reported_without_promising_an_automatic_resta
     [file] = facts["files"]
     assert file["stage"] == "waiting"
     assert {"code": CONTROLLER_WORK_WINDOW_DISABLED} in file["additional_wait_reasons"]
+
+
+def test_changed_work_hours_stop_the_next_file(config: MediaforceConfig) -> None:
+    from datetime import UTC, datetime
+
+    first, *_ = _stage(config, "tv/Show/Season 1/e1.mkv")
+    second, *_ = _stage(config, "tv/Show/Season 1/e2.mkv")
+    closed = replace(config, raw=dict(config.raw))
+    configure_controller_night(closed)
+    published: list[int] = []
+    with controller_clock(datetime(2026, 10, 29, 9, tzinfo=UTC)), patch(
+        "mediaforce.web.runtime.automatic_publish.load_config", side_effect=[config, closed]
+    ), patch.object(delivery, "_try_publish_file", side_effect=lambda _db, _config, item_id, *_args: published.append(item_id)):
+        delivery.publish_checked_files_once(config, load_calibration_state=lambda *_args: None, remake_files=lambda *_args: {})
+    assert published == [first]
+    assert second not in published

@@ -1089,7 +1089,9 @@ extension Words {
         case "measuring": "Finding the right size"
         case "getting_ready": "Getting ready"
         case "checking": "Checking the compressed copy"
-        case "waiting": file.validation == "remaking" ? "Didn't pass its check, being made again" : "Waiting its turn"
+        case "waiting":
+            file.waitReason?.code == "controller_work_window" ? "Waiting for this Mac's work window"
+                : file.validation == "remaking" ? "Didn't pass its check, being made again" : "Waiting its turn"
         default: "Not compressed yet"
         }
     }
@@ -1098,7 +1100,7 @@ extension Words {
         var reasons: [String] = []
         if let question = file.sizeQuestion {
             reasons.append("To look right it needs \(size(question.smallestQualitySafeBytes)), more than its \(size(question.goalBytes)) goal.")
-        } else if file.stage == "needs_you" {
+        } else if file.stage == "needs_you" || file.waitReason?.code == "controller_work_window" {
             reasons.append(waitingReason(file.waitReason, validation: file.validation))
         }
         reasons.append(contentsOf: (file.additionalWaitReasons ?? []).map { waitingReason($0) })

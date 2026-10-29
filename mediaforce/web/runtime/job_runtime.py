@@ -38,7 +38,7 @@ from mediaforce.library.scanner import scan_library
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
-from mediaforce.hosts.work_window import controller_work_allowed
+from mediaforce.hosts.work_window import controller_work_allowed, require_controller_work_window
 
 _MISSING = object()
 ACTIVE_SCAN_JOB_STATUSES = {"queued", "running"}
@@ -814,6 +814,13 @@ def _run_scan_job_pass(
             connection.rollback()
             raise
     cleanup_required = False
+
+    def check_current_work_window() -> None:
+        current_config = _load_scan_config(config.paths.config_path, config, prefix, job_id, process_controller, deps)
+        if current_config is None:
+            raise ProcessCancelledError("Scan request was replaced.")
+        require_controller_work_window(current_config)
+
     try:
         process_controller.throw_if_cancelled()
         cleanup_required = True
@@ -827,6 +834,7 @@ def _run_scan_job_pass(
                 prefixes=[prefix] if prefix else None,
                 process_controller=process_controller,
                 scan_id=job_id,
+                work_window_check=check_current_work_window,
             )
             process_controller.throw_if_cancelled()
             if prefix is None:

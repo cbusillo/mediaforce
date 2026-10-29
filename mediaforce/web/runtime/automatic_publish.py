@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import insert, or_, select, update
 
-from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
 from mediaforce.core.type_defs import object_dict, object_list
@@ -76,6 +76,7 @@ def publish_checked_files_once(
             ).scalars()
         )
     for item_id in item_ids:
+        config = load_config(config.paths.config_path)
         if (stop_event is not None and stop_event.is_set()) or not controller_work_allowed(config):
             break
         with delivery_lock(config.paths.db_path, item_id, blocking=False) as acquired:

@@ -31,7 +31,7 @@ def _controller_schedule_rows(config: MediaforceConfig, *, now: datetime | None)
         if not isinstance(host, dict):
             continue
         policy = schedule_profile_policy_for_host(config, host, deps, profiles=profiles)
-        transition = evaluate_encode_schedule_transition(policy, deps, now=now)
+        transition = evaluate_encode_schedule_transition(policy, deps, now=now, host_payload=host)
         rows.append({"key": host.get("host"), "label": host.get("label"),
                      "finish_current_file": policy.get("finish_current_file") is True, **transition.to_payload()})
     return rows
