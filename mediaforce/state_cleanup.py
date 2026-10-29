@@ -21,6 +21,7 @@ from mediaforce.hosts import DEFAULT_HOST_CAPABILITIES
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.remote import run_remote_command
 from mediaforce.ops.runtime_install import RuntimeProtectionError, paths_overlap, protected_runtime_roots, retained_deploy_stage, runtime_activity
+from mediaforce.hosts.work_window import controller_work_allowed
 
 SECONDS_PER_DAY = 86400
 SECONDS_PER_MINUTE = 60
@@ -49,6 +50,8 @@ class CleanupProcessSnapshot:
 
 
 def purge_transient_artifacts(config: MediaforceConfig, *, force: bool = False) -> bool:
+    if not controller_work_allowed(config):
+        return False
     if not force and not _cleanup_is_due(config):
         return False
 

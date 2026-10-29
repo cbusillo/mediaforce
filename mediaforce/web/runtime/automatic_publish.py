@@ -22,6 +22,7 @@ from mediaforce.library.staged_integrity import staged_integrity_report
 from mediaforce.library.staged_validation import NOT_REMADE_AFTER_FAILED_CHECK, REMAKING_AFTER_FAILED_CHECK, \
     missed_only_final_size, missed_only_over_final_size, staged_validation_outcome
 from mediaforce.web.runtime.folder_actions import production_action_blocker
+from mediaforce.hosts.work_window import controller_work_allowed
 from mediaforce.web.runtime.production_approval import (
     LoadCalibrationState,
     effective_production_approval,
@@ -45,7 +46,6 @@ def publish_checked_files_once(
     load_calibration_state: LoadCalibrationState,
     remake_files: RemakeFilesFn,
     stop_event: threading.Event | None = None,
-    controller_work_allowed: Callable[[MediaforceConfig], bool] = lambda _config: True,
 ) -> None:
     """Check and publish each finished production file; temporary holds retry next pass.
 

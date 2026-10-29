@@ -26,6 +26,16 @@ from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner
 
 
 class OperatorWorkTests(unittest.TestCase):
+    def test_catalog_schedule_defers_automatic_work_and_explains_a_manual_refresh(self) -> None:
+        self.config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local", "schedule_profile": "never"}]
+        with patch("mediaforce.web.app._start_scan_job_thread") as start:
+            deps = web_app._job_runtime_deps()
+            with open_db(self.config.paths.db_path) as connection:
+                self.assertIsNone(maybe_schedule_scan(connection, self.config, None, deps))
+                with self.assertRaises(ValueError):
+                    maybe_schedule_scan(connection, self.config, None, deps, force=True)
+        start.assert_not_called()
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         project_root = Path(self.temp_dir.name)

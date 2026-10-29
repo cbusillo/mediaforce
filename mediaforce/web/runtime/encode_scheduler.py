@@ -8,7 +8,6 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.timezones import system_timezone, valid_timezone_name
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.plain_failure import plain_failure_summary
-from mediaforce.hosts.config import host_targets_current_machine
 
 SCHEDULE_DAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 SCHEDULE_CLOSE_WAITING_REASON = "Waiting for the next work window."
@@ -18,12 +17,16 @@ COMPUTER_WORK_WINDOW_WAITING_REASON = "waiting for a computer's work window"
 
 
 @dataclass(slots=True)
-class EncodeSchedulerDeps:
+class SchedulePolicyDeps:
     normalize_encode_queue_scheduler: Any
     canonical_schedule_profile_key: Any
     default_host_schedule_profile: str
     always_schedule_profile: str
     default_scheduler_policy: dict[str, Any]
+
+
+@dataclass(slots=True)
+class EncodeSchedulerDeps(SchedulePolicyDeps):
     encode_job_manifest_totals: Any
     encode_job_max_attempts: int
 
@@ -42,37 +45,17 @@ class EncodeScheduleTransition:
         }
 
 
-def controller_work_schedule(
-        config: MediaforceConfig,
-        deps: EncodeSchedulerDeps,
-        *,
-        now: datetime | None = None,
-) -> EncodeScheduleTransition:
-    controller_hosts = [
-        host for host in config.remote_hosts
-        if host.get("mode") == "local" or host_targets_current_machine(host)
-    ]
-    if not controller_hosts:
-        return EncodeScheduleTransition(is_open=True)
-    profiles = encode_queue_schedule_profiles(config, deps)
-    transitions = [
-        evaluate_encode_schedule_transition(
-            schedule_profile_policy_for_host(config, host, deps, profiles=profiles),
-            deps,
-            now=now,
-            host_payload=host,
-        ) for host in controller_hosts
-    ]
-    closed = [transition for transition in transitions if not transition.is_open]
-    if closed:
-        openings = [transition.next_opens_at for transition in closed]
-        return EncodeScheduleTransition(
-            is_open=False,
-            next_opens_at=max(opening for opening in openings if opening is not None)
-            if all(opening is not None for opening in openings) else None,
-        )
-    deadlines = [transition.current_closes_at for transition in transitions if transition.current_closes_at is not None]
-    return EncodeScheduleTransition(is_open=True, current_closes_at=min(deadlines) if deadlines else None)
+def schedule_policy_deps() -> SchedulePolicyDeps:
+    from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY
+    from mediaforce.web.settings_runtime import (
+        ALWAYS_SCHEDULE_PROFILE, DEFAULT_HOST_SCHEDULE_PROFILE, canonical_schedule_profile_key,
+        normalize_encode_queue_scheduler,
+    )
+
+    return SchedulePolicyDeps(
+        normalize_encode_queue_scheduler, canonical_schedule_profile_key,
+        DEFAULT_HOST_SCHEDULE_PROFILE, ALWAYS_SCHEDULE_PROFILE, DEFAULT_SCHEDULER_POLICY,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +64,7 @@ class _ScheduleInterval:
     ends_at: datetime
 
 
-def encode_queue_scheduler_policy(config: MediaforceConfig, deps: EncodeSchedulerDeps) -> dict[str, Any]:
+def encode_queue_scheduler_policy(config: MediaforceConfig, deps: SchedulePolicyDeps) -> dict[str, Any]:
     config_raw = object_dict(config.raw)
     encode_queue = object_dict(config_raw.get("encode_queue"))
     raw = encode_queue.get("scheduler")
@@ -91,7 +74,7 @@ def encode_queue_scheduler_policy(config: MediaforceConfig, deps: EncodeSchedule
     return deps.normalize_encode_queue_scheduler(raw if isinstance(raw, dict) else None)
 
 
-def encode_queue_schedule_profiles(config: MediaforceConfig, deps: EncodeSchedulerDeps) -> dict[str, dict[str, Any]]:
+def encode_queue_schedule_profiles(config: MediaforceConfig, deps: SchedulePolicyDeps) -> dict[str, dict[str, Any]]:
     always = deps.normalize_encode_queue_scheduler({"mode": "anytime", "timezone": "host_local"})
     always["key"] = deps.always_schedule_profile
     always["label"] = "Always"
@@ -119,7 +102,7 @@ def encode_queue_schedule_profiles(config: MediaforceConfig, deps: EncodeSchedul
 def schedule_profile_policy_for_host(
         config: MediaforceConfig,
         host_payload: dict[str, Any] | None,
-        deps: EncodeSchedulerDeps,
+        deps: SchedulePolicyDeps,
         *,
         profiles: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -157,7 +140,7 @@ def _host_schedule_timezone(host_payload: dict[str, Any] | None) -> tzinfo:
 
 def evaluate_encode_schedule_transition(
         policy: dict[str, Any],
-        deps: EncodeSchedulerDeps,
+        deps: SchedulePolicyDeps,
         *,
         bypass_schedule: bool = False,
         now: datetime | None = None,
@@ -215,7 +198,7 @@ def evaluate_encode_schedule_transition(
 
 def scheduler_allows_encode_run(
         policy: dict[str, Any],
-        deps: EncodeSchedulerDeps,
+        deps: SchedulePolicyDeps,
         *,
         bypass_schedule: bool = False,
         now: datetime | None = None,
@@ -232,7 +215,7 @@ def scheduler_allows_encode_run(
 
 def max_encode_schedule_window_seconds(
         policy: dict[str, Any],
-        deps: EncodeSchedulerDeps,
+        deps: SchedulePolicyDeps,
         *,
         now: datetime | None = None,
         host_payload: dict[str, Any] | None = None,
@@ -296,7 +279,7 @@ def _schedule_days(policy: dict[str, Any], key: str) -> frozenset[str]:
     })
 
 
-def _schedule_hour(policy: dict[str, Any], key: str, deps: EncodeSchedulerDeps) -> int:
+def _schedule_hour(policy: dict[str, Any], key: str, deps: SchedulePolicyDeps) -> int:
     value = policy.get(key)
     if value is None:
         value = deps.default_scheduler_policy[key]

@@ -253,7 +253,6 @@ class EncodeQueueRuntimeDeps:
     scratch_admission_task_hosts: dict[str, dict[str, Any]] = field(default_factory=dict)
     scratch_admission_lock: threading.Lock = field(default_factory=threading.Lock)
     scratch_admission_pass_started: float = 0
-    controller_work_allowed: Callable[[MediaforceConfig], bool] = field(default=lambda _config: True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3894,8 +3893,6 @@ def process_encode_queue_once(
             save_queue_state(connection, state)
         if state.get("is_paused"):
             _stop_unused_scratch_preparations(config, deps)
-            return
-        if not deps.controller_work_allowed(config):
             return
         has_queued_work = connection.execute(select(encode_jobs.c.job_id)
                                             .where(encode_jobs.c.status == "queued")

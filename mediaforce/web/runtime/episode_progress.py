@@ -13,6 +13,7 @@ from sqlalchemy import select
 from mediaforce.core.db import DBClient
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.hosts.work_window import CONTROLLER_WORK_WINDOW_WAIT, controller_work_allowed
 from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.library.staged_validation import not_remade_blockers, staged_validation_outcome
 from mediaforce.library.workflow_state import ItemWorkflowState
@@ -75,6 +76,13 @@ def load_season_episode_progress(
         if (state := _stopped_publish_state(row["validation_json"])) is not None
     }
     episodes = season_episode_progress(items, run_by_rel_path, bytes_saved, validation, not_remade, publish_stopped)
+    waiting_to_publish = {item.rel_path for item in items if item.status in {"encoded", "validated"} and item.has_staged_output}
+    if config is not None and waiting_to_publish and not controller_work_allowed(config):
+        for episode in episodes:
+            if episode["rel_path"] in waiting_to_publish:
+                if episode["stage"] == "checking":
+                    episode["stage"] = "waiting"
+                episode["additional_wait_reasons"].append({"code": CONTROLLER_WORK_WINDOW_WAIT})
     outcomes_by_path = {item.rel_path: outcomes[item.item_id] for item in items if item.item_id in outcomes}
     for episode in episodes:
         outcome = outcomes_by_path.get(episode["rel_path"])

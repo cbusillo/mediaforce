@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+
+from test_controller_work_window import configure_controller_night
 from sqlalchemy import select
 
 from mediaforce import cli
@@ -1278,3 +1280,44 @@ def test_only_a_copy_still_in_use_keeps_waiting_without_the_owner(
     assert (episode["stage"] == "needs_you") is reaches_owner
     if reaches_owner:
         assert episode["wait_reason"]["blockers"] == [refusal]
+
+
+def test_window_close_leaves_the_next_finished_file_for_the_next_pass(config: MediaforceConfig) -> None:
+    first, *_ = _stage(config, "tv/Show/Season 1/e1.mkv")
+    second, *_ = _stage(config, "tv/Show/Season 1/e2.mkv")
+    opened = True
+    published: list[int] = []
+
+    def finish_current(_connection: DBClient, _config: MediaforceConfig, item_id: int, *_args: object) -> None:
+        nonlocal opened
+        published.append(item_id)
+        opened = False
+
+    with patch("mediaforce.web.runtime.automatic_publish.controller_work_allowed", side_effect=lambda _config: opened), patch.object(
+        delivery, "_try_publish_file", side_effect=finish_current
+    ):
+        delivery.publish_checked_files_once(config, load_calibration_state=lambda *_args: None, remake_files=lambda *_args: {})
+    assert published == [first]
+    assert second not in published
+
+
+def test_publication_window_wait_is_shown_and_clears_without_a_database_write(config: MediaforceConfig) -> None:
+    from datetime import UTC, datetime
+
+    from mediaforce.hosts.work_window import CONTROLLER_WORK_WINDOW_WAIT
+
+    _stage(config, "tv/Show/Season 1/e1.mkv")
+    configure_controller_night(config)
+    with patch("mediaforce.web.runtime.encode_scheduler.datetime", wraps=datetime) as clock:
+        clock.now.return_value = datetime(2026, 10, 29, 9, tzinfo=UTC)
+        waiting = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+        assert waiting is not None
+        [file] = waiting["files"]
+        assert file["stage"] == "waiting"
+        assert {"code": CONTROLLER_WORK_WINDOW_WAIT} in file["additional_wait_reasons"]
+        clock.now.return_value = datetime(2026, 10, 30, 4, tzinfo=UTC)
+        resumed = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+        assert resumed is not None
+        [file] = resumed["files"]
+        assert file["stage"] == "checking"
+        assert {"code": CONTROLLER_WORK_WINDOW_WAIT} not in file["additional_wait_reasons"]

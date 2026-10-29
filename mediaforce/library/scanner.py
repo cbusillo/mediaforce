@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import batched
 from pathlib import Path
@@ -26,6 +27,7 @@ from mediaforce.core.db_tables import source_transitions
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.hosts.work_window import require_controller_work_window
 from mediaforce.library.evidence_state import library_item_source_fingerprint, sync_library_item_evidence_states
 from mediaforce.library.motion_keep_state import reconcile_motion_keep_with_source
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_is_missing
@@ -79,6 +81,7 @@ def scan_library(
         process_controller: ManagedProcessController | None = None,
         scan_id: str | None = None,
 ) -> ScanStats:
+    require_controller_work_window(config)
     _throw_if_scan_cancelled(process_controller)
     scan_id = scan_id or uuid.uuid4().hex
     started_at = timestamp()
@@ -163,7 +166,9 @@ def _execute_scan_library(
                 seen=stats.total_seen,
                 enumeration=enumeration,
                 process_controller=process_controller,
+                work_window_check=lambda: require_controller_work_window(config),
         ):
+            require_controller_work_window(config)
             _throw_if_scan_cancelled(process_controller)
             source_path = str(file_path)
             logical_path = logical_library_rel_path(root_name, root_path, file_path)
@@ -436,6 +441,7 @@ def _execute_scan_library(
         _throw_if_scan_cancelled(process_controller)
 
     if full_scan:
+        require_controller_work_window(config)
         _throw_if_scan_cancelled(process_controller)
         stats.missing = _reconcile_missing_items(
             connection,
@@ -788,6 +794,7 @@ def _iter_media_files(
         seen: int,
         enumeration: _RootEnumeration | None = None,
         process_controller: ManagedProcessController | None = None,
+        work_window_check: Callable[[], None] | None = None,
 ) -> Iterator[Path]:
     _throw_if_scan_cancelled(process_controller)
     scan_state = enumeration or _RootEnumeration()
@@ -808,6 +815,8 @@ def _iter_media_files(
 
     try:
         for dirpath, _, filenames in os.walk(root_path, onerror=_record_error):
+            if work_window_check is not None:
+                work_window_check()
             _throw_if_scan_cancelled(process_controller)
             for name in sorted(filenames):
                 _throw_if_scan_cancelled(process_controller)

@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Callable, Collection
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from functools import partial
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -84,7 +84,6 @@ class EvidenceWorkerDeps:
     prepare_next_original: Callable[[MediaforceConfig, EvidenceWorkClaim], None] | None = None
     remote_commands: Callable[[dict[str, object]], RemoteMediaCommands] | None = None
     read_probe: Callable[..., dict[str, object]] = probe_evidence_source
-    controller_work_allowed: Callable[[MediaforceConfig], bool] = field(default=lambda _config: True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,8 +122,6 @@ def process_evidence_queue_once(
         raise ValueError("Evidence worker item budget must be greater than zero.")
     runtime_deps = deps or default_evidence_worker_deps()
     current_config = config or runtime_deps.load_config(config_path)
-    if not runtime_deps.controller_work_allowed(current_config):
-        return 0
     roots = excluded_media_roots if excluded_media_roots is not None else _unmeasurable_roots(current_config, runtime_deps)
     digest_window = controller_digest_window(current_config, runtime_deps.evidence_host_rows)
     worker_id = _evidence_worker_id()
@@ -245,9 +242,6 @@ def _run_evidence_queue_unit(
                 break
             if config is None and processed:
                 current_config = runtime_deps.load_config(config_path)
-            if not runtime_deps.controller_work_allowed(current_config):
-                stop_reason = "controller_window"
-                break
             roots = _unmeasurable_roots(current_config, runtime_deps)
             if stop_requested():
                 stop_reason = "shutdown"
@@ -300,8 +294,6 @@ def _unmeasurable_roots(config: MediaforceConfig, deps: EvidenceWorkerDeps) -> f
 def _discover_originals(config: MediaforceConfig, deps: EvidenceWorkerDeps) -> int:
     from mediaforce.library.source_intake import queue_original_intake
 
-    if not deps.controller_work_allowed(config):
-        return 0
     try:
         window = controller_digest_window(config, deps.evidence_host_rows)
         with open_db(config.paths.db_path) as connection:

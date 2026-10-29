@@ -293,6 +293,9 @@ Guidance:
 
 ### `mediaforce/hosts/`
 
+- `work_window.py`
+  - controller-side heavy-work admission using the same schedule evaluator as
+    encode computers, independently of remote computer availability
 - `transport.py`
   - SSH command execution, SCP/rsync helpers, shell/path helpers
   - remote work that wakes a computer also keeps it awake while it runs: on a

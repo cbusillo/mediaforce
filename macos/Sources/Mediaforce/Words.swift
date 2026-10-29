@@ -190,7 +190,6 @@ extension Words {
     static func workHeadline(_ facts: MainWindowFacts) -> String {
         let work = facts.work
         if work.pausedByOwner { return "Paused" }
-        if work.stopReasons.contains("controller_window_closed") { return "Waiting for this Mac's work window" }
         if work.stopReasons.contains("storage_unavailable") { return "Paused: this Mac can't see the media library" }
         if work.stopReasons.contains("no_computer_ready") { return "Waiting for a computer" }
         if work.runningCount > 0 { return "Compressing" }
@@ -204,9 +203,6 @@ extension Words {
         var sentences: [String] = []
         if work.pausedByOwner {
             sentences.append("Nothing new starts until you resume. Work already running finishes first.")
-        }
-        if work.stopReasons.contains("controller_window_closed") {
-            sentences.append("This Mac is outside its work window. Library checks and new work resume when it opens.")
         }
         if work.stopReasons.contains("storage_unavailable") {
             sentences.append(work.pausedByOwner
@@ -1112,6 +1108,7 @@ extension Words {
     private static func waitingReason(_ reason: ItemFacts.WaitReason?, validation: String? = nil) -> String {
         let computer = reason?.computer ?? "the computer"
         return switch reason?.code ?? validation {
+        case "controller_work_window": "This Mac will check and publish the file when its work window opens."
         case "check_failed", "failed": "The compressed copy didn't pass its check, so the original stays in the library."
         case "publish_failed": "Mediaforce couldn't check or publish this copy after several tries. Check this file."
         case "publish_unsafe": "Publishing stopped, and Mediaforce couldn't put the files back. Check and restore this file before publishing it."

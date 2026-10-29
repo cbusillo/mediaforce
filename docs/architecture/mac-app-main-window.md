@@ -15,9 +15,7 @@ still answers when that storage is gone, and it starts no work.
 - `work`: `state` is `running`, `idle`, `paused` (the owner paused the queue)
   or `stopped`. `stop_reasons` say why work cannot start, even while paused:
   `storage_unavailable` (the same rule that admits encode work) and
-  `no_computer_ready` (work is waiting and no computer can take it), and
-  `controller_window_closed` (this Mac waits for its own work window before
-  starting library checks or new work).
+  `no_computer_ready` (work is waiting and no computer can take it).
   `running_count` and `waiting_count` count encode jobs. `storage` lists each
   required mount with its recovery `status` and last `failure` code.
 - `library`: per kind (`tv`, `movies`, `other`), counts of present files and
