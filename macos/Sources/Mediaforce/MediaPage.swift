@@ -51,7 +51,16 @@ struct MediaPage: View {
                     .foregroundStyle(.secondary)
             }
             if visible.isEmpty {
-                Text(Words.noMatchingMedia).foregroundStyle(.secondary)
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(Words.noMatchingMedia).foregroundStyle(.secondary)
+                    if kind != .everything || stateGroup != nil || !search.isEmpty {
+                        Button(Words.clearFilters) {
+                            kind = .everything
+                            stateGroup = nil
+                            search = ""
+                        }
+                    }
+                }
             } else if view == .posters {
                 MediaShelves(rows: visible, posters: model.posters, open: openItem) { stateGroup = $0 }
             } else {
