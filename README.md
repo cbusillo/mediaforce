@@ -154,8 +154,9 @@ and cancels the remainder. See `docs/architecture/evidence-worker.md`.
 The TV library (`/` or `/folders`) lists shows. Open a show for show-wide
 actions, or a season for season actions.
 
-The Mac app's back button names the page you came from and returns to it,
-including Media, Space saved, a kind, or another show, season or sample.
+The Mac app's back button shows a chevron and the name of the page you came
+from, then returns to it, including Media, Space saved, a kind, or another
+show, season or sample.
 Changing the selection in the sidebar starts a new browsing path.
 Opening a page from a notification or the menu bar keeps a way back to the
 page already open in the window.
@@ -504,6 +505,9 @@ per-show or per-season tuning there.
 
 Bench-approved drafts are saved locally in runtime settings so future runs on
 that machine can reuse them without changing the tracked repo defaults.
+
+Plex posters are requested at display-sized dimensions to avoid downloading
+full-size artwork.
 
 Use the Mac app's Settings for ordered typed library roots, the transcode folder,
 remote host definitions, the Plex server URL, and Plex-to-Mediaforce path

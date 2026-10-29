@@ -2515,12 +2515,20 @@ def _list_library_structure_cards(config: MediaforceConfig, connection: DBClient
 
 
 def _list_library_detail_cards(config: MediaforceConfig, connection: DBClient) -> list[FolderCard]:
+    tv_roots = {
+        root
+        for root, library_type in config.library_type_map.items()
+        if library_type == "tv"
+    }
+    if not tv_roots:
+        return []
     return _folder_cards_for_group(
         config,
         connection,
         folder_group=_season_group_by_folder(config.library_type_map),
         minimum_recommended_savings_bytes=None,
-        media_roots={root for root, library_type in config.library_type_map.items() if library_type == "tv"},
+        media_roots=tv_roots,
+        candidate_decisions=project_candidates(connection, config, prefixes=sorted(tv_roots)),
     )
 
 

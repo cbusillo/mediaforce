@@ -203,7 +203,7 @@ class OlderSeasonOverrideSelection:
 
 def _candidate_query_prefix(scope: MediaScope) -> str | None:
     """The rows a scope's decisions depend on: its own, or its whole show for a TV season or episode."""
-    if scope.domain in {"other", "movie"} or scope.kind == "tv_series":
+    if scope.domain in {"other", "movie"} or scope.kind in {"library_root", "tv_series"}:
         return scope.prefix
     parts = PurePosixPath(scope.prefix).parts
     return "/".join(parts[:2]) if len(parts) >= 2 else None
