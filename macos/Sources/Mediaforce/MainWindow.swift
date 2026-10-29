@@ -243,6 +243,7 @@ struct MainWindow: View {
                     if let title = navigation.backTitle {
                         ToolbarItem(placement: .navigation) {
                             Button(title, systemImage: "chevron.backward") { navigation.goBack() }
+                                .labelStyle(.titleAndIcon)
                         }
                     }
                 }
