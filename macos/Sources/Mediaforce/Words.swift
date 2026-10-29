@@ -1278,17 +1278,17 @@ extension Words {
         switch mode {
         case "on": "Yes"
         case "off": "No"
-        default: "Follow TMDB"
+        default: "As listed online"
         }
     }
 
     static func stillAiringExplanation(_ airing: ItemFacts.StillAiring) -> String {
-        let tmdb = switch airing.airing {
-        case true?: " TMDB says it is still airing."
-        case false?: " TMDB says it has ended."
+        let listing = switch airing.airing {
+        case true?: " Its online listing says it is still airing."
+        case false?: " Its online listing says it has ended."
         case nil: ""
         }
-        return "While a show is still airing, Mediaforce leaves its newest season alone until the season ends.\(tmdb)"
+        return "While a show is still airing, Mediaforce leaves its newest season alone until the season ends.\(listing)"
     }
 }
 
