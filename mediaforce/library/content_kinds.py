@@ -12,7 +12,7 @@ from mediaforce.core.db_tables import library_items, series_metadata, source_adm
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.library.candidate_selection import season_identity
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
-from mediaforce.library.source_evidence import SourceEvidenceContext, load_source_evidence, load_source_evidence_context
+from mediaforce.library.source_evidence import SourceEvidence, SourceEvidenceContext, load_source_evidence_bulk, load_source_evidence_context
 
 # Kinds of content group seasons by number ranges of their originals' measured traits, so that one
 # approval can cover every season that measures the same (Director decision, #517, 2026-10-22).
@@ -140,17 +140,16 @@ def _admitted_item_ids(connection: DBClient) -> set[int]:
 
 
 def _original_traits(
-        connection: DBClient,
         episodes: Sequence[Mapping[str, Any]],
         admitted: set[int],
-        context: SourceEvidenceContext,
+        evidence_by_item: Mapping[int, SourceEvidence],
 ) -> list[EpisodeTraits | None]:
     traits: list[EpisodeTraits | None] = []
     for item in episodes:
         if int(item["id"]) not in admitted:
             traits.append(None)
             continue
-        evidence = load_source_evidence(connection, int(item["id"]), context=context)
+        evidence = evidence_by_item[int(item["id"])]
         if evidence.original_version_id is None:
             traits.append(None)
             continue
@@ -201,7 +200,11 @@ def season_grouping(
     """One season's kind, read the same way as the report; pass `evidence` to share one snapshot across seasons."""
     seasons, series_of = _seasons(_present_items(connection, season_prefix), library_types)
     admitted, context = evidence or season_evidence(connection)
-    traits = _original_traits(connection, seasons.get(season_prefix, []), admitted, context)
+    episodes = seasons.get(season_prefix, [])
+    evidence_by_item = load_source_evidence_bulk(
+        connection, (int(item["id"]) for item in episodes if int(item["id"]) in admitted), context=context,
+    )
+    traits = _original_traits(episodes, admitted, evidence_by_item)
     series = series_of.get(season_prefix)
     animated = _series_animation(connection, series).get(series) if series else None
     return season_kind(traits, animated=animated)
@@ -274,20 +277,23 @@ def season_kind_report(
     animation = _series_animation(connection)
     items = _present_items(connection)
     seasons, series_of = _seasons(items, library_types)
+    evidence_by_item = load_source_evidence_bulk(connection, admitted, context=context)
     # A file kept original is finished; it still measures as an original but no longer waits.
     kept = library_item_ids_kept_original(connection, [int(item["id"]) for item in items])
     rows = []
+    kinds_by_season: dict[str, SeasonKind] = {}
     totals: dict[str, Counter[str]] = defaultdict(Counter)
     for prefix in sorted(seasons):
         episodes = seasons[prefix]
+        traits = _original_traits(episodes, admitted, evidence_by_item)
+        grouping = season_kind(traits, animated=animation.get(series_of[prefix]))
+        kinds_by_season[prefix] = grouping.kind
         waiting = [item for item in episodes if _waiting(item) and int(item["id"]) not in kept]
         if not waiting:
             continue
         if folder_approved(prefix):
             totals["folder_approved"]["seasons"] += 1
             continue
-        traits = _original_traits(connection, episodes, admitted, context)
-        grouping = season_kind(traits, animated=animation.get(series_of[prefix]))
         waiting_bytes = sum(int_value(item["size_bytes"]) for item in waiting)
         totals[grouping.kind]["seasons"] += 1
         totals[grouping.kind]["waiting_bytes"] += waiting_bytes
@@ -305,5 +311,6 @@ def season_kind_report(
         },
         "totals": {kind: dict(counts) for kind, counts in sorted(totals.items())},
         "unmeasured_reasons": dict(Counter(row["reason"] for row in rows if row["kind"] == "unmeasured")),
+        "kinds_by_season": kinds_by_season,
         "seasons": rows,
     }

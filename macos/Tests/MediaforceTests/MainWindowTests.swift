@@ -205,6 +205,25 @@ final class MainWindowModelTests: XCTestCase {
         XCTAssertEqual(heard?.originalBackups.count, 46)
     }
 
+    func testAFailedKindsReadWaitsBeforePollingAgainAndCanBeRetriedExplicitly() async {
+        let model = model { request in
+            if request.url?.path == "/api/app/kinds" { return (500, Data()) }
+            return (200, Data(MainWindowTests.facts.utf8))
+        }
+        await model.refresh()
+        StubServer.respond = { request in
+            StubServer.body = request.url?.path == "/api/app/kinds"
+                ? Data("{\"kinds\": [], \"left_out\": [], \"mixed_seasons\": 0, \"unmeasured_seasons\": 0, \"folder_approved_seasons\": 0}".utf8)
+                : Data(MainWindowTests.facts.utf8)
+            return HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        }
+        await model.refresh()
+        XCTAssertNil(model.kinds)
+        XCTAssertEqual(model.connection, .reachable)
+        await model.refreshKinds()
+        XCTAssertNotNil(model.kinds)
+    }
+
     func testServerErrorsAndUnreadableRepliesAreFailing() async {
         let erroring = model { _ in (500, Data()) }
         await erroring.refresh()

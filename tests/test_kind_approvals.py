@@ -442,20 +442,27 @@ def test_an_approved_show_of_the_kind_lends_its_setting_with_an_episode_to_watch
         metadata.create_all(connection)
         # Drama's Season 1 was sampled, approved and published; Thriller has its own approval but no backup kept.
         published = _content_item(connection, f"{APPROVED_SEASON}/e01.mkv", status="promoted", codec="av1", current_dark=0.5)
+        _admit_historical_original(connection, published, dark=0.5)
         _keep_original_backup(connection, published)
-        _content_item(connection, EPISODE, status="promoted", codec="av1", current_dark=0.5)
+        thriller = _content_item(connection, EPISODE, status="promoted", codec="av1", current_dark=0.5)
+        _admit_historical_original(connection, thriller, dark=0.5)
         # Thriller's show approval was sampled on a darker season; its Season 3 has its own bright approval and the
         # only kept episode, which never stands for the show's setting.
         own_season = "tv/Thriller/Season 3"
-        kept = _content_item(connection, f"{own_season}/e01.mkv", status="promoted", codec="av1", current_dark=0.5)
+        kept = _content_item(connection, f"{own_season}/e01.mkv", status="promoted", codec="av1", current_dark=0.0)
+        _admit_historical_original(connection, kept, dark=0.0)
         _keep_original_backup(connection, kept)
+        for show in ("tv/Drama", "tv/Thriller"):
+            connection.execute(series_metadata.insert().values(
+                series_prefix=show, tmdb_genres_json='["Drama"]', updated_at="now"))
         approved = {APPROVED_SEASON: _approved_on(config, f"{APPROVED_SEASON}/e01.mkv"),
                     "tv/Thriller": _approved_on(config, EPISODE), own_season: _approved_on(config, f"{own_season}/e01.mkv")}
         kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER, own_season: "bright_live_action"}
 
         def facts_with(folders: dict[str, dict[str, Any]]) -> dict[str, Any]:
             facts = kinds_payload(connection, config, load_calibration_state=_loader(folders, kinds),
-                                  kind_of=lambda _config, season: kinds.get(season))
+                                  kind_of=lambda _config, _season: pytest.fail(
+                                      "the request must use the report snapshot, not start another kind lookup"))
             return {kind["kind"]: kind for kind in facts["kinds"]}
 
         lent = facts_with(approved)

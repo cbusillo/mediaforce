@@ -11,7 +11,8 @@ final class MainWindowModel {
     private(set) var facts: MainWindowFacts?
     // Each kind of content and how it is decided; nil until Mediaforce first answers.
     private(set) var kinds: KindsFacts?
-    private var kindsHeard: Date?
+    private var kindsAttempted: Date?
+    private var readingKinds = false
     // The player the full-screen window shows, while it is open.
     var theater: Theater?
     private(set) var connection: ServerState = .checking
@@ -46,7 +47,7 @@ final class MainWindowModel {
             lastHeard = .now
             problem = nil
             onFacts?(facts)
-            if kindsHeard.map({ Date.now.timeIntervalSince($0) >= Self.kindsInterval }) ?? true { await refreshKinds() }
+            if kindsAttempted.map({ Date.now.timeIntervalSince($0) >= Self.kindsInterval }) ?? true { await refreshKinds() }
         } catch is DecodingError {
             connection = .failing
             problem = ServerProblem(kind: .unreadableReply, at: .now)
@@ -61,9 +62,12 @@ final class MainWindowModel {
 
     /// Reads the kinds again; a failed read keeps what was last heard, since the window's facts say if Mediaforce is down.
     func refreshKinds() async {
+        guard !readingKinds else { return }
+        readingKinds = true
+        defer { readingKinds = false }
+        kindsAttempted = .now
         guard let kinds = try? await client.kinds() else { return }
         self.kinds = kinds
-        kindsHeard = .now
     }
 
     func startWatching() {

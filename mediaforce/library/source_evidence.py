@@ -335,28 +335,111 @@ def known_output_check(candidate: Mapping[str, Any] | DBRow,
 
 
 def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceEvidenceContext | None = None) -> SourceEvidence:
-    item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one_or_none()
+    return load_source_evidence_bulk(connection, [item_id], context=context)[item_id]
+
+
+def load_source_evidence_bulk(
+        connection: DBClient,
+        item_ids: Iterable[int],
+        *,
+        context: SourceEvidenceContext | None = None,
+) -> dict[int, SourceEvidence]:
+    requested = tuple(dict.fromkeys(int(item_id) for item_id in item_ids))
+    if not requested:
+        return {}
+    items = {int(row["id"]): row for row in connection.execute(
+        select(library_items).where(library_items.c.id.in_(requested))
+    ).mappings()}
+    active_ids = {str(row["active_source_version_id"]) for row in items.values() if row["active_source_version_id"]}
+    current_versions = {str(row["version_id"]): row for row in connection.execute(
+        select(source_versions).where(source_versions.c.version_id.in_(active_ids))
+    ).mappings()} if active_ids else {}
+    generations = {str(row["generation_id"]) for row in current_versions.values()}
+    superseded = select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))
+    admission_rows = connection.execute(select(source_admissions).where(
+        source_admissions.c.generation_id.in_(generations),
+        source_admissions.c.admission_id.not_in(superseded),
+    )).mappings() if generations else ()
+    admissions_by_generation: dict[str, list[DBRow]] = defaultdict(list)
+    for row in admission_rows:
+        admissions_by_generation[str(row["generation_id"])].append(row)
+    original_ids = {str(rows[0]["version_id"]) for rows in admissions_by_generation.values() if len(rows) == 1}
+    originals = {str(row["version_id"]): row for row in connection.execute(
+        select(source_versions).where(source_versions.c.version_id.in_(original_ids))
+    ).mappings()} if original_ids else {}
+    pending_items = {int(row["library_item_id"]) for row in connection.execute(
+        select(source_transitions.c.library_item_id).where(
+            source_transitions.c.library_item_id.in_(requested),
+            source_transitions.c.outcome.in_(("prepared", "unresolved")),
+        )
+    )}
+    readable_measurement_ids = {
+        str(measurement_id)
+        for rows in admissions_by_generation.values() for row in rows
+        if len(rows) == 1 and row["basis"] == "readable-source"
+        for measurement_id in json.loads(row["checks_json"]).get("measurement_ids", [])
+    }
+    measurement_rows = list(connection.execute(select(source_measurements).where(or_(
+        source_measurements.c.version_id.in_(original_ids),
+        source_measurements.c.measurement_id.in_(readable_measurement_ids),
+    )).order_by(literal_column("source_measurements.rowid").desc())).mappings()) if original_ids else []
+    measurements = _MeasurementRows(measurement_rows)
+    locations = version_locations(connection, list(originals.values()))
+    if originals and context is None:
+        context = load_source_evidence_context(connection)
+    return {
+        item_id: _classify_source_evidence(
+            connection, item_id, items.get(item_id), current_versions, admissions_by_generation,
+            originals, measurements, pending_items, locations, context,
+        )
+        for item_id in requested
+    }
+
+
+class _MeasurementRows:
+    def __init__(self, rows: Sequence[DBRow]) -> None:
+        self._by_version: dict[tuple[str, str], list[DBRow]] = defaultdict(list)
+        self._by_id = {str(row["measurement_id"]): row for row in rows}
+        self._order = {str(row["measurement_id"]): index for index, row in enumerate(rows)}
+        for row in rows:
+            self._by_version[str(row["version_id"]), str(row["kind"])].append(row)
+
+    def for_original(self, version_id: str, kind: str, allowed_ids: set[str]) -> list[DBRow]:
+        rows = {str(row["measurement_id"]): row for row in self._by_version.get((version_id, kind), ())}
+        rows.update((measurement_id, row) for measurement_id in allowed_ids
+                    if (row := self._by_id.get(measurement_id)) is not None and row["kind"] == kind)
+        return sorted(rows.values(), key=lambda row: self._order[str(row["measurement_id"])])
+
+
+def _classify_source_evidence(
+        connection: DBClient,
+        item_id: int,
+        item: DBRow | None,
+        current_versions: Mapping[str, DBRow],
+        admissions_by_generation: Mapping[str, Sequence[DBRow]],
+        originals: Mapping[str, DBRow],
+        measurements: _MeasurementRows,
+        pending_items: set[int],
+        locations: Mapping[str, str | None],
+        context: SourceEvidenceContext | None,
+) -> SourceEvidence:
     active = str((item or {}).get("active_source_version_id") or "") or None
     traits: dict[EvidenceKind, SourceTrait] = {kind: SourceTrait(kind) for kind in EVIDENCE_KINDS}
     empty = SourceEvidence(None, active, None, "unknown", None, {}, traits)
     if not active or item is None:
         return empty
-    current = connection.execute(select(source_versions).where(source_versions.c.version_id == active)).mappings().one()
+    current = current_versions[active]
     generation = str(current["generation_id"])
     empty = SourceEvidence(generation, active, None, "unknown", None, {}, traits)
-    if (pending_source_operation(connection, item_id) or current["size_bytes"] != item["size_bytes"]
+    if (item_id in pending_items or current["size_bytes"] != item["size_bytes"]
             or (current["sample_fingerprint"] and current["sample_fingerprint"] != item["content_version_fingerprint"])):
         return SourceEvidence(generation, active, None, "unknown", None, {},
                               {kind: SourceTrait(kind, reason="source_attachment_unresolved") for kind in EVIDENCE_KINDS})
-    superseded = select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))
-    admissions = connection.execute(select(source_admissions).where(
-        source_admissions.c.generation_id == generation,
-        source_admissions.c.admission_id.not_in(superseded),
-    )).mappings().all()
+    admissions = admissions_by_generation.get(generation, ())
     if len(admissions) != 1:
         return empty
     admission = admissions[0]
-    original = connection.execute(select(source_versions).where(source_versions.c.version_id == admission["version_id"])).mappings().one()
+    original = originals[str(admission["version_id"])]
     checks = json.loads(admission["checks_json"])
     historical = (admission["tier"] == "probable" and admission["basis"] == "historical-plan"
                   and original["role"] == "input"
@@ -381,11 +464,8 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
             reason = "known_output_match" if output_check == "match" else "possible_output_match"
     # Protected owner confirmation and strict binding are owned by #999. Application-DB rows alone confer no authority.
     for kind in EVIDENCE_KINDS:
-        rows = connection.execute(select(source_measurements).where(
-            or_(source_measurements.c.version_id == original["version_id"],
-                source_measurements.c.measurement_id.in_(checks.get("measurement_ids", []) if readable else [])),
-            source_measurements.c.kind == kind,
-        ).order_by(literal_column("source_measurements.rowid").desc())).mappings().all()
+        allowed_ids = set(checks.get("measurement_ids", []) if readable else [])
+        rows = measurements.for_original(str(original["version_id"]), kind, allowed_ids)
         eligible = [row for row in rows if not reason and row["binding"] == "historical-plan-sampled"
                     and _historical_measurement_matches(row, checks)]
         if readable and not reason:
@@ -399,7 +479,7 @@ def load_source_evidence(connection: DBClient, item_id: int, *, context: SourceE
                                            tuple(row["measurement_id"] for row in eligible), summary, None)
                 continue
         traits[kind] = SourceTrait(kind, reason=reason or ("conflicting_measurements" if eligible else "missing_source_measurement"))
-    location = version_location(connection, original)
+    location = locations[original["version_id"]]
     availability = "available" if readable and not reason and location else "unavailable" if checks.get("unavailability") or not location else "unknown"
     return SourceEvidence(generation, active, original["version_id"], availability, location,
                           {**json.loads(original["profile_json"]), "source_size_bytes": original["size_bytes"],
