@@ -83,6 +83,7 @@ final class MainWindowTests: XCTestCase {
     func testFactsDecodeFromServerShape() throws {
         let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(Self.facts.utf8))
         XCTAssertEqual(facts.work.stopReasons, ["storage_unavailable"])
+        XCTAssertFalse(facts.work.checksPaused)
         XCTAssertEqual(facts.recentlyFinishedSeasons.first?.season, 3)
         XCTAssertEqual(facts.samples.waitingOnYou.first?.action, "make_sample")
         XCTAssertEqual(facts.keptOriginal.keptItemCount, 2)

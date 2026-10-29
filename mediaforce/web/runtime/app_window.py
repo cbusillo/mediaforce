@@ -14,7 +14,7 @@ from mediaforce.core.db_tables import encode_jobs, item_events, library_items, m
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, count_pending_encode_work, load_queue_state
 from mediaforce.library.candidate_selection import SEASON_PATTERN
 from mediaforce.library.background_work import background_work_is_paused
-from mediaforce.library.evidence_queue import original_check_wait_reasons
+from mediaforce.library.evidence_queue import EVIDENCE_WORK_CLAIMABLE_STATUSES, evidence_queue_summary, original_check_wait_reasons
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
@@ -501,6 +501,14 @@ def _work(
         computers: list[dict[str, Any]],
 ) -> dict[str, Any]:
     paused = bool(load_queue_state(connection).get("is_paused")) or background_work_is_paused(connection)
+    evidence_summary = evidence_queue_summary(connection)
+    checks_paused = bool(
+        evidence_summary.get("batch_id")
+        and evidence_summary.get("status") == "paused"
+        and evidence_summary.get("is_paused")
+        and not evidence_summary.get("cancel_requested")
+        and any(evidence_summary["counts"].get(status, 0) for status in EVIDENCE_WORK_CLAIMABLE_STATUSES)
+    )
     waiting_count = count_pending_encode_work(connection)
     running_count = sum(running_encode_counts_by_host(connection).values())
     stop_reasons = []
@@ -519,6 +527,7 @@ def _work(
     return {
         "state": state,
         "paused_by_owner": paused,
+        "checks_paused": checks_paused,
         "stop_reasons": stop_reasons,
         "running_count": running_count,
         "running_seasons": _running_seasons(connection),

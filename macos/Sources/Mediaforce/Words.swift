@@ -211,6 +211,7 @@ extension Words {
         if work.runningCount > 0 { return "Compressing" }
         if work.waitingCount > 0 { return "Waiting to start" }
         if !work.originalCheckWaitReasons.isEmpty { return "Waiting to check new originals" }
+        if work.checksPaused { return checksPausedBar }
         return facts.samples.waitingOnYou.isEmpty && work.seasonsNeedingYou.isEmpty ? "All caught up" : "Waiting for you"
     }
 
@@ -219,6 +220,9 @@ extension Words {
         var sentences: [String] = []
         if work.pausedByOwner {
             sentences.append("Nothing new starts until you resume. Work already running finishes first.")
+        }
+        if work.checksPaused {
+            sentences.append("Checks are paused. Files needing these checks wait until you resume.")
         }
         if work.stopReasons.contains("storage_unavailable") {
             sentences.append(work.pausedByOwner
@@ -229,7 +233,7 @@ extension Words {
             sentences.append("Work is waiting and no computer can take it right now. See Computers for why.")
         }
         sentences.append(contentsOf: work.originalCheckWaitReasons)
-        if sentences.isEmpty, work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
+        if work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
             sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
         }
         if !work.seasonsNeedingYou.isEmpty {
@@ -390,6 +394,7 @@ extension Words {
     static let cancel = "Cancel"
     static let resume = "Resume"
     static let pausedBar = "Mediaforce is paused. Nothing new starts."
+    static let checksPausedBar = "Checks are paused."
     static let none = "None"
     static let next = "Next"
     static let looksGood = "Looks Good"
@@ -397,7 +402,7 @@ extension Words {
     static let lookForNewFilesNow = "Look for New Files"
     static let openMediaforce = "Open Mediaforce"
     static let settingsEllipsis = "Settings…"
-    static let resumeHelp = "Resume work on every computer."
+    static let resumeHelp = "Resume compression and paused checks."
     static let menuNotConnected = "Mediaforce isn't answering. Open it to see why."
 
     /// The line under the menu bar switch: what Mediaforce is doing, or why it isn't.
@@ -413,6 +418,7 @@ extension Words {
             return more > 0 ? "Compressing \(name) and \(more) more" : "Compressing \(name)"
         }
         if work.waitingCount > 0 { return "Waiting to start" }
+        if work.checksPaused { return checksPausedBar }
         return Attention.waitingOnYou(facts) > 0 ? waitingForYou : "Up to date"
     }
     static let tryAgain = "Try Again"
