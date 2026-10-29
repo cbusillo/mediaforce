@@ -147,7 +147,7 @@ struct ActionNotice: Identifiable, Equatable {
 }
 
 enum Place: Hashable {
-    case library, spaceSaved, media
+    case library, needsYou, spaceSaved, media
     // Settings › Computers, on one computer when it names one.
     case computer(String?)
     case sample(String)
@@ -165,6 +165,7 @@ enum Place: Hashable {
         case .computer(let key?): "computer:\(key)"
         case .computer(nil): "computer"
         case .library: "library"
+        case .needsYou: "needsYou"
         default: "spaceSaved"
         }
     }
@@ -175,6 +176,7 @@ enum Place: Hashable {
         case ("sample", let prefix?): self = .sample(prefix)
         case ("item", let prefix?): self = .item(prefix)
         case ("library", nil): self = .library
+        case ("needsYou", nil): self = .needsYou
         case ("spaceSaved", nil): self = .spaceSaved
         case ("computer", let key?): self = .computer(key)
         // "computers" is what notifications sent before Computers moved into Settings carry.
@@ -200,6 +202,8 @@ struct MainWindow: View {
                 } detail: {
                     Group {
                         switch navigation.place {
+                        case .needsYou:
+                            NeedsYouPage(facts: facts, open: go)
                         case .spaceSaved:
                             SpaceSavedPage(facts: facts, model: model) { go(.item($0)) }
                                 // Deleting backups changes what the page shows, so it reads its facts again at once.
@@ -357,6 +361,8 @@ struct Sidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $place) {
+                SidebarRow(title: Words.needsYou, symbol: "hand.raised", trailing: "\(Attention.waitingOnYou(facts))")
+                    .tag(Place.needsYou)
                 Label(Words.library, systemImage: "books.vertical")
                     .tag(Place.library)
                 SidebarRow(title: Words.spaceSaved, symbol: "arrow.down.right.and.arrow.up.left", trailing: Words.size(facts.spaceSaved.bytes))
@@ -375,7 +381,7 @@ struct Sidebar: View {
                 }
             }
             .listStyle(.sidebar)
-            BackupsRow(backups: facts.originalBackups) { place = .spaceSaved }
+
         }
     }
 }
@@ -409,34 +415,6 @@ struct SidebarRow: View {
             Text(trailing)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
-        }
-    }
-}
-
-/// Original backups wait in the Cleanup folder until they are deleted on Space saved, the one place that deletes them.
-struct BackupsRow: View {
-    let backups: MainWindowFacts.OriginalBackups
-    let open: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Divider()
-            Button(action: open) {
-                HStack(spacing: 8) {
-                    Image(systemName: backups.count > 0 ? "trash.fill" : "trash")
-                        .foregroundStyle(.secondary)
-                    Text(Words.originalBackups)
-                    Spacer()
-                    Text(backups.count > 0 ? Words.size(backups.bytes) : Words.none)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                .font(.callout)
-                .padding(14)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(Words.originalBackupsHelp)
         }
     }
 }

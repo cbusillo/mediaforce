@@ -40,10 +40,16 @@ struct Attention: Equatable, Sendable {
     }
 
     static func waitingOnYou(_ facts: MainWindowFacts) -> Int {
-        facts.samples.waitingOnYou.count
-            + facts.work.seasonsNeedingYou.count
-            + facts.computers.filter(\.needsYou).count
-            + (facts.originalBackups.count > 0 ? 1 : 0)
+        waitingItems(facts).count
+    }
+
+    static func waitingItems(_ facts: MainWindowFacts) -> [AttentionNotice] {
+        waitingNotices(facts) + (facts.originalBackups.count > 0 ? [backupsNotice(facts.originalBackups)] : [])
+    }
+
+    static func openingPlace(_ facts: MainWindowFacts?, fallback: Place = .library) -> Place {
+        guard let facts else { return .needsYou }
+        return waitingOnYou(facts) > 0 ? .needsYou : fallback
     }
 
     private static func finishedNotices(_ facts: MainWindowFacts, since remembered: AttentionMemory) -> [AttentionNotice] {

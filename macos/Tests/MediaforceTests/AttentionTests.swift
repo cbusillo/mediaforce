@@ -76,6 +76,7 @@ final class AttentionTests: XCTestCase {
         value["recently_finished_seasons"] = []
         let changed = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: JSONSerialization.data(withJSONObject: value))
         let first = Attention.review(changed, remembered: Attention.review(baseline, remembered: nil).memory)
+        XCTAssertEqual(first.badgeCount, Attention.waitingItems(changed).count)
         XCTAssertEqual(first.badgeCount, 1)
         XCTAssertEqual(first.notices.first?.opens, .item("tv/Futurama/Season 2"))
         XCTAssertTrue(Attention.review(changed, remembered: first.memory).notices.isEmpty)
@@ -204,6 +205,25 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(Words.finishedSaved(seasons[0]), Words.keptOriginal)
         XCTAssertNotEqual(Words.finishedSaved(seasons[1]), Words.keptOriginal)
         XCTAssertFalse(Words.finishedSummary(seasons[0]).contains(Words.size(0)))
+    }
+
+    func testWaitingListMatchesBadgeWithoutACapAndClearsWithFacts() throws {
+        let samples = (1...40).map { ("tv/E/Season \($0)", "ready_to_compare", "review_sample") }
+        let waiting = try facts(waitingSamples: samples, computers: [("mini", "password_needed", true)], backups: 12)
+        let rows = Attention.waitingItems(waiting)
+        XCTAssertEqual(rows.count, samples.count + 2)
+        XCTAssertEqual(rows.count, Attention.waitingOnYou(waiting))
+        XCTAssertEqual(rows.count, Attention.review(waiting, remembered: nil).badgeCount)
+        XCTAssertEqual(Set(rows.map(\.id)).count, rows.count)
+        XCTAssertTrue(rows.allSatisfy { $0.opens != nil })
+        XCTAssertEqual(Attention.openingPlace(waiting, fallback: .sample("tv/E/Season 1")), .needsYou)
+        XCTAssertEqual(Attention.openingPlace(nil), .needsYou)
+        let cleared = try facts()
+        XCTAssertTrue(Attention.waitingItems(cleared).isEmpty)
+        XCTAssertEqual(Attention.waitingOnYou(cleared), 0)
+        XCTAssertEqual(Attention.openingPlace(cleared, fallback: .spaceSaved), .spaceSaved)
+        XCTAssertEqual(Attention.openingPlace(cleared), .library)
+        XCTAssertEqual(Place(notificationValue: Place.needsYou.notificationValue), .needsYou)
     }
 
     func testCountsReadNaturally() {

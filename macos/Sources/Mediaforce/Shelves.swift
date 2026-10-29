@@ -132,10 +132,10 @@ struct SampleShelf: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Samples")
+            Text("Approved samples")
                 .font(.headline)
             HStack(alignment: .top, spacing: 10) {
-                ForEach(Array((samples.waitingOnYou + samples.approvedNotStarted).prefix(6).enumerated()), id: \.element.id) { index, sample in
+                ForEach(Array(samples.approvedNotStarted.prefix(6).enumerated()), id: \.element.id) { index, sample in
                     VStack(alignment: .leading, spacing: 7) {
                         Button { openSample(sample.prefix) } label: {
                             PosterView(
@@ -144,15 +144,6 @@ struct SampleShelf: View {
                                 headline: sample.season.map { "Season \($0)" } ?? sample.show,
                                 detail: Words.sampleState(sample)
                             )
-                            // Inside the button, so VoiceOver reads it with the poster.
-                            .overlay(alignment: .topTrailing) {
-                                if samples.waitingOnYou.contains(where: { $0.id == sample.id }) {
-                                    WaitingMark()
-                                        .padding(2)
-                                        .background(Circle().fill(Color(nsColor: .textBackgroundColor)))
-                                        .padding(5)
-                                }
-                            }
                         }
                         .buttonStyle(.plain)
                         .pointerStyle(.link)

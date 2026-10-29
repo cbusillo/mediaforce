@@ -27,6 +27,9 @@ The current implementation covers:
 - discovery and inventory into SQLite, refreshed in the background
 - the Mac app: TV, Movies, and Other libraries, Activity, Finished, and
   Settings, talking to the local server's API
+- “Needs you” gathers every item counted by the Dock badge, with links to sample decisions,
+  seasons, computers, and original-backup cleanup. Opening the app from the Dock, its waiting
+  menu-bar notice, or a notification shows the list while anything waits
 - the Mac Media table fills the available window below its filters, with one
   scrollbar for its rows and a visible column header while browsing
 - per-file sample, encode, and machine validation across configured encode

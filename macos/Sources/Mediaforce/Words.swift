@@ -1,6 +1,7 @@
 import Foundation
 
 enum Words {
+    static let needsYou = "Needs you"
     static let library = "Library"
 
     static func folderName(_ prefix: String) -> String {
@@ -14,6 +15,7 @@ enum Words {
     static func backTitle(_ place: Place) -> String {
         switch place {
         case .library: library
+        case .needsYou: needsYou
         case .spaceSaved: spaceSaved
         case .media: media
         case .kind(let code): kindName(code)
