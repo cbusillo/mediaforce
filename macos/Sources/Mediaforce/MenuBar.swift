@@ -61,6 +61,8 @@ struct MenuBarPanel: View {
                 Text(Words.staleNotice(model.connection, lastHeard: model.lastHeard))
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
+            } else if Words.menuStatus(facts) == Words.waitingForYou {
+                EmptyView()
             } else if let place = facts.statusOpens {
                 Button(Words.menuStatus(facts)) { open(place) }
                     .buttonStyle(QuietLinkStyle())
@@ -91,7 +93,7 @@ struct MenuBarPanel: View {
             model.settingsRequest = SettingsRequest(computer: key)
             openSettings()
         } else {
-            model.requestedPlace = place
+            model.placeRequest = PlaceRequest(place: place)
         }
         NSApp.activate()
     }
@@ -131,8 +133,8 @@ struct MenuBarLabel: View {
 
     var body: some View {
         Image(nsImage: MenuBarGlyph.image(waiting: model.facts.map(Attention.waitingOnYou) ?? 0 > 0))
-            .onChange(of: model.requestedPlace) { _, place in
-                if place != nil { openWindow(id: MainWindow.id) }
+            .onChange(of: model.placeRequest, initial: true) { _, request in
+                if request != nil { openWindow(id: MainWindow.id) }
             }
     }
 }

@@ -60,14 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         UNUserNotificationCenter.current().delegate = self
         let attention = AttentionCenter()
         attention.requestPermission()
-        var firstLook = true
-        model.onFacts = { [weak model] facts in
-            attention.review(facts)
-            if firstLook {
-                firstLook = false
-                if Attention.waitingOnYou(facts) > 0 { model?.requestedPlace = .needsYou }
-            }
-        }
+        model.onFacts = { attention.review($0) }
         model.startWatching()
         self.attention = attention
     }
@@ -79,12 +72,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let value = response.notification.request.content.userInfo[Place.notificationKey] as? String
         await MainActor.run {
             NSApp.activate()
-            model.requestedPlace = Attention.openingPlace(model.facts, fallback: value.flatMap(Place.init(notificationValue:)) ?? .library)
+            model.placeRequest = PlaceRequest(place: Attention.openingPlace(model.facts, fallback: value.flatMap(Place.init(notificationValue:)) ?? .library))
         }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        model.requestedPlace = Attention.openingPlace(model.facts)
+        model.placeRequest = PlaceRequest(place: Attention.openingPlace(model.facts))
         return true
     }
 

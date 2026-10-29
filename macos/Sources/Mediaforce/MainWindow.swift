@@ -20,8 +20,8 @@ final class MainWindowModel {
     // What went wrong at the last failed check, for the window's Details; nil once Mediaforce answers again.
     private(set) var problem: ServerProblem?
     var notice: ActionNotice?
-    // A page a notification asked to open; the window takes it and clears it.
-    var requestedPlace: Place?
+    // A persistent request, so the window and menu bar can each respond without consuming it.
+    var placeRequest: PlaceRequest?
     var onFacts: ((MainWindowFacts) -> Void)?
     // Whether work was asked to run or pause and the server hasn't confirmed it yet; nil when nothing is pending.
     private(set) var switching: Bool?
@@ -146,6 +146,11 @@ struct ActionNotice: Identifiable, Equatable {
     static func == (lhs: ActionNotice, rhs: ActionNotice) -> Bool { lhs.id == rhs.id }
 }
 
+struct PlaceRequest: Equatable {
+    let id = UUID()
+    let place: Place
+}
+
 enum Place: Hashable {
     case library, needsYou, spaceSaved, media
     // Settings › Computers, on one computer when it names one.
@@ -261,10 +266,9 @@ struct MainWindow: View {
         }
         .frame(minWidth: 1100, minHeight: 700)
         // Initial too: the menu bar may ask for a page while it opens this window.
-        .onChange(of: model.requestedPlace, initial: true) { _, requested in
+        .onChange(of: model.placeRequest, initial: true) { _, requested in
             guard let requested else { return }
-            go(requested)
-            model.requestedPlace = nil
+            go(requested.place)
         }
         .alert(item: Bindable(model).notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
