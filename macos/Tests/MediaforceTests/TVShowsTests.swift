@@ -3,11 +3,11 @@ import XCTest
 @testable import Mediaforce
 
 final class TVShowsTests: XCTestCase {
-    private func season(_ number: Int?, state: String, tone: String, action: String? = nil) -> String {
+    private func season(_ number: Int?, state: String, tone: String, action: String? = nil, needsYou: Bool = false) -> String {
         let folder = number.map { "Season \($0)" } ?? "Specials"
         let seasonJSON = number.map { "\($0)" } ?? "null"
         let actionJSON = action.map { "\"\($0)\"" } ?? "null"
-        return #"{"prefix": "tv/Futurama/\#(folder)", "season": \#(seasonJSON), "state": "\#(state)", "action": \#(actionJSON), "failure": null, "tone": "\#(tone)", "episode_count": 13, "bytes": 4000000000}"#
+        return #"{"prefix": "tv/Futurama/\#(folder)", "season": \#(seasonJSON), "state": "\#(state)", "action": \#(actionJSON), "failure": null, "tone": "\#(tone)", "needs_you": \#(needsYou), "episode_count": 13, "bytes": 4000000000}"#
     }
 
     private func show(_ seasons: [String], estimate: String = "5100000000", looseFiles: String = "") throws -> TVShowsFacts.Show {
@@ -52,9 +52,9 @@ final class TVShowsTests: XCTestCase {
 
     func testAShowTakesTheMostUrgentStateOfItsSeasons() throws {
         let cases: [([String], LibraryStateGroup)] = [
-            ([season(1, state: "finished", tone: "success"), season(2, state: "needs_help", tone: "attention", action: "retry_sample")], .needsYou),
-            ([season(1, state: "making_season", tone: "active"), season(2, state: "ready_to_compare", tone: "ready")], .inProgress),
-            ([season(1, state: "sample_waiting", tone: "quiet"), season(2, state: "needs_test", tone: "quiet")], .inProgress),
+            ([season(1, state: "finished", tone: "success"), season(2, state: "needs_help", tone: "attention", action: "retry_sample", needsYou: true)], .needsYou),
+            ([season(1, state: "making_season", tone: "active", needsYou: true), season(2, state: "ready_to_compare", tone: "ready", needsYou: true)], .needsYou),
+            ([season(1, state: "sample_waiting", tone: "attention"), season(2, state: "needs_test", tone: "quiet")], .inProgress),
             ([season(1, state: "ready_to_finish", tone: "ready"), season(2, state: "finished", tone: "success")], .readyToCompress),
             ([season(1, state: "needs_test", tone: "quiet")], .readyToCompress),
             ([season(1, state: "finished", tone: "success"), season(2, state: "motion_held", tone: "quiet")], .noActiveWork),
@@ -87,13 +87,15 @@ final class TVShowsTests: XCTestCase {
     }
 
     func testCompressingWithFilesThatNeedYouAndMotionChecksFirstAreSaid() throws {
-        func flagged(_ json: String, _ flag: String) -> String {
-            json.replacingOccurrences(of: #""bytes": 4000000000}"#, with: #""bytes": 4000000000, "\#(flag)": true}"#)
+        func flagged(_ json: String, _ flag: String) throws -> String {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+            object[flag] = true
+            return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
         }
         let compressing = season(1, state: "making_season", tone: "active")
         let approved = season(2, state: "ready_to_make", tone: "ready", action: "queue_encode")
-        let decoded = try show([compressing, approved, flagged(compressing, "files_need_you"), flagged(approved, "checks_only")]).seasons
-        XCTAssertEqual(decoded.map(\.filesNeedYou), [false, false, true, false])
+        let decoded = try show([compressing, approved, try flagged(compressing, "needs_you"), try flagged(approved, "checks_only")]).seasons
+        XCTAssertEqual(decoded.map(\.needsYou), [false, false, true, false])
         XCTAssertEqual(decoded.map(\.checksOnly), [false, false, false, true])
         XCTAssertNotEqual(Words.tvSeasonState(decoded[2]), Words.tvSeasonState(decoded[0]))
         XCTAssertNotEqual(Words.tvSeasonState(decoded[3]), Words.tvSeasonState(decoded[1]))

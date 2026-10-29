@@ -102,13 +102,6 @@ enum Words {
     static let accountPassword = "Account password"
     static let workWindowsItem = "Work windows"
 
-    /// States where a computer is fine as it is; every other state has something to fix.
-    private static let computerStatesFine: Set<String> = ["ready", "busy", "finishing_file", "schedule_disabled", "outside_schedule", "not_encoding", "checking", "away", "reconnecting", "unreachable"]
-
-    static func computerNeedsYou(_ state: String?) -> Bool {
-        state.map { !computerStatesFine.contains($0) } ?? false
-    }
-
     static func accountPasswordPrompt(_ name: String) -> String {
         "Password for \(name.isEmpty ? "this computer" : name)"
     }
@@ -596,7 +589,7 @@ extension Words {
     }
 
     static func tvSeasonState(_ season: TVShowsFacts.Season) -> String {
-        if season.filesNeedYou { return "Compressing. Some files need you." }
+        if season.state == "making_season", season.needsYou { return "Compressing. Some files need you." }
         if season.checksOnly { return "Approved. Motion-pattern checks run first." }
         return seasonState(season.state, season.action)
     }

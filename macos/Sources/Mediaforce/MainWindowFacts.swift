@@ -117,6 +117,7 @@ struct MainWindowFacts: Decodable, Sendable {
         let state: String?
         let action: String?
         let failure: String?
+        let needsYou: Bool
         var id: String { prefix }
     }
 
@@ -129,6 +130,7 @@ struct MainWindowFacts: Decodable, Sendable {
         let scheduleOpensAt: String?
         let attentionReason: String?
         let attentionSince: String?
+        let needsYou: Bool
         var id: String { key }
     }
 

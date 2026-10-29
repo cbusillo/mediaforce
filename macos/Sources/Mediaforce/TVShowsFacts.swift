@@ -40,12 +40,12 @@ struct TVShowsFacts: Decodable, Sendable {
         let tone: String?
         let episodeCount: Int
         let bytes: Int64
-        var filesNeedYou = false
+        let needsYou: Bool
         var checksOnly = false
         var id: String { prefix }
 
         enum CodingKeys: CodingKey {
-            case prefix, season, state, action, failure, tone, episodeCount, bytes, filesNeedYou, checksOnly
+            case prefix, season, state, action, failure, tone, episodeCount, bytes, needsYou, checksOnly
         }
 
         init(from decoder: Decoder) throws {
@@ -58,7 +58,7 @@ struct TVShowsFacts: Decodable, Sendable {
             tone = try container.decodeIfPresent(String.self, forKey: .tone)
             episodeCount = try container.decode(Int.self, forKey: .episodeCount)
             bytes = try container.decode(Int64.self, forKey: .bytes)
-            filesNeedYou = try container.decodeIfPresent(Bool.self, forKey: .filesNeedYou) ?? false
+            needsYou = try container.decode(Bool.self, forKey: .needsYou)
             checksOnly = try container.decodeIfPresent(Bool.self, forKey: .checksOnly) ?? false
         }
 
@@ -81,14 +81,11 @@ enum LibraryStateGroup: Int, CaseIterable, Identifiable {
     var id: Int { rawValue }
 }
 
-// The same grouping as the web library's TV list, so a show reads the same in both.
 extension LibraryStateGroup {
-    static let needsYouTones: Set<String> = ["attention", "fail", "wait"]
-
     init(_ seasons: [TVShowsFacts.Season]) {
         let tones = Set(seasons.compactMap(\.tone))
         let states = Set(seasons.compactMap(\.state))
-        if !tones.isDisjoint(with: Self.needsYouTones) {
+        if seasons.contains(where: \.needsYou) {
             self = .needsYou
         } else if tones.contains("active") || states.contains("sample_waiting") {
             self = .inProgress

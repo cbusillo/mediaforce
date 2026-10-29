@@ -260,6 +260,22 @@ def test_ported_season_and_card_states(facts: dict[str, Any], expected: dict[str
     assert {key: state[key] for key in expected} == expected
 
 
+def test_attention_is_authoritative_for_sample_judgments_and_blocked_files_during_processing() -> None:
+    ready = _decide(calibration=_review_ready())
+    retrying = _decide(sample_job=_sample("retry_backoff", finished_at=None))
+    compressing_with_blocked_file = _decide(workflow=_workflow("processing") | {"counts": {"blocked": 1}})
+
+    assert ready["needs_you"] is True
+    assert retrying["needs_you"] is False
+    assert compressing_with_blocked_file["key"] == "making_season"
+    assert compressing_with_blocked_file["needs_you"] is True
+    assert _decide(workflow=_workflow("attention"), encode_job=_encode("failed"))["needs_you"] is True
+    lifecycle = {"motion_held_candidate_count": 1, "motion_as_is_candidate_count": 1}
+    assert _decide(workflow=_workflow("processing"), lifecycle=lifecycle)["needs_you"] is True
+    assert _decide(approval=_approval(_approved()), lifecycle=lifecycle)["needs_you"] is True
+    assert _decide(approval=_approval(_approved()), lifecycle=lifecycle | {"motion_as_is_candidate_count": 0})["needs_you"] is False
+
+
 @pytest.mark.parametrize(("lane", "key"), [
     ("attention", "needs_help"),
     ("blocked", "needs_help"),

@@ -146,7 +146,7 @@ struct SampleShelf: View {
                             )
                             // Inside the button, so VoiceOver reads it with the poster.
                             .overlay(alignment: .topTrailing) {
-                                if samples.waitingOnYou.contains(where: { $0.id == sample.id }) {
+                                if sample.needsYou {
                                     WaitingMark()
                                         .padding(2)
                                         .background(Circle().fill(Color(nsColor: .textBackgroundColor)))
@@ -266,7 +266,7 @@ struct BiggestTable: View {
 
     private func waitingNote(_ show: MainWindowFacts.NotStartedShow) -> String? {
         guard let prefix = show.waitingSamplePrefix,
-              let sample = samples.first(where: { $0.prefix == prefix }) else { return nil }
+              let sample = samples.first(where: { $0.prefix == prefix && $0.needsYou }) else { return nil }
         let season = sample.season.map { "Season \($0)" } ?? "A season"
         return "\(season): \(Words.sampleState(sample).lowercased())"
     }
@@ -292,7 +292,7 @@ struct Computers: View {
                                 Text(computer.name ?? computer.key)
                                     .foregroundStyle(.primary)
                                 HStack(spacing: 4) {
-                                    if Words.computerNeedsYou(computer.state) { WaitingMark().accessibilityHidden(true) }
+                                    if computer.needsYou { WaitingMark().accessibilityHidden(true) }
                                     Text(Words.computerState(computer.state))
                                 }
                                 .font(.caption)

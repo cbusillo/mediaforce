@@ -33,7 +33,8 @@ still answers when that storage is gone, and it starts no work.
 - `samples`: `waiting_on_you` (page state `ready_to_compare`, or `needs_help`
   for a sample) and `approved_not_started` (`ready_to_make`). `state`,
   `action` and `failure` are the folder page's own codes, from
-  `mediaforce/web/runtime/page_state.py`.
+  `mediaforce/web/runtime/page_state.py`. Each entry also carries its canonical
+  `needs_you` fact for waiting marks and notifications.
 - `computers`: each computer's `state`, from the same rows as the computers
   page: `ready`, `busy`, `finishing_file` (a running file without a close deadline
   or an explicit bypass), `schedule_disabled`, `outside_schedule` (with `schedule_opens_at`),
@@ -41,7 +42,9 @@ still answers when that storage is gone, and it starts no work.
   `storage_unreachable`, `not_ready`, or the kind of failed check
   (`password_needed`, `unreachable`, `remote_login_off`, `identity_changed`,
   `new_name`, `not_found`, `no_address`, `python_missing`,
-  `unreadable_reply`, `check_failed`).
+  `unreadable_reply`, `check_failed`). Its `needs_you` fact is shared by the
+  Library, Settings, notifications and badge. Automatic cooldown and retries
+  do not require the Director.
 - `events` and `last_change`: recent encode, check and replace events, newest
   first, using their event types as codes.
 - `original_backups`: originals moved aside on replacement and not yet
@@ -108,10 +111,10 @@ samples and only while the page is open: `shows`, biggest first, each with
 season's details are still loading) and `seasons` in season order. Each season
 has its `prefix`, `season` number (null for a folder without one), the page
 state codes `state`, `action`, `failure` and `tone`, its `episode_count`
-and `bytes`, `files_need_you` (compressing while some files already need the
-Director) and `checks_only` (approved, but starting it only runs motion-pattern
-checks first). The app groups a show by its seasons the way the web library
-does (needs you, in progress, ready for you, no active work), opens the sample
+and `bytes`, `needs_you` (a sample judgment or file problem needs the Director,
+including while other files compress) and `checks_only` (approved, but starting
+it only runs motion-pattern checks first). The app's Needs you filter and waiting
+marks use `needs_you`; the other groups describe progress and readiness. It opens the sample
 page for a season whose sample waits on the Director, and opens the season's
 item page for anything else.
 

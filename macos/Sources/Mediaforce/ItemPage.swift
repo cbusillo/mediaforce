@@ -69,7 +69,7 @@ struct ItemPage: View {
                                 ShowChoices(facts: facts, openShow: openItem) { change in Task { await save(change) } }
                             }
                             if let show {
-                                ShowSeasons(show: show, waitingSamples: Set(model.facts?.samples.waitingOnYou.map(\.prefix) ?? []),
+                                ShowSeasons(show: show,
                                             openSample: openSample, openItem: openItem)
                             }
                         }

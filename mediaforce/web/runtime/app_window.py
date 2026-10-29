@@ -264,11 +264,9 @@ def _tv_season(identity: Mapping[str, Any], card: Mapping[str, Any]) -> dict[str
         "tone": state.get("tone"),
         "approval_source": state.get("approval_source"),
         "approval_kind": state.get("approval_kind"),
+        "needs_you": bool(state.get("needs_you")),
         "episode_count": int(card.get("item_count") or 0),
         "bytes": int(card.get("total_size_bytes") or 0),
-        # A compressing season still says so when some of its files already need the owner.
-        "files_need_you": state.get("key") == "making_season"
-        and "attention" in str(card.get("review_badge_label") or "").lower(),
         # An approved season whose action only starts motion-pattern checks says so, not that it compresses now.
         "checks_only": state.get("key") == "ready_to_make"
         and lifecycle.get("eligible_candidate_count") == 0
@@ -476,8 +474,12 @@ def _samples(cards: list[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
             "state": key,
             "action": state.get("primary_action"),
             "failure": state.get("failure"),
+            "needs_you": bool(state.get("needs_you")),
         }
-        if key == "ready_to_compare" or (key == "needs_help" and state.get("recovery_kind") == "test"):
+        sample_judgment = key == "ready_to_compare" or (
+            key == "needs_help" and state.get("recovery_kind") == "test"
+        )
+        if state.get("needs_you") and sample_judgment:
             waiting.append(entry)
         elif key == "ready_to_make":
             approved.append(entry)
@@ -534,15 +536,22 @@ def _running_seasons(connection: DBClient) -> list[dict[str, Any]]:
 
 
 def _computer(row: Mapping[str, Any]) -> dict[str, Any]:
+    state = _computer_state(row)
+    attention_reason = (
+        (row.get("recovery") or {}).get("reason")
+        if not row.get("available") and (row.get("recovery") or {}).get("status") == "action_required" else None
+    )
     return {
         "key": row.get("key"),
         "name": row.get("label"),
         "platform": row.get("platform"),
-        "state": _computer_state(row),
-        "attention_reason": (
-            (row.get("recovery") or {}).get("reason")
-            if not row.get("available") and (row.get("recovery") or {}).get("status") == "action_required" else None
+        "state": state,
+        "needs_you": (
+            state in {"password_needed", "identity_changed", "new_name", "remote_login_off", "unreachable_long",
+                      "recovery_required"}
+            or attention_reason is not None
         ),
+        "attention_reason": attention_reason,
         "attention_since": (row.get("recovery") or {}).get("first_failure_at"),
         "running_count": int(row.get("active_encode_count") or 0),
         "schedule_opens_at": row.get("schedule_next_opens_at"),

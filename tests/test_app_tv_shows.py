@@ -43,7 +43,8 @@ def test_seasons_group_into_shows_with_their_totals_biggest_show_first(connectio
         {**_card("tv/Futurama/Season 2", items=20, size=3000, reclaim=2000, key="ready_to_compare", tone="ready",
                  action="review_sample"),
          "page_state": {"key": "ready_to_compare", "tone": "ready", "primary_action": "review_sample", "failure": None,
-                        "recovery_kind": None, "approval_source": "kind", "approval_kind": "darker_live_action"}},
+                        "recovery_kind": None, "approval_source": "kind", "approval_kind": "darker_live_action",
+                        "needs_you": True}},
         _card("tv/Futurama/Specials", items=2, size=500, reclaim=100),
         {"prefix": ""},
     ])
@@ -59,7 +60,7 @@ def test_seasons_group_into_shows_with_their_totals_biggest_show_first(connectio
     assert futurama["seasons"][0] == {
         "prefix": "tv/Futurama/Season 2", "season": 2, "state": "ready_to_compare", "action": "review_sample",
         "failure": None, "tone": "ready", "approval_source": "kind", "approval_kind": "darker_live_action",
-        "episode_count": 20, "bytes": 3000, "files_need_you": False, "checks_only": False,
+        "episode_count": 20, "bytes": 3000, "needs_you": True, "checks_only": False,
     }
 
 
@@ -68,20 +69,19 @@ def test_a_show_has_no_estimate_while_any_season_is_still_loading(connection: DB
     assert shows[0]["estimated_saved_bytes"] is None
 
 
-def test_seasons_say_when_files_need_the_owner_or_only_motion_checks_can_start(connection: DBClient) -> None:
+def test_seasons_project_the_canonical_attention_fact_or_only_motion_checks_can_start(connection: DBClient) -> None:
     compressing = _card("tv/ER/Season 1", key="making_season", tone="active", action=None)
     approved = _card("tv/ER/Season 2", key="ready_to_make", tone="ready", action="queue_encode")
     seasons = _shows(connection, [
-        compressing | {"review_badge_label": "Needs attention"},
+        compressing | {"page_state": compressing["page_state"] | {"needs_you": True}},
         approved | {"lifecycle": {"eligible_candidate_count": 0, "motion_check_candidate_count": 3}},
         compressing | {"prefix": "tv/ER/Season 3", "review_badge_label": "Compressing"},
         approved | {"prefix": "tv/ER/Season 4", "lifecycle": {"eligible_candidate_count": 2, "motion_check_candidate_count": 3}},
         _card("tv/ER/Season 5") | {
-            "review_badge_label": "Needs attention",
             "lifecycle": {"eligible_candidate_count": 0, "motion_check_candidate_count": 3},
         },
     ])[0]["seasons"]
-    assert [(season["files_need_you"], season["checks_only"]) for season in seasons] == [
+    assert [(season["needs_you"], season["checks_only"]) for season in seasons] == [
         (True, False), (False, True), (False, False), (False, False), (False, False),
     ]
 

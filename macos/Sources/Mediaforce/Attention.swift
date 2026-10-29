@@ -15,7 +15,6 @@ struct AttentionMemory: Codable, Equatable, Sendable {
 }
 
 struct Attention: Equatable, Sendable {
-    static let computerStatesNeedingYou: Set<String> = ["password_needed", "identity_changed", "new_name", "remote_login_off", "unreachable_long", "recovery_required"]
     static let mostSeasonsNamedSeparately = 3
 
     let notices: [AttentionNotice]
@@ -40,13 +39,9 @@ struct Attention: Equatable, Sendable {
         return Attention(notices: notices, badgeCount: waitingOnYou(facts), memory: memory)
     }
 
-    private static func computerNeedsAttention(_ computer: MainWindowFacts.Computer) -> Bool {
-        computer.attentionReason != nil || computerStatesNeedingYou.contains(computer.state)
-    }
-
     static func waitingOnYou(_ facts: MainWindowFacts) -> Int {
-        facts.samples.waitingOnYou.count
-            + facts.computers.filter(computerNeedsAttention).count
+        facts.samples.waitingOnYou.filter(\.needsYou).count
+            + facts.computers.filter(\.needsYou).count
             + (facts.originalBackups.count > 0 ? 1 : 0)
     }
 
@@ -76,8 +71,8 @@ struct Attention: Equatable, Sendable {
     }
 
     static func waitingNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {
-        let samples = facts.samples.waitingOnYou.map(sampleNotice)
-        let computers = facts.computers.filter(computerNeedsAttention).map { computer in
+        let samples = facts.samples.waitingOnYou.filter(\.needsYou).map(sampleNotice)
+        let computers = facts.computers.filter(\.needsYou).map { computer in
             AttentionNotice(
                 id: "computer:\(computer.key):\(computer.attentionSince ?? "")",
                 title: "\(computer.name ?? computer.key) needs you",

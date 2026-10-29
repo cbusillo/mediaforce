@@ -14,7 +14,7 @@ final class AttentionTests: XCTestCase {
     private func facts(
         finished: [Finished] = [],
         waitingSamples: [(prefix: String, state: String, action: String)] = [],
-        computers: [(key: String, state: String)] = [],
+        computers: [(key: String, state: String, needsYou: Bool)] = [],
         computerReason: String? = nil,
         computerSince: String? = nil,
         backups: Int = 0
@@ -26,12 +26,12 @@ final class AttentionTests: XCTestCase {
             #"{"prefix": "\#(season.prefix)", "show_prefix": "tv/Futurama", "show": "Futurama", "season": 3, "reason": "motion_mixed", "item_count": \#(season.kept)}"#
         }
         let samplesJSON = waitingSamples.map { sample in
-            #"{"prefix": "\#(sample.prefix)", "show_prefix": "tv/Expanse", "show": "The Expanse", "season": 3, "state": "\#(sample.state)", "action": "\#(sample.action)", "failure": null}"#
+            #"{"prefix": "\#(sample.prefix)", "show_prefix": "tv/Expanse", "show": "The Expanse", "season": 3, "state": "\#(sample.state)", "action": "\#(sample.action)", "failure": null, "needs_you": true}"#
         }
         let reason = computerReason.map { #""\#($0)""# } ?? "null"
         let since = computerSince.map { #""\#($0)""# } ?? "null"
         let computersJSON = computers.map { computer in
-            #"{"key": "\#(computer.key)", "name": "\#(computer.key)", "platform": "macos", "state": "\#(computer.state)", "running_count": 0, "schedule_opens_at": null, "attention_reason": \#(reason), "attention_since": \#(since)}"#
+            #"{"key": "\#(computer.key)", "name": "\#(computer.key)", "platform": "macos", "state": "\#(computer.state)", "running_count": 0, "schedule_opens_at": null, "attention_reason": \#(reason), "attention_since": \#(since), "needs_you": \#(computer.needsYou)}"#
         }
         let json = """
         {"observed_at": "2026-10-24T12:00:00+00:00",
@@ -66,7 +66,7 @@ final class AttentionTests: XCTestCase {
         let now = try facts(
             finished: [newer, older],
             waitingSamples: [("tv/E/Season 3", "ready_to_compare", "review_sample")],
-            computers: [("mbp", "password_needed"), ("mini", "storage_unreachable")],
+            computers: [("mbp", "password_needed", true), ("mini", "storage_unreachable", false)],
             backups: 15
         )
         let first = Attention.review(now, remembered: before)
@@ -84,37 +84,35 @@ final class AttentionTests: XCTestCase {
 
     func testAbsentLaptopStaysQuietAndDesktopNotifiesOnceAfterLongAbsence() throws {
         let before = Attention.review(try facts(), remembered: nil).memory
-        let away = try facts(computers: [("laptop", "away"), ("desktop", "reconnecting")])
+        let away = try facts(computers: [("laptop", "away", false), ("desktop", "reconnecting", false), ("mini", "cooling_down", false)])
         let quiet = Attention.review(away, remembered: before)
         XCTAssertTrue(quiet.notices.isEmpty)
         XCTAssertEqual(quiet.badgeCount, 0)
-        XCTAssertFalse(Words.computerNeedsYou("away"))
-        XCTAssertFalse(Words.computerNeedsYou("reconnecting"))
-        let prolonged = try facts(computers: [("laptop", "away"), ("desktop", "unreachable_long")])
+        let prolonged = try facts(computers: [("laptop", "away", false), ("desktop", "unreachable_long", true)])
         let first = Attention.review(prolonged, remembered: quiet.memory)
         XCTAssertEqual(first.notices.count, 1)
         XCTAssertEqual(first.badgeCount, 1)
         XCTAssertTrue(Attention.review(prolonged, remembered: first.memory).notices.isEmpty)
-        let recovered = Attention.review(try facts(computers: [("desktop", "ready")]), remembered: first.memory)
+        let recovered = Attention.review(try facts(computers: [("desktop", "ready", false)]), remembered: first.memory)
         XCTAssertEqual(recovered.badgeCount, 0)
     }
 
     func testOneStorageIncidentNotifiesOnceAcrossDifferentFailedChecks() throws {
         let since = "2026-10-26T10:00:00Z"
         let first = Attention.review(try facts(
-            computers: [("mini", "recovery_required")], computerReason: "Storage request is still running", computerSince: since
+            computers: [("mini", "recovery_required", true)], computerReason: "Storage request is still running", computerSince: since
         ), remembered: AttentionMemory())
         XCTAssertEqual(first.notices.count, 1)
         let failedCheck = Attention.review(try facts(
-            computers: [("mini", "check_failed")], computerReason: "Could not finish its check", computerSince: since
+            computers: [("mini", "check_failed", true)], computerReason: "Could not finish its check", computerSince: since
         ), remembered: first.memory)
         XCTAssertTrue(failedCheck.notices.isEmpty)
         XCTAssertEqual(failedCheck.badgeCount, 1)
         let storageAgain = Attention.review(try facts(
-            computers: [("mini", "recovery_required")], computerReason: "Storage request is still running", computerSince: since
+            computers: [("mini", "recovery_required", true)], computerReason: "Storage request is still running", computerSince: since
         ), remembered: failedCheck.memory)
         XCTAssertTrue(storageAgain.notices.isEmpty)
-        let ready = Attention.review(try facts(computers: [("mini", "ready")]), remembered: storageAgain.memory)
+        let ready = Attention.review(try facts(computers: [("mini", "ready", false)]), remembered: storageAgain.memory)
         XCTAssertEqual(ready.badgeCount, 0)
         XCTAssertTrue(ready.memory.waiting.isEmpty)
     }
@@ -170,7 +168,7 @@ final class AttentionTests: XCTestCase {
     }
 
     func testProblemsTheOwnerCannotFixDoNotNotify() throws {
-        let attention = Attention.review(try facts(computers: [("mini", "storage_unreachable"), ("x", "outside_schedule")]), remembered: AttentionMemory())
+        let attention = Attention.review(try facts(computers: [("mini", "storage_unreachable", false), ("x", "outside_schedule", false)]), remembered: AttentionMemory())
         XCTAssertEqual(attention.notices, [])
         XCTAssertEqual(attention.badgeCount, 0)
     }

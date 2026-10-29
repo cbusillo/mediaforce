@@ -68,6 +68,7 @@ enum ComputerFix {
 struct ComputerStatus: View {
     let name: String
     let state: String?
+    let needsYou: Bool
     let host: HostsFacts.Host?
     let act: (ComputerAction, String?) async -> HostActionResult?
     @State private var password = ""
@@ -81,7 +82,7 @@ struct ComputerStatus: View {
             // The decision: the state as one plain line, the fixes beside it, and the password a fix needs just before it.
             DecisionLine {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    if Words.computerNeedsYou(state) { WaitingMark() }
+                    if needsYou { WaitingMark() }
                     Text(state.map(Words.computerState) ?? Words.computerNotHeardFrom)
                 }
             } buttons: {

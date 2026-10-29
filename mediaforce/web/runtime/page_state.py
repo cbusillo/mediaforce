@@ -133,6 +133,7 @@ class PageState:
     # Which approval governs the folder: its own or a parent folder's ("folder"), or its kind of content's ("kind").
     approval_source: str | None = None
     approval_kind: str | None = None
+    needs_you: bool = False
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -144,6 +145,7 @@ class PageState:
             "source_job": self.source_job.to_payload() if self.source_job is not None else None,
             "approval_source": self.approval_source,
             "approval_kind": self.approval_kind,
+            "needs_you": self.needs_you,
         }
 
 
@@ -177,10 +179,19 @@ class PageStateSources:
 
 def decide_page_state(facts: PageStateFacts) -> PageState:
     state = _decide_page_state(facts)
+    state = replace(state, needs_you=_needs_you(state, facts))
     approval = facts.approval
     if approval is None:
         return state
     return replace(state, approval_source=approval.source, approval_kind=approval.kind)
+
+
+def _needs_you(state: PageState, facts: PageStateFacts) -> bool:
+    blocked_files = int(object_dict(object_dict(facts.workflow).get("counts")).get("blocked") or 0) > 0
+    motion_decision = state.primary_action == "decide_motion" or int(
+        object_dict(facts.lifecycle).get("motion_as_is_candidate_count") or 0
+    ) > 0
+    return state.key in {"ready_to_compare", "needs_help"} or blocked_files or motion_decision
 
 
 def _decide_page_state(facts: PageStateFacts) -> PageState:
