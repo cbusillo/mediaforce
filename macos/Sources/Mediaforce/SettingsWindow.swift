@@ -489,7 +489,7 @@ struct ComputerSettingsForm: View {
             HStack(spacing: 0) {
                 List(selection: $selection) {
                     ForEach(computers.wrappedValue) { row in
-                        ComputerListRow(name: row.computer.name, state: state(row))
+                        ComputerListRow(name: row.computer.name, state: computer(row)?.state, needsYou: computer(row)?.needsYou ?? false)
                             .tag(Pane.computer(row.id))
                     }
                     Label(Words.workWindowsItem, systemImage: "calendar")
@@ -580,7 +580,8 @@ struct ComputerSettingsForm: View {
                     Section {
                         ComputerStatus(
                             name: row.wrappedValue.computer.name,
-                            state: state(row.wrappedValue),
+                            state: computer(row.wrappedValue)?.state,
+                            needsYou: computer(row.wrappedValue)?.needsYou ?? false,
                             host: model.hosts[savedAddress(row.wrappedValue)]
                         ) { action, password in
                             await model.act(action, savedAddress(row.wrappedValue), password: password, main: main)
@@ -636,8 +637,8 @@ struct ComputerSettingsForm: View {
     }
 
     /// The state the main window's facts give this computer, matched by the address the server knows.
-    private func state(_ row: ComputerSettingsDraft.ComputerRow) -> String? {
-        main.facts?.computers.first { $0.key == savedAddress(row) }?.state
+    private func computer(_ row: ComputerSettingsDraft.ComputerRow) -> MainWindowFacts.Computer? {
+        main.facts?.computers.first { $0.key == savedAddress(row) }
     }
 
     /// Keeps the chosen computer chosen when a load or save rebuilds the rows, else chooses the first.
@@ -664,12 +665,13 @@ struct ComputerSettingsForm: View {
 struct ComputerListRow: View {
     let name: String
     let state: String?
+    let needsYou: Bool
 
     var body: some View {
         HStack(spacing: 8) {
             WaitingMark()
-                .opacity(Words.computerNeedsYou(state) ? 1 : 0)
-                .accessibilityHidden(!Words.computerNeedsYou(state))
+                .opacity(needsYou ? 1 : 0)
+                .accessibilityHidden(!needsYou)
             VStack(alignment: .leading, spacing: 1) {
                 Text(name.isEmpty ? Words.unnamedComputer : name)
                 Text(state.map(Words.computerState) ?? Words.computerNotHeardFrom)

@@ -237,7 +237,9 @@ def test_biggest_not_started_leaves_out_shows_with_any_work(connection: DBClient
     _replaced(connection, "tv/Lucifer/Season 2/e1.mkv", saved=10, at=NOW)
     _item(connection, "tv/Monk/Season 1/e1.mkv", size=3000)
     cards = [
-        {"prefix": "tv/Psych/Season 1", "page_state": {"key": "ready_to_compare", "primary_action": "review_sample"}},
+        {"prefix": "tv/Psych/Season 1", "page_state": {
+            "key": "ready_to_compare", "primary_action": "review_sample", "needs_you": True,
+        }},
         {"prefix": "tv/Monk/Season 1", "page_state": {"key": "ready_to_make", "primary_action": "queue_encode"}},
     ]
 
@@ -254,8 +256,11 @@ def test_biggest_not_started_leaves_out_shows_with_any_work(connection: DBClient
 def test_samples_split_into_waiting_on_owner_and_approved_not_started(connection: DBClient) -> None:
     cards = [
         {"prefix": "tv/A/Season 1", "page_state": {"key": "needs_help", "recovery_kind": "test",
-                                                   "primary_action": "make_sample", "failure": "missing_clips"}},
-        {"prefix": "tv/B/Season 2", "page_state": {"key": "ready_to_compare", "primary_action": "review_sample"}},
+                                                      "primary_action": "make_sample", "failure": "missing_clips",
+                                                      "needs_you": True}},
+        {"prefix": "tv/B/Season 2", "page_state": {
+            "key": "ready_to_compare", "primary_action": "review_sample", "needs_you": True,
+        }},
         {"prefix": "tv/C/Season 1", "page_state": {"key": "ready_to_make", "primary_action": "queue_encode"}},
         {"prefix": "tv/D/Season 1", "page_state": {"key": "needs_help", "recovery_kind": "files"}},
         {"prefix": "tv/E/Season 1", "page_state": {"key": "needs_test", "primary_action": "make_sample"}},
@@ -293,6 +298,25 @@ def test_computer_states_are_codes(connection: DBClient) -> None:
         ("studio", "busy"), ("mbp", "ready"), ("night", "outside_schedule"), ("off", "schedule_disabled"), ("cooling", "cooling_down"),
         ("sampler", "not_encoding"), ("mini", "password_needed"), ("server", "storage_unreachable"),
         ("odd", "not_ready"), ("staging", "storage_unreachable"), ("refused", "not_ready"), ("new", "checking"),
+    ]
+
+
+def test_computer_attention_excludes_cooldown_but_includes_actionable_states_and_reasons(connection: DBClient) -> None:
+    computers = _payload(connection, computers=[
+        _computer("cooling", active_flag="cooldown"),
+        _computer("away", available=False, recovery={"absence_state": "away"}),
+        _computer("reconnecting", available=False, recovery={"status": "retrying"}, storage_recovery_available=True),
+        _computer("outside", schedule_open=False),
+        _computer("storage", available=False, missing_mounts=["/Volumes/media"]),
+        _computer("python", available=False, check_failure="python_missing"),
+        _computer("address", available=False, check_failure="no_address"),
+        _computer("password", available=False, check_failure="password_needed"),
+        _computer("recovery", available=False, recovery={"status": "action_required", "reason": "Sign in again"}),
+    ])["computers"]
+
+    assert [(computer["key"], computer["needs_you"]) for computer in computers] == [
+        ("cooling", False), ("away", False), ("reconnecting", False), ("outside", False), ("storage", False),
+        ("python", True), ("address", True), ("password", True), ("recovery", True),
     ]
 
 
@@ -444,3 +468,14 @@ def test_closed_window_copy_follows_the_running_jobs_recorded_close_behavior(
         "studio", schedule_open=False, active_encode_count=1, finish_current_file=current_option, running_jobs=jobs,
     )
     assert _payload(connection, computers=[computer])["computers"][0]["state"] == expected
+
+
+def test_non_sample_season_attention_reaches_main_window_without_counting_samples_twice(connection: DBClient) -> None:
+    cards = [
+        {"prefix": "tv/A/Season 1", "page_state": {"key": "ready_to_compare", "needs_you": True}},
+        {"prefix": "tv/B/Season 2", "page_state": {"key": "making_season", "needs_you": True}},
+        {"prefix": "tv/C/Season 3", "page_state": {"key": "sample_waiting", "needs_you": False}},
+    ]
+    facts = _payload(connection, cards=cards)
+    assert [sample["prefix"] for sample in facts["samples"]["waiting_on_you"]] == ["tv/A/Season 1"]
+    assert [season["prefix"] for season in facts["work"]["seasons_needing_you"]] == ["tv/B/Season 2"]

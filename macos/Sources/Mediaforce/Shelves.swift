@@ -292,7 +292,7 @@ struct Computers: View {
                                 Text(computer.name ?? computer.key)
                                     .foregroundStyle(.primary)
                                 HStack(spacing: 4) {
-                                    if Words.computerNeedsYou(computer.state) { WaitingMark().accessibilityHidden(true) }
+                                    if computer.needsYou { WaitingMark().accessibilityHidden(true) }
                                     Text(Words.computerState(computer.state))
                                 }
                                 .font(.caption)

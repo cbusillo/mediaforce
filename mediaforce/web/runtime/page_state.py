@@ -133,6 +133,7 @@ class PageState:
     # Which approval governs the folder: its own or a parent folder's ("folder"), or its kind of content's ("kind").
     approval_source: str | None = None
     approval_kind: str | None = None
+    needs_you: bool = False
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -144,6 +145,7 @@ class PageState:
             "source_job": self.source_job.to_payload() if self.source_job is not None else None,
             "approval_source": self.approval_source,
             "approval_kind": self.approval_kind,
+            "needs_you": self.needs_you,
         }
 
 
@@ -177,10 +179,17 @@ class PageStateSources:
 
 def decide_page_state(facts: PageStateFacts) -> PageState:
     state = _decide_page_state(facts)
+    state = replace(state, needs_you=_needs_you(state, facts))
     approval = facts.approval
     if approval is None:
         return state
     return replace(state, approval_source=approval.source, approval_kind=approval.kind)
+
+
+def _needs_you(state: PageState, facts: PageStateFacts) -> bool:
+    return state.key in {"ready_to_compare", "needs_help"} or state.primary_action == "decide_motion" or (
+        state.key == "making_season" and bool(object_dict(facts.workflow).get("needs_owner"))
+    )
 
 
 def _decide_page_state(facts: PageStateFacts) -> PageState:
@@ -210,8 +219,6 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     awaits_review = bool(gate and gate.get("status") == "needs_approval" and browser_ready and not sample_active)
     calibration_source = _calibration_source(facts.prefix, calibration, sample_job)
 
-    if lane == "blocked" and not awaits_review:
-        return PageState("needs_help", "attention", recovery_kind="files", primary_action="review_files")
     if sample_status in SAMPLE_RUNNING_STATUSES:
         return PageState("making_test", "active", source_job=_source_job(sample_job, "sample"))
     if sample_status in SAMPLE_WAITING_STATUSES:
@@ -220,6 +227,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
             "attention" if sample_status == "retry_backoff" else "quiet",
             source_job=_source_job(sample_job, "sample"),
         )
+    if lane == "blocked" and not awaits_review:
+        return PageState("needs_help", "attention", recovery_kind="files", primary_action="review_files")
     if sample_status in SAMPLE_FAILED_STATUSES and not _settled_by_approval(sample_job, calibration):
         failure = _sample_failure(sample_job)
         return PageState(
