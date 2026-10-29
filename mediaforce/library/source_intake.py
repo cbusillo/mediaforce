@@ -77,7 +77,8 @@ def _history_present(connection: DBClient, item_id: int) -> bool:
 
 
 def assess_readable_source(
-    connection: DBClient, identity: Mapping[str, Any], probe: Mapping[str, Any], *, context: SourceEvidenceContext | None = None
+    connection: DBClient, identity: Mapping[str, Any], probe: Mapping[str, Any], *, context: SourceEvidenceContext | None = None,
+    load_context: Callable[[], SourceEvidenceContext] | None = None,
 ) -> dict[str, Any]:
     streams = probe.get("streams")
     format_info = probe.get("format")
@@ -105,7 +106,7 @@ def assess_readable_source(
         return {**checks, "reason": "historical_output_encoder"}
     if not identity.get("sha256"):
         return {**checks, "reason": "digest_unavailable"}
-    context = context or load_source_evidence_context(connection)
+    context = context or (load_context() if load_context is not None else load_source_evidence_context(connection))
     if context.rule_conflicts(codec):
         return {**checks, "reason": "historical_output_conflict"}
     output_check = context.output_check({**identity, "video_codec": codec})

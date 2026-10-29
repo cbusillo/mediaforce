@@ -365,8 +365,7 @@ def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_pat
         approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="2026-10-26T01:00:00+00:00")
 
         asked: list[str] = []
-        facts = kinds_payload(connection, config, load_calibration_state=_loader({}, {"tv/Fresh/Season 1": DARKER}, asked),
-                              kind_of=lambda _config, season: asked.append(season))
+        facts = kinds_payload(connection, config, load_calibration_state=_loader({}, {"tv/Fresh/Season 1": DARKER}, asked))
     engine.dispose()
 
     # Only folder approvals are counted, so the page never works out a season's kind just to skip it.
@@ -402,7 +401,7 @@ def test_a_kind_offers_each_shows_biggest_season_to_sample_and_names_the_one_bei
         load = _loader({}, {})
 
         def kind_facts() -> dict[str, Any]:
-            facts = kinds_payload(connection, config, load_calibration_state=load, kind_of=lambda _config, _season: None)
+            facts = kinds_payload(connection, config, load_calibration_state=load)
             return next(kind for kind in facts["kinds"] if kind["kind"] == DARKER)
 
         def sample_job(season: str, status: str, created_at: str, lane: str = "sample") -> None:
@@ -460,9 +459,7 @@ def test_an_approved_show_of_the_kind_lends_its_setting_with_an_episode_to_watch
         kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER, own_season: "bright_live_action"}
 
         def facts_with(folders: dict[str, dict[str, Any]]) -> dict[str, Any]:
-            facts = kinds_payload(connection, config, load_calibration_state=_loader(folders, kinds),
-                                  kind_of=lambda _config, _season: pytest.fail(
-                                      "the request must use the report snapshot, not start another kind lookup"))
+            facts = kinds_payload(connection, config, load_calibration_state=_loader(folders, kinds))
             return {kind["kind"]: kind for kind in facts["kinds"]}
 
         lent = facts_with(approved)

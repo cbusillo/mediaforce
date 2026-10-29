@@ -1,6 +1,6 @@
 import json
 from collections import Counter, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -266,34 +266,37 @@ def season_kind_report(
         *,
         library_types: Mapping[str, str],
         folder_approved: Callable[[str], bool],
+        sample_seasons: Collection[str] = (),
 ) -> dict[str, Any]:
-    """Read-only: each season still waiting on a folder approval, grouped by its originals' traits.
-
-    Only original traits from the source evidence reader count, proven or probable, and published
-    episodes vote with the original they were made from. Output measurements never do.
-    """
     admitted = _admitted_item_ids(connection)
     context = load_source_evidence_context(connection)
     animation = _series_animation(connection)
     items = _present_items(connection)
     seasons, series_of = _seasons(items, library_types)
-    evidence_by_item = load_source_evidence_bulk(connection, admitted, context=context)
     # A file kept original is finished; it still measures as an original but no longer waits.
     kept = library_item_ids_kept_original(connection, [int(item["id"]) for item in items])
+    waiting_by_season = {prefix: [item for item in episodes if _waiting(item) and int(item["id"]) not in kept]
+                         for prefix, episodes in seasons.items()}
+    approved = {prefix for prefix, waiting in waiting_by_season.items() if waiting and folder_approved(prefix)}
+    measured_seasons = {prefix for prefix, waiting in waiting_by_season.items()
+                        if (waiting and prefix not in approved) or prefix in sample_seasons}
+    evidence_by_item = load_source_evidence_bulk(
+        connection, (int(item["id"]) for prefix in measured_seasons for item in seasons[prefix] if int(item["id"]) in admitted),
+        context=context,
+    )
+    groupings = {prefix: season_kind(_original_traits(seasons[prefix], admitted, evidence_by_item),
+                                    animated=animation.get(series_of[prefix])) for prefix in measured_seasons}
     rows = []
-    kinds_by_season: dict[str, SeasonKind] = {}
+    kinds_by_season = {prefix: grouping.kind for prefix, grouping in groupings.items()}
     totals: dict[str, Counter[str]] = defaultdict(Counter)
     for prefix in sorted(seasons):
-        episodes = seasons[prefix]
-        traits = _original_traits(episodes, admitted, evidence_by_item)
-        grouping = season_kind(traits, animated=animation.get(series_of[prefix]))
-        kinds_by_season[prefix] = grouping.kind
-        waiting = [item for item in episodes if _waiting(item) and int(item["id"]) not in kept]
+        waiting = waiting_by_season[prefix]
         if not waiting:
             continue
-        if folder_approved(prefix):
+        if prefix in approved:
             totals["folder_approved"]["seasons"] += 1
             continue
+        grouping = groupings[prefix]
         waiting_bytes = sum(int_value(item["size_bytes"]) for item in waiting)
         totals[grouping.kind]["seasons"] += 1
         totals[grouping.kind]["waiting_bytes"] += waiting_bytes

@@ -434,7 +434,6 @@ def kinds_payload(
         config: MediaforceConfig,
         *,
         load_calibration_state: LoadCalibrationState,
-        kind_of: KindOf,
 ) -> dict[str, Any]:
     """Facts for the page where each kind of content's approval is decided; the app words every one.
 
@@ -451,7 +450,13 @@ def kinds_payload(
         approval = effective_production_approval(config, prefix, folders_only)
         return approval is not None and approval.current
 
-    report = season_kind_report(connection, library_types=config.library_type_map, folder_approved=folder_approved)
+    episodes = _tv_episodes(connection, config)
+    approvals_by_show = {show: found for show, files in episodes.items()
+                         if (found := _show_approvals(config, show, files, folders_only))}
+    report = season_kind_report(
+        connection, library_types=config.library_type_map, folder_approved=folder_approved,
+        sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found},
+    )
     kinds_by_season = object_dict(report.get("kinds_by_season"))
     seasons: dict[str, dict[str, list[tuple[int, str]]]] = {kind: {} for kind in KINDS_IN_ORDER}
     for row in report["seasons"]:
@@ -466,9 +471,6 @@ def kinds_payload(
     totals = report["totals"]
     approvals = {kind: _approval_facts(load_kind_approval(config, kind)) if kind in APPROVABLE_KINDS else None
                  for kind in KINDS_IN_ORDER}
-    episodes = _tv_episodes(connection, config)
-    approvals_by_show = {show: found for show, files in episodes.items()
-                         if (found := _show_approvals(config, show, files, folders_only))}
     for approval in approvals.values():
         if approval:
             show = "/".join(str(approval["from_prefix"]).split("/")[:2])
