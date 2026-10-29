@@ -124,7 +124,6 @@ def test_season_group_by_folder_matches_grouping_each_file() -> None:
     ]
 
 
-
 def patch_attr(target: Any, name: str, *args: Any, **kwargs: Any) -> Any:
     return patch.object(target, name, *args, **kwargs)
 
@@ -222,8 +221,6 @@ def test_tv_root_candidate_projection_matches_full_library_without_loading_other
         }
         assert {str(decision.row["rel_path"]): decision for decision in scoped} == expected
         assert set(loaded) == expected.keys()
-        assert all(not rel_path.startswith("films/") for rel_path in loaded)
-
 
 
 def _item(connection: DBClient, rel_path: str) -> None:
