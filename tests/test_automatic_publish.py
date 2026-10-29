@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+
+from test_controller_work_window import configure_controller_night, controller_clock
 from sqlalchemy import select
 
 from mediaforce import cli
@@ -56,7 +58,8 @@ def config(tmp_path: Path) -> Iterator[MediaforceConfig]:
             runtime_reservation_dir=tmp_path / "reservations",
         ),
     )
-    yield result
+    with patch("mediaforce.web.runtime.automatic_publish.load_config", return_value=result):
+        yield result
     reset_engine_cache()
 
 
@@ -1278,3 +1281,96 @@ def test_only_a_copy_still_in_use_keeps_waiting_without_the_owner(
     assert (episode["stage"] == "needs_you") is reaches_owner
     if reaches_owner:
         assert episode["wait_reason"]["blockers"] == [refusal]
+
+
+def test_window_close_leaves_the_next_finished_file_for_the_next_pass(config: MediaforceConfig) -> None:
+    first, *_ = _stage(config, "tv/Show/Season 1/e1.mkv")
+    second, *_ = _stage(config, "tv/Show/Season 1/e2.mkv")
+    opened = True
+    published: list[int] = []
+
+    def finish_current(_connection: DBClient, _config: MediaforceConfig, item_id: int, *_args: object) -> None:
+        nonlocal opened
+        published.append(item_id)
+        opened = False
+
+    with patch("mediaforce.web.runtime.automatic_publish.controller_work_allowed", side_effect=lambda _config: opened), patch.object(
+        delivery, "_try_publish_file", side_effect=finish_current
+    ):
+        delivery.publish_checked_files_once(config, load_calibration_state=lambda *_args: None, remake_files=lambda *_args: {})
+    assert published == [first]
+    assert second not in published
+
+
+def test_publication_window_wait_is_shown_and_clears_without_a_database_write(config: MediaforceConfig) -> None:
+    from datetime import UTC, datetime
+
+    from mediaforce.hosts.work_window import CONTROLLER_WORK_WINDOW_WAIT
+
+    _stage(config, "tv/Show/Season 1/e1.mkv")
+    configure_controller_night(config)
+    with controller_clock(datetime(2026, 10, 29, 9, tzinfo=UTC)) as clock:
+        waiting = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+        assert waiting is not None
+        [file] = waiting["files"]
+        assert file["stage"] == "waiting"
+        assert file["wait_reason"] == {"code": CONTROLLER_WORK_WINDOW_WAIT}
+        assert not file["additional_wait_reasons"]
+        clock.now.return_value = datetime(2026, 10, 30, 4, tzinfo=UTC)
+        resumed = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+        assert resumed is not None
+        [file] = resumed["files"]
+        assert file["stage"] == "checking"
+        assert {"code": CONTROLLER_WORK_WINDOW_WAIT} not in file["additional_wait_reasons"]
+
+
+@pytest.mark.parametrize("origin,needs_owner", [("calibration", False), ("cli-review", False), ("queue", True)])
+def test_local_window_does_not_promise_to_publish_samples_or_files_needing_a_decision(
+        config: MediaforceConfig, origin: str, needs_owner: bool,
+) -> None:
+    from datetime import UTC, datetime
+
+    from mediaforce.hosts.work_window import CONTROLLER_WORK_WINDOW_WAIT
+
+    item_id, *_ = _stage(config, "tv/Show/Season 1/e1.mkv", origin=origin)
+    if needs_owner:
+        with open_db(config.paths.db_path) as connection:
+            connection.execute(staged_artifacts.update().where(staged_artifacts.c.library_item_id == item_id).values(
+                validation_json=json.dumps({"passed": True, "automatic_publish": {"state": "unsafe"}}),
+            ))
+    configure_controller_night(config)
+    with controller_clock(datetime(2026, 10, 29, 9, tzinfo=UTC)):
+        facts = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+    assert facts is not None
+    [file] = facts["files"]
+    assert {"code": CONTROLLER_WORK_WINDOW_WAIT} not in file["additional_wait_reasons"]
+    if needs_owner:
+        assert file["stage"] == "needs_you"
+
+
+def test_no_future_local_window_is_reported_without_promising_an_automatic_restart(config: MediaforceConfig) -> None:
+    from mediaforce.web.runtime.episode_progress import CONTROLLER_WORK_WINDOW_DISABLED
+
+    _stage(config, "tv/Show/Season 1/e1.mkv")
+    config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local", "schedule_profile": "never"}]
+    facts = item_payload(config, "tv/Show/Season 1", sound=lambda *_args: None)
+    assert facts is not None
+    [file] = facts["files"]
+    assert file["stage"] == "waiting"
+    assert {"code": CONTROLLER_WORK_WINDOW_DISABLED} in file["additional_wait_reasons"]
+
+
+def test_changed_work_hours_stop_the_next_file(config: MediaforceConfig) -> None:
+    from datetime import UTC, datetime
+
+    first, *_ = _stage(config, "tv/Show/Season 1/e1.mkv")
+    second, *_ = _stage(config, "tv/Show/Season 1/e2.mkv")
+    closed = replace(config, raw=dict(config.raw))
+    configure_controller_night(closed)
+    published: list[int] = []
+    with controller_clock(datetime(2026, 10, 29, 9, tzinfo=UTC)), patch(
+        "mediaforce.web.runtime.automatic_publish.load_config", side_effect=[config, closed]
+    ), patch.object(delivery, "_try_publish_file", side_effect=lambda _db, _config, item_id, *_args: published.append(item_id)):
+        delivery.publish_checked_files_once(config, load_calibration_state=lambda *_args: None, remake_files=lambda *_args: {})
+    assert published == [first]
+    assert second not in published

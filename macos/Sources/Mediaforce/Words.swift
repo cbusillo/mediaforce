@@ -1110,7 +1110,9 @@ extension Words {
         case "measuring": "Finding the right size"
         case "getting_ready": "Getting ready"
         case "checking": "Checking the compressed copy"
-        case "waiting": file.validation == "remaking" ? "Didn't pass its check, being made again" : "Waiting its turn"
+        case "waiting":
+            file.waitReason?.code == "controller_work_window" ? "Waiting for this Mac's work window"
+                : file.validation == "remaking" ? "Didn't pass its check, being made again" : "Waiting its turn"
         default: "Not compressed yet"
         }
     }
@@ -1119,7 +1121,7 @@ extension Words {
         var reasons: [String] = []
         if let question = file.sizeQuestion {
             reasons.append("To look right it needs \(size(question.smallestQualitySafeBytes)), more than its \(size(question.goalBytes)) goal.")
-        } else if file.stage == "needs_you" {
+        } else if file.stage == "needs_you" || file.waitReason?.code == "controller_work_window" {
             reasons.append(waitingReason(file.waitReason, validation: file.validation))
         }
         reasons.append(contentsOf: (file.additionalWaitReasons ?? []).map { waitingReason($0) })
@@ -1129,6 +1131,8 @@ extension Words {
     private static func waitingReason(_ reason: ItemFacts.WaitReason?, validation: String? = nil) -> String {
         let computer = reason?.computer ?? "the computer"
         return switch reason?.code ?? validation {
+        case "controller_work_window": "This Mac's checks and publishing are waiting for its next work window."
+        case "controller_work_disabled": "This Mac has no work window for checking and publishing. See Computers."
         case "check_failed", "failed": "The compressed copy didn't pass its check, so the original stays in the library."
         case "publish_failed": "Mediaforce couldn't check or publish this copy after several tries. Check this file."
         case "publish_unsafe": "Publishing stopped, and Mediaforce couldn't put the files back. Check and restore this file before publishing it."
