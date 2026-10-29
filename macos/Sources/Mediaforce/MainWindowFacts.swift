@@ -22,9 +22,10 @@ struct MainWindowFacts: Decodable, Sendable {
         // The seasons or titles being compressed now, each named once.
         var runningSeasons: [Season] = []
         let waitingCount: Int
+        var originalCheckWaitReasons: [String] = []
 
         private enum CodingKeys: String, CodingKey {
-            case state, pausedByOwner, stopReasons, runningCount, runningSeasons, waitingCount
+            case state, pausedByOwner, stopReasons, runningCount, runningSeasons, waitingCount, originalCheckWaitReasons
         }
 
         init(from decoder: Decoder) throws {
@@ -35,6 +36,7 @@ struct MainWindowFacts: Decodable, Sendable {
             runningCount = try container.decode(Int.self, forKey: .runningCount)
             runningSeasons = try container.decodeIfPresent([Season].self, forKey: .runningSeasons) ?? []
             waitingCount = try container.decode(Int.self, forKey: .waitingCount)
+            originalCheckWaitReasons = try container.decodeIfPresent([String].self, forKey: .originalCheckWaitReasons) ?? []
         }
     }
 

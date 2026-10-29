@@ -1,19 +1,80 @@
 """Which encode computer measures a file, so evidence work never runs on the controller once one is set up."""
 
-from collections.abc import Mapping
-from dataclasses import asdict
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.process_control import ManagedProcessController, ScheduleWindowClosedError
+from mediaforce.core.schedule_deadline import parse_schedule_close_deadline
 from mediaforce.core.type_defs import object_list
 from mediaforce.encoding.helpers import resolve_item_source_path
-from mediaforce.hosts.config import _host_priority, configured_remote_host_execution_mode, host_media_access_for_host
+from mediaforce.hosts.config import _host_priority, configured_remote_host_execution_mode, host_media_access_for_host, host_targets_current_machine
 from mediaforce.hosts.types import FFMPEG_MISSING_ISSUE
-from mediaforce.remote import collect_host_statuses
 
 EVIDENCE_HOST_WAIT_REASON = "Waiting for a computer that can measure this file."
 _ENCODE_CAPABILITY = "encode_queue"
+
+
+class ControllerDigestWindowClosed(ScheduleWindowClosedError):
+    def __init__(self, reason: str, next_opens_at: datetime | None = None) -> None:
+        super().__init__(reason)
+        self.next_opens_at = next_opens_at
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerDigestWindow:
+    admitted: bool = True
+    closes_at: datetime | None = None
+    finish_current_file: bool = False
+    label: str = "This computer"
+    next_opens_at: datetime | None = None
+
+    @property
+    def waiting_reason(self) -> str:
+        return f"New originals are waiting for {self.label}'s work window before they can be checked."
+
+    @property
+    def is_open(self) -> bool:
+        return self.admitted and (self.closes_at is None or datetime.now(UTC) < self.closes_at)
+
+    def require_open(self) -> None:
+        if not self.is_open:
+            raise ControllerDigestWindowClosed(self.waiting_reason, self.next_opens_at)
+
+    @contextmanager
+    def guard(self, controller: ManagedProcessController) -> Iterator[None]:
+        self.require_open()
+        if self.finish_current_file:
+            yield
+        else:
+            with controller.activity_guard(self.require_open):
+                yield
+
+
+def controller_digest_window(
+        config: MediaforceConfig,
+        collect_rows: Callable[[MediaforceConfig], list[dict[str, Any]]],
+) -> ControllerDigestWindow:
+    """New full-file hashes follow this computer's window, independently of the measuring computer."""
+    controller = next((host for host in config.remote_hosts if isinstance(host, dict)
+                       and (host.get("mode") == "local" or host_targets_current_machine(host))), None)
+    if controller is None:
+        return ControllerDigestWindow()
+    rows = collect_rows(config)
+    row = next((row for row in rows if (row.get("key") == controller.get("host")
+                or (controller.get("label") and row.get("label") == controller["label"]))), {})
+    try:
+        closes_at = parse_schedule_close_deadline(row.get("schedule_closes_at"))
+        opens_at = parse_schedule_close_deadline(row.get("schedule_next_opens_at"))
+    except ValueError:
+        row, closes_at, opens_at = {}, None, None
+    return ControllerDigestWindow(row.get("schedule_open") is True, closes_at,
+                                  row.get("finish_current_file") is True,
+                                  str(controller.get("label") or "This computer"), opens_at)
 
 
 def remote_evidence_hosts(config: MediaforceConfig) -> list[dict[str, Any]]:
@@ -28,7 +89,11 @@ def remote_evidence_hosts(config: MediaforceConfig) -> list[dict[str, Any]]:
 
 
 def collect_evidence_host_rows(config: MediaforceConfig) -> list[dict[str, Any]]:
-    return [asdict(status) for status in collect_host_statuses(config)]
+    # The application owns schedule normalization; defaults and injected callers use the same projection.
+    from mediaforce.web.app import evidence_host_rows
+    from mediaforce.web.runtime.host_status import current_host_statuses
+
+    return evidence_host_rows(config, collect_statuses=current_host_statuses)
 
 
 def unmeasurable_evidence_roots(config: MediaforceConfig, host_rows: list[dict[str, Any]]) -> frozenset[str]:
