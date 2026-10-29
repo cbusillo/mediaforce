@@ -23,6 +23,7 @@ struct ItemFacts: Decodable, Sendable {
         let stage: String
         let validation: String?
         let waitReason: WaitReason?
+        let additionalWaitReasons: [WaitReason]?
         let keptReason: String?
         let heldReason: String?
         let percentComplete: Int?
@@ -35,12 +36,12 @@ struct ItemFacts: Decodable, Sendable {
         var inShowPage = false
 
         private enum CodingKeys: String, CodingKey {
-            case libraryItemId, relPath, name, season, episode, stage, validation, waitReason, keptReason, heldReason
+            case libraryItemId, relPath, name, season, episode, stage, validation, waitReason, additionalWaitReasons, keptReason, heldReason
             case percentComplete, sizeQuestion, bytes, originalBytes, originalBackup
         }
 
         var compressed: Bool { stage == "published" }
-        var needsYou: Bool { stage == "needs_you" }
+        var needsYou: Bool { stage == "needs_you" || !(additionalWaitReasons ?? []).isEmpty }
     }
 
     /// Why a file waits on the Director, as a code with any values its words need.

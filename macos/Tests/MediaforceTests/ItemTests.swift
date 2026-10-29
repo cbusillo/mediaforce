@@ -15,12 +15,13 @@ final class ItemTests: XCTestCase {
 
     private func file(_ id: Int, stage: String, bytes: Int64, original: Int64? = nil, backup: Bool = false,
                       validation: String? = nil, kept: String? = nil, question: String = "null",
-                      waitReason: String = "null") -> String {
+                      waitReason: String = "null", additionalWaitReasons: String = "[]") -> String {
         let quoted = { (value: String?) in value.map { #""\#($0)""# } ?? "null" }
         return #"""
         {"library_item_id": \#(id), "rel_path": "tv/Futurama/Season 2/Futurama.S02E0\#(id).mkv",
          "name": "Futurama.S02E0\#(id).mkv", "episode": \#(id), "stage": "\#(stage)", "validation": \#(quoted(validation)),
-         "wait_reason": \#(waitReason), "kept_reason": \#(quoted(kept)), "held_reason": null, "percent_complete": null, "size_question": \#(question),
+         "wait_reason": \#(waitReason), "additional_wait_reasons": \#(additionalWaitReasons),
+         "kept_reason": \#(quoted(kept)), "held_reason": null, "percent_complete": null, "size_question": \#(question),
          "bytes": \#(bytes), "original_bytes": \#(original.map(String.init) ?? "null"), "original_backup": \#(backup)}
         """#
     }
@@ -101,6 +102,27 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(Words.fileState(waiting), "Needs more than its size goal")
         XCTAssertEqual(Words.waitingReason(waiting), "To look right it needs 420 MB, more than its 300 MB goal.")
         XCTAssertEqual(Words.allowLarger(try XCTUnwrap(waiting.sizeQuestion)), "Allow 420 MB")
+    }
+
+    func testAdditionalHoldsKeepCurrentWorkAndSizeChoicesVisible() throws {
+        let computer = "Review Mini"
+        let oldHold = #"[{"code": "restart_stopped", "computer": "\#(computer)"}]"#
+        let question = #"{"job_id": "current-question", "rel_path": "x", "goal_bytes": 300000000, "smallest_quality_safe_bytes": 420000000}"#
+        let baseline = try facts([
+            file(1, stage: "compressing", bytes: 900),
+            file(2, stage: "needs_you", bytes: 900, question: question),
+        ])
+        let held = try facts([
+            file(1, stage: "compressing", bytes: 900, additionalWaitReasons: oldHold),
+            file(2, stage: "needs_you", bytes: 900, question: question, additionalWaitReasons: oldHold),
+        ])
+
+        XCTAssertEqual(held.waiting.map(\.libraryItemId), held.files.map(\.libraryItemId))
+        XCTAssertEqual(Words.fileState(held.files[0]), Words.fileState(baseline.files[0]))
+        XCTAssertEqual(held.files[1].sizeQuestion?.jobId, baseline.files[1].sizeQuestion?.jobId)
+        XCTAssertTrue(Words.waitingReason(held.files[0]).contains(computer))
+        XCTAssertTrue(Words.waitingReason(held.files[1]).contains(Words.waitingReason(baseline.files[1])))
+        XCTAssertTrue(Words.waitingReason(held.files[1]).contains(computer))
     }
 
     func testTheShowChoicesDecodeForTheSettingsSection() throws {

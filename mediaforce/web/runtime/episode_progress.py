@@ -1,6 +1,6 @@
 """Where each episode of a season has got, in the owner's words.
 
-Each episode gets one stage. Its run in the season's latest encode run says what is happening now;
+Each episode gets one stage. Its own current encode outcome says what is happening now;
 its library and staged state say what already happened or why nothing will.
 """
 
@@ -11,12 +11,13 @@ from typing import Any
 from sqlalchemy import select
 
 from mediaforce.core.db import DBClient
+from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.type_defs import float_value, int_value, object_dict
-from mediaforce.encoding.encode_queue import encode_run_rel_paths, list_child_encode_jobs_for_parents
 from mediaforce.library.staged_validation import not_remade_blockers, staged_validation_outcome
 from mediaforce.library.workflow_state import ItemWorkflowState
 from mediaforce.web.runtime.encode_runtime import KEPT_ORIGINAL_TERMINAL_REASON, size_exception_question, unfinished_child_reason
+from mediaforce.web.runtime.file_encode_outcomes import file_encode_outcomes
 
 # Stages in the order the owner reads them: their part first, then work under way, then what is done.
 EPISODE_STAGES = (
@@ -44,29 +45,15 @@ _VALIDATION_DETAILS = {
 def load_season_episode_progress(
         connection: DBClient,
         item_states: Iterable[ItemWorkflowState],
-        runs_newest_first: Iterable[Mapping[str, Any]],
+        *, config: MediaforceConfig | None = None,
 ) -> list[dict[str, Any]]:
-    """Each episode takes its own newest run, so re-running one file never hides another's question."""
+    """Show current work and every unresolved hold without replacing one with the other."""
     items = [item for item in item_states if item.state != "missing"]
     if not items:
         return []
-    # A published episode reads as published whatever its runs say.
-    wanted = {item.rel_path for item in items if item.state != "complete"}
-    run_by_rel_path: dict[str, dict[str, Any]] = {}
-    parents = list(runs_newest_first)
-    children = list_child_encode_jobs_for_parents(
-        connection,
-        [str(parent["job_id"]) for parent in parents if str(parent.get("job_kind") or "") == "folder"],
-    )
-    for parent in parents:
-        if len(run_by_rel_path) == len(wanted):
-            break
-        parent_runs = children.get(str(parent["job_id"])) or [dict(parent)]
-        # Within one run, a file's later part (a retry) replaces its earlier one.
-        for run in reversed(parent_runs):
-            for rel_path in encode_run_rel_paths(run):
-                if rel_path in wanted and rel_path not in run_by_rel_path:
-                    run_by_rel_path[rel_path] = run
+    outcomes = file_encode_outcomes(connection, {item.item_id: item.rel_path for item in items
+                                               if item.state != "complete"}, config=config, display_progress_fallback=True)
+    run_by_rel_path = {item.rel_path: outcomes[item.item_id].job for item in items if item.item_id in outcomes}
     staged = _staged_rows(
         connection,
         [item.item_id for item in items if item.has_staged_output or item.state == "complete"],
@@ -87,7 +74,26 @@ def load_season_episode_progress(
         for item_id, row in staged.items()
         if (state := _stopped_publish_state(row["validation_json"])) is not None
     }
-    return season_episode_progress(items, run_by_rel_path, bytes_saved, validation, not_remade, publish_stopped)
+    episodes = season_episode_progress(items, run_by_rel_path, bytes_saved, validation, not_remade, publish_stopped)
+    outcomes_by_path = {item.rel_path: outcomes[item.item_id] for item in items if item.item_id in outcomes}
+    for episode in episodes:
+        outcome = outcomes_by_path.get(episode["rel_path"])
+        if outcome is None:
+            continue
+        reasons = episode["additional_wait_reasons"]
+        for job in outcome.hold_jobs:
+            # The episode already weighed its current run against its checked copy or settled choice.
+            # Writer custody is independent of that outcome and must still be visible.
+            if not job["writer_cleanup_pending"] and (
+                    job["job_id"] == outcome.job["job_id"] or episode["stage"] == "kept_original"):
+                continue
+            reason, _label, needs_owner = unfinished_child_reason(job)
+            if not needs_owner:
+                continue
+            wait_reason = _run_wait_reason(reason, job)
+            if wait_reason != episode["wait_reason"] and wait_reason not in reasons:
+                reasons.append(wait_reason)
+    return episodes
 
 
 def season_episode_progress(
@@ -140,6 +146,7 @@ def _episode(
         "owner_action": None,
         "validation": None,
         "wait_reason": None,
+        "additional_wait_reasons": [],
     }
     if item.state == "complete":
         episode["stage"] = "published"
