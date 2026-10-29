@@ -1777,7 +1777,7 @@ def create_app(
             scope_membership_token: str = "",
             only_library_item_ids: Collection[int] | None = None,
             expected_approval_contract: ActionPayload | None = None,
-            admission_blocker: Callable[[DBClient], ActionPayload | None] | None = None,
+            admission_blocker: Callable[[DBClient, MediaforceConfig], ActionPayload | None] | None = None,
     ) -> ActionPayload:
         current_config = load_config(config.paths.config_path)
         return queue_folder_encode_action(
@@ -1808,7 +1808,7 @@ def create_app(
             load_latest_failed_target_size_job_state=_load_latest_failed_target_size_job_state,
             # Checked inside the queueing transaction, so nothing queued since the caller looked slips past it.
             validate_scope_action=lambda connection, prefix: (
-                admission_blocker(connection) if admission_blocker is not None else None
+                admission_blocker(connection, current_config) if admission_blocker is not None else None
             ) or other_scope_action_blocker(
                 connection,
                 current_config,
@@ -1857,15 +1857,19 @@ def create_app(
             chosen = next_kind_season(connection, config, load_calibration_state=_load_calibration_state, now=wall_time())
         if chosen is None:
             return
+        selected_files = chosen.files
         try:
             result = _queue_encode_action(
-                chosen.season, "Queued under its kind of content's approval.", False,
-                admission_blocker=background_queue_blocker,
+                chosen.season, "Queued under its current approval.", False,
+                only_library_item_ids=selected_files,
+                admission_blocker=lambda queue_connection, queue_config: background_queue_blocker(
+                    queue_connection, library_item_ids=selected_files, config=queue_config,
+                ),
             )
         except HTTPException as refusal:
             result = {"ok": False, "message": str(refusal.detail)}
         record_kind_attempt(config, chosen, result, at=wall_time())
-        LOGGER.info("Kind of content %s, %s: %s", chosen.kind, chosen.season, result.get("message") or result.get("code") or result.get("ok"))
+        LOGGER.info("Approved season %s: %s", chosen.season, result.get("message") or result.get("code") or result.get("ok"))
 
     def _remake_waiting_samples() -> None:
         with open_db(config.paths.db_path) as connection:

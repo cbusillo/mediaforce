@@ -281,7 +281,7 @@ def _prune_run_manifests(config: MediaforceConfig, cutoff: float) -> None:
     root = config.paths.run_manifest_dir
     if not root.exists():
         return
-    protected_paths = _active_manifest_paths(config)
+    protected_paths = _retained_manifest_paths(config)
     try:
         paths = list(root.glob("*.json"))
     except OSError:
@@ -322,7 +322,7 @@ def _run_manifest_has_source_traits(path: Path) -> bool:
     )
 
 
-def _active_manifest_paths(config: MediaforceConfig) -> set[Path]:
+def _retained_manifest_paths(config: MediaforceConfig) -> set[Path]:
     if not config.paths.db_path.exists():
         return set()
     protected: set[Path] = set()
@@ -343,7 +343,7 @@ def _active_manifest_paths(config: MediaforceConfig) -> set[Path]:
     for row in rows:
         status = f"{row['status'] or ''}".strip()
         manifest_path = f"{row['manifest_path'] or ''}".strip()
-        if not manifest_path or status not in ACTIVE_ARTIFACT_STATUSES:
+        if not manifest_path or status == "completed":
             continue
         protected.add(Path(manifest_path).expanduser().resolve())
     return protected

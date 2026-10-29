@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy import and_, or_
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.sql.elements import ColumnElement
 from fastapi import HTTPException
 
 from mediaforce.core.config import MediaforceConfig
@@ -38,7 +39,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, \
-    list_child_encode_jobs, load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
+    encode_run_manifest_indexes, list_child_encode_jobs, load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
 from mediaforce.core.process_control import (
     ManagedProcessController,
     ProcessCancelledError,
@@ -365,16 +366,50 @@ def sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig,
         return
 
 
+def retained_encode_writer_filter() -> ColumnElement[bool]:
+    return and_(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS), or_(
+        encode_jobs.c.status == "stopped",
+        and_(encode_jobs.c.status == "needs_attention", encode_jobs.c.last_failure_kind.in_(("worker_restart", "stale_lease"))),
+    ))
+
+
+def encode_writer_cleanup_pending(config: MediaforceConfig | None, job: dict[str, Any]) -> bool:
+    if (job.get("terminal_reason") == KEPT_ORIGINAL_TERMINAL_REASON
+            and int_value(job.get("attempt_count")) == 0 and job.get("started_at") is None):
+        return False
+    host = object_dict(job.get("host"))
+    if execution_mode_for_host(host) != "ssh":
+        return True
+    if host_media_access_for_host(host) == "stream":
+        return not (job.get("terminal_reason") == CONTROLLER_RESTART_STOP_REASON or job.get("last_failure_kind") == "worker_restart")
+    if config is None:
+        return True
+    try:
+        items = _encode_job_estimate_items(job, manifest_items_cache={}, strict_indexes=True)
+        receipt = _remote_cleanup_receipt(config, job, items)
+    except (OSError, ValueError, KeyError, TypeError, IndexError, RuntimeError):
+        return True
+    return object_dict(job.get("progress")).get("remote_cleanup_verified") != receipt
+
+
+def _remote_cleanup_receipt(config: MediaforceConfig, job: Mapping[str, Any], items: list[dict[str, Any]]) -> str:
+    if not items:
+        raise ValueError("The earlier attempt's saved file selection is unavailable.")
+    host = object_dict(job.get("host"))
+    return stable_json_hash({
+        "job_id": job["job_id"], "started_at": job.get("started_at"),
+        "attempt_count": job.get("attempt_count"), "host": host,
+        "outputs": [str(resolve_item_staging_path(
+            config, item, host=host, host_media_access_for_host=host_media_access_for_host,
+        )) for item in items],
+    })
+
+
 def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig, deps: EncodeQueueRuntimeDeps) -> None:
     """Retained stopped jobs still identify outputs even after their artifact row is gone."""
     rows = connection.execute(
         select(encode_jobs.c.job_id)
-        .where(or_(
-            encode_jobs.c.status == "stopped",
-            and_(encode_jobs.c.status == "needs_attention",
-                 encode_jobs.c.last_failure_kind.in_(("worker_restart", "stale_lease"))),
-        ))
-        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+        .where(retained_encode_writer_filter())
     ).mappings().all()
     active = _active_encode_outputs(connection, config)
     if active is None:
@@ -409,15 +444,9 @@ def _sweep_stopped_remote_encodes(connection: DBClient, config: MediaforceConfig
         selected_items: list[Any] = []
         try:
             items = object_list(json.loads(Path(job["manifest_path"]).read_text()).get("items"))
-            indexes = _manifest_indexes_for_job(job, [object_dict(item) for item in items])
+            indexes = encode_run_manifest_indexes(job, len(items), strict_indexes=True)
             selected_items = [items[index] for index in indexes]
-            receipt = stable_json_hash({
-                "job_id": job["job_id"], "started_at": job.get("started_at"),
-                "attempt_count": job.get("attempt_count"), "host": host,
-                "outputs": [str(resolve_item_staging_path(
-                    config, object_dict(items[index]), host=host, host_media_access_for_host=host_media_access_for_host,
-                )) for index in indexes],
-            })
+            receipt = _remote_cleanup_receipt(config, job, [object_dict(item) for item in selected_items])
             if progress.get("remote_cleanup_verified") == receipt:
                 continue
             connection.commit()
@@ -1645,6 +1674,8 @@ def unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str, bool]:
         if computer:
             return f"waiting_for_computer:{computer}", f"waiting for {computer} to be available", False
         return "retrying", _UNFINISHED_REASON_LABELS["retrying"], False
+    if status == "stopped" and child.get("terminal_reason") == KEPT_ORIGINAL_TERMINAL_REASON:
+        return KEPT_ORIGINAL_TERMINAL_REASON, _UNFINISHED_REASON_LABELS["size_exception_declined"], False
     if status == "stopped" and child.get("terminal_reason") == CONTROLLER_RESTART_STOP_REASON:
         # Still stopped after a restart: its earlier encode is not confirmed ended, or it was on its
         # last attempt. Each computer gets its own line so the owner knows where to look.
@@ -1731,7 +1762,7 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
                 "count": 0,
                 "needs_owner": needs_owner,
                 # The owner already answered for these files; they are listed, not waiting.
-                "owner_choice": reason == "size_exception_declined",
+                "owner_choice": reason in {"size_exception_declined", KEPT_ORIGINAL_TERMINAL_REASON},
                 "items": [],
             },
         )
@@ -1793,16 +1824,7 @@ def encode_job_manifest_totals(
 
 
 def _manifest_indexes_for_job(job: dict[str, Any], manifest_items: list[dict[str, Any]]) -> list[int]:
-    manifest_indexes = job.get("manifest_indexes")
-    if not isinstance(manifest_indexes, list):
-        return list(range(len(manifest_items)))
-    indexes: list[int] = []
-    for value in manifest_indexes:
-        if not isinstance(value, int):
-            continue
-        if 0 <= value < len(manifest_items):
-            indexes.append(value)
-    return indexes or list(range(len(manifest_items)))
+    return encode_run_manifest_indexes(job, len(manifest_items))
 
 
 def transition_encode_job_schedule_close(
@@ -3294,6 +3316,7 @@ def _encode_job_estimate_items(
         job: dict[str, Any],
         *,
         manifest_items_cache: dict[Path, list[dict[str, Any]] | None],
+        strict_indexes: bool = False,
 ) -> list[dict[str, Any]]:
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
     if manifest_path not in manifest_items_cache:
@@ -3313,7 +3336,7 @@ def _encode_job_estimate_items(
         return []
     return [
         manifest_items[index]
-        for index in _manifest_indexes_for_job(job, manifest_items)
+        for index in encode_run_manifest_indexes(job, len(manifest_items), strict_indexes=strict_indexes)
         if 0 <= index < len(manifest_items)
     ]
 

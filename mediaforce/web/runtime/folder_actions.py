@@ -2871,10 +2871,7 @@ def save_profile_action(
         "ok": True,
         "queued": False,
         "auto_queue_status": "approval_only",
-        "message": (
-            "Approved the current test and saved it as the folder profile. "
-            "Choose Make the season when you are ready to start production."
-        ),
+        "message": "Approved the current test and saved this look.",
     }
 
 
