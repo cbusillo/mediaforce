@@ -11,12 +11,13 @@ from sqlalchemy import and_, bindparam, case, func, or_, select, true, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import DBClient
+from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import evidence_queue_state, library_item_evidence_state, library_items, source_admissions, source_measurements, source_versions
 from mediaforce.core.evidence import stable_source_id
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.core.utils import timestamp
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
+from mediaforce.encoding.plain_failure import plain_failure_summary
 from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.evidence_acquisition import DEFAULT_UNCERTAINTY_FRONTIER_LIMIT, \
     FingerprintAcquisitionPlan, load_fingerprint_acquisition_items, plan_fingerprint_acquisition
@@ -49,6 +50,13 @@ EvidenceHeartbeatStatus = Literal["active", "cancel_requested", "claim_lost"]
 
 class EvidenceQueueConflict(RuntimeError):
     pass
+
+
+def _original_decision_takeover_fields(row: DBRow, reason: str) -> dict[str, Any]:
+    if (row.get("work_reason") == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE and reason != EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
+            and row.get("work_status") in {"waiting_window", "retry_wait"}):
+        return {"work_status": "queued", "retry_not_before": None, "last_error": None}
+    return {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,6 +376,7 @@ def queue_decision_evidence_work(
             row_status = str(row.get("work_status") or "")
             current_priority = int_value(row["work_priority"]) if row.get("work_priority") is not None else EVIDENCE_WORK_PRIORITY_OPERATOR
             if row_batch_id == batch_id and row_status in EVIDENCE_WORK_ACTIVE_STATUSES:
+                next_reason = normalized_reason if priority < current_priority or not row.get("work_reason") else str(row["work_reason"])
                 connection.execute(
                     update(library_item_evidence_state)
                     .where(
@@ -376,8 +385,9 @@ def queue_decision_evidence_work(
                     )
                     .values(
                         work_priority=min(current_priority, priority),
-                        work_reason=normalized_reason if priority < current_priority or not row.get("work_reason") else row["work_reason"],
+                        work_reason=next_reason,
                         updated_at=now_iso,
+                        **_original_decision_takeover_fields(row, next_reason),
                     )
                 )
                 prepared_count += 1
@@ -406,6 +416,9 @@ def queue_decision_evidence_work(
                 terminal_failure_count += 1
                 continue
             next_status = row_status if preserve_retry_state else "queued"
+            next_reason = (str(row["work_reason"]) if preserve_retry_state and current_priority <= priority and row.get("work_reason")
+                           else normalized_reason)
+            takeover = _original_decision_takeover_fields(row, next_reason)
             connection.execute(
                 update(library_item_evidence_state)
                 .where(
@@ -414,19 +427,19 @@ def queue_decision_evidence_work(
                 )
                 .values(
                     work_batch_id=batch_id,
-                    work_status=next_status,
+                    work_status=takeover.get("work_status", next_status),
                     work_priority=min(current_priority, priority) if preserve_retry_state else priority,
-                    work_reason=(row["work_reason"] if preserve_retry_state and current_priority <= priority and row.get("work_reason") else normalized_reason),
+                    work_reason=next_reason,
                     work_source_fingerprint=current_source_fingerprint,
                     leased_at=None,
                     lease_expires_at=None,
                     heartbeat_at=None,
                     worker_id=None,
                     process_pid=None,
-                    retry_not_before=row.get("retry_not_before") if preserve_retry_state else None,
+                    retry_not_before=takeover.get("retry_not_before", row.get("retry_not_before") if preserve_retry_state else None),
                     attempt_count=int_value(row.get("attempt_count")) if preserve_retry_state else 0,
                     last_attempt_at=row.get("last_attempt_at") if preserve_retry_state else None,
-                    last_error=row.get("last_error") if preserve_retry_state else None,
+                    last_error=takeover.get("last_error", row.get("last_error") if preserve_retry_state else None),
                     updated_at=now_iso,
                 )
             )
@@ -443,6 +456,7 @@ def queue_decision_evidence_work(
                 "work": evidence_queue_summary(connection),
             }
 
+        _release_controller_digest_waits(connection, batch_id, now_iso)
         if active_batch:
             evidence_kinds = list(dict.fromkeys([
                 *object_list(queue_state.get("evidence_kinds")),
@@ -742,6 +756,32 @@ def next_evidence_work_query(batch_id: str, now_iso: str, *, excluded_media_root
     )
 
 
+def _original_digest_required() -> Any:
+    cached = select(library_items.c.id).select_from(library_items.join(
+        source_versions, source_versions.c.version_id == library_items.c.active_source_version_id,
+    )).where(
+        source_versions.c.sha256.is_not(None), source_versions.c.sha256 != "",
+        source_versions.c.size_bytes == library_items.c.size_bytes,
+        source_versions.c.sample_fingerprint == library_items.c.content_version_fingerprint,
+        func.json_extract(source_versions.c.identity_json, "$.path") == library_items.c.source_path,
+        func.json_extract(source_versions.c.identity_json, "$.stat[3]") == library_items.c.mtime_ns,
+    )
+    return and_(
+        func.coalesce(library_item_evidence_state.c.work_reason, "") == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
+        ~_observed_original_receipt_exists(), library_item_evidence_state.c.library_item_id.not_in(cached),
+    )
+
+
+def _release_controller_digest_waits(
+        connection: DBClient, batch_id: str, updated_at: str, *, window_open: bool = False,
+) -> None:
+    connection.execute(update(library_item_evidence_state).where(
+        library_item_evidence_state.c.work_batch_id == batch_id,
+        library_item_evidence_state.c.work_status == "waiting_window",
+        true() if window_open else ~_original_digest_required(),
+    ).values(work_status="queued", retry_not_before=None, last_error=None, updated_at=updated_at))
+
+
 def refresh_controller_digest_waits(connection: DBClient, window: ControllerDigestWindow) -> None:
     """Use the queue's existing due-time mechanism for this computer's window, without leasing waiting files."""
     state = load_evidence_queue_state(connection)
@@ -751,33 +791,33 @@ def refresh_controller_digest_waits(connection: DBClient, window: ControllerDige
     now = datetime.now(UTC)
     now_iso = now.isoformat(timespec="seconds")
     owned = library_item_evidence_state.c.work_batch_id == batch
+    needs_digest = _original_digest_required()
+    _release_controller_digest_waits(connection, batch, now_iso, window_open=window.is_open)
     if window.is_open:
-        connection.execute(update(library_item_evidence_state).where(
-            owned, library_item_evidence_state.c.work_status == "waiting_window",
-        ).values(work_status="queued", retry_not_before=None, last_error=None, updated_at=now_iso))
         return
-    cached = select(library_items.c.id).select_from(library_items.join(
-        source_versions, source_versions.c.version_id == library_items.c.active_source_version_id,
-    )).where(source_versions.c.sha256.is_not(None), source_versions.c.sha256 != "")
     opens_at = window.next_opens_at
     retry_at = opens_at if opens_at is not None and opens_at > now else now + timedelta(seconds=EVIDENCE_BACKGROUND_RETRY_SECONDS)
     connection.execute(update(library_item_evidence_state).where(
         owned, library_item_evidence_state.c.work_status.in_(("queued", "retry_wait", "waiting_window")),
-        _evidence_due_now(now_iso),
-        library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
-        or_(library_item_evidence_state.c.work_status == "waiting_window",
-            and_(~_observed_original_receipt_exists(), library_item_evidence_state.c.library_item_id.not_in(cached))),
+        _evidence_due_now(now_iso), needs_digest,
     ).values(work_status="waiting_window", retry_not_before=retry_at.isoformat(timespec="seconds"),
              last_error=window.waiting_reason, updated_at=now_iso))
 
 
-def evidence_window_wait_reasons(connection: DBClient) -> list[str]:
+def original_check_wait_reasons(connection: DBClient) -> list[str]:
     batch = str(load_evidence_queue_state(connection).get("batch_id") or "")
-    return [str(reason) for reason in connection.execute(select(library_item_evidence_state.c.last_error).where(
+    reasons = connection.execute(select(library_item_evidence_state.c.last_error).where(
         library_item_evidence_state.c.work_batch_id == batch,
-        library_item_evidence_state.c.work_status == "waiting_window",
+        library_item_evidence_state.c.work_status.in_(("waiting_window", "retry_wait")),
+        library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
         library_item_evidence_state.c.last_error.is_not(None),
-    ).distinct().order_by(library_item_evidence_state.c.last_error)).scalars()]
+    ).distinct()).scalars()
+    summaries: set[str] = set()
+    for reason in reasons:
+        summary = plain_failure_summary(reason)
+        if summary is not None:
+            summaries.add(summary)
+    return sorted(summaries)
 
 
 def _evidence_requires_computer() -> Any:

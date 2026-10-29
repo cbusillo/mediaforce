@@ -295,11 +295,14 @@ def _discover_originals(config: MediaforceConfig, deps: EvidenceWorkerDeps) -> i
     from mediaforce.library.source_intake import queue_original_intake
 
     try:
+        window = controller_digest_window(config, deps.evidence_host_rows)
         with open_db(config.paths.db_path) as connection:
             state = load_evidence_queue_state(connection)
             if state["is_paused"] or state["cancel_requested"] or state["status"] in {"cancelled", "cancel_requested"}:
                 return 0
-            return queue_original_intake(connection, config)
+            discovered = queue_original_intake(connection, config)
+            refresh_controller_digest_waits(connection, window)
+            return discovered
     except (OSError, RuntimeError, ValueError, SQLAlchemyError):
         deps.logger.exception("Original discovery failed; queued analysis can still continue")
         return 0
@@ -513,9 +516,7 @@ def _run_evidence_claim(
     except (EvidenceWorkDeferred, ControllerDigestWindowClosed) as exc:
         stop_heartbeats()
         for owned in claims:
-            _defer_claim(config, owned, deps,
-                         work_status="waiting_window" if isinstance(exc, ControllerDigestWindowClosed) else "retry_wait",
-                         reason=str(exc), restore_attempt=owned.evidence_kind in started)
+            _defer_claim(config, owned, deps, work_status="retry_wait", reason=str(exc), restore_attempt=owned.evidence_kind in started)
         return len(claims)
     except ProcessCancelledError:
         stop_heartbeats()

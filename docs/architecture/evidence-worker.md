@@ -111,9 +111,19 @@ the existing local behavior remains available. Waiting rows use `waiting_window`
 with their next due time and a plain reason, without taking a lease or changing
 their attempt budget. The normal autostart preparation refreshes those waits
 before counting runnable work, including when a changed schedule opens early.
+Loop discovery refreshes them before returning too. A decision check or a newly
+qualified source leaves its old window wait as soon as it no longer needs a new
+hash; a cached identity that no longer matches the catalog stays held. The
+descriptor observation remains the final authority before any cached hash is
+reused. If that observation finds a replaced file whose catalog facts did not
+change, the attempted check keeps the existing short retry delay instead of
+being released and reclaimed immediately. Its reason stays visible too. A full
+hash that already finished is retained when the window closes after its last
+read; hard-close guards still stop the next chunk from being read.
 The Mac's current work explanation includes each distinct window reason while
 other eligible work continues. All default, web and CLI workers read the same
-schedule-aware computer projection.
+schedule-aware computer projection. Standalone defaults use the current host
+collector so a cold status cache cannot masquerade as unavailable computers.
 
 ## Durable state
 

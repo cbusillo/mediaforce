@@ -51,7 +51,6 @@ class ControllerDigestWindow:
         else:
             with controller.activity_guard(self.require_open):
                 yield
-                controller.throw_if_cancelled()
 
 
 def controller_digest_window(
@@ -90,8 +89,9 @@ def remote_evidence_hosts(config: MediaforceConfig) -> list[dict[str, Any]]:
 def collect_evidence_host_rows(config: MediaforceConfig) -> list[dict[str, Any]]:
     # The application owns schedule normalization; defaults and injected callers use the same projection.
     from mediaforce.web.app import evidence_host_rows
+    from mediaforce.web.runtime.host_status import current_host_statuses
 
-    return evidence_host_rows(config)
+    return evidence_host_rows(config, collect_statuses=current_host_statuses)
 
 
 def unmeasurable_evidence_roots(config: MediaforceConfig, host_rows: list[dict[str, Any]]) -> frozenset[str]:

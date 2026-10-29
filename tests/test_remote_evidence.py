@@ -587,11 +587,24 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
         for stamp, opened in [("2026-10-28T08:59:59+00:00", True), ("2026-10-28T09:00:00+00:00", False)]:
             with self.subTest(stamp=stamp), patch("mediaforce.web.app.datetime", wraps=datetime) as clock, patch(
                 "mediaforce.library.evidence_hosts.datetime", wraps=datetime
-            ) as digest_clock, patch("mediaforce.web.app._safe_collect_host_statuses", return_value=statuses):
+            ) as digest_clock, patch("mediaforce.web.runtime.host_status.current_host_statuses", return_value=statuses):
                 clock.now.return_value = digest_clock.now.return_value = datetime.fromisoformat(stamp)
                 window = controller_digest_window(config, collect_evidence_host_rows)
                 self.assertEqual(window.is_open, opened)
                 self.assertTrue(window.finish_current_file)
+
+    def test_default_rows_use_a_current_probe_in_a_cold_process(self) -> None:
+        config = self._config([self.mini])
+        status = HostStatus(key=self.mini["host"], label=self.mini["label"], mode="ssh", priority=self.mini["priority"],
+                            capabilities=["encode_queue"], available=True, message="Ready", missing_paths=[])
+        fallback = HostStatus(key=status.key, label=status.label, mode="ssh", priority=status.priority,
+                              capabilities=status.capabilities, available=False, message="Checking", missing_paths=[])
+        with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=[fallback]), patch(
+            "mediaforce.web.runtime.host_status.current_host_statuses", return_value=[status]
+        ) as current:
+            rows = collect_evidence_host_rows(config)
+        assert select_evidence_host(config, rows, media_root="tv") == self.mini
+        current.assert_called_once_with(config)
 
     def test_without_encode_computers_measures_locally_as_before(self) -> None:
         config = self._config([])
