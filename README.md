@@ -27,6 +27,8 @@ The current implementation covers:
 - discovery and inventory into SQLite, refreshed in the background
 - the Mac app: TV, Movies, and Other libraries, Activity, Finished, and
   Settings, talking to the local server's API
+- the Mac Media table fills the available window below its filters, with one
+  scrollbar for its rows and a visible column header while browsing
 - per-file sample, encode, and machine validation across configured encode
   hosts, with work-window schedules
 - measured evidence (motion pattern, media fingerprint) checked automatically

@@ -4,21 +4,30 @@ import SwiftUI
 struct PageFrame<Content: View>: View {
     let title: String
     var subtitle = ""
+    var scrolls = true
     @ViewBuilder let content: Content
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                content
+        Group {
+            if scrolls {
+                ScrollView { document }
+            } else {
+                document
             }
-            .padding(.horizontal, 34)
-            .padding(.vertical, 20)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollBounceBehavior(.basedOnSize)
         .background(Color(nsColor: .textBackgroundColor))
         .navigationTitle(title)
         .navigationSubtitle(subtitle)
+    }
+
+    private var document: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            content
+        }
+        .padding(.horizontal, 34)
+        .padding(.vertical, 20)
+        .frame(maxWidth: .infinity, maxHeight: scrolls ? nil : .infinity, alignment: .topLeading)
     }
 }
 
@@ -26,6 +35,7 @@ struct PageFrame<Content: View>: View {
 struct RefreshingPage<Facts: Sendable, Content: View>: View {
     let title: String
     var subtitle = ""
+    var scrolls = true
     // A subtitle that counts what the facts hold; the plain subtitle stands until they arrive.
     var factsSubtitle: ((Facts) -> String)?
     let load: @MainActor () async throws -> Facts
@@ -35,7 +45,7 @@ struct RefreshingPage<Facts: Sendable, Content: View>: View {
     @State private var lastHeard: Date?
 
     var body: some View {
-        PageFrame(title: title, subtitle: facts.flatMap { factsSubtitle?($0) } ?? subtitle) {
+        PageFrame(title: title, subtitle: facts.flatMap { factsSubtitle?($0) } ?? subtitle, scrolls: scrolls) {
             if let facts {
                 if refreshFailed {
                     StaleNotice(connection: .failing, lastHeard: lastHeard)
