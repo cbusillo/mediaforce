@@ -1,38 +1,21 @@
 import AppKit
 import SwiftUI
 
-/// The menu bar panel: a Mediaforce switch that turns work on and off, a line saying what it is doing, what waits
-/// for the Director with each line opening its page, then plain rows to look for new files, open the window and
-/// open Settings.
+/// The menu bar panel: work status, one link to Needs you, and the app's controls.
 struct MenuBarPanel: View {
     let model: MainWindowModel
-    @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let facts = model.facts {
                 header(facts)
-                let lines = Attention.menuLines(facts)
-                if !lines.isEmpty {
+                if Attention.waitingOnYou(facts) > 0 {
                     Divider().padding(.horizontal, 10)
-                    // The status line already says "Waiting for you" when nothing else is happening.
-                    if Words.menuStatus(facts) != Words.waitingForYou {
-                        Text(Words.waitingForYou)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 14)
-                            .padding(.top, 8)
-                            .padding(.bottom, 2)
-                    } else {
-                        Spacer().frame(height: 6)
+                    Button { open(.needsYou) } label: {
+                        Label("\(Words.needsYou) · \(Attention.waitingOnYou(facts))", systemImage: "hand.raised")
                     }
-                    ForEach(lines, id: \.id) { line in
-                        Button { open(line.opens) } label: {
-                            WaitingLine(notice: line, posters: model.posters)
-                        }
-                        .buttonStyle(MenuRowStyle())
-                    }
+                    .buttonStyle(MenuRowStyle())
                 }
             } else {
                 Text(Words.menuNotConnected)
@@ -46,7 +29,7 @@ struct MenuBarPanel: View {
             }
             .buttonStyle(MenuRowStyle())
             .disabled(model.connection != .reachable)
-            Button(Words.openMediaforce) { open(nil) }
+            Button(Words.openMediaforce) { open(Attention.openingPlace(model.facts)) }
                 .buttonStyle(MenuRowStyle())
             SettingsLink { Text(Words.settingsEllipsis) }
                 .buttonStyle(MenuRowStyle())
@@ -78,6 +61,8 @@ struct MenuBarPanel: View {
                 Text(Words.staleNotice(model.connection, lastHeard: model.lastHeard))
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
+            } else if Words.menuStatus(facts) == Words.waitingForYou {
+                EmptyView()
             } else if let place = facts.statusOpens {
                 Button(Words.menuStatus(facts)) { open(place) }
                     .buttonStyle(QuietLinkStyle())
@@ -102,54 +87,15 @@ struct MenuBarPanel: View {
     }
 
     /// Brings the main window forward, on a page when one is named, and closes the panel.
-    private func open(_ place: Place?) {
+    private func open(_ place: Place) {
         NSApp.keyWindow?.close()
         if case .computer(let key) = place {
             model.settingsRequest = SettingsRequest(computer: key)
             openSettings()
         } else {
-            if let place { model.requestedPlace = place }
-            openWindow(id: MainWindow.id)
+            model.placeRequest = PlaceRequest(place: place)
         }
         NSApp.activate()
-    }
-}
-
-/// One thing waiting for the Director: a small poster for a show, or a symbol for a computer or the backups.
-struct WaitingLine: View {
-    let notice: AttentionNotice
-    let posters: PosterStore
-
-    var body: some View {
-        HStack(spacing: 9) {
-            Group {
-                if let show = showPrefix, let image = posters.image(for: show) {
-                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
-                } else {
-                    Image(systemName: symbol).foregroundStyle(.secondary)
-                }
-            }
-            .frame(width: 20, height: 30)
-            .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
-            Text(notice.title).lineLimit(2)
-            Spacer(minLength: 0)
-        }
-        .frame(minHeight: 34)
-    }
-
-    private var showPrefix: String? {
-        switch notice.opens {
-        case .sample(let prefix), .item(let prefix): MediaPoster.titlePrefix(prefix)
-        default: nil
-        }
-    }
-
-    private var symbol: String {
-        switch notice.opens {
-        case .spaceSaved: "trash"
-        case .computer: "desktopcomputer"
-        default: "film"
-        }
     }
 }
 
@@ -181,6 +127,18 @@ struct MenuRowStyle: ButtonStyle {
     }
 }
 
+struct MenuBarLabel: View {
+    let model: MainWindowModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Image(nsImage: MenuBarGlyph.image(waiting: model.facts.map(Attention.waitingOnYou) ?? 0 > 0))
+            .onChange(of: model.placeRequest, initial: true) { _, request in
+                if request != nil { openWindow(id: MainWindow.id) }
+            }
+    }
+}
+
 /// The menu bar glyph: the compress mark, with a dot while something waits for the Director.
 enum MenuBarGlyph {
     static func image(waiting: Bool) -> NSImage {
@@ -209,12 +167,5 @@ extension MainWindowFacts {
         if work.waitingCount > 0 { return nil }
         if work.checksPaused { return .library }
         return nil
-    }
-}
-
-extension Attention {
-    /// What the menu bar lists: the same waiting notices the app sends, with the backups when there are any.
-    static func menuLines(_ facts: MainWindowFacts) -> [AttentionNotice] {
-        waitingNotices(facts) + (facts.originalBackups.count > 0 ? [backupsNotice(facts.originalBackups)] : [])
     }
 }

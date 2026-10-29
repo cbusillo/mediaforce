@@ -19,7 +19,7 @@ struct LibraryPage: View {
                 HStack(alignment: .top, spacing: 28) {
                     VStack(alignment: .leading, spacing: 20) {
                         FinishedShelf(seasons: Array(facts.recentlyFinishedSeasons.prefix(6)), posters: posters, open: open)
-                        if !facts.samples.waitingOnYou.isEmpty || !facts.samples.approvedNotStarted.isEmpty {
+                        if !facts.samples.approvedNotStarted.isEmpty {
                             SampleShelf(facts: facts, posters: posters) { open(.sample($0)) }
                         }
                         Latest(events: Array(facts.events.prefix(4)), posters: posters, open: open)

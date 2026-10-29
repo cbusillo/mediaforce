@@ -20,8 +20,8 @@ final class MainWindowModel {
     // What went wrong at the last failed check, for the window's Details; nil once Mediaforce answers again.
     private(set) var problem: ServerProblem?
     var notice: ActionNotice?
-    // A page a notification asked to open; the window takes it and clears it.
-    var requestedPlace: Place?
+    // A persistent request, so the window and menu bar can each respond without consuming it.
+    var placeRequest: PlaceRequest?
     var onFacts: ((MainWindowFacts) -> Void)?
     // Whether work was asked to run or pause and the server hasn't confirmed it yet; nil when nothing is pending.
     private(set) var switching: Bool?
@@ -146,8 +146,13 @@ struct ActionNotice: Identifiable, Equatable {
     static func == (lhs: ActionNotice, rhs: ActionNotice) -> Bool { lhs.id == rhs.id }
 }
 
+struct PlaceRequest: Equatable {
+    let id = UUID()
+    let place: Place
+}
+
 enum Place: Hashable {
-    case library, spaceSaved, media
+    case library, needsYou, spaceSaved, media
     // Settings › Computers, on one computer when it names one.
     case computer(String?)
     case sample(String)
@@ -165,6 +170,7 @@ enum Place: Hashable {
         case .computer(let key?): "computer:\(key)"
         case .computer(nil): "computer"
         case .library: "library"
+        case .needsYou: "needsYou"
         default: "spaceSaved"
         }
     }
@@ -175,6 +181,7 @@ enum Place: Hashable {
         case ("sample", let prefix?): self = .sample(prefix)
         case ("item", let prefix?): self = .item(prefix)
         case ("library", nil): self = .library
+        case ("needsYou", nil): self = .needsYou
         case ("spaceSaved", nil): self = .spaceSaved
         case ("computer", let key?): self = .computer(key)
         // "computers" is what notifications sent before Computers moved into Settings carry.
@@ -200,6 +207,8 @@ struct MainWindow: View {
                 } detail: {
                     Group {
                         switch navigation.place {
+                        case .needsYou:
+                            NeedsYouPage(facts: facts, open: go)
                         case .spaceSaved:
                             SpaceSavedPage(facts: facts, model: model) { go(.item($0)) }
                                 // Deleting backups changes what the page shows, so it reads its facts again at once.
@@ -257,10 +266,9 @@ struct MainWindow: View {
         }
         .frame(minWidth: 1100, minHeight: 700)
         // Initial too: the menu bar may ask for a page while it opens this window.
-        .onChange(of: model.requestedPlace, initial: true) { _, requested in
+        .onChange(of: model.placeRequest, initial: true) { _, requested in
             guard let requested else { return }
-            go(requested)
-            model.requestedPlace = nil
+            go(requested.place)
         }
         .alert(item: Bindable(model).notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message))
@@ -357,6 +365,8 @@ struct Sidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $place) {
+                SidebarRow(title: Words.needsYou, symbol: "hand.raised", trailing: "\(Attention.waitingOnYou(facts))")
+                    .tag(Place.needsYou)
                 Label(Words.library, systemImage: "books.vertical")
                     .tag(Place.library)
                 SidebarRow(title: Words.spaceSaved, symbol: "arrow.down.right.and.arrow.up.left", trailing: Words.size(facts.spaceSaved.bytes))
@@ -375,7 +385,6 @@ struct Sidebar: View {
                 }
             }
             .listStyle(.sidebar)
-            BackupsRow(backups: facts.originalBackups) { place = .spaceSaved }
         }
     }
 }
@@ -409,34 +418,6 @@ struct SidebarRow: View {
             Text(trailing)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
-        }
-    }
-}
-
-/// Original backups wait in the Cleanup folder until they are deleted on Space saved, the one place that deletes them.
-struct BackupsRow: View {
-    let backups: MainWindowFacts.OriginalBackups
-    let open: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Divider()
-            Button(action: open) {
-                HStack(spacing: 8) {
-                    Image(systemName: backups.count > 0 ? "trash.fill" : "trash")
-                        .foregroundStyle(.secondary)
-                    Text(Words.originalBackups)
-                    Spacer()
-                    Text(backups.count > 0 ? Words.size(backups.bytes) : Words.none)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                .font(.callout)
-                .padding(14)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(Words.originalBackupsHelp)
         }
     }
 }
