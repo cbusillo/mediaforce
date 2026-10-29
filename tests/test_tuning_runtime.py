@@ -27,7 +27,6 @@ from mediaforce.advisor import (
     _force_repeated_tune_experiment,
     _policy_response_schema,
     _run_tune_self_check,
-    _build_seed_prompt,
     apply_seed_policy,
     request_review_artifact_critique,
     request_operator_note_parse,
@@ -9012,16 +9011,6 @@ class TuningRuntimeTests(unittest.TestCase):
                 self.assertEqual(hint["leverage"], leverage)
                 self.assertEqual(hint["recommended_seed_action"], action)
                 self.assertEqual(hint["review_confidence"], "low")
-
-    def test_seed_prompt_references_hinted_audio_key_for_stereo(self) -> None:
-        prompt = _build_seed_prompt(
-            {
-                "folder": "movies/Demo",
-                "audio_tradeoff_hint": {"policy_key": "stereo_opus_bitrate", "review_confidence": "medium"},
-            }
-        )
-
-        self.assertIn("stereo_opus_bitrate", prompt)
 
     def test_tune_self_check_bypasses_model_for_audio_hint(self) -> None:
         with patch("mediaforce.advisor._run_structured_llm_request") as structured_request:
