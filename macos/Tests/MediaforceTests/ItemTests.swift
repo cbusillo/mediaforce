@@ -93,6 +93,19 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(Set(season.files.map(Words.waitingReason)).count, 3)
     }
 
+    func testScheduledWorkWaitsWithoutAskingForAttention() throws {
+        let season = try facts([
+            file(1, stage: "waiting", bytes: 100, waitReason: #"{"code": "controller_work_window"}"#),
+            file(2, stage: "waiting", bytes: 100,
+                 additionalWaitReasons: #"[{"code": "controller_work_disabled"}]"#),
+        ])
+
+        XCTAssertEqual(season.waiting.map(\.libraryItemId), [2])
+        XCTAssertFalse(season.files[0].needsYou)
+        XCTAssertNotEqual(Words.fileState(season.files[0]), Words.fileState(season.files[1]))
+        XCTAssertFalse(Words.waitingReason(season.files[0]).isEmpty)
+    }
+
     func testASizeQuestionNamesBothSizes() throws {
         let question = #"{"job_id": "job-7", "rel_path": "x", "goal_bytes": 300000000, "smallest_quality_safe_bytes": 420000000, "reason": "quality_needs_more"}"#
         let season = try facts([file(7, stage: "needs_you", bytes: 900, question: question)])

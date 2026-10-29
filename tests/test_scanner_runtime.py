@@ -11,12 +11,14 @@ from unittest.mock import patch
 
 from sqlalchemy import func, insert, select, update
 
+from test_controller_work_window import configure_controller_night, controller_clock
+
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import item_events, library_item_evidence_state, library_items, \
     motion_keep_decisions, scan_runs, staged_artifacts
 from mediaforce.core.models import ProbeSummary
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
 from mediaforce.library.evidence_state import EVIDENCE_REASON_POLICY_CHANGED, EVIDENCE_REASON_SOURCE_CHANGED, \
@@ -70,9 +72,37 @@ class _FakeConnection:
 
 class _FakeConfig:
     source_root_map: dict[str, Path] = {}
+    remote_hosts: list[dict[str, Any]] = []
 
 
 class ScannerRuntimeTests(unittest.TestCase):
+    def test_window_close_preserves_the_current_file_and_does_not_probe_the_next(self) -> None:
+        from datetime import UTC, datetime
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media = root / "tv"
+            media.mkdir()
+            for name in ("first.mkv", "second.mkv"):
+                (media / name).write_bytes(b"fixture")
+            config = self._config(root, {"tv": media})
+            configure_controller_night(config)
+            with open_db(config.paths.db_path) as connection, controller_clock(
+                datetime(2026, 10, 29, 8, 59, 59, tzinfo=UTC)
+            ) as clock, patch("mediaforce.library.scanner._reconcile_missing_items") as missing:
+                clock.now.return_value = datetime(2026, 10, 29, 8, 59, 59, tzinfo=UTC)
+
+                def finish_probe(*_args: object, **_kwargs: object) -> ProbeSummary:
+                    clock.now.return_value = datetime(2026, 10, 29, 9, tzinfo=UTC)
+                    return _failed_probe_summary(RuntimeError("fixture"))
+
+                with patch("mediaforce.library.scanner.probe_media", side_effect=finish_probe) as probe:
+                    with self.assertRaises(ScheduleWindowClosedError):
+                        scan_library(connection, config)
+                self.assertEqual(probe.call_count, 1)
+                missing.assert_not_called()
+                self.assertEqual(connection.execute(select(func.count()).select_from(library_items)).scalar_one(), 1)
+
     @staticmethod
     def _config(project_root: Path, roots: dict[str, Path], labels: dict[str, str] | None = None) -> MediaforceConfig:
         paths = ConfigPaths(
