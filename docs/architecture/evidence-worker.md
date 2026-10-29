@@ -116,8 +116,11 @@ qualified source leaves its old window wait as soon as it no longer needs a new
 hash; a cached identity that no longer matches the catalog stays held. The
 descriptor observation remains the final authority before any cached hash is
 reused. If that observation finds a replaced file whose catalog facts did not
-change, the attempted check keeps the existing short retry delay instead of
-being released and reclaimed immediately. Its reason stays visible too. A full
+change, the attempted check waits until the next opening instead of being
+released and reclaimed throughout the closed window. A missing opening uses the
+existing background retry delay. Opening the schedule early releases that wait;
+its reason stays visible too. A measurement receipt alone never stands in for
+the full original hash. A full
 hash that already finished is retained when the window closes after its last
 read; hard-close guards still stop the next chunk from being read.
 The Mac's current work explanation includes each distinct window reason while
