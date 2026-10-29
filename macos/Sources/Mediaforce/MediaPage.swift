@@ -15,6 +15,7 @@ struct MediaPage: View {
 
     var body: some View {
         RefreshingPage(title: onlySeasons == nil ? Words.media : Words.seasonsWithoutKindTitle,
+                       scrolls: view != .table,
                        factsSubtitle: { loaded in
                            let rows = listed(loaded)
                            return Words.shown(visibleRows(rows).count, of: rows.count, onlySeasons == nil ? "item" : "season")
@@ -189,8 +190,6 @@ struct MediaPoster: View {
 }
 
 struct MediaTable: View {
-    static let height: CGFloat = 560
-
     let rows: [MediaRow]
     let posters: PosterStore
     let open: (String) -> Void
@@ -228,7 +227,7 @@ struct MediaTable: View {
             .width(140)
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
-        .frame(minHeight: Self.height)
+        .frame(maxHeight: .infinity)
         .contextMenu(forSelectionType: MediaRow.ID.self) { _ in } primaryAction: { ids in
             if let id = ids.first { open(id) }
         }
