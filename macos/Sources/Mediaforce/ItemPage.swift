@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// The page for one show season, movie or folder: the player leads, every file sits beside it, and
-/// anything waiting for the Director is answered right above the player.
+/// anything waiting for the Director is answered beside the file's evidence.
 struct ItemPage: View {
     let prefix: String
     let model: MainWindowModel
@@ -53,17 +53,17 @@ struct ItemPage: View {
                                     }
                                 }
                             }
-                            if !facts.waiting.isEmpty {
-                                WaitingFiles(files: facts.waiting) { file, action in
-                                    Task { await act(action, file) }
-                                }
-                            }
                             if let file = selectedFile(facts) {
                                 FilePlayer(file: file, model: model) {
                                     Task { await act(.putOriginalBack, file) }
                                 }
                                 // A file that is published, put back or loses its backup plays again from the start.
                                 .id("\(file.id) \(file.stage) \(file.bytes) \(file.originalBackup)")
+                            }
+                            if !facts.waiting.isEmpty {
+                                WaitingFiles(files: facts.waiting) { file, action in
+                                    Task { await act(action, file) }
+                                }
                             }
                             if facts.sound != nil || facts.stillAiring != nil {
                                 ShowChoices(facts: facts, openShow: openItem) { change in Task { await save(change) } }
@@ -152,7 +152,9 @@ struct ItemPage: View {
 
     private func refresh() async {
         do {
-            facts = try await model.client.item(prefix)
+            let latest = try await model.client.item(prefix)
+            selected = selectedFile(latest)?.id
+            facts = latest
             refreshFailed = false
         } catch {
             refreshFailed = true
@@ -269,10 +271,11 @@ struct ItemHeader: View {
             }
             Spacer(minLength: 0)
         }
+        .frame(minHeight: facts.showPrefix == nil ? 0 : 126, alignment: .bottom)
     }
 }
 
-/// The mark a file waiting for the Director carries, in its line above the player and in the list.
+/// The mark a file waiting for the Director carries, beside its decision and in the list.
 struct WaitingMark: View {
     var body: some View {
         Image(systemName: "exclamationmark.circle.fill")
