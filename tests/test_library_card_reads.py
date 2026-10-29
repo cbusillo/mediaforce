@@ -1,17 +1,19 @@
 import copy
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 import tomllib
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
-from mediaforce.core.db_tables import library_items
-from mediaforce.library import workflow_state
-from mediaforce.library.candidate_selection import CandidateDecision
+from mediaforce.core.db_tables import library_items, staged_artifacts
+from mediaforce.library import candidate_selection, workflow_state
+from mediaforce.library.candidate_selection import CandidateDecision, _load_rows, project_candidates
 from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, scopes_overlap
 from mediaforce.web import app as web_app
 
@@ -138,10 +140,8 @@ def test_tv_root_projection_matches_full_projection_and_reads_mutations(
     def project_all_rows(
             db: DBClient,
             candidate_config: MediaforceConfig,
-            *,
-            prefixes: list[str] | None = None,
+            **_scope_options: Any,
     ) -> list[CandidateDecision]:
-        assert prefixes == ["anime", "shows"]
         return original_project_candidates(db, candidate_config)
 
     projected = web_app._list_library_detail_cards(config, connection)
@@ -174,6 +174,56 @@ def test_tv_detail_cards_are_empty_without_tv_roots(
         assert web_app._list_library_detail_cards(config, connection) == []
 
     project.assert_not_called()
+
+
+def test_tv_root_candidate_projection_matches_full_library_without_loading_other_roots(
+        connection: DBClient,
+        config: MediaforceConfig,
+) -> None:
+    paths = [
+        "shows/Alpha/Season 1/e1.mkv",
+        "shows/Alpha/Season 2/e1.mkv",
+        "shows/Beta/Season 1/e1.mkv",
+        "anime/Gamma/Season 1/e1.mkv",
+        "anime/Gamma/Season 2/e1.mkv",
+        "films/Movie/Movie.mkv",
+    ]
+    for rel_path in paths:
+        _item(connection, rel_path)
+    promoted_id = connection.execute(
+        select(library_items.c.id).where(library_items.c.rel_path == paths[0])
+    ).scalar_one()
+    connection.execute(library_items.update().where(library_items.c.id == promoted_id).values(status="promoted"))
+    connection.execute(staged_artifacts.insert().values(
+        library_item_id=promoted_id,
+        staging_path="/staging/shows/Alpha/Season 1/e1.mkv",
+        promoted_at=NOW,
+        updated_at=NOW,
+    ))
+    connection.commit()
+    now = datetime.fromisoformat(NOW).astimezone(UTC)
+    canonical = project_candidates(connection, config, now=now)
+    load_rows = _load_rows
+
+    for root in ("shows", "anime"):
+        loaded: list[str] = []
+
+        def record_rows(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            rows = load_rows(*args, **kwargs)
+            loaded.extend(str(row["rel_path"]) for row in rows)
+            return rows
+
+        with patch_attr(candidate_selection, "_load_rows", side_effect=record_rows):
+            scoped = project_candidates(connection, config, prefixes=[root], now=now)
+
+        expected: dict[str, CandidateDecision] = {
+            str(decision.row["rel_path"]): decision for decision in canonical
+            if str(decision.row["rel_path"]).startswith(f"{root}/")
+        }
+        assert {str(decision.row["rel_path"]): decision for decision in scoped} == expected
+        assert set(loaded) == expected.keys()
+        assert all(not rel_path.startswith("films/") for rel_path in loaded)
+
 
 
 def _item(connection: DBClient, rel_path: str) -> None:
