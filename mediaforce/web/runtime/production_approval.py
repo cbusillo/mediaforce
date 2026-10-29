@@ -5,9 +5,8 @@ folder page alike:
 
 - A file is governed by the nearest folder holding an approval: the file itself, then its season,
   then its show, then the library.
-- When no folder on that path holds any saved sample, a TV season's kind of content may govern it: one
-  approval covering every season that measures the same (#1047). A folder's approval or its own sample
-  always comes first.
+- When no folder on that path holds an approval, a TV season's kind of content may govern it: one
+  approval covering every season that measures the same (#1047). Unapproved old samples do not block it.
 - A production run records the contract of the approval it was queued under. Queueing leaves out
   every file whose governing approval has a different contract, such as a season with its own
   sample inside a show run, so each file a run makes is governed by the approval the run recorded.
@@ -85,6 +84,15 @@ def _kind_approval(config: MediaforceConfig, rel_path: str, load: LoadCalibratio
     return load.kind_approval(config, rel_path) if isinstance(load, KindApprovalSource) else None
 
 
+@runtime_checkable
+class KindSampleSource(Protocol):
+    def following_kind(self, config: MediaforceConfig, prefix: str) -> str | None: ...
+
+
+def following_kind(config: MediaforceConfig, prefix: str, load: LoadCalibrationState) -> str | None:
+    return load.following_kind(config, prefix) if isinstance(load, KindSampleSource) else None
+
+
 def approval_prefixes(rel_path: str) -> list[str]:
     """The folders that could govern a file, nearest first."""
     path = PurePosixPath(str(rel_path or "").strip().strip("/"))
@@ -104,15 +112,12 @@ def effective_production_approval(
         load_calibration_state: LoadCalibrationState,
 ) -> EffectiveApproval | None:
     """The approval governing this file or folder, or None when nothing above it holds one."""
-    saved_sample = False
     for prefix in approval_prefixes(rel_path):
         calibration = load_calibration_state(config, prefix)
         if holds_approval(calibration):
             payload = object_dict(calibration)
             return EffectiveApproval(prefix, payload, production_approval_contract(payload))
-        saved_sample = saved_sample or calibration is not None
-    # A sample saved on the way, approved or not, keeps the folder's own decision ahead of its kind's.
-    return None if saved_sample else _kind_approval(config, rel_path, load_calibration_state)
+    return _kind_approval(config, rel_path, load_calibration_state)
 
 
 def production_calibration(
@@ -122,18 +127,17 @@ def production_calibration(
 ) -> tuple[str, dict[str, Any] | None]:
     """The saved sample a production action here runs under, and the folder it was saved at.
 
-    That is the nearest folder at or above the scope holding any saved sample, approved or not, so a
-    season following its show queues under the show's approval, while a sample still awaiting review
-    keeps blocking, as its page leads with reviewing it. The caller's review gate judges the sample.
+    A kind's approval replaces unapproved samples. Otherwise, the nearest saved sample decides,
+    including a sample awaiting review. The caller's review gate judges it.
     """
+    approval = effective_production_approval(config, prefix, load_calibration_state)
+    if approval is not None and approval.kind is not None:
+        return approval.prefix, approval.calibration
     # A whole-library scope has no folder path, so only its own saved sample can govern it.
     for candidate in approval_prefixes(prefix) or [prefix]:
         calibration = load_calibration_state(config, candidate)
         if calibration is not None:
             return candidate, calibration
-    kind = _kind_approval(config, prefix, load_calibration_state)
-    if kind is not None:
-        return kind.prefix, kind.calibration
     return prefix, None
 
 
@@ -154,6 +158,9 @@ class _CachedCalibrationLoader:
 
     def kind_approval(self, config: MediaforceConfig, rel_path: str) -> EffectiveApproval | None:
         return _kind_approval(config, rel_path, self._load)
+
+    def following_kind(self, config: MediaforceConfig, prefix: str) -> str | None:
+        return following_kind(config, prefix, self._load)
 
 
 def production_approval_contract(calibration: Mapping[str, Any]) -> dict[str, Any] | None:

@@ -49,10 +49,11 @@ from mediaforce.web.runtime.folder_actions import quality_risk_blocks_production
 from mediaforce.web.runtime.folder_tuning_advice import review_gate
 from mediaforce.web.runtime.job_runtime import retryable_saved_sample_job, sample_target_size_failure
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    cached_calibration_loader, effective_production_approval
+    cached_calibration_loader, effective_production_approval, following_kind
 
 PageStateKey = Literal[
     "needs_test",
+    "waiting_for_kind",
     "sample_waiting",
     "making_test",
     "ready_to_compare",
@@ -165,6 +166,7 @@ class PageStateFacts:
     # The approval governing this folder, from the nearest folder holding one.
     approval: EffectiveApproval | None = None
     approval_review_blocked: bool = False
+    following_kind: str | None = None
     # The staged-file summary, when the caller read one.
     staged_integrity: Mapping[str, Any] | None = None
     # The scope's lifecycle payload with its motion-pattern counts, for a TV scope.
@@ -199,6 +201,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     sample_job = object_dict(facts.sample_job)
     sample_status = str(sample_job.get("status") or "")
     calibration = object_dict(facts.calibration) if facts.calibration is not None else None
+    if facts.following_kind and sample_status not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES:
+        sample_job, sample_status, calibration = {}, "", None
 
     if lane == "processing":
         return PageState("making_season", "active", source_job=_source_job(encode_job, "encode"))
@@ -288,6 +292,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
             failure="missing_clips",
             source_job=calibration_source,
         )
+    if facts.following_kind:
+        return PageState("waiting_for_kind", "quiet", approval_source="kind", approval_kind=facts.following_kind)
     return PageState("needs_test", "quiet", primary_action="make_sample")
 
 
@@ -369,6 +375,7 @@ def _facts(
         sample_job=sample_job if _is_sample_job(sample_job) else None,
         calibration=load_calibration(config, prefix),
         approval=approval,
+        following_kind=following_kind(config, prefix, load_calibration),
         approval_review_blocked=review_blocked(approval) if approval is not None and approval.current else False,
         staged_integrity=staged_integrity,
         lifecycle=lifecycle,

@@ -36,7 +36,7 @@ from mediaforce.web.runtime.kind_approvals import APPROVAL_NOT_CURRENT_CODE, KIN
     KIND_QUEUE_WAITS_CODE, KIND_RETRY_SECONDS, SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, KindSeason, SeasonKinds, \
     NO_FOLDER_APPROVAL_CODE, SOURCE_KIND_DIFFERS_CODE, approve_kind, approve_kind_action, background_queue_blocker, kinds_payload, load_kind_approval, \
     next_kind_season, record_kind_attempt, stop_kind_approval
-from mediaforce.web.runtime.page_state import PageStateFacts, decide_page_state
+from mediaforce.web.runtime.page_state import PageStateFacts, PageStateSources, card_page_states, decide_page_state
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_matches, \
     production_calibration
 
@@ -110,7 +110,7 @@ def test_a_never_sampled_season_of_an_approved_kind_is_governed_by_it(tmp_path: 
     assert effective_production_approval(config, "tv/Thriller", load) is None
 
 
-def test_a_folder_approval_or_a_seasons_own_sample_comes_before_its_kind(tmp_path: Path) -> None:
+def test_a_folder_approval_comes_first_but_an_unapproved_sample_follows_its_kind(tmp_path: Path) -> None:
     config = _config(tmp_path)
     approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
     show_approval = _approved(config)
@@ -122,8 +122,10 @@ def test_a_folder_approval_or_a_seasons_own_sample_comes_before_its_kind(tmp_pat
     by_own_sample = _loader({SEASON: unapproved_own}, {SEASON: DARKER})
 
     assert by_show is not None and by_show.source == "folder" and by_show.prefix == "tv/Thriller"
-    assert effective_production_approval(config, EPISODE, by_own_sample) is None
-    assert production_calibration(config, SEASON, by_own_sample) == (SEASON, unapproved_own)
+    inherited = effective_production_approval(config, EPISODE, by_own_sample)
+    assert inherited is not None and inherited.kind == DARKER
+    assert production_calibration(config, SEASON, by_own_sample) == (SEASON, inherited.calibration)
+    assert by_own_sample(config, SEASON) == unapproved_own
 
 
 def test_no_seasons_kind_is_read_until_a_kind_is_approved(tmp_path: Path) -> None:
@@ -296,15 +298,17 @@ def test_seasons_a_kind_covers_are_offered_one_at_a_time_largest_first(tmp_path:
     assert _next(config, load) is None
     approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
     first = _next(config, load)
-    assert first is not None and (first.season, first.kind, first.waiting_bytes) == (large, DARKER, 9_000)
+    assert first is not None and (first.season, first.kind, first.waiting_bytes) == (own, DARKER, 50_000)
     record_kind_attempt(config, first, {"ok": True}, at=0.0)
     second = _next(config, load)
-    assert second is not None and second.season == small
+    assert second is not None and second.season == large
     # A wait for the queue to settle is no attempt, so the season is offered again.
     record_kind_attempt(config, second, {"ok": False, "code": KIND_QUEUE_WAITS_CODE}, at=0.0)
     assert _next(config, load) == second
     record_kind_attempt(config, second, {"ok": True}, at=0.0)
-    # The season with its own sample is never offered, and attempts outlive this process.
+    third = _next(config, load)
+    assert third is not None and third.season == small
+    record_kind_attempt(config, third, {"ok": True}, at=0.0)
     assert _next(config, load) is None
 
 
@@ -931,3 +935,45 @@ def test_legacy_or_malformed_item_identity_uses_its_recorded_path(tmp_path: Path
     manifest.write_text(json.dumps({"items": [{"library_item_id": identity, "rel_path": EPISODE}]}))
 
     assert _next(config, _loader({SEASON: _approved(config)}, {})) is None
+
+
+@pytest.mark.parametrize("kind", [DARKER, "bright_live_action", "unmeasured", "mixed", "cartoon", "4k"])
+def test_old_samples_follow_a_reusable_kind_while_its_newest_sample_stays_visible(tmp_path: Path, kind: str) -> None:
+    from test_page_state import _review_ready
+
+    config = _config(tmp_path)
+    folders = {SEASON: _review_ready(), OTHER_SEASON: _review_ready()}
+    load = _loader(folders, {SEASON: kind, OTHER_SEASON: kind})
+    sources = PageStateSources(load, lambda *_args: {})
+    with open_db(config.paths.db_path) as connection:
+        for index, season in enumerate([SEASON, OTHER_SEASON]):
+            connection.execute(calibration_jobs.insert().values(
+                job_id=f"sample-{index}", prefix=season, status="pending_review", lane="sample", action="sample",
+                host_json="{}", policy_json="{}", sample_item_json="{}",
+                created_at=f"2026-10-29T0{index}:00:00+00:00", updated_at="now"))
+        connection.commit()
+        states = card_page_states(connection, config, [(season, None, None) for season in folders], sources)
+        reusable = kind in {DARKER, "bright_live_action"}
+        assert states[SEASON]["key"] == ("waiting_for_kind" if reusable else "ready_to_compare")
+        assert states[SEASON]["needs_you"] is not reusable
+        assert states[OTHER_SEASON]["key"] == "ready_to_compare"
+        assert states[OTHER_SEASON]["needs_you"]
+        assert load(config, SEASON) == folders[SEASON]
+        assert len(connection.execute(calibration_jobs.select()).all()) == len(folders)
+
+
+def test_kind_approval_replaces_old_sample_decision_and_allows_queueing(tmp_path: Path) -> None:
+    from test_page_state import _review_ready
+
+    config = _config(tmp_path)
+    saved = _review_ready()
+    load = _loader({SEASON: saved}, {SEASON: DARKER})
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    with open_db(config.paths.db_path) as connection:
+        states = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))
+    assert states[SEASON]["key"] == "ready_to_make"
+    assert not states[SEASON]["needs_you"]
+    assert states[SEASON]["approval_kind"] == DARKER
+    result, manifests = _queue(config, SEASON, load)
+    assert result["ok"] and manifests
+    assert load(config, SEASON) == saved

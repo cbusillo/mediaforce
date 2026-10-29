@@ -5,7 +5,7 @@ starting with darker and bright live action. Cartoons and 4K stay one-time choic
 
 A kind approval is a copy of a current folder approval the Director chose to extend, kept in the web state
 directory's `kinds` folder, one file per kind. It governs a season only when no folder on the season's path
-holds any saved sample (see production_approval), and the season's kind comes from its originals' traits
+holds an approval (see production_approval), and the season's kind comes from its originals' traits
 (library/content_kinds). Every file it covers still meets the per-file quality floor and size hold.
 """
 
@@ -22,7 +22,7 @@ from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_readonly_db
-from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
+from mediaforce.core.db_tables import calibration_jobs, encode_jobs, library_items, staged_artifacts
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, load_queue_state
 from mediaforce.core.type_defs import object_dict
 from mediaforce.library.candidate_selection import season_identity
@@ -161,6 +161,28 @@ class KindAwareLoader:
 
     def __call__(self, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
         return self._load(config, prefix)
+
+    def following_kind(self, config: MediaforceConfig, prefix: str) -> str | None:
+        season = season_prefix_of(config, prefix)
+        if season is None or season != prefix:
+            return None
+        if effective_production_approval(config, prefix, self._load) is not None:
+            return None
+        kind = self._kind_of(config, season)
+        if kind is None or kind not in APPROVABLE_KINDS:
+            return None
+        if holds_approval(load_kind_approval(config, kind)):
+            return kind
+        if not config.paths.db_path.exists():
+            return None
+        with open_readonly_db(config.paths.db_path) as connection:
+            prefixes = connection.execute(select(calibration_jobs.c.prefix).distinct()).scalars().all()
+            seasons = [candidate for candidate in prefixes
+                       if season_prefix_of(config, candidate) == candidate
+                       and self._kind_of(config, candidate) == kind
+                       and effective_production_approval(config, candidate, self._load) is None]
+            representative = _season_with_sample(connection, seasons)
+        return kind if representative != prefix else None
 
     def kind_approval(self, config: MediaforceConfig, rel_path: str) -> EffectiveApproval | None:
         # No season's kind is read until the Director has approved a kind.
