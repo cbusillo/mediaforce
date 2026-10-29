@@ -1901,7 +1901,8 @@ def test_unresolved_attachment_does_not_load_the_output_catalog(tmp_path: Path) 
     item_id, path = _source(config)
     with open_db(config.paths.db_path) as database:
         item = database.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
-        commit_readable_source(database, item, observe_file(path, full_digest=True), _probe())
+        commit_readable_source(database, {str(key): value for key, value in item.items()},
+                               observe_file(path, full_digest=True), _probe())
         database.execute(update(library_items).where(library_items.c.id == item_id).values(size_bytes=path.stat().st_size + 1))
         with patch("mediaforce.library.source_evidence.load_source_evidence_context") as catalog:
             assert load_source_evidence(database, item_id).traits["media_fingerprint"].reason == "source_attachment_unresolved"

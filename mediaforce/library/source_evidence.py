@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
 
-from sqlalchemy import ColumnElement, Select, exists, inspect, literal_column, or_, select, update
+from sqlalchemy import ColumnElement, Select, exists, inspect, literal_column, select, update
 
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import library_items, source_admissions, source_generations, source_measurements, \

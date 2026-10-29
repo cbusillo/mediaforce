@@ -155,7 +155,7 @@ def test_bulk_evidence_matches_individual_reads_and_report_queries_stay_bounded(
 
     event.listen(connection.engine, "before_cursor_execute", count_query)
     try:
-        first = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+        season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
         first_queries = query_count
         for episode in range(3, 30):
             item_id = _item(connection, f"tv/Drama/Season 1/e{episode:02}.mkv", status="promoted", codec="av1", current_dark=0.0)
@@ -182,7 +182,6 @@ def test_bulk_evidence_matches_individual_reads_and_report_queries_stay_bounded(
     assert refreshed_queries == first_queries
 
 
-
 def test_large_evidence_batch_respects_sqlite_parameter_limits(connection: DBClient) -> None:
     item_ids = []
     for episode in range(600):
@@ -193,12 +192,18 @@ def test_large_evidence_batch_respects_sqlite_parameter_limits(connection: DBCli
                                   .join(source_measurements, source_measurements.c.version_id == source_admissions.c.version_id)):
         connection.execute(source_admissions.update().where(source_admissions.c.admission_id == row.admission_id)
                            .values(basis="readable-source", checks_json=json_text({"measurement_ids": [row.measurement_id]})))
+    extra = append_measurement(connection, version_id=None, kind="media_fingerprint", binding="unbound",
+                               summary=_fingerprint(0.5), provenance={}, measured_at=None, recorded_at="now")
+    connection.execute(source_admissions.update().where(source_admissions.c.admission_id == f"admission-{item_ids[0]}")
+                       .values(checks_json=json_text({"measurement_ids": [extra]})))
     raw = connection.connection.driver_connection
-    previous_limit = raw.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    assert isinstance(raw, sqlite3.Connection)
+    previous_limit = raw.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 550)
     try:
         assert set(load_source_evidence_bulk(connection, item_ids)) == set(item_ids)
     finally:
         raw.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous_limit)
+
 
 def _config(root: Path) -> MediaforceConfig:
     return MediaforceConfig(raw={"media": {"source_roots": {"tv": str(root / "tv")}}},

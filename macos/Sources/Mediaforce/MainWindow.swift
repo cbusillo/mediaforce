@@ -12,6 +12,7 @@ final class MainWindowModel {
     // Each kind of content and how it is decided; nil until Mediaforce first answers.
     private(set) var kinds: KindsFacts?
     private var kindsAttempted: Date?
+    private var kindsRequest = 0
     // The player the full-screen window shows, while it is open.
     var theater: Theater?
     private(set) var connection: ServerState = .checking
@@ -61,8 +62,10 @@ final class MainWindowModel {
 
     /// Reads the kinds again; a failed read keeps what was last heard, since the window's facts say if Mediaforce is down.
     func refreshKinds() async {
+        kindsRequest += 1
+        let request = kindsRequest
         kindsAttempted = .now
-        guard let kinds = try? await client.kinds() else { return }
+        guard let kinds = try? await client.kinds(), request == kindsRequest else { return }
         self.kinds = kinds
     }
 

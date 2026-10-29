@@ -287,7 +287,6 @@ def season_kind_report(
     groupings = {prefix: season_kind(_original_traits(seasons[prefix], admitted, evidence_by_item),
                                     animated=animation.get(series_of[prefix])) for prefix in measured_seasons}
     rows = []
-    kinds_by_season = {prefix: grouping.kind for prefix, grouping in groupings.items()}
     totals: dict[str, Counter[str]] = defaultdict(Counter)
     for prefix in sorted(seasons):
         waiting = waiting_by_season[prefix]
@@ -302,7 +301,7 @@ def season_kind_report(
         totals[grouping.kind]["waiting_bytes"] += waiting_bytes
         rows.append({"season": prefix, **grouping.to_payload(), "waiting_episodes": len(waiting),
                      "waiting_bytes": waiting_bytes})
-    return {
+    report: dict[str, Any] = {
         "content_kinds_version": CONTENT_KINDS_VERSION,
         "ranges": {
             "darker_min_dark_frames": DARKER_MIN_DARK_FRAMES,
@@ -314,6 +313,8 @@ def season_kind_report(
         },
         "totals": {kind: dict(counts) for kind, counts in sorted(totals.items())},
         "unmeasured_reasons": dict(Counter(row["reason"] for row in rows if row["kind"] == "unmeasured")),
-        "kinds_by_season": kinds_by_season,
         "seasons": rows,
     }
+    if sample_seasons:
+        report["kinds_by_season"] = {prefix: groupings[prefix].kind for prefix in sample_seasons if prefix in groupings}
+    return report
