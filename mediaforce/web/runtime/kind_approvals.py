@@ -4,8 +4,8 @@ The Director decided on 2026-10-22 (#517) that one approval may cover every show
 starting with darker and bright live action. Cartoons and 4K stay one-time choices made show by show.
 
 A kind approval is a copy of a current folder approval the Director chose to extend, kept in the web state
-directory's `kinds` folder, one file per kind. It governs a season only when no folder on the season's path
-holds an approval (see production_approval), and the season's kind comes from its originals' traits
+directory's `kinds` folder, one file per kind. Production approval precedence lives in production_approval;
+the season's kind comes from its originals' traits
 (library/content_kinds). Every file it covers still meets the per-file quality floor and size hold.
 """
 
@@ -34,7 +34,7 @@ from mediaforce.library.source_evidence import SourceEvidenceContext
 from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
     approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
-    production_calibration, sample_finished_before, season_prefix_of
+    production_calibration, sample_allows_kind, season_prefix_of
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 from mediaforce.web.runtime.production_holds import approval_identity
@@ -156,17 +156,26 @@ class KindAwareLoader:
     def following_kinds(self, config: MediaforceConfig) -> dict[str, str]:
         if not config.paths.db_path.exists():
             return {}
+        pending = [kind for kind in APPROVABLE_KINDS if not holds_approval(load_kind_approval(config, kind))]
+        if not pending:
+            return {}
         load = cached_calibration_loader(self._load)
         with open_readonly_db(config.paths.db_path) as connection:
-            report = _kind_report(connection, config, load)
-            representatives = {
-                kind: _newest_sample(connection, [row["season"] for row in report["seasons"] if row["kind"] == kind])
-                for kind in APPROVABLE_KINDS if not holds_approval(load_kind_approval(config, kind))
-            }
-            jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in report["seasons"]])
-        return {row["season"]: row["kind"] for row in report["seasons"]
-                if row["kind"] in representatives
-                and sample_finished_before(jobs.get(row["season"]), object_dict(representatives[row["kind"]]).get("created_at"))
+            contents = _kind_contents(connection, config, load)
+            rows = contents.report["seasons"]
+            boundaries = {}
+            for kind in pending:
+                settings = _lent_settings(kind, contents.approvals, contents.episodes,
+                                          object_dict(contents.report.get("kinds_by_season")))
+                if settings:
+                    boundaries[kind] = object_dict(load(config, settings[0]["from_prefix"])).get("accepted_at")
+                else:
+                    representative = _newest_sample(connection, [row["season"] for row in rows if row["kind"] == kind])
+                    boundaries[kind] = object_dict(representative).get("created_at")
+            jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in rows])
+        return {row["season"]: row["kind"] for row in rows
+                if row["kind"] in boundaries
+                and sample_allows_kind(config, row["season"], load, jobs.get(row["season"]), boundaries[row["kind"]])
                 and effective_production_approval(config, row["season"], load) is None}
 
     def kind_approval(self, config: MediaforceConfig, rel_path: str) -> EffectiveApproval | None:
@@ -182,14 +191,12 @@ class KindAwareLoader:
         if calibration is None:
             return None
         approval = EffectiveApproval(season, calibration, production_approval_contract(calibration), kind=kind)
-        for prefix in approval_prefixes(rel_path):
-            if self._load(config, prefix) is None:
-                continue
-            if prefix != season or not approval.current or not config.paths.db_path.exists():
+        if any(self._load(config, prefix) is not None for prefix in approval_prefixes(rel_path)):
+            if not approval.current or not config.paths.db_path.exists():
                 return None
             with open_readonly_db(config.paths.db_path) as connection:
-                job = load_latest_job(connection, prefix)
-            if not sample_finished_before(job, calibration.get("kind_approved_at")):
+                job = load_latest_job(connection, season)
+            if not sample_allows_kind(config, rel_path, self._load, job, calibration.get("kind_approved_at")):
                 return None
         return approval
 
@@ -457,6 +464,27 @@ def _kind_report(
                               sample_seasons=sample_seasons)
 
 
+@dataclass(frozen=True, slots=True)
+class _KindContents:
+    episodes: dict[str, list[tuple[str, int]]]
+    approvals: dict[str, list[_ShowApproval]]
+    report: dict[str, Any]
+
+
+def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibration_state: LoadCalibrationState) -> _KindContents:
+    def folders_only(loader_config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+        return load_calibration_state(loader_config, prefix)
+
+    episodes = _tv_episodes(connection, config)
+    approvals_by_show = {show: found for show, files in episodes.items()
+                         if (found := _show_approvals(config, show, files, folders_only))}
+    report = _kind_report(
+        connection, config, folders_only,
+        sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found},
+    )
+    return _KindContents(episodes, approvals_by_show, report)
+
+
 def kinds_payload(
         connection: DBClient,
         config: MediaforceConfig,
@@ -470,16 +498,8 @@ def kinds_payload(
     Such a show's own seasons follow its approval, so it is never among the shows the kind covers.
     """
 
-    def folders_only(loader_config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
-        return load_calibration_state(loader_config, prefix)
-
-    episodes = _tv_episodes(connection, config)
-    approvals_by_show = {show: found for show, files in episodes.items()
-                         if (found := _show_approvals(config, show, files, folders_only))}
-    report = _kind_report(
-        connection, config, folders_only,
-        sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found},
-    )
+    contents = _kind_contents(connection, config, load_calibration_state)
+    episodes, approvals_by_show, report = contents.episodes, contents.approvals, contents.report
     kinds_by_season = object_dict(report.get("kinds_by_season"))
     seasons: dict[str, dict[str, list[tuple[int, str]]]] = {kind: {} for kind in KINDS_IN_ORDER}
     for row in report["seasons"]:

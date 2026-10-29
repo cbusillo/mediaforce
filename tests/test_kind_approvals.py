@@ -1050,6 +1050,14 @@ def test_kind_page_and_season_states_choose_the_same_waiting_sample(tmp_path: Pa
                     if row["kind"] == DARKER)
         states = card_page_states(connection, config, [(season, None, None) for season in folders],
                                   PageStateSources(load, lambda *_args: {}))
+        if not stale_kind:
+            folders[OTHER_SEASON] = _approved_on(config, f"{OTHER_SEASON}/e00.mkv")
+            folders[OTHER_SEASON]["accepted_at"] = "2026-10-29T03:00:00+00:00"
+            decided = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"]
+                           if row["kind"] == DARKER)
+            after = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
+            assert decided["settings"]
+            assert after["key"] == "waiting_for_kind" and not after["needs_you"]
     assert (kind["approval"] is not None) == stale_kind
     assert kind["sample_season"] == OTHER_SEASON
     assert states[kind["sample_season"]]["key"] == "ready_to_compare"
@@ -1075,15 +1083,28 @@ def test_newer_or_unknown_samples_and_show_samples_keep_their_decision(
     assert state["key"] == "ready_to_compare" and state["needs_you"]
 
 
-def test_never_sampled_and_active_seasons_do_not_load_the_library_kind_report(tmp_path: Path) -> None:
+def test_never_sampled_seasons_stay_available_while_other_samples_run(tmp_path: Path) -> None:
     config = _config(tmp_path)
     _finished_sample(config, SEASON)
     with open_db(config.paths.db_path) as connection:
         connection.execute(calibration_jobs.update().values(status="running", finished_at=None))
         connection.commit()
         sources = PageStateSources(_loader({SEASON: _review_ready()}, {SEASON: DARKER, OTHER_SEASON: DARKER}), lambda *_args: {})
-        with patch("mediaforce.web.runtime.kind_approvals.season_kind_report", side_effect=AssertionError("unneeded library read")):
-            states = card_page_states(connection, config, [(SEASON, None, None), (OTHER_SEASON, None, None)], sources)
+        states = card_page_states(connection, config, [(SEASON, None, None), (OTHER_SEASON, None, None)], sources)
     assert states[SEASON]["key"] == "making_test"
     assert states[OTHER_SEASON]["key"] == "needs_test"
     assert states[OTHER_SEASON]["primary_action"] == "make_sample"
+
+
+@pytest.mark.parametrize("parent", ["tv/Thriller", "tv"])
+def test_undecided_kind_preserves_an_older_sample_with_a_saved_parent_sample(tmp_path: Path, parent: str) -> None:
+    config = _config(tmp_path)
+    _finished_sample(config, SEASON)
+    _finished_sample(config, OTHER_SEASON, "2026-10-29T01:00:00+00:00")
+    load = _loader({SEASON: _review_ready(), OTHER_SEASON: _review_ready(), parent: _review_ready()},
+                   {SEASON: DARKER, OTHER_SEASON: DARKER})
+    with open_db(config.paths.db_path) as connection:
+        report = {"seasons": [{"season": season, "kind": DARKER} for season in [SEASON, OTHER_SEASON]]}
+        with patch("mediaforce.web.runtime.kind_approvals.season_kind_report", return_value=report):
+            state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
+    assert state["key"] == "ready_to_compare" and state["needs_you"]

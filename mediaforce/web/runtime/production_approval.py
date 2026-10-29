@@ -5,8 +5,9 @@ folder page alike:
 
 - A file is governed by the nearest folder holding an approval: the file itself, then its season,
   then its show, then the library.
-- When no folder on that path holds an approval, a TV season's kind of content may govern it: one
-  approval covering every season that measures the same (#1047). Unapproved old samples do not block it.
+- When no folder on that path holds an approval, a TV season's kind may govern it. A saved sample
+  exactly at the season can follow only when its newest sample job finished before the kind was
+  approved. Saved samples at other scopes, newer samples and uncertain timing retain their veto.
 - A production run records the contract of the approval it was queued under. Queueing leaves out
   every file whose governing approval has a different contract, such as a season with its own
   sample inside a show run, so each file a run makes is governed by the approval the run recorded.
@@ -116,6 +117,13 @@ def sample_finished_before(job: Mapping[str, Any] | None, boundary: Any) -> bool
     except ValueError:
         return False
     return finished.tzinfo is not None and cutoff.tzinfo is not None and finished < cutoff
+
+
+def sample_allows_kind(
+        config: MediaforceConfig, rel_path: str, load: LoadCalibrationState, job: Mapping[str, Any] | None, boundary: Any,
+) -> bool:
+    saved = [prefix for prefix in approval_prefixes(rel_path) if load(config, prefix) is not None]
+    return not saved or (saved == [season_prefix_of(config, rel_path)] and sample_finished_before(job, boundary))
 
 
 def approval_prefixes(rel_path: str) -> list[str]:
