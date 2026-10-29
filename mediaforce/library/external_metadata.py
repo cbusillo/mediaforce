@@ -192,12 +192,13 @@ class PlexClient:
             yield PlexShow(rating_key=rating_key, guids=guids, thumb=plex_thumb_path(metadata.get("thumb")))
 
     def poster(self, thumb: str) -> bytes:
-        """The poster image at a thumb path Plex gave, sent with the token in a header rather than the URL."""
         path = plex_thumb_path(thumb)
         if path is None:
             raise ProviderHttpError("Plex poster path was not a metadata thumb")
         headers = {key: value for key, value in self._headers.items() if key != "Accept"}
-        return self._fetch_image(urljoin(self._base_url, path.lstrip("/")), headers, self._timeout_seconds)
+        query = urlencode({"url": path, "width": 600, "height": 900, "upscale": 0})
+        url = urljoin(self._base_url, "photo/:/transcode")
+        return self._fetch_image(f"{url}?{query}", headers, self._timeout_seconds)
 
     def _metadata(self, metadata_type: int, *, include_guids: bool = False) -> Iterator[JSONPayload]:
         page_size = 500
