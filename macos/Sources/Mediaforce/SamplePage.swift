@@ -4,13 +4,16 @@ struct SamplePage: View {
     let prefix: String
     let model: MainWindowModel
     let openItem: (String) -> Void
+    var namePage: (String) -> Void = { _ in }
     @State private var facts: SampleFacts?
 
     var body: some View {
         let names = self.names
-        PageFrame(title: names.season, subtitle: names.show) {
+        let title = Words.sampleTitle(names.season)
+        PageFrame(title: title, subtitle: names.show) {
             SampleWork(prefix: prefix, model: model, facts: $facts, openItem: openItem)
         }
+        .onChange(of: title, initial: true) { _, title in namePage(title) }
     }
 
     /// The season names the page and its show is the subtitle, as on the season's own page.
@@ -20,7 +23,7 @@ struct SamplePage: View {
         if let sample = samples.first(where: { $0.prefix == prefix }) { return Words.seasonTitle(sample.show, sample.season) }
         // Until its facts arrive, the page is named by its folders.
         let folders = prefix.split(separator: "/").map(String.init)
-        return (folders.last ?? prefix, folders.count > 2 ? folders[folders.count - 2] : "")
+        return (Words.folderName(prefix), folders.count > 2 ? folders[folders.count - 2] : "")
     }
 }
 

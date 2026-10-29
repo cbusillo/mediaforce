@@ -7,6 +7,7 @@ struct ItemPage: View {
     let model: MainWindowModel
     let openSample: (String) -> Void
     let openItem: (String) -> Void
+    var namePage: (String) -> Void = { _ in }
     @State private var facts: ItemFacts?
     @State private var work: SampleFacts?
     @State private var show: TVShowsFacts.Show?
@@ -20,7 +21,8 @@ struct ItemPage: View {
         page
             .background(Color(nsColor: .textBackgroundColor))
             // Until its facts arrive, the page is named by its folder.
-            .navigationTitle(facts.map(Words.itemTitle) ?? prefix.split(separator: "/").last.map(String.init) ?? prefix)
+            .navigationTitle(title)
+            .onChange(of: title, initial: true) { _, title in namePage(title) }
             // A season names its show; a show's own page is already named by it.
             .navigationSubtitle(facts.flatMap { $0.kind == "tv_series" ? nil : $0.show } ?? "")
             .task(id: prefix) { await watch() }
@@ -37,6 +39,10 @@ struct ItemPage: View {
             } message: { action in
                 Text(Words.workDetail(action))
             }
+    }
+
+    private var title: String {
+        facts.map(Words.itemTitle) ?? Words.folderName(prefix)
     }
 
     private var page: some View {
