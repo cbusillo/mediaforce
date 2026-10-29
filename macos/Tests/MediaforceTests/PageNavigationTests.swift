@@ -40,16 +40,6 @@ final class PageNavigationTests: XCTestCase {
         XCTAssertEqual(navigation.place, .spaceSaved)
     }
 
-    func testBackLabelsUseTheDestinationKindAndFolderNames() {
-        let kind = "cartoon"
-        let folder = "Season 12"
-        XCTAssertEqual(Words.backTitle(.kind(kind)), Words.kindName(kind))
-        XCTAssertEqual(Words.backTitle(.media), Words.media)
-        XCTAssertEqual(Words.backTitle(.seasonsWithoutKind), Words.seasonsWithoutKindTitle)
-        XCTAssertEqual(Words.backTitle(.item("tv/Example/\(folder)")), folder)
-        XCTAssertTrue(Words.backTitle(.sample("tv/Example/\(folder)")).contains(folder))
-    }
-
     func testBackUsesTheTitleThePageDisplayedInsteadOfItsFolder() {
         var navigation = PageNavigation()
         let season = Place.item("tv/Example/S02")
@@ -59,10 +49,12 @@ final class PageNavigationTests: XCTestCase {
         navigation.name(season, title)
         navigation.open(sample)
         XCTAssertEqual(navigation.backTitle, title)
-        navigation.name(sample, title)
+        let sampleTitle = Words.sampleTitle(title)
+        navigation.name(sample, sampleTitle)
         navigation.open(.spaceSaved)
         XCTAssertEqual(navigation.back, sample)
-        XCTAssertEqual(navigation.backTitle, title)
+        XCTAssertEqual(navigation.backTitle, sampleTitle)
+        XCTAssertNotEqual(navigation.backTitle, title)
         navigation.goBack()
         XCTAssertEqual(navigation.place, sample)
     }

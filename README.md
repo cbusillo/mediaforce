@@ -152,7 +152,7 @@ actions, or a season for season actions.
 
 The Mac app's back button names the page you came from and returns to it,
 including Media, Space saved, a kind, or another show, season or sample.
-Choosing a page in the sidebar starts a new browsing path.
+Changing the selection in the sidebar starts a new browsing path.
 Opening a page from a notification or the menu bar keeps a way back to the
 page already open in the window.
 

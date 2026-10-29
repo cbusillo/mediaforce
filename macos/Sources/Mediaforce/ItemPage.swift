@@ -42,7 +42,7 @@ struct ItemPage: View {
     }
 
     private var title: String {
-        facts.map(Words.itemTitle) ?? prefix.split(separator: "/").last.map(String.init) ?? prefix
+        facts.map(Words.itemTitle) ?? Words.folderName(prefix)
     }
 
     private var page: some View {

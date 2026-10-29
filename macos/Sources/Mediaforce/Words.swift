@@ -3,6 +3,14 @@ import Foundation
 enum Words {
     static let library = "Library"
 
+    static func folderName(_ prefix: String) -> String {
+        prefix.split(separator: "/").last.map(String.init) ?? prefix
+    }
+
+    static func sampleTitle(_ season: String) -> String {
+        "\(sample): \(season)"
+    }
+
     static func backTitle(_ place: Place) -> String {
         switch place {
         case .library: library
@@ -10,8 +18,8 @@ enum Words {
         case .media: media
         case .kind(let code): kindName(code)
         case .seasonsWithoutKind: seasonsWithoutKindTitle
-        case .item(let prefix): prefix.split(separator: "/").last.map(String.init) ?? prefix
-        case .sample(let prefix): "Sample: \(prefix.split(separator: "/").last.map(String.init) ?? prefix)"
+        case .item(let prefix): folderName(prefix)
+        case .sample(let prefix): sampleTitle(folderName(prefix))
         case .computer: "Computers"
         }
     }
