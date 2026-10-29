@@ -1,6 +1,29 @@
 import Foundation
 
 enum Words {
+    static let library = "Library"
+
+    static func folderName(_ prefix: String) -> String {
+        prefix.split(separator: "/").last.map(String.init) ?? prefix
+    }
+
+    static func sampleTitle(_ season: String) -> String {
+        "\(sample): \(season)"
+    }
+
+    static func backTitle(_ place: Place) -> String {
+        switch place {
+        case .library: library
+        case .spaceSaved: spaceSaved
+        case .media: media
+        case .kind(let code): kindName(code)
+        case .seasonsWithoutKind: seasonsWithoutKindTitle
+        case .item(let prefix): folderName(prefix)
+        case .sample(let prefix): sampleTitle(folderName(prefix))
+        case .computer: "Computers"
+        }
+    }
+
     static func size(_ bytes: Int64) -> String {
         let value = Double(bytes)
         if value >= 1e12 { return (value / 1e12).formatted(.number.precision(.fractionLength(2))) + " TB" }
