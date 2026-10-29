@@ -1764,8 +1764,11 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
                 # The owner already answered for these files; they are listed, not waiting.
                 "owner_choice": reason in {"size_exception_declined", KEPT_ORIGINAL_TERMINAL_REASON},
                 "items": [],
+                "child_job_ids": [],
             },
         )
+        if child.get("job_id"):
+            group["child_job_ids"].append(str(child["job_id"]))
         indexes = child.get("manifest_indexes")
         group["count"] += len(indexes) if isinstance(indexes, list) and indexes else max(
             int_value(child.get("item_count")), 1,

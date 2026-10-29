@@ -56,7 +56,7 @@ final class MainWindowTests: XCTestCase {
                                       "season_folder": "Season 2", "season": 2, "state": "needs_help",
                                       "action": "make_sample", "failure": "missing_clips"}],
                   "approved_not_started": []},
-      "computers": [{"key": "mini", "name": "M1 mini", "platform": "macos", "state": "password_needed",
+      "computers": [{"key": "mini", "name": "M1 mini", "platform": "macos", "state": "password_needed", "needs_you": true,
                      "running_count": 0, "schedule_opens_at": null, "cooldown_until": null}],
       "events": [{"id": 7, "kind": "promotion_completed", "at": "2026-10-22T04:14:18+00:00",
                   "rel_path": "tv/Futurama/Season 3/Futurama.S03E08.mkv",
@@ -68,6 +68,17 @@ final class MainWindowTests: XCTestCase {
       "kept_original": {"kept": [], "kept_item_count": 2, "held": []}
     }
     """
+
+    func testAnOlderServerResponseStillLoadsAfterRollback() throws {
+        let baseline = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(Self.facts.utf8))
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Self.facts.utf8)) as? [String: Any])
+        var computers = try XCTUnwrap(value["computers"] as? [[String: Any]])
+        computers[0].removeValue(forKey: "needs_you")
+        value["computers"] = computers
+        let legacy = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: JSONSerialization.data(withJSONObject: value))
+        XCTAssertEqual(legacy.computers.first?.state, baseline.computers.first?.state)
+        XCTAssertTrue(legacy.work.seasonsNeedingYou.isEmpty)
+    }
 
     func testFactsDecodeFromServerShape() throws {
         let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(Self.facts.utf8))

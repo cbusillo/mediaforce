@@ -18,6 +18,9 @@ still answers when that storage is gone, and it starts no work.
   `no_computer_ready` (work is waiting and no computer can take it).
   `running_count` and `waiting_count` count encode jobs. `storage` lists each
   required mount with its recovery `status` and last `failure` code.
+  `seasons_needing_you` carries non-sample season decisions for the badge and
+  notifications, using the TV season facts below; sample decisions remain under
+  `samples.waiting_on_you` so they count once.
 - `library`: per kind (`tv`, `movies`, `other`), counts of present files and
   `total_bytes`, plus `original_bytes`, the size still in original form.
 - `space_saved`: bytes saved by replaced files, the replaced file and episode
@@ -33,7 +36,9 @@ still answers when that storage is gone, and it starts no work.
 - `samples`: `waiting_on_you` (page state `ready_to_compare`, or `needs_help`
   for a sample) and `approved_not_started` (`ready_to_make`). `state`,
   `action` and `failure` are the folder page's own codes, from
-  `mediaforce/web/runtime/page_state.py`.
+  `mediaforce/web/runtime/page_state.py`. Their
+  waiting-list membership is selected from the season's canonical `needs_you`
+  fact.
 - `computers`: each computer's `state`, from the same rows as the computers
   page: `ready`, `busy`, `finishing_file` (a running file without a close deadline
   or an explicit bypass), `schedule_disabled`, `outside_schedule` (with `schedule_opens_at`),
@@ -41,7 +46,9 @@ still answers when that storage is gone, and it starts no work.
   `storage_unreachable`, `not_ready`, or the kind of failed check
   (`password_needed`, `unreachable`, `remote_login_off`, `identity_changed`,
   `new_name`, `not_found`, `no_address`, `python_missing`,
-  `unreadable_reply`, `check_failed`).
+  `unreadable_reply`, `check_failed`). Its `needs_you` fact is shared by the
+  Library, Settings, notifications and badge. Automatic cooldown and retries
+  do not require the Director.
 - `events` and `last_change`: recent encode, check and replace events, newest
   first, using their event types as codes.
 - `original_backups`: originals moved aside on replacement and not yet
@@ -108,10 +115,10 @@ samples and only while the page is open: `shows`, biggest first, each with
 season's details are still loading) and `seasons` in season order. Each season
 has its `prefix`, `season` number (null for a folder without one), the page
 state codes `state`, `action`, `failure` and `tone`, its `episode_count`
-and `bytes`, `files_need_you` (compressing while some files already need the
-Director) and `checks_only` (approved, but starting it only runs motion-pattern
-checks first). The app groups a show by its seasons the way the web library
-does (needs you, in progress, ready for you, no active work), opens the sample
+and `bytes`, `needs_you` (a sample judgment or file problem needs the Director,
+including while other files compress) and `checks_only` (approved, but starting
+it only runs motion-pattern checks first). The app's Needs you filter and waiting
+marks use `needs_you`; the other groups describe progress and readiness. It opens the sample
 page for a season whose sample waits on the Director, and opens the season's
 item page for anything else.
 
@@ -279,3 +286,10 @@ storage being gone or a computer being off schedule, never notify. The first
 check after the app starts with no memory only records what it sees, so a new
 install does not announce the whole library. Opened from /Applications, the
 app registers itself to open at login.
+
+Older controllers omit the attention facts. The app still loads them and keeps
+sample notifications working, but season marks and non-sample notices return
+when the current controller is restored. A running show summary records all
+child job IDs for waiting reasons, beyond the short file preview, so a season
+only inherits reasons for its own files. Older summaries gain those IDs on the
+next progress refresh. Until then their existing unscoped warning remains.

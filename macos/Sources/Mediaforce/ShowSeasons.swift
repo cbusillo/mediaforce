@@ -3,8 +3,6 @@ import SwiftUI
 /// A whole show's seasons on its page: each with its state and its next step, the sample page or the season's page.
 struct ShowSeasons: View {
     let show: TVShowsFacts.Show
-    // The seasons whose sample waits on the Director, as Library's Samples shelf lists them.
-    let waitingSamples: Set<String>
     let openSample: (String) -> Void
     let openItem: (String) -> Void
 
@@ -24,7 +22,7 @@ struct ShowSeasons: View {
                             .monospacedDigit()
                             .gridColumnAlignment(.trailing)
                         HStack(alignment: .firstTextBaseline, spacing: 5) {
-                            if season.filesNeedYou || waitingSamples.contains(season.prefix) { WaitingMark() }
+                            if season.needsYou { WaitingMark() }
                             Text(Words.tvSeasonState(season))
                         }
                         .help(Words.sampleFailure(season.failure) ?? "")
