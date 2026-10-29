@@ -272,7 +272,6 @@ def test_samples_split_into_waiting_on_owner_and_approved_not_started(connection
         ("tv/B/Season 2", "ready_to_compare", "review_sample"),
         ("tv/A/Season 1", "needs_help", "make_sample"),
     ]
-    assert all(sample["needs_you"] for sample in samples["waiting_on_you"])
     assert samples["waiting_on_you"][1]["failure"] == "missing_clips"
     assert [sample["prefix"] for sample in samples["approved_not_started"]] == ["tv/C/Season 1"]
 
@@ -305,12 +304,19 @@ def test_computer_states_are_codes(connection: DBClient) -> None:
 def test_computer_attention_excludes_cooldown_but_includes_actionable_states_and_reasons(connection: DBClient) -> None:
     computers = _payload(connection, computers=[
         _computer("cooling", active_flag="cooldown"),
+        _computer("away", available=False, recovery={"absence_state": "away"}),
+        _computer("reconnecting", available=False, recovery={"status": "retrying"}, storage_recovery_available=True),
+        _computer("outside", schedule_open=False),
+        _computer("storage", available=False, missing_mounts=["/Volumes/media"]),
+        _computer("python", available=False, check_failure="python_missing"),
+        _computer("address", available=False, check_failure="no_address"),
         _computer("password", available=False, check_failure="password_needed"),
         _computer("recovery", available=False, recovery={"status": "action_required", "reason": "Sign in again"}),
     ])["computers"]
 
     assert [(computer["key"], computer["needs_you"]) for computer in computers] == [
-        ("cooling", False), ("password", True), ("recovery", True),
+        ("cooling", False), ("away", False), ("reconnecting", False), ("outside", False), ("storage", False),
+        ("python", True), ("address", True), ("password", True), ("recovery", True),
     ]
 
 
@@ -462,3 +468,14 @@ def test_closed_window_copy_follows_the_running_jobs_recorded_close_behavior(
         "studio", schedule_open=False, active_encode_count=1, finish_current_file=current_option, running_jobs=jobs,
     )
     assert _payload(connection, computers=[computer])["computers"][0]["state"] == expected
+
+
+def test_non_sample_season_attention_reaches_main_window_without_counting_samples_twice(connection: DBClient) -> None:
+    cards = [
+        {"prefix": "tv/A/Season 1", "page_state": {"key": "ready_to_compare", "needs_you": True}},
+        {"prefix": "tv/B/Season 2", "page_state": {"key": "making_season", "needs_you": True}},
+        {"prefix": "tv/C/Season 3", "page_state": {"key": "sample_waiting", "needs_you": False}},
+    ]
+    facts = _payload(connection, cards=cards)
+    assert [sample["prefix"] for sample in facts["samples"]["waiting_on_you"]] == ["tv/A/Season 1"]
+    assert [season["prefix"] for season in facts["work"]["seasons_needing_you"]] == ["tv/B/Season 2"]

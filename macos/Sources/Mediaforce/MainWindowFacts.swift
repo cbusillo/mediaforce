@@ -23,9 +23,10 @@ struct MainWindowFacts: Decodable, Sendable {
         var runningSeasons: [Season] = []
         let waitingCount: Int
         var originalCheckWaitReasons: [String] = []
+        var seasonsNeedingYou: [TVShowsFacts.Season] = []
 
         private enum CodingKeys: String, CodingKey {
-            case state, pausedByOwner, stopReasons, runningCount, runningSeasons, waitingCount, originalCheckWaitReasons
+            case state, pausedByOwner, stopReasons, runningCount, runningSeasons, waitingCount, originalCheckWaitReasons, seasonsNeedingYou
         }
 
         init(from decoder: Decoder) throws {
@@ -37,6 +38,7 @@ struct MainWindowFacts: Decodable, Sendable {
             runningSeasons = try container.decodeIfPresent([Season].self, forKey: .runningSeasons) ?? []
             waitingCount = try container.decode(Int.self, forKey: .waitingCount)
             originalCheckWaitReasons = try container.decodeIfPresent([String].self, forKey: .originalCheckWaitReasons) ?? []
+            seasonsNeedingYou = try container.decodeIfPresent([TVShowsFacts.Season].self, forKey: .seasonsNeedingYou) ?? []
         }
     }
 
@@ -117,7 +119,6 @@ struct MainWindowFacts: Decodable, Sendable {
         let state: String?
         let action: String?
         let failure: String?
-        let needsYou: Bool
         var id: String { prefix }
     }
 
@@ -132,6 +133,23 @@ struct MainWindowFacts: Decodable, Sendable {
         let attentionSince: String?
         let needsYou: Bool
         var id: String { key }
+
+        private enum CodingKeys: CodingKey {
+            case key, name, platform, state, runningCount, scheduleOpensAt, attentionReason, attentionSince, needsYou
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            key = try container.decode(String.self, forKey: .key)
+            name = try container.decodeIfPresent(String.self, forKey: .name)
+            platform = try container.decodeIfPresent(String.self, forKey: .platform)
+            state = try container.decode(String.self, forKey: .state)
+            runningCount = try container.decode(Int.self, forKey: .runningCount)
+            scheduleOpensAt = try container.decodeIfPresent(String.self, forKey: .scheduleOpensAt)
+            attentionReason = try container.decodeIfPresent(String.self, forKey: .attentionReason)
+            attentionSince = try container.decodeIfPresent(String.self, forKey: .attentionSince)
+            needsYou = try container.decodeIfPresent(Bool.self, forKey: .needsYou) ?? false
+        }
     }
 
     struct Event: Decodable, Sendable, Identifiable {

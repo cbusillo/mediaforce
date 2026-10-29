@@ -88,13 +88,21 @@ def app_window_payload(
     seasons = _seasons(items)
     cards = [card for card in season_cards if card.get("prefix")]
     samples = _samples(cards)
+    waiting_samples = {sample["prefix"] for sample in samples["waiting_on_you"]}
     finished = _finished_seasons(items, promotions, seasons, kept)
     events = _events(connection)
     computer_states = [_computer(row) for row in computers]
     return {
         "schema_version": SCHEMA_VERSION,
         "observed_at": observed_at.isoformat(timespec="seconds"),
-        "work": _work(connection, controller_storage, storage_admits_work, computer_states),
+        "work": {
+            **_work(connection, controller_storage, storage_admits_work, computer_states),
+            "seasons_needing_you": [
+                _tv_season(season_identity(str(card["prefix"])), card) for card in cards
+                if (card.get("page_state") or {}).get("needs_you")
+                and card["prefix"] not in waiting_samples
+            ],
+        },
         "library": _library_totals(items),
         "space_saved": _space_saved(items, promotions, finished),
         "recently_finished_seasons": finished[:RECENT_SEASON_LIMIT],
@@ -474,7 +482,6 @@ def _samples(cards: list[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
             "state": key,
             "action": state.get("primary_action"),
             "failure": state.get("failure"),
-            "needs_you": bool(state.get("needs_you")),
         }
         sample_judgment = key == "ready_to_compare" or (
             key == "needs_help" and state.get("recovery_kind") == "test"
@@ -548,7 +555,7 @@ def _computer(row: Mapping[str, Any]) -> dict[str, Any]:
         "state": state,
         "needs_you": (
             state in {"password_needed", "identity_changed", "new_name", "remote_login_off", "unreachable_long",
-                      "recovery_required"}
+                      "recovery_required", "python_missing", "no_address"}
             or attention_reason is not None
         ),
         "attention_reason": attention_reason,

@@ -187,11 +187,15 @@ def decide_page_state(facts: PageStateFacts) -> PageState:
 
 
 def _needs_you(state: PageState, facts: PageStateFacts) -> bool:
-    blocked_files = int(object_dict(object_dict(facts.workflow).get("counts")).get("blocked") or 0) > 0
+    sample_job = object_dict(facts.sample_job)
+    sample_active = sample_job.get("status") in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES
+    sample_answers_recovery = not facts.encode_job or _sample_answers_stop(sample_job, object_dict(facts.encode_job))
+    if sample_active and sample_answers_recovery and state.key != "making_season":
+        return False
     motion_decision = state.primary_action == "decide_motion" or int(
         object_dict(facts.lifecycle).get("motion_as_is_candidate_count") or 0
     ) > 0
-    return state.key in {"ready_to_compare", "needs_help"} or blocked_files or motion_decision
+    return state.key in {"ready_to_compare", "needs_help"} or bool(object_dict(facts.workflow).get("needs_owner")) or motion_decision
 
 
 def _decide_page_state(facts: PageStateFacts) -> PageState:

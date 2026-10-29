@@ -56,6 +56,17 @@ final class MainWindowTests: XCTestCase {
     }
     """
 
+    func testAnOlderServerResponseStillLoadsAfterRollback() throws {
+        let baseline = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(Self.facts.utf8))
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Self.facts.utf8)) as? [String: Any])
+        var computers = try XCTUnwrap(value["computers"] as? [[String: Any]])
+        computers[0].removeValue(forKey: "needs_you")
+        value["computers"] = computers
+        let legacy = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: JSONSerialization.data(withJSONObject: value))
+        XCTAssertEqual(legacy.computers.first?.state, baseline.computers.first?.state)
+        XCTAssertTrue(legacy.work.seasonsNeedingYou.isEmpty)
+    }
+
     func testFactsDecodeFromServerShape() throws {
         let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(Self.facts.utf8))
         XCTAssertEqual(facts.work.stopReasons, ["storage_unavailable"])

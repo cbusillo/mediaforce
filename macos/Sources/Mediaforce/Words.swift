@@ -188,7 +188,7 @@ extension Words {
         if work.runningCount > 0 { return "Compressing" }
         if work.waitingCount > 0 { return "Waiting to start" }
         if !work.originalCheckWaitReasons.isEmpty { return "Waiting to check new originals" }
-        return facts.samples.waitingOnYou.isEmpty ? "All caught up" : "Waiting for you"
+        return facts.samples.waitingOnYou.isEmpty && work.seasonsNeedingYou.isEmpty ? "All caught up" : "Waiting for you"
     }
 
     static func workExplanation(_ facts: MainWindowFacts) -> String? {
@@ -208,6 +208,9 @@ extension Words {
         sentences.append(contentsOf: work.originalCheckWaitReasons)
         if sentences.isEmpty, work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
             sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
+        }
+        if !work.seasonsNeedingYou.isEmpty {
+            sentences.append("\(count(work.seasonsNeedingYou.count, "season")) waiting for you in Media.")
         }
         return sentences.isEmpty ? nil : sentences.joined(separator: " ")
     }
@@ -589,7 +592,9 @@ extension Words {
     }
 
     static func tvSeasonState(_ season: TVShowsFacts.Season) -> String {
-        if season.state == "making_season", season.needsYou { return "Compressing. Some files need you." }
+        if season.needsYou, !["ready_to_compare", "needs_help"].contains(season.state), season.action != "decide_motion" {
+            return "\(seasonState(season.state, season.action)). Some files need you."
+        }
         if season.checksOnly { return "Approved. Motion-pattern checks run first." }
         return seasonState(season.state, season.action)
     }

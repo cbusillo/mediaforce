@@ -263,10 +263,12 @@ def test_ported_season_and_card_states(facts: dict[str, Any], expected: dict[str
 def test_attention_is_authoritative_for_sample_judgments_and_blocked_files_during_processing() -> None:
     ready = _decide(calibration=_review_ready())
     retrying = _decide(sample_job=_sample("retry_backoff", finished_at=None))
-    compressing_with_blocked_file = _decide(workflow=_workflow("processing") | {"counts": {"blocked": 1}})
+    compressing_with_blocked_file = _decide(workflow=_workflow("processing") | {"needs_owner": True})
 
     assert ready["needs_you"] is True
     assert retrying["needs_you"] is False
+    assert _decide(workflow=_workflow("blocked") | {"needs_owner": True},
+                   sample_job=_sample("retry_backoff", finished_at=None))["needs_you"] is False
     assert compressing_with_blocked_file["key"] == "making_season"
     assert compressing_with_blocked_file["needs_you"] is True
     assert _decide(workflow=_workflow("attention"), encode_job=_encode("failed"))["needs_you"] is True
@@ -654,3 +656,21 @@ def test_a_stopped_show_run_leaves_the_seasons_it_never_reached_ready(config: Me
     # The file the run stopped on is still unresolved, so its season and the file say so.
     assert stopped_here == {SEASON: ("attention", "needs_help"), stopped: ("attention", "needs_help")}
     assert latest_run is not None and latest_run["job_id"] == "show-run"
+
+
+def test_running_folder_keeps_owner_child_problems_in_its_attention_fact(config: MediaforceConfig) -> None:
+    with open_db(config.paths.db_path) as connection:
+        _insert_item(connection, EPISODE)
+        _insert_encode_job(connection, "running-parent", prefix=SEASON, kind="folder", status="running")
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == "running-parent").values(
+            progress_json=json.dumps({"unfinished_breakdown": [
+                {"reason": "quality_floor_size_conflict", "label": "waiting for your OK to use more space",
+                 "count": 1, "needs_owner": True},
+            ]}),
+        ))
+        workflow = build_folder_workflow_state(connection, SEASON, library_types=config.library_type_map).to_payload()
+        assert workflow["counts"]["blocked"] == 0
+        assert workflow["needs_owner"] is True
+        state = _page_state(connection, config, SEASON, {})
+        assert state["key"] == "making_season"
+        assert state["needs_you"] is True

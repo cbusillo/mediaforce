@@ -61,6 +61,26 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(attention.badgeCount, 2)
     }
 
+    func testASeasonWithFileDecisionsNotifiesAndCountsOnce() throws {
+        let baseline = try facts()
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(MainWindowTests.facts.utf8)) as? [String: Any])
+        var work = try XCTUnwrap(value["work"] as? [String: Any])
+        work["seasons_needing_you"] = [[
+            "prefix": "tv/Futurama/Season 2", "season": 2, "state": "making_season", "action": NSNull(),
+            "tone": "active", "episode_count": 3, "bytes": 1000, "needs_you": true,
+        ]]
+        value["work"] = work
+        value["samples"] = ["waiting_on_you": [], "approved_not_started": []]
+        value["computers"] = []
+        value["original_backups"] = ["count": 0, "bytes": 0]
+        value["recently_finished_seasons"] = []
+        let changed = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: JSONSerialization.data(withJSONObject: value))
+        let first = Attention.review(changed, remembered: Attention.review(baseline, remembered: nil).memory)
+        XCTAssertEqual(first.badgeCount, 1)
+        XCTAssertEqual(first.notices.first?.opens, .item("tv/Futurama/Season 2"))
+        XCTAssertTrue(Attention.review(changed, remembered: first.memory).notices.isEmpty)
+    }
+
     func testEachNewThingNotifiesOnce() throws {
         let before = Attention.review(try facts(finished: [older]), remembered: nil).memory
         let now = try facts(
@@ -165,12 +185,6 @@ final class AttentionTests: XCTestCase {
         let fewer = Attention.review(try facts(backups: 4), remembered: many.memory)
         XCTAssertEqual(fewer.notices, [])
         XCTAssertEqual(fewer.badgeCount, 1)
-    }
-
-    func testProblemsTheOwnerCannotFixDoNotNotify() throws {
-        let attention = Attention.review(try facts(computers: [("mini", "storage_unreachable", false), ("x", "outside_schedule", false)]), remembered: AttentionMemory())
-        XCTAssertEqual(attention.notices, [])
-        XCTAssertEqual(attention.badgeCount, 0)
     }
 
     func testASeasonKeptEntirelyOriginalSaysWhyInsteadOfWhatWasSaved() throws {

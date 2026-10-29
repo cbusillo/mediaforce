@@ -3,11 +3,12 @@ import XCTest
 @testable import Mediaforce
 
 final class TVShowsTests: XCTestCase {
-    private func season(_ number: Int?, state: String, tone: String, action: String? = nil, needsYou: Bool = false) -> String {
+    private func season(_ number: Int?, state: String, tone: String, action: String? = nil, needsYou: Bool? = false) -> String {
         let folder = number.map { "Season \($0)" } ?? "Specials"
         let seasonJSON = number.map { "\($0)" } ?? "null"
         let actionJSON = action.map { "\"\($0)\"" } ?? "null"
-        return #"{"prefix": "tv/Futurama/\#(folder)", "season": \#(seasonJSON), "state": "\#(state)", "action": \#(actionJSON), "failure": null, "tone": "\#(tone)", "needs_you": \#(needsYou), "episode_count": 13, "bytes": 4000000000}"#
+        let needsYouJSON = needsYou.map { ", \"needs_you\": \($0)" } ?? ""
+        return #"{"prefix": "tv/Futurama/\#(folder)", "season": \#(seasonJSON), "state": "\#(state)", "action": \#(actionJSON), "failure": null, "tone": "\#(tone)"\#(needsYouJSON), "episode_count": 13, "bytes": 4000000000}"#
     }
 
     private func show(_ seasons: [String], estimate: String = "5100000000", looseFiles: String = "") throws -> TVShowsFacts.Show {
@@ -26,6 +27,8 @@ final class TVShowsTests: XCTestCase {
         XCTAssertEqual(decoded.seasons.map(Words.seasonName), ["Season 2", "Specials"])
         XCTAssertNil(try show([], estimate: "null").estimatedSavedBytes)
         XCTAssertNil(decoded.looseFiles)
+        let legacy = try show([season(2, state: "ready_to_compare", tone: "ready", needsYou: nil)])
+        XCTAssertEqual(legacy.seasons.first?.prefix, decoded.seasons.first?.prefix)
     }
 
     func testAShowWithOnlyFilesOutsideASeasonFolderIsListedAndSaysWhy() throws {
@@ -94,12 +97,13 @@ final class TVShowsTests: XCTestCase {
         }
         let compressing = season(1, state: "making_season", tone: "active")
         let approved = season(2, state: "ready_to_make", tone: "ready", action: "queue_encode")
-        let decoded = try show([compressing, approved, try flagged(compressing, "needs_you"), try flagged(approved, "checks_only")]).seasons
-        XCTAssertEqual(decoded.map(\.needsYou), [false, false, true, false])
-        XCTAssertEqual(decoded.map(\.checksOnly), [false, false, false, true])
+        let decoded = try show([compressing, approved, try flagged(compressing, "needs_you"), try flagged(approved, "checks_only"), try flagged(approved, "needs_you")]).seasons
+        XCTAssertEqual(decoded.map(\.needsYou), [false, false, true, false, true])
+        XCTAssertEqual(decoded.map(\.checksOnly), [false, false, false, true, false])
         XCTAssertNotEqual(Words.tvSeasonState(decoded[2]), Words.tvSeasonState(decoded[0]))
         XCTAssertNotEqual(Words.tvSeasonState(decoded[3]), Words.tvSeasonState(decoded[1]))
         XCTAssertEqual(Words.seasonButton(decoded[3]), Words.startCompressing)
+        XCTAssertNotEqual(Words.tvSeasonState(decoded[4]), Words.tvSeasonState(decoded[1]))
     }
 
     func testSearchMatchesTheShowOrASeasonFolder() throws {

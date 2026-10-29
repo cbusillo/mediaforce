@@ -101,6 +101,7 @@ class ScopeJobLane(NamedTuple):
     lane: WorkflowLane
     detail: str
     job_id: str
+    needs_owner: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +160,7 @@ class FolderWorkflowState:
     items: tuple[ItemWorkflowState, ...]
     # The encode run whose state set the lane, when a job did.
     source_job_id: str | None = None
+    needs_owner: bool = False
 
     def to_payload(self) -> WorkflowPayload:
         return {
@@ -174,6 +176,7 @@ class FolderWorkflowState:
             "next_action": self.next_action.to_payload(),
             "blockers": list(self.blockers),
             "source_job_id": self.source_job_id,
+            "needs_owner": self.needs_owner,
         }
 
 
@@ -471,6 +474,7 @@ def _build_folder_state(
         blockers=blockers,
         items=items,
         source_job_id=job_state.job_id if job_state is not None and lane == job_state.lane else None,
+        needs_owner=counts["blocked"] > 0 or bool(job_state and lane == job_state.lane and job_state.needs_owner),
     )
 
 
@@ -874,7 +878,7 @@ def _encode_job_workflow_state(
         owner_groups = [group for group in groups if group.get("needs_owner")]
         if owner_groups:
             detail = f"{detail} Needs you: {unfinished_breakdown_summary(owner_groups)}."
-        return ScopeJobLane("processing", detail, str(active["parent_job_id"] or active["job_id"]))
+        return ScopeJobLane("processing", detail, str(active["parent_job_id"] or active["job_id"]), bool(owner_groups))
     if latest is not None and latest["status"] in ATTENTION_JOB_STATUSES:
         run = attention_for_scope(latest)
         if run is None:
@@ -886,5 +890,5 @@ def _encode_job_workflow_state(
             if breakdown
             else plain_failure_summary(run["error"]) or "This needs you to take a look."
         )
-        return ScopeJobLane("attention", detail, str(run["job_id"]))
+        return ScopeJobLane("attention", detail, str(run["job_id"]), True)
     return None

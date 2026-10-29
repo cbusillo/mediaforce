@@ -58,13 +58,14 @@ struct TVShowsFacts: Decodable, Sendable {
             tone = try container.decodeIfPresent(String.self, forKey: .tone)
             episodeCount = try container.decode(Int.self, forKey: .episodeCount)
             bytes = try container.decode(Int64.self, forKey: .bytes)
-            needsYou = try container.decode(Bool.self, forKey: .needsYou)
+            needsYou = try container.decodeIfPresent(Bool.self, forKey: .needsYou) ?? false
             checksOnly = try container.decodeIfPresent(Bool.self, forKey: .checksOnly) ?? false
         }
 
         static let sampleActions: Set<String> = ["make_sample", "retry_sample", "choose_size"]
 
         var folder: String { prefix.split(separator: "/").last.map(String.init) ?? prefix }
+        var showName: String { prefix.split(separator: "/").dropFirst().first.map(String.init) ?? prefix }
 
         var opensSample: Bool {
             ["ready_to_compare", "needs_test", "ready_to_make"].contains(state)

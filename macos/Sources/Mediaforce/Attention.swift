@@ -40,7 +40,8 @@ struct Attention: Equatable, Sendable {
     }
 
     static func waitingOnYou(_ facts: MainWindowFacts) -> Int {
-        facts.samples.waitingOnYou.filter(\.needsYou).count
+        facts.samples.waitingOnYou.count
+            + facts.work.seasonsNeedingYou.count
             + facts.computers.filter(\.needsYou).count
             + (facts.originalBackups.count > 0 ? 1 : 0)
     }
@@ -71,7 +72,7 @@ struct Attention: Equatable, Sendable {
     }
 
     static func waitingNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {
-        let samples = facts.samples.waitingOnYou.filter(\.needsYou).map(sampleNotice)
+        let samples = facts.samples.waitingOnYou.map(sampleNotice)
         let computers = facts.computers.filter(\.needsYou).map { computer in
             AttentionNotice(
                 id: "computer:\(computer.key):\(computer.attentionSince ?? "")",
@@ -80,7 +81,15 @@ struct Attention: Equatable, Sendable {
                 opens: .computer(computer.key)
             )
         }
-        return samples + computers
+        let seasons = facts.work.seasonsNeedingYou.map { season in
+            AttentionNotice(
+                id: "season:\(season.prefix)",
+                title: "\(Words.season(season.showName, season.season)) needs you",
+                body: Words.tvSeasonState(season),
+                opens: .item(season.prefix)
+            )
+        }
+        return samples + seasons + computers
     }
 
     private static func sampleNotice(_ sample: MainWindowFacts.Sample) -> AttentionNotice {
