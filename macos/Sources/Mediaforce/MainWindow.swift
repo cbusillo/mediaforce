@@ -237,14 +237,14 @@ struct MainWindow: View {
                     }
                 }
                 .toolbar {
+                    // First beside the sidebar, so Pause never moves; a page opened from a list adds its back button after it.
+                    ToolbarItem(placement: .navigation) {
+                        PauseButton(facts: facts, model: model)
+                    }
                     if place?.opensFromList == true {
                         ToolbarItem(placement: .navigation) {
                             Button("Library", systemImage: "chevron.backward") { place = .library }
                         }
-                    }
-                    // Beside the sidebar, before the page's title, so Pause never moves.
-                    ToolbarItem(placement: .navigation) {
-                        PauseButton(facts: facts, model: model)
                     }
                 }
             } else {
