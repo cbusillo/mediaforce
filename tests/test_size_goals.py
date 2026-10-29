@@ -5,8 +5,6 @@ from pathlib import Path
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, _merge_runtime_settings
 from mediaforce.library.planner import build_manifest_item
 from mediaforce.tuning.size_goals import (
-    DEFAULT_FINAL_OUTPUT_TOLERANCE_PERCENT,
-    DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT,
     OperatorIntent,
     ResolutionIntent,
     SizeGoalIntent,
@@ -186,24 +184,24 @@ class SizeGoalTests(unittest.TestCase):
             [440.0, 225.0],
         )
 
-    def test_default_tolerances_are_distinct(self) -> None:
+    def test_sample_and_final_tolerances_resolve_independently(self) -> None:
         intent = OperatorIntent(
             size_goal=SizeGoalIntent(
                 mode="absolute",
                 value_bytes=megabytes_to_bytes(300),
                 reference_runtime_seconds=None,
-                sample_projection_tolerance_percent=DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT,
-                final_output_tolerance_percent=DEFAULT_FINAL_OUTPUT_TOLERANCE_PERCENT,
+                sample_projection_tolerance_percent=13,
+                final_output_tolerance_percent=3,
                 source="operator",
             ),
             resolution=ResolutionIntent("source", None, "operator"),
         )
 
         payload = intent.to_payload(item_runtime_seconds=45 * 60)["size_goal"]
-        self.assertEqual(payload["sample_lower_bound_bytes"], 270_000_000)
-        self.assertEqual(payload["sample_upper_bound_bytes"], 330_000_000)
-        self.assertEqual(payload["final_lower_bound_bytes"], 285_000_000)
-        self.assertEqual(payload["final_upper_bound_bytes"], 315_000_000)
+        self.assertEqual(payload["sample_lower_bound_bytes"], 261_000_000)
+        self.assertEqual(payload["sample_upper_bound_bytes"], 339_000_000)
+        self.assertEqual(payload["final_lower_bound_bytes"], 291_000_000)
+        self.assertEqual(payload["final_upper_bound_bytes"], 309_000_000)
 
     def test_typed_request_round_trips_quality_and_stream_constraints(self) -> None:
         policy_intent = operator_intent_from_policy(
