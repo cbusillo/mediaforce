@@ -22,11 +22,10 @@ struct MainWindowFacts: Decodable, Sendable {
         // The seasons or titles being compressed now, each named once.
         var runningSeasons: [Season] = []
         let waitingCount: Int
+        var checksPaused: Bool { stopReasons.contains("checks_paused") }
+        var canResume: Bool { pausedByOwner || checksPaused }
         var originalCheckWaitReasons: [String] = []
         var seasonsNeedingYou: [TVShowsFacts.Season] = []
-
-        var motionChecksPaused: Bool { stopReasons.contains("motion_checks_paused") }
-        var canResume: Bool { pausedByOwner || motionChecksPaused }
 
         private enum CodingKeys: String, CodingKey {
             case state, pausedByOwner, stopReasons, runningCount, runningSeasons, waitingCount, originalCheckWaitReasons, seasonsNeedingYou

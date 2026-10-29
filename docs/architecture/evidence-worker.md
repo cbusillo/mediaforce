@@ -384,12 +384,10 @@ Explicit bounded analysis remains available through the CLI commands below.
 Queue pause, resume and cancellation retain their existing durable state.
 
 A global background pause saved by the retired web page appears as paused in
-the Mac app. Resume clears that pause along with the encode-queue pause. A
-prepared, paused motion-check batch appears separately from the global pause,
-and the same Resume action releases that batch without rebuilding it, resetting
-attempts, or changing failed and cancelled rows. Other compression can continue
-while those checks are paused. Reading facts preserves the saved pause. The CLI
-recovery below remains available.
+the Mac app. A paused active evidence batch with claimable work appears there
+too. Resume clears the global and encode pauses and resumes that same evidence
+batch atomically, while cancelled batches and terminal evidence rows retain
+their state.
 
 Create a paused folder pilot:
 

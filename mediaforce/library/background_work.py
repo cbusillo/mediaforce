@@ -54,10 +54,12 @@ def set_background_work_paused(
         *,
         is_paused: bool,
         updated_at: str | None = None,
+        within_transaction: bool = False,
 ) -> dict[str, Any]:
     now_iso = updated_at or timestamp()
-    connection.commit()
-    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    if not within_transaction:
+        connection.commit()
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
     try:
         ensure_background_work_state(connection, updated_at=now_iso)
         connection.execute(
@@ -66,6 +68,7 @@ def set_background_work_paused(
             .values(is_paused=int(is_paused), updated_at=now_iso)
         )
     except BaseException:
-        connection.rollback()
+        if not within_transaction:
+            connection.rollback()
         raise
     return load_background_work_state(connection)

@@ -209,7 +209,6 @@ extension Words {
         if work.stopReasons.contains("storage_unavailable") { return "Paused: this Mac can't see the media library" }
         if work.stopReasons.contains("no_computer_ready") { return "Waiting for a computer" }
         if work.runningCount > 0 { return "Compressing" }
-        if work.motionChecksPaused { return "Motion checks paused" }
         if work.waitingCount > 0 { return "Waiting to start" }
         if !work.originalCheckWaitReasons.isEmpty { return "Waiting to check new originals" }
         return facts.samples.waitingOnYou.isEmpty && work.seasonsNeedingYou.isEmpty ? "All caught up" : "Waiting for you"
@@ -221,6 +220,9 @@ extension Words {
         if work.pausedByOwner {
             sentences.append("Nothing new starts until you resume. Work already running finishes first.")
         }
+        if work.checksPaused {
+            sentences.append("Checks are paused. Files needing these checks wait until you resume.")
+        }
         if work.stopReasons.contains("storage_unavailable") {
             sentences.append(work.pausedByOwner
                 ? "Shared storage isn't connected either; Mediaforce keeps checking by itself."
@@ -228,9 +230,6 @@ extension Words {
         }
         if work.stopReasons.contains("no_computer_ready") {
             sentences.append("Work is waiting and no computer can take it right now. See Computers for why.")
-        }
-        if work.motionChecksPaused {
-            sentences.append("Motion checks wait until you resume. Other compression can continue.")
         }
         sentences.append(contentsOf: work.originalCheckWaitReasons)
         if sentences.isEmpty, work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
@@ -266,7 +265,7 @@ extension Words {
     static func waitingReason(_ sample: MainWindowFacts.Sample, _ facts: MainWindowFacts) -> String? {
         var reasons = facts.keptOriginal.held.first(where: { $0.prefix == sample.prefix })?.reasons.map(holdReason) ?? []
         let work = facts.work
-        if work.pausedByOwner { reasons.append("until you resume") }
+        if work.pausedByOwner || work.checksPaused { reasons.append("until you resume") }
         if work.stopReasons.contains("storage_unavailable") { reasons.append("until storage is back") }
         if work.stopReasons.contains("no_computer_ready") { reasons.append("for a free computer") }
         return reasons.isEmpty ? nil : "Waits: " + reasons.joined(separator: ", ")
@@ -394,7 +393,7 @@ extension Words {
     static let cancel = "Cancel"
     static let resume = "Resume"
     static let pausedBar = "Mediaforce is paused. Nothing new starts."
-    static let motionChecksPausedBar = "Motion checks are paused. Other compression can continue."
+    static let checksPausedBar = "Checks are paused."
     static let none = "None"
     static let next = "Next"
     static let looksGood = "Looks Good"
@@ -417,7 +416,6 @@ extension Words {
             let more = work.runningSeasons.count - 1
             return more > 0 ? "Compressing \(name) and \(more) more" : "Compressing \(name)"
         }
-        if work.motionChecksPaused { return "Motion checks paused" }
         if work.waitingCount > 0 { return "Waiting to start" }
         return Attention.waitingOnYou(facts) > 0 ? waitingForYou : "Up to date"
     }

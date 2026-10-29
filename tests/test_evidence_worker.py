@@ -938,7 +938,7 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(claim.batch_id, paused_batch)
         self.assertIn(claim.library_item_id, {queued_id, merged_id})
         self.assertEqual(terminal, [(failed_id, "failed", 3), (cancelled_id, "cancelled", 2)])
-        self.assertIn("motion_checks_paused", payload["work"]["stop_reasons"])
+        self.assertIn("checks_paused", payload["work"]["stop_reasons"])
 
     def test_cadence_decision_blocker_does_not_requeue_measured_blocked_cadence(self) -> None:
         item_id, _path = self._insert_item(
