@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+from contextlib import ExitStack
 import json
 from http.client import HTTPException
 import os
@@ -13,6 +15,10 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+from mediaforce.core.config import MediaforceConfig, load_config
+from mediaforce.core.db import open_db, open_readonly_db
+from mediaforce.core.utils import timestamp
+from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
 from mediaforce.ops.login_item import (
     LoginItemPaths, _atomic_write, _bootstrap, _launch_domain, _launch_target,
     _require_success, _run_command, disable_login_item, enable_login_item,
@@ -20,6 +26,7 @@ from mediaforce.ops.login_item import (
 from mediaforce.ops.runtime_install import (
     register_runtime_roots, require_release_directory, retain_deploy_stage, runtime_activity, runtime_directory,
 )
+from mediaforce.web.runtime_lock import exclusive_mediaforce_runtime_lock, reserve_mediaforce_database_identity
 
 
 DEFAULT_STARTUP_TIMEOUT = 180
@@ -120,34 +127,90 @@ def backup_database(database: Path, destination: Path) -> None:
                 raise RuntimeError("database backup failed quick_check")
 
 
+def require_stopped_idle_controller(config: MediaforceConfig) -> None:
+    require_closed_listener()
+    with open_readonly_db(config.paths.db_path) as connection:
+        counts = [
+            connection.exec_driver_sql(statement).scalar_one()
+            for statement in (
+                "SELECT COUNT(*) FROM encode_jobs WHERE status = 'running'",
+                "SELECT COUNT(*) FROM calibration_jobs WHERE status IN ('starting', 'running')",
+                "SELECT COUNT(*) FROM scan_runs WHERE status = 'running'",
+                "SELECT COUNT(*) FROM library_item_evidence_state WHERE work_status = 'running'",
+            )
+        ]
+    if any(counts):
+        raise RuntimeError("stopped controller still records running work; reconcile that work before deploying")
+
+
+def require_closed_listener() -> None:
+    if not _listener_is_closed():
+        raise RuntimeError("port 8777 is still listening")
+
+
+def _listener_is_closed() -> bool:
+    probe = subprocess.run(["/usr/sbin/lsof", "-tiTCP:8777", "-sTCP:LISTEN"], capture_output=True, check=False)
+    if probe.returncode == 1 and not probe.stdout and not probe.stderr:
+        return True
+    if probe.returncode != 0:
+        raise RuntimeError("cannot verify listener state")
+    return False
+
+
+def pause_stopped_queue(config: MediaforceConfig) -> None:
+    with open_db(config.paths.db_path) as connection:
+        state = load_queue_state(connection)
+        state.update(is_paused=True, updated_at=timestamp())
+        save_queue_state(connection, state)
+
+
 def deploy(
     source: Path, target: str, stage: Path, home: Path, base_url: str,
     *, database: Path, config_path: Path | None = None, startup_timeout: int = DEFAULT_STARTUP_TIMEOUT,
+    stopped: bool = False,
 ) -> None:
     # The release flow's own pause request can start the hourly cleanup, so the deploy waits for it (#1109).
     with runtime_activity(database.parent, wait_seconds=DEPLOY_LOCK_WAIT_SECONDS) as acquired:
         if not acquired:
             raise RuntimeError(f"cleanup or another deploy stayed active for {DEPLOY_LOCK_WAIT_SECONDS // 60} minutes; retry after it finishes")
-        _deploy(source, target, stage, home, base_url, database=database, config_path=config_path, startup_timeout=startup_timeout)
+        with ExitStack() as stopped_runtime:
+            config = load_config(config_path) if stopped else None
+            if config is not None:
+                if config.paths.db_path.resolve() != database.resolve():
+                    raise RuntimeError("stopped deployment database does not match the installed configuration")
+                stopped_runtime.enter_context(exclusive_mediaforce_runtime_lock(config, owner_payload={"operation": "stopped-deploy"}))
+                reserve_mediaforce_database_identity(config)
+            _deploy(source, target, stage, home, base_url, database=database, config_path=config_path,
+                    startup_timeout=startup_timeout, stopped_config=config, release_stopped_runtime=stopped_runtime.close)
 
 
 def _deploy(
     source: Path, target: str, stage: Path, home: Path, base_url: str,
     *, database: Path, config_path: Path | None = None, startup_timeout: int = DEFAULT_STARTUP_TIMEOUT,
+    stopped_config: MediaforceConfig | None = None, release_stopped_runtime: Callable[[], None] | None = None,
 ) -> None:
     import plistlib
 
-    require_paused_idle_dashboard(_api(base_url, "/api/dashboard?preview_limit=0"))
+    if stopped_config is None:
+        require_paused_idle_dashboard(_api(base_url, "/api/dashboard?preview_limit=0"))
     plist = LoginItemPaths(project_root=source, home=home).plist
     expected_stage_parent = database.parent / "deployments"
     if stage.absolute() != stage.resolve() or stage.parent != expected_stage_parent:
         raise RuntimeError(f"deploy stage must be a real directory directly under {expected_stage_parent}")
     previous_payload = plist.read_bytes()
-    previous_root = Path(plistlib.loads(previous_payload)["WorkingDirectory"])
+    previous_item = plistlib.loads(previous_payload)
+    previous_root = Path(previous_item["WorkingDirectory"])
     if not previous_root.is_absolute() or _run(["git", "status", "--porcelain"], cwd=previous_root):
         raise RuntimeError("existing runtime checkout is dirty or its identity is invalid")
     if stage.exists():
         raise RuntimeError("deploy stage already exists; use a fresh stage")
+    if stopped_config is not None:
+        arguments = previous_item["ProgramArguments"]
+        previous_config = Path(arguments[arguments.index("--config") + 1]).resolve() if "--config" in arguments else None
+        if previous_config != (config_path.resolve() if config_path else None):
+            raise RuntimeError("stopped deployment configuration does not match the installed launch item")
+        disable_login_item(LoginItemPaths(project_root=previous_root, home=home, config_path=config_path))
+        require_stopped_idle_controller(stopped_config)
     candidate = prepare_release(source, target, home)
     stage.mkdir(parents=True, exist_ok=False)
     _atomic_write(stage / "launch-item.before.plist", previous_payload)
@@ -156,23 +219,27 @@ def _deploy(
     # Both sides are protected before launchd changes. Old worktrees remain locked and intact.
     register_runtime_roots(home, previous_root, candidate, support_dir=database.parent)
     _atomic_write(stage / "candidate.txt", str(candidate).encode())
-    require_paused_idle_dashboard(_api(base_url, "/api/dashboard?preview_limit=0"))
+    if stopped_config is None:
+        require_paused_idle_dashboard(_api(base_url, "/api/dashboard?preview_limit=0"))
+    else:
+        require_stopped_idle_controller(stopped_config)
     disable_login_item(paths)
     candidate_started = False
     port_closed = False
     try:
         for _ in range(15):
-            probe = subprocess.run(["/usr/sbin/lsof", "-tiTCP:8777", "-sTCP:LISTEN"], capture_output=True, check=False)
-            if probe.returncode == 1 and not probe.stdout and not probe.stderr:
+            if _listener_is_closed():
                 port_closed = True
                 break
-            if probe.returncode != 0:
-                raise RuntimeError("cannot verify listener state")
             time.sleep(1)
         else:
             raise RuntimeError("port 8777 still listening")
         backup_database(database, stage / "before.sqlite")
         candidate_started = True
+        if stopped_config is not None:
+            pause_stopped_queue(stopped_config)
+        if release_stopped_runtime is not None:
+            release_stopped_runtime()
         enable_login_item(paths)
         deadline = time.monotonic() + startup_timeout
         while True:
@@ -184,7 +251,7 @@ def _deploy(
                     raise RuntimeError("candidate did not become healthy") from exc
                 time.sleep(1)
     except Exception:
-        if not candidate_started and port_closed:
+        if not candidate_started and port_closed and stopped_config is None:
             if plist.read_bytes() != previous_payload:
                 raise RuntimeError("previous plist changed; reconcile before restarting")
             _require_success(_run_command(["/bin/launchctl", "enable", _launch_target()]), "restore the previous login item")
@@ -207,16 +274,17 @@ def main() -> None:
     parser.add_argument("--target", required=True, help="exact reviewed main commit")
     parser.add_argument("--stage", type=Path, required=True, help="fresh deploy evidence/backup folder")
     parser.add_argument("--config", type=Path, help="same configuration used by the installed controller")
+    parser.add_argument("--stopped", action="store_true", help="deploy while the controller is stopped, after verifying idle work records")
     parser.add_argument("--startup-timeout", type=int, default=DEFAULT_STARTUP_TIMEOUT, help="seconds allowed for startup and migrations")
     args = parser.parse_args()
     if args.startup_timeout <= 0:
         parser.error("--startup-timeout must be positive")
-    from mediaforce.core.config import load_config
     config = load_config(args.config)
     deploy(
         args.source.resolve(), args.target, args.stage.expanduser(), Path.home(), "http://127.0.0.1:8777",
         database=config.paths.db_path, config_path=args.config.expanduser().resolve() if args.config else None,
         startup_timeout=args.startup_timeout,
+        stopped=args.stopped,
     )
 
 

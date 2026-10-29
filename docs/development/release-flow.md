@@ -79,6 +79,22 @@ They are not part of source implementation or PR review.
    remain present. Keep the legacy runtime and its worktree lock as rollback;
    this deploy never removes or changes its source/environment.
 
+### A controller intentionally stopped for repair
+
+Use the same script with `--stopped` when the controller must stay stopped until
+its replacement is installed. Keep the same `--config` as its saved launch item.
+The script takes the normal deploy lock and the controller's exclusive runtime
+lease, verifies that port 8777 is closed and that no encode, sample, scan or
+evidence record is running, and prepares the candidate without starting old
+code. Missing or running work records require reconciliation; this mode never
+clears them.
+
+After the existing verified backup, the script pauses the encode queue through
+the database's custody guards, then releases its runtime lease before starting
+the candidate. The ordinary health check, app installation and queue resume
+follow. A failure leaves the service stopped. The saved plist and backup remain
+available for the rollback procedure below.
+
 ### Rollback and cleanup ownership
 
 Before changing the plist, deploy records both old and new runtime paths in
