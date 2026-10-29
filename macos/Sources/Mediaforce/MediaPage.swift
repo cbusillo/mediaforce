@@ -43,7 +43,7 @@ struct MediaPage: View {
                 .fixedSize()
             }
             if onlySeasons != nil {
-                Button(Words.showEverything, action: showEverything).buttonStyle(.link).font(.callout)
+                Button(Words.showEverything, action: showEverything).buttonStyle(QuietLinkStyle()).font(.callout)
             }
             if rows.contains(where: \.listCutShort) && (kind == .everything || kind == .other) {
                 Text(Words.otherMediaTruncated)

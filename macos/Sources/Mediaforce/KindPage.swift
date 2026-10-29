@@ -170,7 +170,7 @@ struct KindShows: View {
                 Text(Words.showsOfThisKind).font(.headline)
                 Spacer()
                 if leftOut > 0 {
-                    Button(Words.seasonsWithoutKind(leftOut), action: openLeftOut).buttonStyle(.link)
+                    Button(Words.seasonsWithoutKind(leftOut), action: openLeftOut).buttonStyle(QuietLinkStyle())
                 }
             }
             ScrollView(.horizontal) {
@@ -190,7 +190,7 @@ struct KindShows: View {
                             if let offer {
                                 // The biggest show's link stays hidden, keeping every tile one height in the lazy row.
                                 Button(Words.makeASample) { offer(show) }
-                                    .buttonStyle(.link)
+                                    .buttonStyle(QuietLinkStyle())
                                     .font(.caption)
                                     .help(Words.makeSampleOf(show.name))
                                     .opacity(show == kind.shows.first ? 0 : 1)

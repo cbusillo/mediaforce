@@ -667,8 +667,9 @@ struct ComputerListRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: Words.computerNeedsYou(state) ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
-                .foregroundStyle(Words.computerNeedsYou(state) ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+            WaitingMark()
+                .opacity(Words.computerNeedsYou(state) ? 1 : 0)
+                .accessibilityHidden(!Words.computerNeedsYou(state))
             VStack(alignment: .leading, spacing: 1) {
                 Text(name.isEmpty ? Words.unnamedComputer : name)
                 Text(state.map(Words.computerState) ?? Words.computerNotHeardFrom)
