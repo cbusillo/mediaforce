@@ -1,19 +1,21 @@
 import json
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, select
 
 from mediaforce import cli
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_items, metadata, motion_keep_decisions, series_metadata, source_admissions, source_generations
+from mediaforce.core.db_tables import library_items, metadata, motion_keep_decisions, series_metadata, source_admissions, source_generations, source_measurements
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.utils import timestamp
 from mediaforce.library.content_kinds import EpisodeTraits, season_kind, season_kind_report
-from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, append_measurement, append_version, json_text
+from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, append_measurement, append_version, json_text, \
+    load_source_evidence, load_source_evidence_bulk
 from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 
@@ -129,6 +131,78 @@ def test_report_groups_waiting_seasons_by_original_traits_only(connection: DBCli
     assert seasons["tv/Drama/Season 2"]["kind"] == "unmeasured"
     assert "tv/Drama/Season 3" not in seasons
     assert report["totals"]["folder_approved"]["seasons"] == 1
+
+
+def test_bulk_evidence_matches_individual_reads_and_report_queries_stay_bounded(connection: DBClient) -> None:
+    item_ids = []
+    for episode in range(3):
+        item_id = _item(connection, f"tv/Drama/Season 1/e{episode:02}.mkv", status="promoted", codec="av1",
+                        current_dark=0.0)
+        _admit_historical_original(connection, item_id, dark=0.5)
+        item_ids.append(item_id)
+    _item(connection, "tv/Drama/Season 1/waiting.mkv", status="discovered", codec="h264", current_dark=0.0)
+    connection.execute(series_metadata.insert().values(series_prefix="tv/Drama", tmdb_genres_json='["Drama"]',
+                                                       updated_at=timestamp()))
+
+    expected = {item_id: load_source_evidence(connection, item_id) for item_id in item_ids}
+    assert load_source_evidence_bulk(connection, item_ids) == expected
+
+    query_count = 0
+
+    def count_query(*_args: object) -> None:
+        nonlocal query_count
+        query_count += 1
+
+    event.listen(connection.engine, "before_cursor_execute", count_query)
+    try:
+        season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+        first_queries = query_count
+        for episode in range(3, 30):
+            item_id = _item(connection, f"tv/Drama/Season 1/e{episode:02}.mkv", status="promoted", codec="av1", current_dark=0.0)
+            _admit_historical_original(connection, item_id, dark=0.5)
+        query_count = 0
+        first = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+        assert query_count == first_queries
+        original = expected[item_ids[0]]
+        assert original.original_version_id is not None
+        append_measurement(
+            connection, version_id=original.original_version_id, kind="media_fingerprint",
+            binding="historical-plan-sampled", summary=_fingerprint(0.0),
+            provenance={"basis": "historical-plan", "codec_rule_hash": stable_json_hash(HISTORICAL_OUTPUT_PROFILES),
+                        "plan_sha256": f"plan-{item_ids[0]}"}, measured_at=None, recorded_at=timestamp(),
+        )
+        query_count = 0
+        refreshed = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
+        refreshed_queries = query_count
+    finally:
+        event.remove(connection.engine, "before_cursor_execute", count_query)
+
+    assert first["seasons"][0]["kind"] == "darker_live_action"
+    assert refreshed["seasons"][0]["measured"] == first["seasons"][0]["measured"] - 1
+    assert refreshed_queries == first_queries
+
+
+def test_large_evidence_batch_respects_sqlite_parameter_limits(connection: DBClient) -> None:
+    item_ids = []
+    for episode in range(600):
+        item_id = _item(connection, f"tv/Drama/Season 1/{episode}.mkv", status="promoted", codec="av1", current_dark=0.0)
+        _admit_historical_original(connection, item_id, dark=0.5)
+        item_ids.append(item_id)
+    for row in connection.execute(select(source_admissions.c.admission_id, source_measurements.c.measurement_id)
+                                  .join(source_measurements, source_measurements.c.version_id == source_admissions.c.version_id)):
+        connection.execute(source_admissions.update().where(source_admissions.c.admission_id == row.admission_id)
+                           .values(basis="readable-source", checks_json=json_text({"measurement_ids": [row.measurement_id]})))
+    extra = append_measurement(connection, version_id=None, kind="media_fingerprint", binding="unbound",
+                               summary=_fingerprint(0.5), provenance={}, measured_at=None, recorded_at="now")
+    connection.execute(source_admissions.update().where(source_admissions.c.admission_id == f"admission-{item_ids[0]}")
+                       .values(checks_json=json_text({"measurement_ids": [extra]})))
+    raw = connection.connection.driver_connection
+    assert isinstance(raw, sqlite3.Connection)
+    previous_limit = raw.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 550)
+    try:
+        assert set(load_source_evidence_bulk(connection, item_ids)) == set(item_ids)
+    finally:
+        raw.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous_limit)
 
 
 def _config(root: Path) -> MediaforceConfig:

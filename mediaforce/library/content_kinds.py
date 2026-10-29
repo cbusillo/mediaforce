@@ -1,6 +1,6 @@
 import json
 from collections import Counter, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -12,7 +12,7 @@ from mediaforce.core.db_tables import library_items, series_metadata, source_adm
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.library.candidate_selection import season_identity
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
-from mediaforce.library.source_evidence import SourceEvidenceContext, load_source_evidence, load_source_evidence_context
+from mediaforce.library.source_evidence import SourceEvidence, SourceEvidenceContext, load_source_evidence_bulk, load_source_evidence_context
 
 # Kinds of content group seasons by number ranges of their originals' measured traits, so that one
 # approval can cover every season that measures the same (Director decision, #517, 2026-10-22).
@@ -140,17 +140,16 @@ def _admitted_item_ids(connection: DBClient) -> set[int]:
 
 
 def _original_traits(
-        connection: DBClient,
         episodes: Sequence[Mapping[str, Any]],
         admitted: set[int],
-        context: SourceEvidenceContext,
+        evidence_by_item: Mapping[int, SourceEvidence],
 ) -> list[EpisodeTraits | None]:
     traits: list[EpisodeTraits | None] = []
     for item in episodes:
         if int(item["id"]) not in admitted:
             traits.append(None)
             continue
-        evidence = load_source_evidence(connection, int(item["id"]), context=context)
+        evidence = evidence_by_item[int(item["id"])]
         if evidence.original_version_id is None:
             traits.append(None)
             continue
@@ -201,7 +200,11 @@ def season_grouping(
     """One season's kind, read the same way as the report; pass `evidence` to share one snapshot across seasons."""
     seasons, series_of = _seasons(_present_items(connection, season_prefix), library_types)
     admitted, context = evidence or season_evidence(connection)
-    traits = _original_traits(connection, seasons.get(season_prefix, []), admitted, context)
+    episodes = seasons.get(season_prefix, [])
+    evidence_by_item = load_source_evidence_bulk(
+        connection, (int(item["id"]) for item in episodes if int(item["id"]) in admitted), context=context,
+    )
+    traits = _original_traits(episodes, admitted, evidence_by_item)
     series = series_of.get(season_prefix)
     animated = _series_animation(connection, series).get(series) if series else None
     return season_kind(traits, animated=animated)
@@ -263,12 +266,8 @@ def season_kind_report(
         *,
         library_types: Mapping[str, str],
         folder_approved: Callable[[str], bool],
+        sample_seasons: Collection[str] = (),
 ) -> dict[str, Any]:
-    """Read-only: each season still waiting on a folder approval, grouped by its originals' traits.
-
-    Only original traits from the source evidence reader count, proven or probable, and published
-    episodes vote with the original they were made from. Output measurements never do.
-    """
     admitted = _admitted_item_ids(connection)
     context = load_source_evidence_context(connection)
     animation = _series_animation(connection)
@@ -276,24 +275,33 @@ def season_kind_report(
     seasons, series_of = _seasons(items, library_types)
     # A file kept original is finished; it still measures as an original but no longer waits.
     kept = library_item_ids_kept_original(connection, [int(item["id"]) for item in items])
+    waiting_by_season = {prefix: [item for item in episodes if _waiting(item) and int(item["id"]) not in kept]
+                         for prefix, episodes in seasons.items()}
+    approved = {prefix for prefix, waiting in waiting_by_season.items() if waiting and folder_approved(prefix)}
+    measured_seasons = {prefix for prefix, waiting in waiting_by_season.items()
+                        if (waiting and prefix not in approved) or prefix in sample_seasons}
+    evidence_by_item = load_source_evidence_bulk(
+        connection, (int(item["id"]) for prefix in measured_seasons for item in seasons[prefix] if int(item["id"]) in admitted),
+        context=context,
+    )
+    groupings = {prefix: season_kind(_original_traits(seasons[prefix], admitted, evidence_by_item),
+                                    animated=animation.get(series_of[prefix])) for prefix in measured_seasons}
     rows = []
     totals: dict[str, Counter[str]] = defaultdict(Counter)
     for prefix in sorted(seasons):
-        episodes = seasons[prefix]
-        waiting = [item for item in episodes if _waiting(item) and int(item["id"]) not in kept]
+        waiting = waiting_by_season[prefix]
         if not waiting:
             continue
-        if folder_approved(prefix):
+        if prefix in approved:
             totals["folder_approved"]["seasons"] += 1
             continue
-        traits = _original_traits(connection, episodes, admitted, context)
-        grouping = season_kind(traits, animated=animation.get(series_of[prefix]))
+        grouping = groupings[prefix]
         waiting_bytes = sum(int_value(item["size_bytes"]) for item in waiting)
         totals[grouping.kind]["seasons"] += 1
         totals[grouping.kind]["waiting_bytes"] += waiting_bytes
         rows.append({"season": prefix, **grouping.to_payload(), "waiting_episodes": len(waiting),
                      "waiting_bytes": waiting_bytes})
-    return {
+    report: dict[str, Any] = {
         "content_kinds_version": CONTENT_KINDS_VERSION,
         "ranges": {
             "darker_min_dark_frames": DARKER_MIN_DARK_FRAMES,
@@ -307,3 +315,6 @@ def season_kind_report(
         "unmeasured_reasons": dict(Counter(row["reason"] for row in rows if row["kind"] == "unmeasured")),
         "seasons": rows,
     }
+    if sample_seasons:
+        report["kinds_by_season"] = {prefix: groupings[prefix].kind for prefix in sample_seasons if prefix in groupings}
+    return report

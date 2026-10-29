@@ -394,11 +394,10 @@ def _episode_made_under(episodes: list[tuple[str, int]], seasons: tuple[str, ...
 
 
 def _lent_settings(
-        config: MediaforceConfig,
         kind: str,
         approvals: Mapping[str, list[_ShowApproval]],
         episodes: Mapping[str, list[tuple[str, int]]],
-        kind_of: KindOf,
+        kinds_by_season: Mapping[str, str],
 ) -> list[dict[str, Any]]:
     """Each show approved on a season of this kind, once, with an episode made under its approval to watch when one
     is kept; shows with an episode come first. A kind one approval covers lists only approvals that can extend to it."""
@@ -408,7 +407,7 @@ def _lent_settings(
             {"show": show, "from_prefix": entry.approval.prefix, **_size_goal_facts(entry.approval),
              "library_item_id": _episode_made_under(episodes[show], entry.seasons)}
             for entry in found
-            if kind_of(config, entry.sample_season) == kind
+            if kinds_by_season.get(entry.sample_season) == kind
             and (kind not in APPROVABLE_KINDS or _extension_refusal(entry.approval) is None)
         ]
         if candidates:
@@ -435,7 +434,6 @@ def kinds_payload(
         config: MediaforceConfig,
         *,
         load_calibration_state: LoadCalibrationState,
-        kind_of: KindOf,
 ) -> dict[str, Any]:
     """Facts for the page where each kind of content's approval is decided; the app words every one.
 
@@ -452,7 +450,14 @@ def kinds_payload(
         approval = effective_production_approval(config, prefix, folders_only)
         return approval is not None and approval.current
 
-    report = season_kind_report(connection, library_types=config.library_type_map, folder_approved=folder_approved)
+    episodes = _tv_episodes(connection, config)
+    approvals_by_show = {show: found for show, files in episodes.items()
+                         if (found := _show_approvals(config, show, files, folders_only))}
+    report = season_kind_report(
+        connection, library_types=config.library_type_map, folder_approved=folder_approved,
+        sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found},
+    )
+    kinds_by_season = object_dict(report.get("kinds_by_season"))
     seasons: dict[str, dict[str, list[tuple[int, str]]]] = {kind: {} for kind in KINDS_IN_ORDER}
     for row in report["seasons"]:
         if row["kind"] in seasons:
@@ -466,9 +471,6 @@ def kinds_payload(
     totals = report["totals"]
     approvals = {kind: _approval_facts(load_kind_approval(config, kind)) if kind in APPROVABLE_KINDS else None
                  for kind in KINDS_IN_ORDER}
-    episodes = _tv_episodes(connection, config)
-    approvals_by_show = {show: found for show, files in episodes.items()
-                         if (found := _show_approvals(config, show, files, folders_only))}
     for approval in approvals.values():
         if approval:
             show = "/".join(str(approval["from_prefix"]).split("/")[:2])
@@ -482,7 +484,7 @@ def kinds_payload(
             "waiting_bytes": int(object_dict(totals.get(kind)).get("waiting_bytes") or 0),
             "shows": [{"prefix": prefix, **values} for prefix, values in
                       sorted(shows[kind].items(), key=lambda entry: (-entry[1]["waiting_bytes"], entry[0]))],
-            "settings": _lent_settings(config, kind, approvals_by_show, episodes, kind_of),
+            "settings": _lent_settings(kind, approvals_by_show, episodes, kinds_by_season),
             "approval": approvals[kind],
             "sample_season": _season_with_sample(connection, [season for found in seasons[kind].values() for _, season in found]),
         } for kind in KINDS_IN_ORDER],
