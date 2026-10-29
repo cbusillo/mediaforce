@@ -726,12 +726,52 @@ def _scope_job_states(
             overlapping_rows,
             counts_for_scope=_wider_run_filter(scope, overlapping_rows, part_files),
             attention_for_scope=_wider_run_attention(scope, overlapping_rows, part_files, settled_paths),
+            owner_groups_for_scope=_scoped_owner_groups(scope, overlapping_rows, part_files, settled_paths),
         ),
         own=_encode_job_workflow_state(
             own_rows,
             attention_for_scope=_wider_run_attention(scope, own_rows, part_files, settled_paths),
+            owner_groups_for_scope=_scoped_owner_groups(scope, own_rows, part_files, settled_paths),
         ),
     )
+
+
+def _scoped_owner_groups(
+        scope: MediaScope,
+        rows: list[DBRow],
+        part_files: Callable[[DBRow], tuple[str, ...]],
+        settled_paths: frozenset[str],
+) -> Callable[[DBRow, list[dict[str, Any]]], list[dict[str, Any]]]:
+    by_id = {str(row["job_id"]): row for row in rows}
+    def scoped_groups(run: DBRow, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        owner_groups = [group for group in groups if group.get("needs_owner")]
+        if not _job_is_wider(scope, str(run["prefix"] or "")):
+            return owner_groups
+        if not owner_groups:
+            return []
+        newest_by_file: dict[str, str] = {}
+        for row in rows:
+            if row["job_kind"] in {"shard", "single"}:
+                for path in part_files(row):
+                    newest_by_file.setdefault(path, str(row["job_id"]))
+        result = []
+        for group in owner_groups:
+            if "child_job_ids" not in group:
+                result.append(group)
+                continue
+            files = {
+                path
+                for job_id in group.get("child_job_ids", [])
+                if (part := by_id.get(str(job_id))) is not None
+                for path in part_files(part)
+                if path_matches_scope(path, scope) and path not in settled_paths
+                and newest_by_file.get(path) == str(job_id)
+            }
+            if files:
+                result.append(group | {"count": len(files)})
+        return result
+
+    return scoped_groups
 
 
 def _wider_run_filter(
@@ -852,6 +892,9 @@ def _encode_job_workflow_state(
         *,
         counts_for_scope: Callable[[DBRow], bool] = lambda _row: True,
         attention_for_scope: Callable[[DBRow], DBRow | None] = lambda latest: latest,
+        owner_groups_for_scope: Callable[[DBRow, list[dict[str, Any]]], list[dict[str, Any]]] = (
+            lambda _run, groups: [group for group in groups if group.get("needs_owner")]
+        ),
 ) -> ScopeJobLane | None:
     """The scope's encode lane, naming every reason its files are not finished.
 
@@ -875,7 +918,7 @@ def _encode_job_workflow_state(
     groups = unfinished_breakdown_groups(latest["progress_json"]) if latest is not None else []
     if active is not None:
         detail = _PROCESSING_JOB_DETAILS[active["status"]]
-        owner_groups = [group for group in groups if group.get("needs_owner")]
+        owner_groups = owner_groups_for_scope(latest, groups) if latest is not None else []
         if owner_groups:
             detail = f"{detail} Needs you: {unfinished_breakdown_summary(owner_groups)}."
         return ScopeJobLane("processing", detail, str(active["parent_job_id"] or active["job_id"]), bool(owner_groups))

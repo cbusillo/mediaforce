@@ -187,15 +187,9 @@ def decide_page_state(facts: PageStateFacts) -> PageState:
 
 
 def _needs_you(state: PageState, facts: PageStateFacts) -> bool:
-    sample_job = object_dict(facts.sample_job)
-    sample_active = sample_job.get("status") in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES
-    sample_answers_recovery = not facts.encode_job or _sample_answers_stop(sample_job, object_dict(facts.encode_job))
-    if sample_active and sample_answers_recovery and state.key != "making_season":
-        return False
-    motion_decision = state.primary_action == "decide_motion" or int(
-        object_dict(facts.lifecycle).get("motion_as_is_candidate_count") or 0
-    ) > 0
-    return state.key in {"ready_to_compare", "needs_help"} or bool(object_dict(facts.workflow).get("needs_owner")) or motion_decision
+    return state.key in {"ready_to_compare", "needs_help"} or state.primary_action == "decide_motion" or (
+        state.key == "making_season" and bool(object_dict(facts.workflow).get("needs_owner"))
+    )
 
 
 def _decide_page_state(facts: PageStateFacts) -> PageState:
@@ -225,8 +219,6 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     awaits_review = bool(gate and gate.get("status") == "needs_approval" and browser_ready and not sample_active)
     calibration_source = _calibration_source(facts.prefix, calibration, sample_job)
 
-    if lane == "blocked" and not awaits_review:
-        return PageState("needs_help", "attention", recovery_kind="files", primary_action="review_files")
     if sample_status in SAMPLE_RUNNING_STATUSES:
         return PageState("making_test", "active", source_job=_source_job(sample_job, "sample"))
     if sample_status in SAMPLE_WAITING_STATUSES:
@@ -235,6 +227,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
             "attention" if sample_status == "retry_backoff" else "quiet",
             source_job=_source_job(sample_job, "sample"),
         )
+    if lane == "blocked" and not awaits_review:
+        return PageState("needs_help", "attention", recovery_kind="files", primary_action="review_files")
     if sample_status in SAMPLE_FAILED_STATUSES and not _settled_by_approval(sample_job, calibration):
         failure = _sample_failure(sample_job)
         return PageState(

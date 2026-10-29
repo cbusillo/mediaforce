@@ -286,3 +286,10 @@ storage being gone or a computer being off schedule, never notify. The first
 check after the app starts with no memory only records what it sees, so a new
 install does not announce the whole library. Opened from /Applications, the
 app registers itself to open at login.
+
+Older controllers omit the attention facts. The app still loads them and keeps
+sample notifications working, but season marks and non-sample notices return
+when the current controller is restored. A running show summary records all
+child job IDs for waiting reasons, beyond the short file preview, so a season
+only inherits reasons for its own files. Older summaries gain those IDs on the
+next progress refresh. Until then their existing unscoped warning remains.

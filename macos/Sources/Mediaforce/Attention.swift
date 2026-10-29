@@ -83,7 +83,7 @@ struct Attention: Equatable, Sendable {
         }
         let seasons = facts.work.seasonsNeedingYou.map { season in
             AttentionNotice(
-                id: "season:\(season.prefix)",
+                id: "season:\(season.prefix):\(season.state ?? ""):\(season.action ?? "")",
                 title: "\(Words.season(season.showName, season.season)) needs you",
                 body: Words.tvSeasonState(season),
                 opens: .item(season.prefix)

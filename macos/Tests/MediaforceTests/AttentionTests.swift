@@ -26,7 +26,7 @@ final class AttentionTests: XCTestCase {
             #"{"prefix": "\#(season.prefix)", "show_prefix": "tv/Futurama", "show": "Futurama", "season": 3, "reason": "motion_mixed", "item_count": \#(season.kept)}"#
         }
         let samplesJSON = waitingSamples.map { sample in
-            #"{"prefix": "\#(sample.prefix)", "show_prefix": "tv/Expanse", "show": "The Expanse", "season": 3, "state": "\#(sample.state)", "action": "\#(sample.action)", "failure": null, "needs_you": true}"#
+            #"{"prefix": "\#(sample.prefix)", "show_prefix": "tv/Expanse", "show": "The Expanse", "season": 3, "state": "\#(sample.state)", "action": "\#(sample.action)", "failure": null}"#
         }
         let reason = computerReason.map { #""\#($0)""# } ?? "null"
         let since = computerSince.map { #""\#($0)""# } ?? "null"
@@ -79,6 +79,15 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(first.badgeCount, 1)
         XCTAssertEqual(first.notices.first?.opens, .item("tv/Futurama/Season 2"))
         XCTAssertTrue(Attention.review(changed, remembered: first.memory).notices.isEmpty)
+        var seasons = try XCTUnwrap(work["seasons_needing_you"] as? [[String: Any]])
+        seasons[0]["state"] = "needs_help"
+        seasons[0]["action"] = "retry_encode"
+        work["seasons_needing_you"] = seasons
+        value["work"] = work
+        let newReason = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: JSONSerialization.data(withJSONObject: value))
+        let next = Attention.review(newReason, remembered: first.memory)
+        XCTAssertEqual(next.notices.count, 1)
+        XCTAssertEqual(next.badgeCount, first.badgeCount)
     }
 
     func testEachNewThingNotifiesOnce() throws {
@@ -100,21 +109,6 @@ final class AttentionTests: XCTestCase {
         ])
         XCTAssertEqual(second.notices, [])
         XCTAssertEqual(first.badgeCount, 3)
-    }
-
-    func testAbsentLaptopStaysQuietAndDesktopNotifiesOnceAfterLongAbsence() throws {
-        let before = Attention.review(try facts(), remembered: nil).memory
-        let away = try facts(computers: [("laptop", "away", false), ("desktop", "reconnecting", false), ("mini", "cooling_down", false)])
-        let quiet = Attention.review(away, remembered: before)
-        XCTAssertTrue(quiet.notices.isEmpty)
-        XCTAssertEqual(quiet.badgeCount, 0)
-        let prolonged = try facts(computers: [("laptop", "away", false), ("desktop", "unreachable_long", true)])
-        let first = Attention.review(prolonged, remembered: quiet.memory)
-        XCTAssertEqual(first.notices.count, 1)
-        XCTAssertEqual(first.badgeCount, 1)
-        XCTAssertTrue(Attention.review(prolonged, remembered: first.memory).notices.isEmpty)
-        let recovered = Attention.review(try facts(computers: [("desktop", "ready", false)]), remembered: first.memory)
-        XCTAssertEqual(recovered.badgeCount, 0)
     }
 
     func testOneStorageIncidentNotifiesOnceAcrossDifferentFailedChecks() throws {

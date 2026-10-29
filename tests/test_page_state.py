@@ -273,8 +273,10 @@ def test_attention_is_authoritative_for_sample_judgments_and_blocked_files_durin
     assert compressing_with_blocked_file["needs_you"] is True
     assert _decide(workflow=_workflow("attention"), encode_job=_encode("failed"))["needs_you"] is True
     lifecycle = {"motion_held_candidate_count": 1, "motion_as_is_candidate_count": 1}
-    assert _decide(workflow=_workflow("processing"), lifecycle=lifecycle)["needs_you"] is True
+    assert _decide(workflow=_workflow("processing"), lifecycle=lifecycle)["needs_you"] is False
     assert _decide(approval=_approval(_approved()), lifecycle=lifecycle)["needs_you"] is True
+    assert _decide(approval=_approval(_approved()),
+                   lifecycle=lifecycle | {"eligible_candidate_count": 1})["needs_you"] is False
     assert _decide(approval=_approval(_approved()), lifecycle=lifecycle | {"motion_as_is_candidate_count": 0})["needs_you"] is False
 
 
@@ -674,3 +676,56 @@ def test_running_folder_keeps_owner_child_problems_in_its_attention_fact(config:
         state = _page_state(connection, config, SEASON, {})
         assert state["key"] == "making_season"
         assert state["needs_you"] is True
+
+
+@pytest.mark.parametrize(("status", "key"), [("running", "making_test"), ("retry_backoff", "sample_waiting")])
+def test_active_sample_replaces_blocked_file_words_and_attention(status: str, key: str) -> None:
+    state = _decide(workflow=_workflow("blocked") | {"needs_owner": True},
+                    sample_job=_sample(status, finished_at=None))
+    assert state["key"] == key
+    assert state["needs_you"] is False
+
+
+def test_approved_new_sample_settles_old_run_attention() -> None:
+    state = _decide(workflow=_workflow("attention") | {"needs_owner": True}, encode_job=_encode("failed"),
+                    sample_job=_sample("completed"), calibration=_approved(), approval=_approval(_approved()))
+    assert state["key"] == "ready_to_make"
+    assert state["needs_you"] is False
+
+
+@pytest.mark.parametrize("child_status", ["needs_attention", "queued"])
+def test_running_show_only_flags_seasons_with_their_own_decisions(config: MediaforceConfig, child_status: str) -> None:
+    from mediaforce.web.runtime import encode_runtime
+    season_2 = f"{SHOW}/Season 2"
+    problem_files = [f"{SEASON}/episode-{index}.mkv" for index in range(7)] + [f"{season_2}/problem.mkv"]
+    quiet_season = f"{SHOW}/Season 3"
+    files = problem_files + [f"{quiet_season}/working.mkv"]
+    manifest = config.paths.run_manifest_dir / "active-show.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({"items": [{"rel_path": path} for path in files]}))
+    with open_db(config.paths.db_path) as connection:
+        for path in files:
+            _insert_item(connection, path)
+        _insert_encode_job(connection, "parent", prefix=SHOW, kind="folder", status="running", manifest=manifest)
+        children = []
+        for index, path in enumerate(files):
+            status = child_status if path in problem_files else "running"
+            job_id = f"part-{index}"
+            _insert_encode_job(connection, job_id, prefix=SHOW, kind="shard", status=status,
+                               parent="parent", manifest=manifest, index=index)
+            children.append({"job_id": job_id, "status": status, "manifest_indexes": [index],
+                             "waiting_reason": encode_runtime.HOST_WINDOW_IMPOSSIBLE_MARKER,
+                             "progress": {"current_item_rel_path": path}})
+        groups = encode_runtime._unfinished_child_breakdown(children)
+        assert len(groups[0]["child_job_ids"]) == len(problem_files)
+        assert len(groups[0]["items"]) < len(problem_files)
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == "parent").values(
+            progress_json=json.dumps({"unfinished_breakdown": groups})))
+        for prefix, needs_you in [(SEASON, True), (season_2, True), (quiet_season, False)]:
+            state = _page_state(connection, config, prefix, {})
+            assert state["key"] == "making_season"
+            assert state["needs_you"] is needs_you
+
+        _insert_encode_job(connection, "new-success", prefix=SHOW, kind="shard", status="completed",
+                           parent="parent", manifest=manifest, index=len(problem_files) - 1)
+        assert _page_state(connection, config, season_2, {})["needs_you"] is False

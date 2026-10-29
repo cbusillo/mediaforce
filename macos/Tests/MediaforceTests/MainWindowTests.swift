@@ -41,7 +41,7 @@ final class MainWindowTests: XCTestCase {
                                "season_count": 15, "waiting_sample_prefix": null}],
       "samples": {"waiting_on_you": [{"prefix": "tv/Lucifer/Season 2", "show_prefix": "tv/Lucifer", "show": "Lucifer",
                                       "season_folder": "Season 2", "season": 2, "state": "needs_help",
-                                      "action": "make_sample", "failure": "missing_clips", "needs_you": true}],
+                                      "action": "make_sample", "failure": "missing_clips"}],
                   "approved_not_started": []},
       "computers": [{"key": "mini", "name": "M1 mini", "platform": "macos", "state": "password_needed", "needs_you": true,
                      "running_count": 0, "schedule_opens_at": null, "cooldown_until": null}],
