@@ -31,7 +31,7 @@ from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.evidence_acquisition import load_fingerprint_acquisition_items, plan_fingerprint_acquisition
 from mediaforce.library.evidence_state import EvidenceKind
 from mediaforce.library.source_evidence import append_measurement, ensure_active_source_version, json_text, load_source_evidence, \
-    known_output_check, observe_file, record_current_measurement, record_generated_output, source_trait_coverage, version_location
+    SourceEvidenceContext, known_output_check, observe_file, record_current_measurement, record_generated_output, source_trait_coverage, version_location
 from mediaforce.library.source_evidence_backfill import restore_published_source_evidence
 from mediaforce.library.evidence_queue import load_evidence_work_claim
 from mediaforce.library.evidence_worker import _commit_evidence_summary
@@ -232,7 +232,11 @@ def test_publication_is_not_unavailability_and_legacy_candidates_are_unknown(con
                                             ({"sha256": "different"}, "clear"),
                                             ({"sha256": "source", "size_bytes": 2, "video_codec": "av1"}, "match")])
 def test_known_output_digest_gaps_respect_size_or_codec_exclusion(output: dict[str, Any], expected: str) -> None:
-    assert known_output_check({"sha256": "source", "size_bytes": 10, "video_codec": "h264"}, [output]) == expected
+    candidate = {"sha256": "source", "size_bytes": 10, "video_codec": "h264"}
+    assert known_output_check(candidate, [output]) == expected
+    context = SourceEvidenceContext(frozenset(), (output,), {}, False, "")
+    assert context.output_check(candidate) == expected
+    assert context.output_check({"sha256": "source"}) == known_output_check({"sha256": "source"}, [output])
 
 
 def _probe() -> SimpleNamespace:

@@ -5,11 +5,17 @@ import XCTest
 final class StubServer: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var respond: (@Sendable (URLRequest) throws -> HTTPURLResponse)?
     nonisolated(unsafe) static var body = Data("{}".utf8)
+    nonisolated(unsafe) static var holdNextKinds: (@Sendable (StubServer) -> Void)?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        if request.url?.path == "/api/app/kinds", let hold = Self.holdNextKinds {
+            Self.holdNextKinds = nil
+            hold(self)
+            return
+        }
         do {
             guard let respond = Self.respond else { throw URLError(.cannotConnectToHost) }
             client?.urlProtocol(self, didReceive: try respond(request), cacheStoragePolicy: .notAllowed)
@@ -18,6 +24,13 @@ final class StubServer: URLProtocol, @unchecked Sendable {
         } catch {
             client?.urlProtocol(self, didFailWithError: error)
         }
+    }
+
+    func finish(body: Data) {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
     }
 
     override func stopLoading() {}
@@ -121,6 +134,7 @@ final class MediaforceClientActionTests: XCTestCase {
 
     override func tearDown() {
         StubServer.respond = nil
+        StubServer.holdNextKinds = nil
         super.tearDown()
     }
 
@@ -191,6 +205,7 @@ final class MainWindowModelTests: XCTestCase {
 
     override func tearDown() {
         StubServer.respond = nil
+        StubServer.holdNextKinds = nil
         StubServer.body = Data("{}".utf8)
         super.tearDown()
     }
@@ -203,6 +218,44 @@ final class MainWindowModelTests: XCTestCase {
         XCTAssertEqual(model.connection, .reachable)
         XCTAssertNotNil(model.facts)
         XCTAssertEqual(heard?.originalBackups.count, 46)
+    }
+
+    func testAFailedKindsReadWaitsBeforePollingAgainAndCanBeRetriedExplicitly() async {
+        let model = model { request in
+            if request.url?.path == "/api/app/kinds" { return (500, Data()) }
+            return (200, Data(MainWindowTests.facts.utf8))
+        }
+        await model.refresh()
+        StubServer.respond = { request in
+            StubServer.body = request.url?.path == "/api/app/kinds"
+                ? Data("{\"kinds\": [], \"left_out\": [], \"mixed_seasons\": 0, \"unmeasured_seasons\": 0, \"folder_approved_seasons\": 0}".utf8)
+                : Data(MainWindowTests.facts.utf8)
+            return HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        }
+        await model.refresh()
+        XCTAssertNil(model.kinds)
+        XCTAssertEqual(model.connection, .reachable)
+        await model.refreshKinds()
+        XCTAssertNotNil(model.kinds)
+    }
+
+    func testAnOlderKindsReplyCannotReplaceAnActionRefresh() async {
+        let older = Data("{\"kinds\": [], \"left_out\": [{\"season\": \"tv/Old/Season 1\", \"kind\": \"unmeasured\", \"waiting_bytes\": 1}]}".utf8)
+        let newer = Data("{\"kinds\": [], \"left_out\": []}".utf8)
+        let model = model { _ in (200, newer) }
+        let (held, continuation) = AsyncStream<@Sendable (Data) -> Void>.makeStream()
+        StubServer.holdNextKinds = { request in
+            let finish: @Sendable (Data) -> Void = { body in request.finish(body: body) }
+            continuation.yield(finish)
+            continuation.finish()
+        }
+        let first = Task { await model.refreshKinds() }
+        for await finish in held {
+            await model.refreshKinds()
+            finish(older)
+        }
+        await first.value
+        XCTAssertEqual(model.kinds?.leftOut.count, 0)
     }
 
     func testServerErrorsAndUnreadableRepliesAreFailing() async {

@@ -119,6 +119,8 @@ On macOS, Mediaforce now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
 changes and normal formula upgrades. You can override either binary with
 `MEDIAFORCE_FFMPEG` or `MEDIAFORCE_FFPROBE`.
 
+The sidebar keeps the last kinds received while retrying an unanswered refresh.
+
 API reads only report persisted catalog and job state; opening or
 polling a page does not start scans, host probes, or media analysis. Catalog
 inventory refreshes in the background every `media.catalog_refresh_hours`
