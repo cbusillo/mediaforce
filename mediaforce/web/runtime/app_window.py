@@ -18,9 +18,11 @@ from mediaforce.library.evidence_queue import original_check_wait_reasons
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
+
 from mediaforce.web.runtime.host_runtime import running_encode_counts_by_host
 from mediaforce.web.runtime.host_status import is_awaiting_first_check
 
+CONTROLLER_WORK_WINDOW_CLOSED = "controller_window_closed"
 SCHEMA_VERSION = 1
 RECENT_SEASON_LIMIT = 12
 BIGGEST_SHOW_LIMIT = 10
@@ -81,6 +83,7 @@ def app_window_payload(
         controller_storage: Mapping[str, Any],
         storage_admits_work: bool,
         observed_at: datetime,
+        controller_work_window_open: bool = True,
 ) -> dict[str, Any]:
     items = _present_items(connection, library_types)
     promotions = _promotions(connection)
@@ -94,7 +97,7 @@ def app_window_payload(
     return {
         "schema_version": SCHEMA_VERSION,
         "observed_at": observed_at.isoformat(timespec="seconds"),
-        "work": _work(connection, controller_storage, storage_admits_work, computer_states),
+        "work": _work(connection, controller_storage, storage_admits_work, computer_states, controller_work_window_open),
         "library": _library_totals(items),
         "space_saved": _space_saved(items, promotions, finished),
         "recently_finished_seasons": finished[:RECENT_SEASON_LIMIT],
@@ -490,11 +493,14 @@ def _work(
         controller_storage: Mapping[str, Any],
         storage_admits_work: bool,
         computers: list[dict[str, Any]],
+        controller_work_window_open: bool,
 ) -> dict[str, Any]:
     paused = bool(load_queue_state(connection).get("is_paused")) or background_work_is_paused(connection)
     waiting_count = count_pending_encode_work(connection)
     running_count = sum(running_encode_counts_by_host(connection).values())
     stop_reasons = []
+    if not controller_work_window_open:
+        stop_reasons.append(CONTROLLER_WORK_WINDOW_CLOSED)
     if not storage_admits_work:
         stop_reasons.append("storage_unavailable")
     if waiting_count and not any(computer["state"] in WORKING_COMPUTER_STATES for computer in computers):

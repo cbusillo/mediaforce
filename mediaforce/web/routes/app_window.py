@@ -26,6 +26,7 @@ def register_app_window_routes(
         kinds_payload: Callable[[], dict[str, Any]] | None = None,
         approve_kind_action: Callable[[str, str], dict[str, Any]] | None = None,
         stop_kind_action: Callable[[str], dict[str, Any]] | None = None,
+        controller_work_allowed: Callable[[], bool] | None = None,
 ) -> None:
 
     @app.get("/api/app/main-window")
@@ -70,6 +71,11 @@ def register_app_window_routes(
 
         @app.get("/api/app/kinds")
         def api_app_kinds() -> JSONResponse:
+            if controller_work_allowed is not None and not controller_work_allowed():
+                return JSONResponse(
+                    {"detail": "Waiting for this computer's work window before checking how the library should look."},
+                    status_code=503,
+                )
             return JSONResponse(kinds_facts())
 
         @app.post("/api/app/kinds/{kind}/approve")

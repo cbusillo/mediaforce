@@ -45,11 +45,14 @@ def publish_checked_files_once(
     load_calibration_state: LoadCalibrationState,
     remake_files: RemakeFilesFn,
     stop_event: threading.Event | None = None,
+    controller_work_allowed: Callable[[MediaforceConfig], bool] = lambda _config: True,
 ) -> None:
     """Check and publish each finished production file; temporary holds retry next pass.
 
     A copy that fails its check is made again through ``remake_files`` until the attempt limit, then kept original.
     """
+    if not controller_work_allowed(config):
+        return
     with open_db(config.paths.db_path) as connection:
         item_ids = list(
             connection.execute(
@@ -73,7 +76,7 @@ def publish_checked_files_once(
             ).scalars()
         )
     for item_id in item_ids:
-        if stop_event is not None and stop_event.is_set():
+        if (stop_event is not None and stop_event.is_set()) or not controller_work_allowed(config):
             break
         with delivery_lock(config.paths.db_path, item_id, blocking=False) as acquired:
             if not acquired:

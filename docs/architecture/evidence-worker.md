@@ -128,6 +128,18 @@ other eligible work continues. All default, web and CLI workers read the same
 schedule-aware computer projection. Standalone defaults use the current host
 collector so a cold status cache cannot masquerade as unavailable computers.
 
+The installed server also respects the controller's work window before starting
+catalog scans, evidence units, samples, encode dispatch, file publishing and
+periodic library work. Its expensive kinds report waits before reading the
+library outside that window. Remote computers do not open the controller's
+window; newly dispatched work waits even when a remote computer is available.
+Queued work and completed evidence are retained. A file already running keeps
+its existing finish-current-file policy. Lightweight status and settings reads
+remain available, and the Mac app lists the controller-window wait alongside
+other reasons work cannot start. The controller checks its configured schedule
+without probing computers or reading the database just to decide whether it
+may start a pass.
+
 ## Durable state
 
 `library_item_evidence_state` owns one independent work unit for each

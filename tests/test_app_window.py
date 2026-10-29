@@ -444,3 +444,18 @@ def test_closed_window_copy_follows_the_running_jobs_recorded_close_behavior(
         "studio", schedule_open=False, active_encode_count=1, finish_current_file=current_option, running_jobs=jobs,
     )
     assert _payload(connection, computers=[computer])["computers"][0]["state"] == expected
+
+
+def test_controller_window_wait_is_visible_beside_other_stop_reasons(connection: DBClient) -> None:
+    from mediaforce.web.runtime.app_window import CONTROLLER_WORK_WINDOW_CLOSED
+
+    payload = app_window_payload(
+        connection, library_types=LIBRARY_TYPES, season_cards=[], computers=[], controller_storage=READY_STORAGE,
+        storage_admits_work=False, observed_at=datetime(2026, 10, 24, 12, tzinfo=UTC),
+        controller_work_window_open=False,
+    )
+    work = payload["work"]
+    assert work["state"] == "stopped"
+    assert CONTROLLER_WORK_WINDOW_CLOSED in work["stop_reasons"]
+    assert len(work["stop_reasons"]) == 2
+    assert not work["paused_by_owner"]

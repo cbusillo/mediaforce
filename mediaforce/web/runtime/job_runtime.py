@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Callable
 from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -66,6 +66,7 @@ class JobRuntimeDeps:
     reset_folder_card_cache: Any
     start_scan_job_thread: Callable[..., None] | None = None
     list_scan_job_files: Callable[[MediaforceConfig], Iterable[Any]] | None = None
+    controller_work_allowed: Callable[[MediaforceConfig], bool] = field(default=lambda _config: True)
 
 
 @dataclass(slots=True)
@@ -85,6 +86,7 @@ class CalibrationQueueRuntimeDeps:
     full_calibration_concurrency: int
     calibration_queue_poll_seconds: float
     host_window_open: Callable[[MediaforceConfig, dict[str, Any]], bool] = lambda _config, _host: True
+    controller_work_allowed: Callable[[MediaforceConfig], bool] = field(default=lambda _config: True)
 
 
 def calibration_job_public_payload(
@@ -589,7 +591,7 @@ def maybe_schedule_scan(
             job = _expire_scan_job(config, prefix, job, deps)
         if job and job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
             return job
-        if background_work_is_paused(connection):
+        if background_work_is_paused(connection) or not deps.controller_work_allowed(config):
             return job
         if not force and not scan_is_stale(connection, config, prefix, deps, full_stale_after=full_stale_after):
             return job
@@ -682,7 +684,7 @@ def run_scan_job(
                 if not _scan_job_owned_by_worker(job, scan_id=job_id):
                     connection.rollback()
                     return
-                if background_work_is_paused(connection):
+                if background_work_is_paused(connection) or not deps.controller_work_allowed(config):
                     job.update(
                         {
                             "job_id": job_id,
@@ -849,6 +851,8 @@ def calibration_queue_worker_loop(
 
 def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRuntimeDeps) -> None:
     config = load_config(config_path)
+    if not deps.controller_work_allowed(config):
+        return
     capacities = {
         "sample": deps.sample_calibration_concurrency,
         "full": deps.full_calibration_concurrency,
@@ -890,6 +894,8 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
                 outside_window + queued_jobs_waiting_to_retry(connection, lane=lane, now=now) + still_ending
             )
             while running_by_lane[lane] < capacity:
+                if not deps.controller_work_allowed(config):
+                    return
                 started_at = deps.now_iso()
                 payload = claim_next_queued_calibration_job(
                     connection,

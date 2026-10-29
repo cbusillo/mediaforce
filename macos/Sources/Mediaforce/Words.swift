@@ -190,6 +190,7 @@ extension Words {
     static func workHeadline(_ facts: MainWindowFacts) -> String {
         let work = facts.work
         if work.pausedByOwner { return "Paused" }
+        if work.stopReasons.contains("controller_window_closed") { return "Waiting for this Mac's work window" }
         if work.stopReasons.contains("storage_unavailable") { return "Paused: this Mac can't see the media library" }
         if work.stopReasons.contains("no_computer_ready") { return "Waiting for a computer" }
         if work.runningCount > 0 { return "Compressing" }
@@ -203,6 +204,9 @@ extension Words {
         var sentences: [String] = []
         if work.pausedByOwner {
             sentences.append("Nothing new starts until you resume. Work already running finishes first.")
+        }
+        if work.stopReasons.contains("controller_window_closed") {
+            sentences.append("This Mac is outside its work window. Library checks and new work resume when it opens.")
         }
         if work.stopReasons.contains("storage_unavailable") {
             sentences.append(work.pausedByOwner
