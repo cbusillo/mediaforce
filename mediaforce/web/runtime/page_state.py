@@ -28,7 +28,10 @@ Order, first match wins:
    gate. It is quiet when no one can change the outcome, and asks for attention when the show's
    encode-as-is decision could accept some of the files.
 7. ``needs_help`` / ``test``: the page's saved sample cannot be reviewed.
-8. ``needs_test``.
+8. ``waiting_for_kind``: an older unapproved sample follows its reusable kind. The newest sample
+   offered by that kind stays available until a current approval covers it. Active samples and
+   review-blocked decisions stay visible.
+9. ``needs_test``.
 
 The page's own sample is the newest sample job and the saved sample at exactly its folder. A sample
 of one episode inside a season, or of the show around it, never sets the season's sample state.
@@ -49,10 +52,11 @@ from mediaforce.web.runtime.folder_actions import quality_risk_blocks_production
 from mediaforce.web.runtime.folder_tuning_advice import review_gate
 from mediaforce.web.runtime.job_runtime import retryable_saved_sample_job, sample_target_size_failure
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    cached_calibration_loader, effective_production_approval
+    cached_calibration_loader, effective_production_approval, following_kind, holds_approval, season_prefix_of
 
 PageStateKey = Literal[
     "needs_test",
+    "waiting_for_kind",
     "sample_waiting",
     "making_test",
     "ready_to_compare",
@@ -165,6 +169,7 @@ class PageStateFacts:
     # The approval governing this folder, from the nearest folder holding one.
     approval: EffectiveApproval | None = None
     approval_review_blocked: bool = False
+    following_kind: str | None = None
     # The staged-file summary, when the caller read one.
     staged_integrity: Mapping[str, Any] | None = None
     # The scope's lifecycle payload with its motion-pattern counts, for a TV scope.
@@ -199,6 +204,9 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     sample_job = object_dict(facts.sample_job)
     sample_status = str(sample_job.get("status") or "")
     calibration = object_dict(facts.calibration) if facts.calibration is not None else None
+    follows_kind = facts.following_kind if not facts.approval_review_blocked else None
+    if follows_kind and sample_status not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES:
+        sample_job, sample_status, calibration = {}, "", None
 
     if lane == "processing":
         return PageState("making_season", "active", source_job=_source_job(encode_job, "encode"))
@@ -288,6 +296,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
             failure="missing_clips",
             source_job=calibration_source,
         )
+    if follows_kind:
+        return PageState("waiting_for_kind", "quiet", approval_source="kind", approval_kind=follows_kind)
     return PageState("needs_test", "quiet", primary_action="make_sample")
 
 
@@ -362,13 +372,19 @@ def _facts(
 ) -> PageStateFacts:
     source_job_id = str(object_dict(workflow).get("source_job_id") or "")
     approval = effective_production_approval(config, prefix, load_calibration)
+    calibration = load_calibration(config, prefix)
+    follows = None
+    if (calibration is not None and not holds_approval(calibration) and season_prefix_of(config, prefix) == prefix
+            and str(object_dict(sample_job).get("status") or "") not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES):
+        follows = following_kind(config, prefix, load_calibration)
     return PageStateFacts(
         prefix=prefix,
         workflow=workflow,
         encode_job=load_encode_job(connection, source_job_id) if source_job_id else None,
         sample_job=sample_job if _is_sample_job(sample_job) else None,
-        calibration=load_calibration(config, prefix),
+        calibration=calibration,
         approval=approval,
+        following_kind=follows,
         approval_review_blocked=review_blocked(approval) if approval is not None and approval.current else False,
         staged_integrity=staged_integrity,
         lifecycle=lifecycle,
