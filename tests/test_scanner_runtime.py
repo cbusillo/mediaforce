@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from sqlalchemy import func, insert, select, update
 
-from test_controller_work_window import configure_controller_night
+from test_controller_work_window import configure_controller_night, controller_clock
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
@@ -87,8 +87,8 @@ class ScannerRuntimeTests(unittest.TestCase):
                 (media / name).write_bytes(b"fixture")
             config = self._config(root, {"tv": media})
             configure_controller_night(config)
-            with open_db(config.paths.db_path) as connection, patch(
-                "mediaforce.web.runtime.encode_scheduler.datetime", wraps=datetime
+            with open_db(config.paths.db_path) as connection, controller_clock(
+                datetime(2026, 10, 29, 8, 59, 59, tzinfo=UTC)
             ) as clock, patch("mediaforce.library.scanner._reconcile_missing_items") as missing:
                 clock.now.return_value = datetime(2026, 10, 29, 8, 59, 59, tzinfo=UTC)
 

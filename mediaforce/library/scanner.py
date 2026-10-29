@@ -27,7 +27,7 @@ from mediaforce.core.db_tables import source_transitions
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
-from mediaforce.hosts.work_window import require_controller_work_window
+from mediaforce.hosts.work_window import controller_work_schedule, require_controller_work_window
 from mediaforce.library.evidence_state import library_item_source_fingerprint, sync_library_item_evidence_states
 from mediaforce.library.motion_keep_state import reconcile_motion_keep_with_source
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT, library_item_is_missing
@@ -81,7 +81,12 @@ def scan_library(
         process_controller: ManagedProcessController | None = None,
         scan_id: str | None = None,
 ) -> ScanStats:
-    require_controller_work_window(config)
+    window = controller_work_schedule(config)
+
+    def check_work_window() -> None:
+        require_controller_work_window(config, window=window)
+
+    check_work_window()
     _throw_if_scan_cancelled(process_controller)
     scan_id = scan_id or uuid.uuid4().hex
     started_at = timestamp()
@@ -119,6 +124,7 @@ def scan_library(
             limit=limit,
             stats=stats,
             process_controller=process_controller,
+            check_work_window=check_work_window,
         )
     except BaseException as exc:
         try:
@@ -142,6 +148,7 @@ def _execute_scan_library(
         limit: int | None,
         stats: ScanStats,
         process_controller: ManagedProcessController | None,
+        check_work_window: Callable[[], None],
 ) -> ScanStats:
     seen_paths_by_root: dict[str, set[str]] = {}
     reconcilable_roots: set[str] = set()
@@ -166,9 +173,9 @@ def _execute_scan_library(
                 seen=stats.total_seen,
                 enumeration=enumeration,
                 process_controller=process_controller,
-                work_window_check=lambda: require_controller_work_window(config),
+                work_window_check=check_work_window,
         ):
-            require_controller_work_window(config)
+            check_work_window()
             _throw_if_scan_cancelled(process_controller)
             source_path = str(file_path)
             logical_path = logical_library_rel_path(root_name, root_path, file_path)
@@ -441,7 +448,7 @@ def _execute_scan_library(
         _throw_if_scan_cancelled(process_controller)
 
     if full_scan:
-        require_controller_work_window(config)
+        check_work_window()
         _throw_if_scan_cancelled(process_controller)
         stats.missing = _reconcile_missing_items(
             connection,

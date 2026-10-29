@@ -5,6 +5,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from functools import lru_cache
+import socket
 from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
@@ -12,7 +14,7 @@ from mediaforce.core.process_control import ManagedProcessController, ScheduleWi
 from mediaforce.core.schedule_deadline import parse_schedule_close_deadline
 from mediaforce.core.type_defs import object_list
 from mediaforce.encoding.helpers import resolve_item_source_path
-from mediaforce.hosts.config import _host_priority, configured_remote_host_execution_mode, host_media_access_for_host, host_targets_current_machine
+from mediaforce.hosts.config import _host_priority, configured_remote_host_execution_mode, host_media_access_for_host, host_targets_current_machine, ssh_target_for_host
 from mediaforce.hosts.types import FFMPEG_MISSING_ISSUE
 
 EVIDENCE_HOST_WAIT_REASON = "Waiting for a computer that can measure this file."
@@ -61,7 +63,7 @@ def controller_digest_window(
 ) -> ControllerDigestWindow:
     """New full-file hashes follow this computer's window, independently of the measuring computer."""
     controller = next((host for host in config.remote_hosts if isinstance(host, dict)
-                       and (host.get("mode") == "local" or host_targets_current_machine(host))), None)
+                       and (host.get("mode") == "local" or _controller_target_matches(ssh_target_for_host(host), socket.gethostname()))), None)
     if controller is None:
         return ControllerDigestWindow()
     rows = collect_rows(config)
@@ -75,6 +77,11 @@ def controller_digest_window(
     return ControllerDigestWindow(row.get("schedule_open") is True, closes_at,
                                   row.get("finish_current_file") is True,
                                   str(controller.get("label") or "This computer"), opens_at)
+
+
+@lru_cache(maxsize=128)
+def _controller_target_matches(target: str, hostname: str) -> bool:
+    return target == hostname or host_targets_current_machine({"host": target})
 
 
 def remote_evidence_hosts(config: MediaforceConfig) -> list[dict[str, Any]]:

@@ -1,11 +1,14 @@
 import json
+import copy
+from dataclasses import dataclass, replace
 import os
 import tempfile
 import threading
 import unittest
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, patch
 
 from sqlalchemy import select
@@ -13,7 +16,7 @@ from sqlalchemy import select
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, scan_runs
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
 from mediaforce.library.background_work import set_background_work_paused
 from mediaforce.library.evidence_queue import EvidenceQueueConflict, claim_next_evidence_work, start_evidence_work
 from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
@@ -23,18 +26,250 @@ from mediaforce.web.runtime import job_runtime as job_runtime_module
 from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_db, latest_scan_completed_at, \
     load_scan_status, maybe_schedule_scan, repair_stale_scan_runs, run_scan_job, save_scan_job_state, scan_is_stale
 from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner
+from test_controller_work_window import configure_controller_night, controller_clock
+
+
+@dataclass
+class _ScanRequest:
+    job: dict[str, Any]
+    deps: JobRuntimeDeps
+    started: Mock
 
 
 class OperatorWorkTests(unittest.TestCase):
-    def test_catalog_schedule_defers_automatic_work_and_explains_a_manual_refresh(self) -> None:
+    def test_catalog_schedule_defers_automatic_work_and_retains_a_manual_refresh(self) -> None:
         self.config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local", "schedule_profile": "never"}]
         with patch("mediaforce.web.app._start_scan_job_thread") as start:
             deps = web_app._job_runtime_deps()
             with open_db(self.config.paths.db_path) as connection:
                 self.assertIsNone(maybe_schedule_scan(connection, self.config, None, deps))
-                with self.assertRaises(ValueError):
-                    maybe_schedule_scan(connection, self.config, None, deps, force=True)
-        start.assert_not_called()
+                start.assert_not_called()
+                job = maybe_schedule_scan(connection, self.config, None, deps, force=True)
+        assert job is not None
+        self.assertEqual(job["status"], "queued")
+        self.assertTrue(job["waiting_for_window"])
+        start.assert_called_once()
+
+    def _resumable_request(self) -> _ScanRequest:
+        configure_controller_night(self.config)
+        self.config.raw["media"]["catalog_refresh_hours"] = 0
+        job: dict[str, Any] = {}
+
+        def save(_config: MediaforceConfig, _prefix: str | None, payload: dict[str, Any]) -> None:
+            job.clear()
+            job.update(payload)
+
+        deps = self._job_runtime_deps(load_scan_job_state=lambda *_args: dict(job) if job else None, save_scan_job_state=save)
+        start = Mock()
+        deps.start_scan_job_thread = start
+        with open_db(self.config.paths.db_path) as connection:
+            maybe_schedule_scan(connection, self.config, "tv/Show", deps, force=True)
+        return _ScanRequest(job, deps, start)
+
+    def test_forced_scan_waits_without_database_locks_and_uses_latest_settings_with_refresh_disabled(self) -> None:
+        with controller_clock(datetime(2026, 10, 29, 9, tzinfo=UTC)) as clock:
+            request = self._resumable_request()
+            self.assertIsNone(self.config.catalog_refresh_interval)
+            latest = replace(self.config, raw=copy.deepcopy(self.config.raw))
+            latest.raw["media"]["libraries"][0]["path"] = str(self.config.paths.project_root / "changed-root")
+            load_count = 0
+            real_open = job_runtime_module.open_db
+
+            def load(_path: Path) -> MediaforceConfig:
+                nonlocal load_count
+                load_count += 1
+                if load_count > 1:
+                    opened.assert_not_called()
+                    clock.now.return_value = datetime(2026, 10, 30, 4, tzinfo=UTC)
+                    return latest
+                return self.config
+
+            def scan(_connection: object, config: MediaforceConfig, **kwargs: Any) -> ScanStats:
+                self.assertIs(config, latest)
+                return ScanStats(scan_id=kwargs["scan_id"])
+
+            with patch("mediaforce.web.runtime.job_runtime.load_config", side_effect=load), patch("mediaforce.web.runtime.job_runtime.open_db", wraps=real_open
+            ) as opened, patch("mediaforce.web.runtime.job_runtime.scan_library", side_effect=scan), patch("mediaforce.web.runtime.job_runtime.purge_transient_artifacts"
+            ), patch.object(job_runtime_module, "_SCAN_WINDOW_POLL_SECONDS", 0):
+                run_scan_job(config_path=self.config.paths.config_path, prefix="tv/Show", job_id=request.job["job_id"],
+                             process_controller=ManagedProcessController(), deps=request.deps)
+            self.assertEqual(request.job["status"], "completed")
+            self.assertFalse(request.job["waiting_for_window"])
+
+    def test_window_close_retries_with_a_new_scan_id_and_retains_the_request(self) -> None:
+        with controller_clock(datetime(2026, 10, 29, 8, 59, 59, tzinfo=UTC)) as clock:
+            request = self._resumable_request()
+            scan_ids: list[str] = []
+
+            def load(_path: Path) -> MediaforceConfig:
+                if scan_ids:
+                    clock.now.return_value = datetime(2026, 10, 30, 4, tzinfo=UTC)
+                return self.config
+
+            def scan(connection: Any, _config: MediaforceConfig, **kwargs: Any) -> ScanStats:
+                scan_id = kwargs["scan_id"]
+                scan_ids.append(scan_id)
+                connection.execute(scan_runs.insert().values(scan_id=scan_id, started_at=request.deps.now_iso(),
+                    completed_at=request.deps.now_iso(), roots_json="[]", scope="prefix", status="failed" if len(scan_ids) == 1 else "completed"))
+                connection.commit()
+                if len(scan_ids) == 1:
+                    clock.now.return_value = datetime(2026, 10, 29, 9, tzinfo=UTC)
+                    raise ScheduleWindowClosedError("closed")
+                return ScanStats(scan_id=scan_id)
+
+            with patch("mediaforce.web.runtime.job_runtime.load_config", side_effect=load), patch("mediaforce.web.runtime.job_runtime.scan_library", side_effect=scan
+            ), patch("mediaforce.web.runtime.job_runtime.purge_transient_artifacts"), patch.object(
+                job_runtime_module, "_SCAN_WINDOW_POLL_SECONDS", 0
+            ):
+                run_scan_job(config_path=self.config.paths.config_path, prefix="tv/Show", job_id=request.job["job_id"],
+                             process_controller=ManagedProcessController(), deps=request.deps)
+            self.assertEqual(len(scan_ids), 2)
+            self.assertNotEqual(scan_ids[0], scan_ids[1])
+            self.assertEqual(request.job["status"], "completed")
+
+    def test_inventory_completion_is_not_failed_when_the_window_closes_before_metadata(self) -> None:
+        from types import SimpleNamespace
+
+        with controller_clock(datetime(2026, 10, 29, 8, 59, 59, tzinfo=UTC)) as clock:
+            request = self._resumable_request()
+            request.job["scope"] = "full"
+            request.job["prefix"] = None
+
+            def scan(_connection: object, _config: MediaforceConfig, **kwargs: Any) -> ScanStats:
+                clock.now.return_value = datetime(2026, 10, 29, 9, tzinfo=UTC)
+                return ScanStats(scan_id=kwargs["scan_id"])
+
+            with patch("mediaforce.web.runtime.job_runtime.load_config", return_value=self.config), patch("mediaforce.web.runtime.job_runtime.scan_library", side_effect=scan
+            ), patch("mediaforce.web.runtime.job_runtime.purge_transient_artifacts"), patch("mediaforce.web.runtime.job_runtime.sync_external_metadata", return_value=SimpleNamespace(to_payload=lambda: {})
+            ):
+                run_scan_job(config_path=self.config.paths.config_path, prefix=None, job_id=request.job["job_id"],
+                             process_controller=ManagedProcessController(), deps=request.deps)
+            self.assertEqual(request.job["status"], "completed")
+            request.deps.save_catalog_signature.assert_called_once()
+            request.deps.reset_folder_card_cache.assert_called_once()
+
+    def test_shutdown_keeps_a_waiting_request_for_startup_recovery(self) -> None:
+        with controller_clock(datetime(2026, 10, 29, 9, tzinfo=UTC)):
+            request = self._resumable_request()
+            controller = ManagedProcessController()
+            loads = 0
+
+            def load(_path: Path) -> MediaforceConfig:
+                nonlocal loads
+                loads += 1
+                if loads > 1:
+                    controller.cancel()
+                return self.config
+
+            with patch("mediaforce.web.runtime.job_runtime.load_config", side_effect=load), patch("mediaforce.web.runtime.job_runtime.open_db", side_effect=AssertionError("no database while waiting")
+            ), patch.object(job_runtime_module, "_SCAN_WINDOW_POLL_SECONDS", 0):
+                run_scan_job(config_path=self.config.paths.config_path, prefix="tv/Show", job_id=request.job["job_id"],
+                             process_controller=controller, deps=request.deps)
+            self.assertEqual(request.job["status"], "queued")
+            self.assertIsNone(request.job["owner_pid"])
+            path = self.config.paths.web_state_dir / "scan-request.job.json"
+            job_runtime_module._save_scan_job_file(path, request.job)
+            request.deps.list_scan_job_files = lambda _config: [path]
+            request.started.reset_mock()
+            with open_db(self.config.paths.db_path) as connection:
+                repaired = repair_stale_scan_runs(connection, self.config, request.deps)
+            self.assertEqual(repaired, 1)
+            request.started.assert_called_once()
+            self.assertEqual(json.loads(path.read_text())["status"], "queued")
+
+    def test_scan_config_read_failure_retries_in_the_same_worker_then_uses_latest_settings(self) -> None:
+        for fail_initial in (True, False):
+            with self.subTest(fail_initial=fail_initial), controller_clock(datetime(2026, 10, 29, 9, tzinfo=UTC)) as clock:
+                request = self._resumable_request()
+                controller = request.started.call_args.kwargs["process_controller"]
+                latest = replace(self.config, raw=copy.deepcopy(self.config.raw))
+                latest.raw["media"]["libraries"][0]["path"] = str(self.config.paths.project_root / "new-root")
+                attempts = 0
+
+                def load(_path: Path) -> MediaforceConfig:
+                    nonlocal attempts
+                    attempts += 1
+                    opened.assert_not_called()
+                    if attempts == (1 if fail_initial else 2):
+                        raise OSError("settings are temporarily unavailable")
+                    if attempts > (1 if fail_initial else 2):
+                        clock.now.return_value = datetime(2026, 10, 30, 4, tzinfo=UTC)
+                        return latest
+                    return self.config
+
+                def scan(_connection: object, config: MediaforceConfig, **kwargs: Any) -> ScanStats:
+                    self.assertIs(config, latest)
+                    return ScanStats(scan_id=kwargs["scan_id"])
+
+                with patch("mediaforce.web.runtime.job_runtime.load_config", side_effect=load), patch(
+                    "mediaforce.web.runtime.job_runtime.open_db", wraps=open_db
+                ) as opened, patch("mediaforce.web.runtime.job_runtime.scan_library", side_effect=scan), patch(
+                    "mediaforce.web.runtime.job_runtime.purge_transient_artifacts"
+                ), patch.object(job_runtime_module, "_SCAN_WINDOW_POLL_SECONDS", 0):
+                    run_scan_job(config_path=self.config.paths.config_path, prefix="tv/Show", job_id=request.job["job_id"],
+                                 process_controller=controller, deps=request.deps)
+                self.assertEqual(attempts, 2 if fail_initial else 3)
+                self.assertEqual(request.job["status"], "completed")
+                request.started.assert_called_once()
+
+    def test_scan_config_read_failure_remains_cancellable_and_releases_queued_ownership(self) -> None:
+        for fail_initial in (True, False):
+            with self.subTest(fail_initial=fail_initial), controller_clock(datetime(2026, 10, 29, 9, tzinfo=UTC)):
+                request = self._resumable_request()
+                original_id = request.job["job_id"]
+                controller = request.started.call_args.kwargs["process_controller"]
+                attempts = 0
+
+                def load(_path: Path) -> MediaforceConfig:
+                    nonlocal attempts
+                    attempts += 1
+                    if fail_initial or attempts > 1:
+                        controller.cancel()
+                        raise ValueError("settings are temporarily incomplete")
+                    return self.config
+
+                with patch("mediaforce.web.runtime.job_runtime.load_config", side_effect=load), patch(
+                    "mediaforce.web.runtime.job_runtime.open_db", side_effect=AssertionError("no database while waiting")
+                ), patch.object(job_runtime_module, "_SCAN_WINDOW_POLL_SECONDS", 0):
+                    run_scan_job(config_path=self.config.paths.config_path, prefix="tv/Show", job_id=original_id,
+                                 process_controller=controller, deps=request.deps)
+                self.assertEqual(request.job["status"], "queued")
+                self.assertIsNone(request.job["owner_pid"])
+                self.assertNotEqual(request.job["job_id"], original_id)
+                self.assertTrue(request.job["resume_after_interruption"])
+                self.assertEqual(request.job["prefix"], "tv/Show")
+                request.started.assert_called_once()
+
+    def test_startup_adopts_dead_resumable_running_requests_once_and_keeps_live_owners(self) -> None:
+        for live in (False, True):
+            for has_run_row in (False, True):
+                with self.subTest(live=live, has_run_row=has_run_row), controller_clock(
+                    datetime(2026, 10, 29, 9, tzinfo=UTC)
+                ):
+                    request = self._resumable_request()
+                    old_id = request.job["job_id"]
+                    request.job.update(status="running", owner_pid=123456)
+                    path = self.config.paths.web_state_dir / "scan-request.job.json"
+                    job_runtime_module._save_scan_job_file(path, request.job)
+                    request.deps.list_scan_job_files = lambda _config: [path]
+                    request.deps.scan_process_is_alive = lambda _pid: live
+                    request.started.reset_mock()
+                    with open_db(self.config.paths.db_path) as connection:
+                        if has_run_row:
+                            connection.execute(scan_runs.insert().values(scan_id=old_id, started_at=request.deps.now_iso(),
+                                roots_json="[]", scope="prefix", prefixes_json='["tv/Show"]', owner_pid=123456,
+                                status="running"))
+                        repair_stale_scan_runs(connection, self.config, request.deps)
+                        stored = json.loads(path.read_text())
+                        if live:
+                            request.started.assert_not_called()
+                            self.assertEqual(stored["job_id"], old_id)
+                            self.assertEqual(stored["status"], "running")
+                        else:
+                            request.started.assert_called_once()
+                            self.assertNotEqual(stored["job_id"], old_id)
+                            self.assertEqual(stored["status"], "queued")
+                    path.unlink()
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -995,12 +1230,15 @@ class OperatorWorkTests(unittest.TestCase):
             "status": "queued",
             "created_at": "2026-07-19T12:01:00+00:00",
         }
-        load_count = 0
+        replaced = False
 
         def load_scan_job_state(_config: object, _prefix: str | None) -> dict[str, object]:
-            nonlocal load_count
-            load_count += 1
-            return first_job if load_count == 1 else replacement_job
+            return replacement_job if replaced else first_job
+
+        def replace_while_scanning(*_args: object, **_kwargs: object) -> ScanStats:
+            nonlocal replaced
+            replaced = True
+            return ScanStats(scan_id="scan-a")
 
         save_scan_job_state = Mock()
         deps = self._job_runtime_deps(
@@ -1015,7 +1253,7 @@ class OperatorWorkTests(unittest.TestCase):
             patch("mediaforce.web.runtime.job_runtime.purge_transient_artifacts"),
             patch(
                 "mediaforce.web.runtime.job_runtime.scan_library",
-                return_value=ScanStats(scan_id="scan-a"),
+                side_effect=replace_while_scanning,
             ) as scan,
         ):
             run_scan_job(

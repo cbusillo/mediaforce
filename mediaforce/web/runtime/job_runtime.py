@@ -1,6 +1,7 @@
 import errno
 import hashlib
 import json
+import logging
 import os
 import threading
 import uuid
@@ -29,7 +30,7 @@ from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.metadata_sync import sync_external_metadata
@@ -37,7 +38,7 @@ from mediaforce.library.scanner import scan_library
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_dict
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
-from mediaforce.hosts.work_window import controller_work_allowed, require_controller_work_window
+from mediaforce.hosts.work_window import controller_work_allowed
 
 _MISSING = object()
 ACTIVE_SCAN_JOB_STATUSES = {"queued", "running"}
@@ -46,6 +47,8 @@ SUCCESSFUL_SCAN_RUN_STATUS = "completed"
 DEFAULT_SCAN_INTERRUPTED_ERROR = "Background scan was interrupted by a web process restart."
 _SCAN_SCHEDULE_LOCK = threading.Lock()
 _SCAN_JOB_STATE_LOCK = threading.Lock()
+_SCAN_WINDOW_POLL_SECONDS = 1.0
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -569,6 +572,7 @@ def maybe_schedule_scan(
         force: bool = False,
         full_stale_after: timedelta | None = None,
 ) -> dict[str, Any] | None:
+    window_open = controller_work_allowed(config)
     with _SCAN_SCHEDULE_LOCK:
         active_scan = active_scan_from_db(connection, config, prefix, deps)
         if active_scan is not None:
@@ -592,9 +596,7 @@ def maybe_schedule_scan(
             return job
         if background_work_is_paused(connection):
             return job
-        if not controller_work_allowed(config):
-            if force:
-                raise ValueError("This computer is outside its work window. Automatic catalog refreshes resume when it opens.")
+        if not window_open and not force:
             return job
         if not force and not scan_is_stale(connection, config, prefix, deps, full_stale_after=full_stale_after):
             return job
@@ -609,6 +611,9 @@ def maybe_schedule_scan(
             "job_id": scan_id,
             "scan_id": scan_id,
             "status": "queued",
+            "resume_after_interruption": True,
+            "waiting_for_window": not window_open,
+            "waiting_reason": None if window_open else "Waiting for this computer's work window.",
             "scope": "full" if prefix is None else "prefix",
             "prefix": prefix,
             "owner_pid": os.getpid(),
@@ -619,22 +624,8 @@ def maybe_schedule_scan(
             "stats": None,
         }
         _save_scan_job_state(config, prefix, job_payload, deps)
-        thread_kwargs = {
-            "config_path": config.paths.config_path,
-            "prefix": prefix,
-            "job_id": str(job_payload["job_id"]),
-            "process_controller": ManagedProcessController(),
-        }
         try:
-            if deps.start_scan_job_thread is not None:
-                deps.start_scan_job_thread(**thread_kwargs)
-            else:
-                thread = threading.Thread(
-                    target=deps.run_scan_job,
-                    kwargs=thread_kwargs,
-                    name=f"scan-job-{job_payload['job_id']}",
-                )
-                thread.start()
+            _start_scan_job(config, prefix, str(job_payload["job_id"]), deps)
         except BaseException as exc:
             _save_worker_scan_job_state(
                 config,
@@ -668,15 +659,120 @@ def load_scan_status(
     return _current_scan_job_snapshot(connection, config, prefix, deps)
 
 
+class _ScanProcessController(ManagedProcessController):
+    def __init__(self, config: MediaforceConfig) -> None:
+        super().__init__()
+        self.last_config = config
+
+
+def _start_scan_job(config: MediaforceConfig, prefix: str | None, job_id: str, deps: JobRuntimeDeps) -> None:
+    thread_kwargs = {"config_path": config.paths.config_path, "prefix": prefix, "job_id": job_id,
+                     "process_controller": _ScanProcessController(config)}
+    if deps.start_scan_job_thread is not None:
+        deps.start_scan_job_thread(**thread_kwargs)
+    else:
+        threading.Thread(target=deps.run_scan_job, kwargs=thread_kwargs, name=f"scan-job-{job_id}").start()
+
+
+def _queued_scan_successor(
+        config: MediaforceConfig, prefix: str | None, job_id: str, job: dict[str, Any], deps: JobRuntimeDeps,
+        *, running_thread: bool,
+) -> str | None:
+    successor_id = uuid.uuid4().hex[:12]
+    successor = {**job, "job_id": successor_id, "scan_id": successor_id, "status": "queued",
+                 "resume_after_interruption": True, "waiting_for_window": True,
+                 "waiting_reason": "Waiting for this computer's work window.",
+                 "owner_pid": os.getpid() if running_thread else None, "started_at": None,
+                 "finished_at": None, "error": None, "stats": None}
+    if _save_worker_scan_job_state(config, prefix, job_id, successor, deps):
+        return successor_id
+    return None
+
+
+def _load_scan_config(
+        config_path: Any, config: MediaforceConfig | None, prefix: str | None, job_id: str,
+        controller: ManagedProcessController, deps: JobRuntimeDeps,
+) -> MediaforceConfig | None:
+    poll = threading.Event()
+    reported = False
+    while True:
+        controller.throw_if_cancelled()
+        if config is not None:
+            job = deps.load_scan_job_state(config, prefix) or {}
+            if not _scan_job_owned_by_worker(job, scan_id=job_id):
+                return None
+        try:
+            loaded = load_config(config_path)
+        except (OSError, ValueError):
+            if not reported:
+                _LOGGER.warning("Cannot read scan settings; keeping the requested scan queued and retrying.", exc_info=True)
+                reported = True
+            poll.wait(_SCAN_WINDOW_POLL_SECONDS)
+            continue
+        if isinstance(controller, _ScanProcessController):
+            controller.last_config = loaded
+        return loaded
+
+
+def _wait_for_scan_window(
+        config: MediaforceConfig, prefix: str | None, job_id: str, controller: ManagedProcessController, deps: JobRuntimeDeps,
+) -> MediaforceConfig | None:
+    poll = threading.Event()
+    while True:
+        controller.throw_if_cancelled()
+        job = deps.load_scan_job_state(config, prefix) or {}
+        if not _scan_job_owned_by_worker(job, scan_id=job_id):
+            return None
+        if controller_work_allowed(config):
+            return config
+        if not job.get("waiting_for_window"):
+            _save_worker_scan_job_state(config, prefix, job_id, {**job, "waiting_for_window": True,
+                                        "waiting_reason": "Waiting for this computer's work window."}, deps)
+        poll.wait(_SCAN_WINDOW_POLL_SECONDS)
+        refreshed = _load_scan_config(config.paths.config_path, config, prefix, job_id, controller, deps)
+        if refreshed is None:
+            return None
+        config = refreshed
+
+
 def run_scan_job(
+        *, config_path: Any, prefix: str | None, job_id: str,
+        process_controller: ManagedProcessController, deps: JobRuntimeDeps,
+) -> None:
+    current_id: str | None = job_id
+    config = process_controller.last_config if isinstance(process_controller, _ScanProcessController) else None
+    while current_id is not None:
+        try:
+            config = _load_scan_config(config_path, config, prefix, current_id, process_controller, deps)
+            if config is None:
+                return
+            current_config = _wait_for_scan_window(config, prefix, current_id, process_controller, deps)
+        except ProcessCancelledError:
+            if isinstance(process_controller, _ScanProcessController):
+                config = process_controller.last_config
+            if config is None:
+                return
+            job = deps.load_scan_job_state(config, prefix) or {}
+            if job.get("resume_after_interruption"):
+                _queued_scan_successor(config, prefix, current_id, job, deps, running_thread=False)
+            else:
+                _save_worker_scan_job_state(config, prefix, current_id,
+                    _interrupted_scan_job(job, deps, finished_at=deps.now_iso()), deps)
+            return
+        if current_config is None:
+            return
+        current_id = _run_scan_job_pass(config=current_config, prefix=prefix, job_id=current_id,
+                                       process_controller=process_controller, deps=deps)
+
+
+def _run_scan_job_pass(
         *,
-        config_path: Any,
+        config: MediaforceConfig,
         prefix: str | None,
         job_id: str,
         process_controller: ManagedProcessController,
         deps: JobRuntimeDeps,
-) -> None:
-    config = load_config(config_path)
+) -> str | None:
     job: dict[str, Any] = {}
     with open_db(config.paths.db_path) as connection:
         connection.commit()
@@ -706,6 +802,8 @@ def run_scan_job(
                         "job_id": job_id,
                         "scan_id": job_id,
                         "status": "running",
+                        "waiting_for_window": False,
+                        "waiting_reason": None,
                         "started_at": deps.now_iso(),
                         "finished_at": None,
                         "error": None,
@@ -733,7 +831,6 @@ def run_scan_job(
             process_controller.throw_if_cancelled()
             if prefix is None:
                 try:
-                    require_controller_work_window(config)
                     process_controller.throw_if_cancelled()
                     metadata_stats = sync_external_metadata(connection, config).to_payload()
                     process_controller.throw_if_cancelled()
@@ -766,7 +863,15 @@ def run_scan_job(
             },
             deps,
         )
+    except ScheduleWindowClosedError:
+        successor = _queued_scan_successor(config, prefix, job_id, job, deps,
+                                           running_thread=not process_controller.cancelled)
+        return successor if not process_controller.cancelled else None
+
     except ProcessCancelledError:
+        if job.get("resume_after_interruption"):
+            _queued_scan_successor(config, prefix, job_id, job, deps, running_thread=False)
+            return None
         _save_worker_scan_job_state(
             config,
             prefix,
@@ -1140,6 +1245,11 @@ def repair_stale_scan_runs(
         job_prefixes = [None]
         if scope == "prefix":
             job_prefixes = _prefixes_for_scan_run(row)
+        owned_jobs = [deps.load_scan_job_state(config, job_prefix) for job_prefix in job_prefixes]
+        if any(job and job.get("resume_after_interruption")
+               and _scan_job_matches_database_row(job, scan_id=str(row["scan_id"]))
+               and deps.scan_process_is_alive(job.get("owner_pid")) for job in owned_jobs):
+            continue
         _expire_scan_run(
             connection,
             str(row["scan_id"]),
@@ -1180,6 +1290,25 @@ def repair_stale_scan_runs(
                 path,
                 _interrupted_scan_job(job, deps, finished_at=deps.now_iso()),
             )
+            repaired += 1
+            continue
+        resumable = bool(job.get("resume_after_interruption")) and (
+            job.get("status") in {"queued", "running", "starting"}
+            or (job.get("status") == "failed" and job.get("error") == deps.scan_interrupted_error)
+        )
+        if resumable:
+            if deps.scan_process_is_alive(job.get("owner_pid")):
+                continue
+            job_prefix = None if job.get("scope") in {"full", "unknown"} else str(job.get("prefix") or "").strip("/") or None
+            scan_id = uuid.uuid4().hex[:12]
+            job = {**job, "job_id": scan_id, "scan_id": scan_id, "status": "queued", "owner_pid": os.getpid(), "started_at": None,
+                   "finished_at": None, "error": None, "stats": None}
+            _save_scan_job_file(path, job)
+            try:
+                _start_scan_job(config, job_prefix, str(job["job_id"]), deps)
+            except BaseException:
+                _save_scan_job_file(path, {**job, "owner_pid": None})
+                raise
             repaired += 1
             continue
         if str(job.get("status") or "") in ACTIVE_SCAN_JOB_STATUSES:
