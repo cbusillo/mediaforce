@@ -86,11 +86,11 @@ def _kind_approval(config: MediaforceConfig, rel_path: str, load: LoadCalibratio
 
 @runtime_checkable
 class KindSampleSource(Protocol):
-    def following_kind(self, config: MediaforceConfig, prefix: str) -> str | None: ...
+    def following_kinds(self, config: MediaforceConfig) -> dict[str, str]: ...
 
 
 def following_kind(config: MediaforceConfig, prefix: str, load: LoadCalibrationState) -> str | None:
-    return load.following_kind(config, prefix) if isinstance(load, KindSampleSource) else None
+    return load.following_kinds(config).get(prefix) if isinstance(load, KindSampleSource) else None
 
 
 def approval_prefixes(rel_path: str) -> list[str]:
@@ -150,6 +150,7 @@ class _CachedCalibrationLoader:
     def __init__(self, load_calibration_state: LoadCalibrationState) -> None:
         self._load = load_calibration_state
         self._cache: dict[str, dict[str, Any] | None] = {}
+        self._following: dict[str, str] | None = None
 
     def __call__(self, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
         if prefix not in self._cache:
@@ -159,8 +160,12 @@ class _CachedCalibrationLoader:
     def kind_approval(self, config: MediaforceConfig, rel_path: str) -> EffectiveApproval | None:
         return _kind_approval(config, rel_path, self._load)
 
-    def following_kind(self, config: MediaforceConfig, prefix: str) -> str | None:
-        return following_kind(config, prefix, self._load)
+    def following_kinds(self, config: MediaforceConfig) -> dict[str, str]:
+        following = self._following
+        if following is None:
+            following = self._load.following_kinds(config) if isinstance(self._load, KindSampleSource) else {}
+            self._following = following
+        return following
 
 
 def production_approval_contract(calibration: Mapping[str, Any]) -> dict[str, Any] | None:

@@ -28,7 +28,10 @@ Order, first match wins:
    gate. It is quiet when no one can change the outcome, and asks for attention when the show's
    encode-as-is decision could accept some of the files.
 7. ``needs_help`` / ``test``: the page's saved sample cannot be reviewed.
-8. ``needs_test``.
+8. ``waiting_for_kind``: an older unapproved sample follows its reusable kind. The newest sample
+   offered by that kind stays available until a current approval covers it. Active samples and
+   review-blocked decisions stay visible.
+9. ``needs_test``.
 
 The page's own sample is the newest sample job and the saved sample at exactly its folder. A sample
 of one episode inside a season, or of the show around it, never sets the season's sample state.
@@ -201,7 +204,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     sample_job = object_dict(facts.sample_job)
     sample_status = str(sample_job.get("status") or "")
     calibration = object_dict(facts.calibration) if facts.calibration is not None else None
-    if facts.following_kind and sample_status not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES:
+    follows_kind = facts.following_kind if not facts.approval_review_blocked else None
+    if follows_kind and sample_status not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES:
         sample_job, sample_status, calibration = {}, "", None
 
     if lane == "processing":
@@ -292,8 +296,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
             failure="missing_clips",
             source_job=calibration_source,
         )
-    if facts.following_kind:
-        return PageState("waiting_for_kind", "quiet", approval_source="kind", approval_kind=facts.following_kind)
+    if follows_kind:
+        return PageState("waiting_for_kind", "quiet", approval_source="kind", approval_kind=follows_kind)
     return PageState("needs_test", "quiet", primary_action="make_sample")
 
 

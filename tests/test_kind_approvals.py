@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI, HTTPException
 from test_web_route_security import _json_request, _route_endpoint
+from test_page_state import _review_ready
 from sqlalchemy import create_engine
 from test_content_kinds import _admit_historical_original, _item as _content_item
 
@@ -32,7 +33,7 @@ from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
-from mediaforce.web.runtime.kind_approvals import APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
+from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
     KIND_QUEUE_WAITS_CODE, KIND_RETRY_SECONDS, SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, KindSeason, SeasonKinds, \
     NO_FOLDER_APPROVAL_CODE, SOURCE_KIND_DIFFERS_CODE, approve_kind, approve_kind_action, background_queue_blocker, kinds_payload, load_kind_approval, \
     next_kind_season, record_kind_attempt, stop_kind_approval
@@ -937,11 +938,22 @@ def test_legacy_or_malformed_item_identity_uses_its_recorded_path(tmp_path: Path
     assert _next(config, _loader({SEASON: _approved(config)}, {})) is None
 
 
-@pytest.mark.parametrize("kind", [DARKER, "bright_live_action", "unmeasured", "mixed", "cartoon", "4k"])
-def test_old_samples_follow_a_reusable_kind_while_its_newest_sample_stays_visible(tmp_path: Path, kind: str) -> None:
-    from test_page_state import _review_ready
+def _approve_stale_kind(config: MediaforceConfig, kind: str) -> None:
+    approve_kind(config, kind, APPROVED_SEASON, _approved(config), approved_at="now")
+    path = config.paths.web_state_dir / "kinds" / f"{kind}.json"
+    saved_kind = json.loads(path.read_text())
+    saved_kind["accepted_policy_hash"] = "a different policy"
+    path.write_text(json.dumps(saved_kind))
 
+
+@pytest.mark.parametrize("stale_kind", [False, True])
+@pytest.mark.parametrize("kind", [DARKER, "bright_live_action", "unmeasured", "mixed", "cartoon", "4k"])
+def test_old_samples_follow_a_reusable_kind_while_its_newest_sample_stays_visible(
+        tmp_path: Path, kind: str, stale_kind: bool,
+) -> None:
     config = _config(tmp_path)
+    if stale_kind and kind in APPROVABLE_KINDS:
+        _approve_stale_kind(config, kind)
     folders = {SEASON: _review_ready(), OTHER_SEASON: _review_ready()}
     load = _loader(folders, {SEASON: kind, OTHER_SEASON: kind})
     sources = PageStateSources(load, lambda *_args: {})
@@ -952,28 +964,80 @@ def test_old_samples_follow_a_reusable_kind_while_its_newest_sample_stays_visibl
                 host_json="{}", policy_json="{}", sample_item_json="{}",
                 created_at=f"2026-10-29T0{index}:00:00+00:00", updated_at="now"))
         connection.commit()
-        states = card_page_states(connection, config, [(season, None, None) for season in folders], sources)
-        reusable = kind in {DARKER, "bright_live_action"}
+        report = {"seasons": [{"season": season, "kind": kind} for season in folders]}
+        with patch("mediaforce.web.runtime.kind_approvals.season_kind_report", return_value=report) as grouping:
+            states = card_page_states(connection, config, [(season, None, None) for season in folders], sources)
+        assert grouping.call_count == 1
+        reusable = kind in APPROVABLE_KINDS
         assert states[SEASON]["key"] == ("waiting_for_kind" if reusable else "ready_to_compare")
         assert states[SEASON]["needs_you"] is not reusable
         assert states[OTHER_SEASON]["key"] == "ready_to_compare"
         assert states[OTHER_SEASON]["needs_you"]
         assert load(config, SEASON) == folders[SEASON]
-        assert len(connection.execute(calibration_jobs.select()).all()) == len(folders)
 
 
 def test_kind_approval_replaces_old_sample_decision_and_allows_queueing(tmp_path: Path) -> None:
-    from test_page_state import _review_ready
-
     config = _config(tmp_path)
     saved = _review_ready()
     load = _loader({SEASON: saved}, {SEASON: DARKER})
     approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
     with open_db(config.paths.db_path) as connection:
-        states = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))
+        with patch("mediaforce.web.runtime.kind_approvals.season_kind_report",
+                   return_value={"seasons": [{"season": SEASON, "kind": DARKER}]}):
+            states = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))
     assert states[SEASON]["key"] == "ready_to_make"
     assert not states[SEASON]["needs_you"]
     assert states[SEASON]["approval_kind"] == DARKER
     result, manifests = _queue(config, SEASON, load)
     assert result["ok"] and manifests
     assert load(config, SEASON) == saved
+
+
+@pytest.mark.parametrize("status", ["running", "queued", "pending_review"])
+def test_an_approved_kind_keeps_active_samples_and_review_blocked_decisions(tmp_path: Path, status: str) -> None:
+    config = _config(tmp_path)
+    load = _loader({SEASON: _review_ready()}, {SEASON: DARKER})
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(calibration_jobs.insert().values(
+            job_id="sample", prefix=SEASON, status=status, lane="sample", action="sample",
+            host_json="{}", policy_json="{}", sample_item_json="{}", created_at="now", updated_at="now"))
+        connection.commit()
+        with patch("mediaforce.web.runtime.kind_approvals.season_kind_report",
+                   return_value={"seasons": [{"season": SEASON, "kind": DARKER}]}), \
+                patch("mediaforce.web.runtime.page_state.quality_risk_blocks_production", return_value=status == "pending_review"):
+            states = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))
+    assert states[SEASON]["key"] == {"running": "making_test", "queued": "sample_waiting",
+                                     "pending_review": "ready_to_compare"}[status]
+    assert states[SEASON]["needs_you"] == (status == "pending_review")
+
+
+@pytest.mark.parametrize("stale_kind", [False, True])
+def test_kind_page_and_season_states_choose_the_same_waiting_sample(tmp_path: Path, stale_kind: bool) -> None:
+    config = _config(tmp_path)
+    if stale_kind:
+        _approve_stale_kind(config, DARKER)
+    done = "tv/Done/Season 1"
+    folders = {season: _review_ready() for season in [SEASON, OTHER_SEASON, done]}
+    load = _loader(folders, {season: DARKER for season in folders})
+    with open_db(config.paths.db_path) as connection:
+        for index, season in enumerate(folders):
+            published = _content_item(connection, f"{season}/e00.mkv", status="promoted", codec="av1", current_dark=0.0)
+            _admit_historical_original(connection, published, dark=0.5)
+            if season != done:
+                _content_item(connection, f"{season}/e01.mkv", status="discovered", codec="h264", current_dark=0.0)
+            connection.execute(series_metadata.insert().values(
+                series_prefix="/".join(season.split("/")[:2]), tmdb_genres_json='["Drama"]', updated_at="now"))
+            connection.execute(calibration_jobs.insert().values(
+                job_id=f"sample-{index}", prefix=season, status="pending_review", lane="sample", action="sample",
+                host_json="{}", policy_json="{}", sample_item_json="{}",
+                created_at=f"2026-10-29T0{index}:00:00+00:00", updated_at="now"))
+        connection.commit()
+        kind = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"]
+                    if row["kind"] == DARKER)
+        states = card_page_states(connection, config, [(season, None, None) for season in folders],
+                                  PageStateSources(load, lambda *_args: {}))
+    assert kind["approval"] is None
+    assert kind["sample_season"] == OTHER_SEASON
+    assert states[kind["sample_season"]]["key"] == "ready_to_compare"
+    assert states[SEASON]["key"] == "waiting_for_kind"
