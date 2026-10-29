@@ -154,6 +154,12 @@ and cancels the remainder. See `docs/architecture/evidence-worker.md`.
 The TV library (`/` or `/folders`) lists shows. Open a show for show-wide
 actions, or a season for season actions.
 
+The Mac app's back button names the page you came from and returns to it,
+including Media, Space saved, a kind, or another show, season or sample.
+Changing the selection in the sidebar starts a new browsing path.
+Opening a page from a notification or the menu bar keeps a way back to the
+page already open in the window.
+
 In the Mac app, a show's seasons follow the player and show choices, so loading
 the season list leaves the player in place. The file list highlights the file
 shown in the player, including the first file chosen when the page opens.
