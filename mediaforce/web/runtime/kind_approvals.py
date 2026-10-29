@@ -439,7 +439,7 @@ def _lent_settings(
     return sorted(settings, key=lambda setting: (setting["library_item_id"] is None, setting["show"]))
 
 
-SAMPLE_IN_HAND_STATUSES = SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES | SAMPLE_FAILED_STATUSES | {"pending_review"}
+SAMPLE_IN_HAND_STATUSES = SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES | SAMPLE_FAILED_STATUSES | {"pending_review", "completed"}
 
 
 def _newest_sample(connection: DBClient, seasons: list[str]) -> dict[str, Any] | None:
