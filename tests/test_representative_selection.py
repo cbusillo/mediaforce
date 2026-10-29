@@ -372,6 +372,10 @@ class RepresentativeSelectionTests(unittest.TestCase):
             {(group["kind"], group["value"]) for group in selection.payload["coverage"]["untested_groups"]},
             {("video_format", "hevc"), ("resolution", "2160p")},
         )
+        summary = selection.payload["coverage_summary"]
+        for group in selection.payload["coverage"]["untested_groups"]:
+            self.assertIn(group["label"], summary)
+            self.assertNotIn(group["value"], summary)
 
     def test_single_sample_of_uniform_season_keeps_high_confidence(self) -> None:
         selection = select_representatives([self._item(index) for index in range(1, 6)], prefix="tv/Example/Season 1")
