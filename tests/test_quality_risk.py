@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from typing import Any
 
 from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.type_defs import object_dict, object_list
@@ -636,7 +637,7 @@ class QualityRiskContractTests(unittest.TestCase):
     def _failed_trace_contract(
             sample: dict[str, object], trace: dict[str, object], *,
             preview_video: dict[str, object], job_id: str,
-    ) -> dict[str, object]:
+    ) -> dict[str, Any]:
         return build_quality_risk_contract(
             prefix="tv/House/Season 2",
             sample_item=sample,
