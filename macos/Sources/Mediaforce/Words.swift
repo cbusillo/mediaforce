@@ -211,6 +211,7 @@ extension Words {
         if work.runningCount > 0 { return "Compressing" }
         if work.waitingCount > 0 { return "Waiting to start" }
         if !work.originalCheckWaitReasons.isEmpty { return "Waiting to check new originals" }
+        if work.checksPaused { return checksPausedBar }
         return facts.samples.waitingOnYou.isEmpty && work.seasonsNeedingYou.isEmpty ? "All caught up" : "Waiting for you"
     }
 
@@ -265,7 +266,7 @@ extension Words {
     static func waitingReason(_ sample: MainWindowFacts.Sample, _ facts: MainWindowFacts) -> String? {
         var reasons = facts.keptOriginal.held.first(where: { $0.prefix == sample.prefix })?.reasons.map(holdReason) ?? []
         let work = facts.work
-        if work.pausedByOwner || work.checksPaused { reasons.append("until you resume") }
+        if work.pausedByOwner { reasons.append("until you resume") }
         if work.stopReasons.contains("storage_unavailable") { reasons.append("until storage is back") }
         if work.stopReasons.contains("no_computer_ready") { reasons.append("for a free computer") }
         return reasons.isEmpty ? nil : "Waits: " + reasons.joined(separator: ", ")
@@ -401,7 +402,7 @@ extension Words {
     static let lookForNewFilesNow = "Look for New Files"
     static let openMediaforce = "Open Mediaforce"
     static let settingsEllipsis = "Settings…"
-    static let resumeHelp = "Resume work on every computer."
+    static let resumeHelp = "Resume compression and paused checks."
     static let menuNotConnected = "Mediaforce isn't answering. Open it to see why."
 
     /// The line under the menu bar switch: what Mediaforce is doing, or why it isn't.
@@ -417,6 +418,7 @@ extension Words {
             return more > 0 ? "Compressing \(name) and \(more) more" : "Compressing \(name)"
         }
         if work.waitingCount > 0 { return "Waiting to start" }
+        if work.checksPaused { return checksPausedBar }
         return Attention.waitingOnYou(facts) > 0 ? waitingForYou : "Up to date"
     }
     static let tryAgain = "Try Again"

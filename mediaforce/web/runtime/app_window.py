@@ -501,25 +501,24 @@ def _work(
         computers: list[dict[str, Any]],
 ) -> dict[str, Any]:
     paused = bool(load_queue_state(connection).get("is_paused")) or background_work_is_paused(connection)
+    evidence_summary = evidence_queue_summary(connection)
+    checks_paused = bool(
+        evidence_summary.get("batch_id")
+        and evidence_summary.get("status") == "paused"
+        and evidence_summary.get("is_paused")
+        and not evidence_summary.get("cancel_requested")
+        and any(evidence_summary["counts"].get(status, 0) for status in EVIDENCE_WORK_CLAIMABLE_STATUSES)
+    )
     waiting_count = count_pending_encode_work(connection)
     running_count = sum(running_encode_counts_by_host(connection).values())
     stop_reasons = []
-    evidence = evidence_queue_summary(connection)
-    checks_paused = (
-        evidence["status"] == "paused"
-        and bool(evidence["is_paused"])
-        and not bool(evidence["cancel_requested"])
-        and any(int(evidence["counts"].get(status, 0)) for status in EVIDENCE_WORK_CLAIMABLE_STATUSES)
-    )
-    if checks_paused:
-        stop_reasons.append("checks_paused")
     if not storage_admits_work:
         stop_reasons.append("storage_unavailable")
     if waiting_count and not any(computer["state"] in WORKING_COMPUTER_STATES for computer in computers):
         stop_reasons.append("no_computer_ready")
     if paused:
         state = "paused"
-    elif stop_reasons and not (running_count and set(stop_reasons) == {"checks_paused"}):
+    elif stop_reasons:
         state = "stopped"
     elif running_count:
         state = "running"
@@ -528,6 +527,7 @@ def _work(
     return {
         "state": state,
         "paused_by_owner": paused,
+        "checks_paused": checks_paused,
         "stop_reasons": stop_reasons,
         "running_count": running_count,
         "running_seasons": _running_seasons(connection),

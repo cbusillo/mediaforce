@@ -15,11 +15,12 @@ still answers when that storage is gone, and it starts no work.
 - `work`: `state` is `running`, `idle`, `paused` (the owner paused the queue)
   or `stopped`. `stop_reasons` say why work cannot start, even while paused:
   `storage_unavailable` (the same rule that admits encode work) and
-  `no_computer_ready` (work is waiting and no computer can take it), and
-  `checks_paused` (the active evidence batch is paused with claimable rows).
-  Unrelated running encoding keeps the work state `running` when only checks are paused.
+  `no_computer_ready` (work is waiting and no computer can take it).
   `running_count` and `waiting_count` count encode jobs. `storage` lists each
   required mount with its recovery `status` and last `failure` code.
+  `checks_paused` is true when the active evidence batch is paused, has not
+  been asked to cancel, and still has work that can be claimed. It is separate
+  from encode `state`, `paused_by_owner`, and `stop_reasons`.
   `seasons_needing_you` carries non-sample season decisions for the badge and
   notifications, using the TV season facts below; sample decisions remain under
   `samples.waiting_on_you` so they count once.

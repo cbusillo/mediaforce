@@ -7,7 +7,9 @@ from typing import Any
 import pytest
 
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.db_tables import encode_jobs, evidence_queue_state, item_events, library_item_evidence_state, library_items, motion_keep_decisions, staged_artifacts
+from mediaforce.core.db_tables import evidence_queue_state, encode_jobs, item_events, library_item_evidence_state, library_items, \
+    motion_keep_decisions, staged_artifacts
+from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
 from mediaforce.library.background_work import background_work_is_paused, set_background_work_paused
 from mediaforce.library.evidence_queue import evidence_queue_summary
@@ -361,23 +363,27 @@ def test_saved_background_pause_is_visible_and_preserved_by_native_reads(connect
         assert background_work_is_paused(connection)
 
 
-def test_paused_fingerprint_checks_are_visible_without_stopping_running_encoding(connection: DBClient) -> None:
+def test_paused_fingerprint_batch_is_visible_without_changing_encode_state(connection: DBClient) -> None:
     item_id = _item(connection, "tv/A/Season 1/e1.mkv")
-    connection.execute(evidence_queue_state.insert().values(
-        queue_name="evidence", batch_id="batch-1", status="paused", is_paused=1, cancel_requested=0,
-        item_count=1, updated_at=NOW,
-    ))
-    connection.execute(library_item_evidence_state.insert().values(
-        library_item_id=item_id, evidence_kind="media_fingerprint", state="analysis_required", policy_hash="policy",
-        work_batch_id="batch-1", work_status="queued", work_priority=50, attempt_count=0, updated_at=NOW,
-    ))
-    _encode_job(connection, "tv/B/Season 2", status="running", host_key="mbp")
+    baseline = _payload(connection)["work"]
+    connection.execute(
+        library_item_evidence_state.insert().values(
+            library_item_id=item_id, evidence_kind=MEDIA_FINGERPRINT_EVIDENCE_KIND, state="analysis_required",
+            policy_hash="policy", work_batch_id="batch-1", work_status="queued", updated_at=NOW,
+        )
+    )
+    connection.execute(
+        evidence_queue_state.insert().values(
+            queue_name="evidence", batch_id="batch-1", status="paused", evidence_kinds_json='["media_fingerprint"]',
+            is_paused=1, cancel_requested=0, item_count=1, updated_at=NOW,
+        )
+    )
     connection.commit()
 
     for _ in range(2):
-        work = _payload(connection, computers=[_computer("mbp")])["work"]
-        assert work["stop_reasons"] == ["checks_paused"]
-        assert work["state"] == "running"
+        work = _payload(connection)["work"]
+        assert work["checks_paused"] is True
+        assert (work["state"], work["stop_reasons"]) == (baseline["state"], baseline["stop_reasons"])
         assert evidence_queue_summary(connection)["is_paused"] is True
 
 

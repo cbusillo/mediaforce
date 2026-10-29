@@ -284,7 +284,8 @@ enum TopNotice: Hashable {
     case stale, paused
 
     static func shown(connection: ServerState, facts: MainWindowFacts) -> [TopNotice] {
-        (connection == .reachable ? [] : [.stale]) + (facts.work.canResume ? [.paused] : [])
+        let canResume = facts.work.pausedByOwner || facts.work.checksPaused
+        return (connection == .reachable ? [] : [.stale]) + (canResume ? [.paused] : [])
     }
 }
 
