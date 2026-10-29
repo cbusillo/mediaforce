@@ -203,10 +203,10 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(tmp_path: Path, out
             raise OSError("Applications folder not writable")
 
     actual_backup = controller_deploy.backup_database
-    def backup(source: Path, destination: Path) -> None:
+    def backup(source: Path, destination: Path, *, pause_queue: bool = False) -> None:
         if outcome == "backup-failed":
             raise OSError("backup volume unavailable")
-        actual_backup(source, destination)
+        actual_backup(source, destination, pause_queue=pause_queue)
 
     with patch.object(controller_deploy, "_api", side_effect=api), patch.object(
         controller_deploy, "_run", side_effect=git
@@ -426,7 +426,7 @@ def test_stopped_deploy_owns_database_until_verified_backup_and_pause(tmp_path: 
                release_stopped_runtime: Callable[[], None], **_kwargs: Any) -> None:
         lease = assert_mediaforce_runtime_lock_held()
         controller_deploy.require_stopped_idle_controller(stopped_config)
-        controller_deploy.backup_database(database, snapshot)
+        controller_deploy.backup_database(database, snapshot, pause_queue=True)
         controller_deploy.pause_stopped_queue(stopped_config)
         release_stopped_runtime()
         with pytest.raises(MediaforceRuntimeLockOwnershipError):
@@ -438,6 +438,26 @@ def test_stopped_deploy_owns_database_until_verified_backup_and_pause(tmp_path: 
         controller_deploy.deploy(tmp_path / "source", "main", tmp_path / "stage", tmp_path / "home", "http://fixture",
                                  database=database, stopped=True)
     with sqlite3.connect(snapshot) as connection:
-        assert connection.execute("select count(*) from encode_queue_state").fetchone() == (0,)
+        assert connection.execute("select is_paused from encode_queue_state").fetchone() == (1,)
     with sqlite3.connect(database) as connection:
         assert connection.execute("select is_paused from encode_queue_state").fetchone() == (1,)
+
+
+def test_paused_rollback_backup_preserves_work_and_leaves_source_queue_unchanged(tmp_path: Path) -> None:
+    from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
+
+    source, backup = tmp_path / "source.sqlite", tmp_path / "before.sqlite"
+    retained_job = "retained-job"
+    work_id = 42
+    with open_db(source) as connection:
+        state = load_queue_state(connection)
+        state.update(is_paused=False, stop_requested=True, active_job_id=retained_job, updated_at="2026-10-29T00:00:00+00:00")
+        save_queue_state(connection, state)
+        connection.exec_driver_sql("CREATE TABLE retained_work (job INTEGER)")
+        connection.exec_driver_sql("INSERT INTO retained_work VALUES (?)", (work_id,))
+    controller_deploy.backup_database(source, backup, pause_queue=True)
+    with sqlite3.connect(source) as connection:
+        assert connection.execute("SELECT is_paused FROM encode_queue_state").fetchone() == (0,)
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute("SELECT is_paused, stop_requested, active_job_id FROM encode_queue_state").fetchone() == (1, 1, retained_job)
+        assert connection.execute("SELECT job FROM retained_work").fetchall() == [(work_id,)]

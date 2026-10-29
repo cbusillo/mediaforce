@@ -89,7 +89,10 @@ evidence record is running, and prepares the candidate without starting old
 code. Missing or running work records require reconciliation; this mode never
 clears them.
 
-After the existing verified backup, the script pauses the encode queue through
+The rollback copy retains the work records with its encode queue paused, as in
+the online flow. The source database is unchanged until the backup passes its
+integrity check.
+After that verified backup, the script pauses the encode queue through
 the database's custody guards, then releases its runtime lease before starting
 the candidate. The ordinary health check, app installation and queue resume
 follow. A failure leaves the service stopped. The saved plist and backup remain

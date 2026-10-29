@@ -18,7 +18,7 @@ from uuid import uuid4
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import open_db, open_readonly_db
 from mediaforce.core.utils import timestamp
-from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
+from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, load_queue_state, save_queue_state
 from mediaforce.ops.login_item import (
     LoginItemPaths, _atomic_write, _bootstrap, _launch_domain, _launch_target,
     _require_success, _run_command, disable_login_item, enable_login_item,
@@ -117,12 +117,20 @@ def _is_present(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
-def backup_database(database: Path, destination: Path) -> None:
+def backup_database(database: Path, destination: Path, *, pause_queue: bool = False) -> None:
     if destination.exists():
         raise RuntimeError("backup already exists; use a fresh deploy stage")
     with sqlite3.connect(database.resolve().as_uri() + "?mode=rw", uri=True) as source:
         with sqlite3.connect(destination) as backup:
             source.backup(backup)
+            if pause_queue:
+                backup.execute(
+                    "INSERT INTO encode_queue_state (queue_name, is_paused, stop_requested, active_job_id, updated_at) "
+                    "VALUES (?, 1, 0, NULL, ?) ON CONFLICT (queue_name) DO UPDATE SET "
+                    "is_paused = 1, updated_at = excluded.updated_at",
+                    (DEFAULT_QUEUE_NAME, timestamp()),
+                )
+                backup.commit()
             if backup.execute("pragma quick_check").fetchall() != [("ok",)]:
                 raise RuntimeError("database backup failed quick_check")
 
@@ -234,7 +242,7 @@ def _deploy(
             time.sleep(1)
         else:
             raise RuntimeError("port 8777 still listening")
-        backup_database(database, stage / "before.sqlite")
+        backup_database(database, stage / "before.sqlite", pause_queue=stopped_config is not None)
         candidate_started = True
         if stopped_config is not None:
             pause_stopped_queue(stopped_config)

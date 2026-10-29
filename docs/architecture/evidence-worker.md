@@ -129,12 +129,15 @@ schedule-aware computer projection. Standalone defaults use the current host
 collector so a cold status cache cannot masquerade as unavailable computers.
 
 The controller's window also admits catalog scans, automatic file checks and
-publishing, and transient cleanup. Automatic scans wait outside that window;
-an explicit refresh explains the wait instead of claiming it was queued. A
-scan rechecks before each file and before reconciling missing sources, and
-publishing rechecks before each file. An interrupted scan retains completed
-catalog progress and uses the existing automatic retry path. File pages show
-the publishing wait without changing saved validation or attempt counts.
+publishing, and transient cleanup. Automatic scans wait outside that window.
+A requested refresh remains queued, with its window wait recorded, even when
+periodic refreshing is off. Its existing worker waits outside database
+transactions, reads current settings when the window opens, and resumes after
+an interruption or restart. A scan rechecks before each file and before
+reconciling missing sources; a retry uses a new scan ID and retains completed
+catalog progress. Publishing rechecks before each file. File pages show a
+window wait only for copies eligible for automatic checking, without changing
+saved validation or attempt counts; a missing future window is stated plainly.
 Remote measuring and encoding retain their own computers' schedules. Reading
 the kinds report remains available at any time and starts no measuring work.
 
