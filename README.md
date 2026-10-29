@@ -505,6 +505,9 @@ per-show or per-season tuning there.
 Bench-approved drafts are saved locally in runtime settings so future runs on
 that machine can reuse them without changing the tracked repo defaults.
 
+Plex posters are requested at display-sized dimensions to avoid downloading
+full-size artwork.
+
 Use the Mac app's Settings for ordered typed library roots, the transcode folder,
 remote host definitions, the Plex server URL, and Plex-to-Mediaforce path
 mappings so those environment details stay off the checked-in repo. Library

@@ -528,6 +528,20 @@ class ExternalMetadataTests(unittest.TestCase):
         for value in (None, "", "/library/metadata/7/art/1", "/../thumb", "https://x.test/library/metadata/7/thumb", 7):
             self.assertIsNone(plex_thumb_path(value), value)
 
+    def test_plex_poster_refuses_an_arbitrary_url_before_fetching(self) -> None:
+        requests: list[tuple[str, Mapping[str, str]]] = []
+        client = PlexClient(
+            base_url="http://plex.local:32400",
+            token="plex-secret",
+            client_identifier="mediaforce-tests",
+            fetch_image_fn=self._poster_fetch(requests),
+        )
+
+        with self.assertRaises(ProviderHttpError):
+            client.poster("https://elsewhere.test/poster.jpg")
+
+        self.assertEqual(requests, [])
+
     def test_sync_caches_each_show_and_movie_poster_from_plex_once_and_serves_it(self) -> None:
         config = self._config(keep_posters=True)
         requests: list[tuple[str, Mapping[str, str]]] = []
@@ -541,13 +555,18 @@ class ExternalMetadataTests(unittest.TestCase):
             unmatched_feature = cached_poster(connection, config.paths.poster_dir, "movies/Ronin (1998)")
             missing = cached_poster(connection, config.paths.poster_dir, "tv/Unknown Show")
 
-        self.assertEqual(sorted(url for url, _ in requests), [
-            "http://plex.local:32400/library/metadata/11/thumb/1700000000",
-            "http://plex.local:32400/library/metadata/7/thumb/1700000001",
-            "http://plex.local:32400/library/metadata/8/thumb/1700000002",
-            "http://plex.local:32400/library/metadata/9/thumb/1700000003",
+        parsed_requests = [urlsplit(url) for url, _ in requests]
+        self.assertEqual(len(requests), 4)
+        self.assertTrue(all((request.scheme, request.netloc) == ("http", "plex.local:32400") for request in parsed_requests))
+        self.assertTrue(all(request.path == "/photo/:/transcode" for request in parsed_requests))
+        queries = [parse_qs(request.query) for request in parsed_requests]
+        self.assertEqual(sorted(query["url"][0] for query in queries), [
+            "/library/metadata/11/thumb/1700000000",
+            "/library/metadata/7/thumb/1700000001",
+            "/library/metadata/8/thumb/1700000002",
+            "/library/metadata/9/thumb/1700000003",
         ])
-        # The token goes in a header, never in the poster's URL.
+        self.assertTrue(all(int(query["width"][0]) > 0 and int(query["height"][0]) > 0 for query in queries))
         self.assertTrue(all(headers.get("X-Plex-Token") == "plex-secret" and "plex-secret" not in url for url, headers in requests))
         self.assertEqual((first.posters.refreshed, second.posters.cached), (4, 4))
         assert show is not None and movie is not None and config.paths.poster_dir is not None
@@ -571,7 +590,10 @@ class ExternalMetadataTests(unittest.TestCase):
             )
             after = cached_poster(connection, config.paths.poster_dir, "tv/Show")
 
-        self.assertIn("http://plex.local:32400/library/metadata/11/thumb/1800000000", [url for url, _ in requests])
+        self.assertIn(
+            "/library/metadata/11/thumb/1800000000",
+            [parse_qs(urlsplit(url).query)["url"][0] for url, _ in requests],
+        )
         self.assertNotEqual(before, after)
 
     def test_a_title_without_a_plex_poster_reads_none(self) -> None:
