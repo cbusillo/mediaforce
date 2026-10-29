@@ -3,7 +3,7 @@ import json
 import unittest
 from typing import Any
 
-from mediaforce.core.evidence import build_evidence_envelope, evidence_staleness
+from mediaforce.core.evidence import EVIDENCE_VERSION, build_evidence_envelope, evidence_staleness
 from mediaforce.library.representatives import (
     FINGERPRINT_DIMENSIONS,
     TECHNICAL_PROFILE_DIMENSIONS,
@@ -209,7 +209,7 @@ class RepresentativeSelectionTests(unittest.TestCase):
         )
 
         self.assertEqual(envelope["evidence_id"], reversed_envelope["evidence_id"])
-        self.assertEqual(envelope["version"], 1)
+        self.assertEqual(envelope["version"], EVIDENCE_VERSION)
         self.assertEqual(envelope["measurement"]["sample_job_id"], "sample-job-123")
         self.assertNotIn("/Volumes/private-media", json.dumps(envelope, sort_keys=True))
 
