@@ -25,7 +25,8 @@ from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 from mediaforce.web.runtime.encode_runtime import CONTROLLER_RESTART_STOP_REASON, KEPT_ORIGINAL_TERMINAL_REASON, unfinished_child_reason
 from mediaforce.library.content_kinds import season_evidence, season_grouping
 from mediaforce.library.source_evidence import append_version
-from mediaforce.library.workflow_state import ItemWorkflowState
+from mediaforce.library.workflow_state import build_folder_workflow_state
+from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
@@ -627,11 +628,43 @@ def _stored_folder_run(
 
 
 def _displayed_episode(config: MediaforceConfig, item_id: int, path: str) -> dict[str, Any]:
-    item = ItemWorkflowState(item_id=item_id, rel_path=path, status="discovered", state="encode_candidate",
-                             lane="encode", has_staged_output=False, blocker=None)
     with open_db(config.paths.db_path) as connection:
-        [episode] = load_season_episode_progress(connection, [item], config=config)
+        workflow = build_folder_workflow_state(connection, path, library_types=config.library_type_map)
+        [episode] = load_season_episode_progress(connection, [item for item in workflow.items if item.item_id == item_id], config=config)
     return episode
+
+
+@pytest.mark.parametrize("checked_state", ["size_held", "failed", "publish_failed", "kept_original"])
+@pytest.mark.parametrize("current_status,older_writer", [("needs_attention", False), ("needs_attention", True), ("completed", True)])
+def test_checked_copy_or_keep_supersedes_its_run_but_not_an_independent_writer(
+        tmp_path: Path, checked_state: str, current_status: str, older_writer: bool,
+) -> None:
+    config = _config(tmp_path)
+    item_id = _waiting_episode(config, EPISODE, 1_000, status="discovered" if checked_state == "kept_original" else "encoded")
+    if older_writer:
+        _stored_folder_run(config, SEASON, {item_id: EPISODE}, {item_id: ("stopped", CONTROLLER_RESTART_STOP_REASON)},
+                           name="earlier-writer")
+    children = _stored_folder_run(config, SEASON, {item_id: EPISODE}, {item_id: (current_status, None)},
+                                  name="current", created_at="2026-10-27T00:00:00+00:00")
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == children[item_id]).values(
+            progress_json=json.dumps({"failure_analysis": {"kind": "final_size_target_miss"}})))
+        if checked_state == "kept_original":
+            connection.execute(motion_keep_decisions.insert().values(
+                library_item_id=item_id, source_fingerprint=EPISODE, reason_code="mixed_motion", prefix=SEASON, kept_at="now"))
+        else:
+            validation: dict[str, Any] = {"passed": False, "checks": [{"passed": False, "message": "The copy did not decode."}]}
+            if checked_state == "size_held":
+                validation.update(checks=[{"passed": False, "message": FAR_BELOW_PREDICTION_CHECK}], size_prediction={"held": True})
+            elif checked_state == "publish_failed":
+                validation = {"passed": True, "automatic_publish": {"state": "failed"}}
+            connection.execute(staged_artifacts.insert().values(
+                library_item_id=item_id, staging_path="checked.mkv", validation_json=json.dumps(validation), updated_at="now"))
+
+    episode = _displayed_episode(config, item_id, EPISODE)
+
+    assert episode["stage"] == ("kept_original" if checked_state == "kept_original" else "needs_you")
+    assert [reason["code"] for reason in episode["additional_wait_reasons"]] == (["restart_stopped"] if older_writer else [])
 
 
 @pytest.mark.parametrize("scope", [SEASON, "tv/Thriller", "tv", ""])

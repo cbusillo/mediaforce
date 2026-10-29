@@ -61,6 +61,7 @@ def file_encode_outcomes(
         # Most historical runs cannot match this page. Decode their state only after membership can match.
         job.update(progress=json.loads(row["progress_json"] or "{}"), host=object_dict(json.loads(row["host_json"] or "{}")))
         custody_hold = bool(row["retained_writer"]) and encode_writer_cleanup_pending(config, job)
+        job["writer_cleanup_pending"] = custody_hold
         reason, _label, needs_owner = (unfinished_child_reason(job) if job["status"] not in {"completed", "running"}
                                       else ("", "", False))
         held = custody_hold or needs_owner or reason == "size_exception_declined"

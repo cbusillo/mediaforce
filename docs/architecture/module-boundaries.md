@@ -267,6 +267,8 @@ Guidance:
       as in admission; progress is a display hint only for work with no hold
     - unknown completed membership cannot clear a question, and historical
       progress and computer data is decoded only after membership can match
+    - a checked copy or settled keep choice supersedes its own run's ordinary
+      explanation; independent writer custody remains an additional reason
   - `folder_tuning_helpers.py`
   - `folder_tuning_advice.py`
   - `folder_tuning_runtime.py`

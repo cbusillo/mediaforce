@@ -82,6 +82,11 @@ def load_season_episode_progress(
             continue
         reasons = episode["additional_wait_reasons"]
         for job in outcome.hold_jobs:
+            # The episode already weighed its current run against its checked copy or settled choice.
+            # Writer custody is independent of that outcome and must still be visible.
+            if not job["writer_cleanup_pending"] and (
+                    job["job_id"] == outcome.job["job_id"] or episode["stage"] == "kept_original"):
+                continue
             reason, _label, needs_owner = unfinished_child_reason(job)
             if not needs_owner:
                 continue
