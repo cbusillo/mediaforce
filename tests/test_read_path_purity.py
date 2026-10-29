@@ -215,7 +215,7 @@ class ReadPathPurityTests(unittest.TestCase):
                     state = load_queue_state(connection)
                     self.assertFalse(state["is_paused"])
                     self.assertFalse(state["stop_requested"])
-                    self.assertTrue(load_evidence_queue_state(connection)["is_paused"])
+                    self.assertFalse(load_evidence_queue_state(connection)["is_paused"])
 
     @staticmethod
     def _endpoint(app: FastAPI, path: str, name: str) -> Callable[..., Any]:

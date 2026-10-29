@@ -12,9 +12,10 @@ from sqlalchemy import select
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, count_pending_encode_work, load_queue_state
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.library.candidate_selection import SEASON_PATTERN
 from mediaforce.library.background_work import background_work_is_paused
-from mediaforce.library.evidence_queue import original_check_wait_reasons
+from mediaforce.library.evidence_queue import EVIDENCE_QUEUE_ACTIVE_STATUSES, evidence_queue_summary, original_check_wait_reasons
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_source_sql
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
@@ -501,6 +502,7 @@ def _work(
         computers: list[dict[str, Any]],
 ) -> dict[str, Any]:
     paused = bool(load_queue_state(connection).get("is_paused")) or background_work_is_paused(connection)
+    evidence = evidence_queue_summary(connection)
     waiting_count = count_pending_encode_work(connection)
     running_count = sum(running_encode_counts_by_host(connection).values())
     stop_reasons = []
@@ -508,8 +510,18 @@ def _work(
         stop_reasons.append("storage_unavailable")
     if waiting_count and not any(computer["state"] in WORKING_COMPUTER_STATES for computer in computers):
         stop_reasons.append("no_computer_ready")
+    motion_checks_paused = (
+        bool(evidence.get("is_paused"))
+        and evidence.get("status") in EVIDENCE_QUEUE_ACTIVE_STATUSES
+        and not evidence.get("cancel_requested")
+        and int((evidence.get("claimable_counts") or {}).get(CADENCE_EVIDENCE_KIND, 0)) > 0
+    )
+    if motion_checks_paused:
+        stop_reasons.append("motion_checks_paused")
     if paused:
         state = "paused"
+    elif running_count and stop_reasons == ["motion_checks_paused"]:
+        state = "running"
     elif stop_reasons:
         state = "stopped"
     elif running_count:

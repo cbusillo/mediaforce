@@ -5,9 +5,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.db_tables import encode_jobs, item_events, library_items, motion_keep_decisions, staged_artifacts
+from mediaforce.core.db_tables import encode_jobs, evidence_queue_state, item_events, library_item_evidence_state, library_items, motion_keep_decisions, staged_artifacts
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_state
 from mediaforce.library.background_work import background_work_is_paused, set_background_work_paused
 from mediaforce.web.runtime import host_status
@@ -358,6 +360,53 @@ def test_saved_background_pause_is_visible_and_preserved_by_native_reads(connect
         assert work["state"] == "paused"
         assert work["paused_by_owner"] is True
         assert background_work_is_paused(connection)
+
+
+def test_paused_motion_batch_is_resumable_without_hiding_running_compression(connection: DBClient) -> None:
+    item_id = _item(connection, "tv/A/Season 1/e1.mkv")
+    connection.execute(
+        library_item_evidence_state.insert().values(
+            library_item_id=item_id, evidence_kind=CADENCE_EVIDENCE_KIND, state="analysis_required",
+            policy_hash="policy", work_batch_id="motion-batch", work_status="queued", attempt_count=2, updated_at=NOW,
+        )
+    )
+    connection.execute(
+        evidence_queue_state.insert().values(
+            queue_name="evidence", batch_id="motion-batch", status="paused", is_paused=1,
+            cancel_requested=0, updated_at=NOW,
+        )
+    )
+    _encode_job(connection, "tv/B/Season 2", status="running", host_key="mbp")
+
+    for _ in range(2):
+        work = _payload(connection, computers=[_computer("mbp")])["work"]
+        assert work["state"] == "running"
+        assert work["paused_by_owner"] is False
+        assert work["stop_reasons"] == ["motion_checks_paused"]
+        row = connection.execute(select(library_item_evidence_state)).mappings().one()
+        assert (row["work_batch_id"], row["work_status"], row["attempt_count"]) == ("motion-batch", "queued", 2)
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_terminal_motion_rows_do_not_offer_resume(connection: DBClient, status: str) -> None:
+    item_id = _item(connection, f"tv/A/Season 1/{status}.mkv")
+    connection.execute(
+        library_item_evidence_state.insert().values(
+            library_item_id=item_id, evidence_kind=CADENCE_EVIDENCE_KIND, state="analysis_required",
+            policy_hash="policy", work_batch_id="motion-batch", work_status=status, attempt_count=3, updated_at=NOW,
+        )
+    )
+    connection.execute(
+        evidence_queue_state.insert().values(
+            queue_name="evidence", batch_id="motion-batch", status="paused", is_paused=1,
+            cancel_requested=0, updated_at=NOW,
+        )
+    )
+    connection.commit()
+
+    assert "motion_checks_paused" not in _payload(connection)["work"]["stop_reasons"]
+    row = connection.execute(select(library_item_evidence_state)).mappings().one()
+    assert (row["work_status"], row["attempt_count"]) == (status, 3)
 
 
 def test_work_names_each_season_being_compressed_once(connection: DBClient) -> None:

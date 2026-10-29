@@ -25,6 +25,9 @@ struct MainWindowFacts: Decodable, Sendable {
         var originalCheckWaitReasons: [String] = []
         var seasonsNeedingYou: [TVShowsFacts.Season] = []
 
+        var motionChecksPaused: Bool { stopReasons.contains("motion_checks_paused") }
+        var canResume: Bool { pausedByOwner || motionChecksPaused }
+
         private enum CodingKeys: String, CodingKey {
             case state, pausedByOwner, stopReasons, runningCount, runningSeasons, waitingCount, originalCheckWaitReasons, seasonsNeedingYou
         }

@@ -284,7 +284,7 @@ enum TopNotice: Hashable {
     case stale, paused
 
     static func shown(connection: ServerState, facts: MainWindowFacts) -> [TopNotice] {
-        (connection == .reachable ? [] : [.stale]) + (facts.work.pausedByOwner ? [.paused] : [])
+        (connection == .reachable ? [] : [.stale]) + (facts.work.canResume ? [.paused] : [])
     }
 }
 
@@ -296,7 +296,8 @@ struct PausedBar: View {
         HStack(spacing: 8) {
             Image(systemName: "pause.circle.fill")
                 .foregroundStyle(Color.accentColor)
-            Text(Words.pausedBar)
+            Text(model.facts?.work.motionChecksPaused == true && model.facts?.work.pausedByOwner == false
+                 ? Words.motionChecksPausedBar : Words.pausedBar)
             Spacer(minLength: 0)
             Button(Words.resume) { Task { await model.setRunning(true) } }
                 .controlSize(.small)
@@ -332,7 +333,7 @@ struct PauseButton: View {
     let model: MainWindowModel
 
     var body: some View {
-        let paused = facts.work.pausedByOwner
+        let paused = facts.work.canResume
         Button {
             Task { await model.setRunning(paused) }
         } label: {

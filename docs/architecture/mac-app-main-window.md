@@ -15,7 +15,10 @@ still answers when that storage is gone, and it starts no work.
 - `work`: `state` is `running`, `idle`, `paused` (the owner paused the queue)
   or `stopped`. `stop_reasons` say why work cannot start, even while paused:
   `storage_unavailable` (the same rule that admits encode work) and
-  `no_computer_ready` (work is waiting and no computer can take it).
+  `no_computer_ready` (work is waiting and no computer can take it), or
+  `motion_checks_paused` (the active prepared batch has motion checks ready to
+  resume). The last reason does not make `paused_by_owner` true and does not
+  change `state` from `running` while compression is in progress.
   `running_count` and `waiting_count` count encode jobs. `storage` lists each
   required mount with its recovery `status` and last `failure` code.
   `seasons_needing_you` carries non-sample season decisions for the badge and
