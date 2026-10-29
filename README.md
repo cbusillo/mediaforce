@@ -41,7 +41,12 @@ The current implementation covers:
   original-file archival under the transcode root,
   and user-approved cleanup of those rollback copies
 
-A sample is still approved per show. Finished production files are checked and
+Live-action seasons can follow one approval for their kind of content. Older unapproved
+season samples stop asking separately when they finished before the kind was
+approved or before its newest sample was requested. Newer samples, uncertain timing,
+and existing folder approvals keep their own decision. While the kind waits for a
+choice, its newest sample stays available. Seasons without a reusable kind keep their own samples.
+Saved sample files are retained. Finished production files are checked and
 published automatically one at a time under their current approval. Manual
 checking and publishing remain explicit overrides. Rollback copies stay until
 the user approves cleanup.
