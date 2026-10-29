@@ -305,13 +305,13 @@ class DatabaseRuntimeTests(unittest.TestCase):
         legacy_payload.pop("source_sidecar_snapshots")
         return legacy_payload
 
-    def _assert_completed_v5_intent(
+    def _assert_completed_intent(
             self,
             intent_path: Path,
     ) -> dict[str, object]:
         self.assertTrue(intent_path.is_file())
         payload = json.loads(intent_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], 5)
+        self.assertEqual(payload["schema_version"], config_module._LEGACY_SQLITE_INTENT_VERSION)
         self.assertEqual(payload["phase"], "complete")
         self.assertIn(
             payload["cleanup_policy"],
@@ -379,7 +379,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
         ):
             migrate_config_state(config)
         payload = json.loads(intent_path.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], 5)
+        self.assertEqual(payload["schema_version"], config_module._LEGACY_SQLITE_INTENT_VERSION)
         self.assertEqual(payload["phase"], "cleaning")
         return config, source_path, destination_path, intent_path, payload
 
@@ -473,7 +473,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 intent_path = config_module._legacy_sqlite_migration_intent_path(
                     destination_path
                 )
-                completed = self._assert_completed_v5_intent(intent_path)
+                completed = self._assert_completed_intent(intent_path)
                 self.assertEqual(
                     completed["publication_policy"],
                     "exclusive_staging_rename",
@@ -855,7 +855,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 else:
                     with retry:
                         migrate_config_state(config)
-                    self._assert_completed_v5_intent(intent_path)
+                    self._assert_completed_intent(intent_path)
 
     def test_migrate_config_state_rechecks_legacy_prepared_completion_transition(
             self,
@@ -950,7 +950,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 else:
                     with retry:
                         migrate_config_state(config)
-                    self._assert_completed_v5_intent(intent_path)
+                    self._assert_completed_intent(intent_path)
                     self.assertEqual(
                         json.loads(transition_path.read_text(encoding="utf-8")),
                         cleaning_payload,
@@ -1859,7 +1859,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertTrue(destination_path.is_file())
             self.assertTrue(intent_path.is_file())
             intent_payload = json.loads(intent_path.read_text(encoding="utf-8"))
-            self.assertEqual(intent_payload["schema_version"], 5)
+            self.assertEqual(intent_payload["schema_version"], config_module._LEGACY_SQLITE_INTENT_VERSION)
             self.assertEqual(intent_payload["phase"], "cleaning")
             self.assertEqual(
                 intent_payload["cleanup_policy"],
@@ -1925,7 +1925,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 migrate_config_state(config)
 
             self.assertFalse(source_path.exists())
-            self._assert_completed_v5_intent(intent_path)
+            self._assert_completed_intent(intent_path)
             self.assertEqual(
                 list(destination_path.parent.glob(
                     ".library.sqlite3.migration-*.sqlite3"
@@ -1991,7 +1991,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 migrate_config_state(config)
 
             self.assertFalse(source_path.exists())
-            self._assert_completed_v5_intent(intent_path)
+            self._assert_completed_intent(intent_path)
             with sqlite3.connect(destination_path) as connection:
                 self.assertEqual(
                     connection.execute("SELECT value FROM migration_rows").fetchall(),
@@ -2031,7 +2031,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
             ):
                 migrate_config_state(config)
 
-            completed = self._assert_completed_v5_intent(intent_path)
+            completed = self._assert_completed_intent(intent_path)
             self.assertEqual(
                 completed["legacy_cleanup_absent_prefix"],
                 ["", "-wal", "-shm", "-journal"],
@@ -2772,7 +2772,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
             ):
                 migrate_config_state(config)
 
-            completed = self._assert_completed_v5_intent(intent_path)
+            completed = self._assert_completed_intent(intent_path)
             self.assertEqual(
                 completed["legacy_cleanup_absent_prefix"],
                 ["", "-wal"],
@@ -3002,7 +3002,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                         for message in logs.output
                     ))
                     self.assertFalse(source_path.exists())
-                    self._assert_completed_v5_intent(intent_path)
+                    self._assert_completed_intent(intent_path)
                     self.assertTrue(quarantines[0].is_file())
                     with sqlite3.connect(destination_path) as connection:
                         self.assertEqual(
@@ -3073,7 +3073,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 migrate_config_state(config)
 
             self.assertFalse(source_path.exists())
-            self._assert_completed_v5_intent(intent_path)
+            self._assert_completed_intent(intent_path)
             with sqlite3.connect(destination_path) as connection:
                 self.assertEqual(
                     connection.execute("SELECT value FROM migration_rows").fetchall(),
@@ -3154,7 +3154,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 for message in logs.output
             ))
             self.assertFalse(source_path.exists())
-            self._assert_completed_v5_intent(intent_path)
+            self._assert_completed_intent(intent_path)
             self.assertEqual(residual_wal.read_bytes(), b"unmanifested-v2-wal")
             self.assertEqual(
                 residual_quarantine.read_bytes(),
@@ -3312,7 +3312,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
             ):
                 migrate_config_state(config)
 
-            self._assert_completed_v5_intent(intent_path)
+            self._assert_completed_intent(intent_path)
             with sqlite3.connect(destination_path) as connection:
                 self.assertEqual(
                     connection.execute("SELECT value FROM migration_rows").fetchall(),
@@ -3453,7 +3453,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     [("publication-race-row",)],
                 )
             intent_payload = json.loads(intent_path.read_text(encoding="utf-8"))
-            self.assertEqual(intent_payload["schema_version"], 5)
+            self.assertEqual(intent_payload["schema_version"], config_module._LEGACY_SQLITE_INTENT_VERSION)
             self.assertEqual(intent_payload["phase"], "ready")
             self.assertTrue(source_path.is_file())
 
@@ -3569,7 +3569,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
                 self.assertTrue(publication_observed)
                 self.assertTrue(receipt_path.is_file())
-                self._assert_completed_v5_intent(intent_path)
+                self._assert_completed_intent(intent_path)
                 self.assertFalse(source_path.exists())
                 with sqlite3.connect(destination_path) as connection:
                     self.assertEqual(
@@ -3963,7 +3963,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 ):
                     migrate_config_state(config)
 
-                self._assert_completed_v5_intent(intent_path)
+                self._assert_completed_intent(intent_path)
                 for suffix in ("-wal", "-shm", "-journal"):
                     self.assertFalse(Path(f"{source_path}{suffix}").exists())
                 with sqlite3.connect(destination_path) as connection:
@@ -4903,7 +4903,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
             ):
                 migrate_config_state(config)
 
-            self._assert_completed_v5_intent(intent_path)
+            self._assert_completed_intent(intent_path)
             self.assertEqual(
                 len(list(source_path.parent.glob("*.mediaforce-retired-*"))),
                 4,
@@ -5258,7 +5258,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 migrate_config_state(config)
 
             self.assertFalse(source_path.exists())
-            self._assert_completed_v5_intent(intent_path)
+            self._assert_completed_intent(intent_path)
             with sqlite3.connect(destination_path) as connection:
                 self.assertEqual(
                     connection.execute("SELECT value FROM migration_rows").fetchall(),
@@ -5486,7 +5486,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             self.assertFalse(source_path.exists())
             self.assertTrue(destination_path.is_file())
-            self._assert_completed_v5_intent(intent_path)
+            self._assert_completed_intent(intent_path)
             self.assertEqual(
                 list(destination_path.parent.glob(
                     ".library.sqlite3.migration-*.sqlite3"
@@ -5571,7 +5571,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             self.assertEqual(retained_staging[0].read_bytes(), retained_bytes)
             self.assertTrue(destination_path.is_file())
-            self._assert_completed_v5_intent(intent_path)
+            self._assert_completed_intent(intent_path)
             self.assertEqual(
                 list(destination_path.parent.glob(
                     ".library.sqlite3.migration-*.sqlite3"
