@@ -323,16 +323,9 @@ class QualityRiskContractTests(unittest.TestCase):
             "stream_plan_id": "plan-old",
         }
 
-        contract = build_quality_risk_contract(
-            prefix="tv/House/Season 2",
-            sample_item=sample,
-            current_policy={"video": {"target_vmaf": 90.0}},
-            preview_policy={"video": {"target_vmaf": 90.0, "target_size_mb": 82.0}},
-            calibration=None,
-            latest_failed_sample_job={
-                "job_id": "job-old",
-                "result": {"target_size_trace": failed_trace},
-            },
+        contract = self._failed_trace_contract(
+            sample, failed_trace,
+            preview_video={"target_vmaf": 90.0, "target_size_mb": 82.0}, job_id="job-old",
         )
 
         self.assertEqual(contract["facts"]["target_size_trace"], {})
@@ -354,16 +347,9 @@ class QualityRiskContractTests(unittest.TestCase):
             "stream_plan_id": "plan-current",
         }
 
-        contract = build_quality_risk_contract(
-            prefix="tv/House/Season 2",
-            sample_item=sample,
-            current_policy={"video": {"target_vmaf": 90.0}},
-            preview_policy={"video": {"target_vmaf": 90.0}},
-            calibration=None,
-            latest_failed_sample_job={
-                "job_id": "job-current",
-                "result": {"target_size_trace": failed_trace},
-            },
+        contract = self._failed_trace_contract(
+            sample, failed_trace,
+            preview_video={"target_vmaf": 90.0}, job_id="job-current",
         )
 
         self.assertEqual(contract["facts"]["target_size_trace"], failed_trace)
@@ -387,16 +373,9 @@ class QualityRiskContractTests(unittest.TestCase):
                     "stream_plan_id": plan_id,
                 }
 
-                contract = build_quality_risk_contract(
-                    prefix="tv/House/Season 2",
-                    sample_item=sample,
-                    current_policy={"video": {"target_vmaf": 90.0}},
-                    preview_policy={"video": {"target_vmaf": 90.0, "target_size_mb": 82.0}},
-                    calibration=None,
-                    latest_failed_sample_job={
-                        "job_id": "job-old",
-                        "result": {"target_size_trace": failed_trace},
-                    },
+                contract = self._failed_trace_contract(
+                    sample, failed_trace,
+                    preview_video={"target_vmaf": 90.0, "target_size_mb": 82.0}, job_id="job-old",
                 )
 
                 self.assertEqual(contract["facts"]["target_size_trace"], {})
@@ -411,16 +390,9 @@ class QualityRiskContractTests(unittest.TestCase):
         failed_trace = self._target_size_trace(status="selected")
         failed_trace["ledger"] = {"source_id": "src-house-s2"}
 
-        contract = build_quality_risk_contract(
-            prefix="tv/House/Season 2",
-            sample_item=sample,
-            current_policy={"video": {"target_vmaf": 90.0}},
-            preview_policy={"video": {"target_vmaf": 90.0}},
-            calibration=None,
-            latest_failed_sample_job={
-                "job_id": "job-current",
-                "result": {"target_size_trace": failed_trace},
-            },
+        contract = self._failed_trace_contract(
+            sample, failed_trace,
+            preview_video={"target_vmaf": 90.0}, job_id="job-current",
         )
 
         self.assertEqual(contract["facts"]["target_size_trace"], failed_trace)
@@ -434,16 +406,9 @@ class QualityRiskContractTests(unittest.TestCase):
             "ledger_id": "ledger-old",
             "stream_plan_id": "plan-old",
         }
-        contract_without_current_identity = build_quality_risk_contract(
-            prefix="tv/House/Season 2",
-            sample_item=sample_without_identity,
-            current_policy={"video": {"target_vmaf": 90.0}},
-            preview_policy={"video": {"target_vmaf": 90.0}},
-            calibration=None,
-            latest_failed_sample_job={
-                "job_id": "job-current",
-                "result": {"target_size_trace": trace_with_identity},
-            },
+        contract_without_current_identity = self._failed_trace_contract(
+            sample_without_identity, trace_with_identity,
+            preview_video={"target_vmaf": 90.0}, job_id="job-current",
         )
 
         self.assertEqual(
@@ -665,6 +630,20 @@ class QualityRiskContractTests(unittest.TestCase):
         self.assertEqual(
             state["content_intent_boundary_observation"]["exclusion_reason"],
             "frozen_sample_item_missing",
+        )
+
+    @staticmethod
+    def _failed_trace_contract(
+            sample: dict[str, object], trace: dict[str, object], *,
+            preview_video: dict[str, object], job_id: str,
+    ) -> dict[str, object]:
+        return build_quality_risk_contract(
+            prefix="tv/House/Season 2",
+            sample_item=sample,
+            current_policy={"video": {"target_vmaf": 90.0}},
+            preview_policy={"video": preview_video},
+            calibration=None,
+            latest_failed_sample_job={"job_id": job_id, "result": {"target_size_trace": trace}},
         )
 
     def _contract(

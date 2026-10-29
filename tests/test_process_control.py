@@ -165,12 +165,7 @@ class ProcessControlTests(TestCase):
                             process_controller=ManagedProcessController(),
                         )
 
-                    self.assertTrue(child_pid_path.exists())
-                    child_pid = int(child_pid_path.read_text())
-                    exit_deadline = time.monotonic() + 2
-                    while _pid_is_alive(child_pid) and time.monotonic() < exit_deadline:
-                        time.sleep(0.02)
-                    self.assertFalse(_pid_is_alive(child_pid))
+                    self._assert_child_reaped(child_pid_path)
 
     @skipUnless(sys.platform == "darwin", "requires trusted Darwin process groups")
     def test_trusted_local_orchestrator_deadline_kills_same_group_children(self) -> None:
@@ -203,12 +198,15 @@ class ProcessControlTests(TestCase):
                         process_controller=controller,
                     )
 
-            self.assertTrue(child_pid_path.exists())
-            child_pid = int(child_pid_path.read_text())
-            exit_deadline = time.monotonic() + 2
-            while _pid_is_alive(child_pid) and time.monotonic() < exit_deadline:
-                time.sleep(0.02)
-            self.assertFalse(_pid_is_alive(child_pid))
+            self._assert_child_reaped(child_pid_path)
+
+    def _assert_child_reaped(self, child_pid_path: Path) -> None:
+        self.assertTrue(child_pid_path.exists())
+        child_pid = int(child_pid_path.read_text())
+        exit_deadline = time.monotonic() + 2
+        while _pid_is_alive(child_pid) and time.monotonic() < exit_deadline:
+            time.sleep(0.02)
+        self.assertFalse(_pid_is_alive(child_pid))
 
     def test_trusted_local_orchestrator_rejects_other_commands(self) -> None:
         with self.assertRaisesRegex(ValueError, "restricted to ab-av1"):
