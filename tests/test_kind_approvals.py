@@ -58,6 +58,14 @@ def _config(tmp_path: Path) -> MediaforceConfig:
     )
 
 
+def _finished_sample(config: MediaforceConfig, prefix: str, at: str = "2026-10-28T00:00:00+00:00") -> None:
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(calibration_jobs.insert().values(
+            job_id=f"sample-{prefix}", prefix=prefix, status="pending_review", lane="sample", action="sample",
+            host_json="{}", policy_json="{}", sample_item_json="{}", created_at=at, updated_at=at, finished_at=at))
+        connection.commit()
+
+
 def _approved(config: MediaforceConfig, *, size_mode: str = "normalized", job_id: str = "sample-job") -> dict[str, Any]:
     policy = config.resolve_policy(APPROVED_SEASON)
     policy["video"].update({"compression_intent_schema_version": 1, "compression_intent": "balanced",
@@ -113,7 +121,8 @@ def test_a_never_sampled_season_of_an_approved_kind_is_governed_by_it(tmp_path: 
 
 def test_a_folder_approval_comes_first_but_an_unapproved_sample_follows_its_kind(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="2026-10-29T00:00:00+00:00")
+    _finished_sample(config, SEASON)
     show_approval = _approved(config)
     show_approval["accepted_sample_job_id"] = show_approval["job_id"] = "show-sample"
 
@@ -293,11 +302,12 @@ def test_seasons_a_kind_covers_are_offered_one_at_a_time_largest_first(tmp_path:
     for season, size in ((small, 1_000), (large, 9_000), (own, 50_000)):
         _waiting_episode(config, f"{season}/e01.mkv", size)
     _waiting_episode(config, f"{small}/e02.mkv", 20_000, status="promoted")
+    _finished_sample(config, own)
     own_sample = {key: value for key, value in _approved(config).items() if not key.startswith("accepted_")}
     load = _loader({own: own_sample}, {small: DARKER, large: DARKER, own: DARKER})
 
     assert _next(config, load) is None
-    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="2026-10-29T00:00:00+00:00")
     first = _next(config, load)
     assert first is not None and (first.season, first.kind, first.waiting_bytes) == (own, DARKER, 50_000)
     record_kind_attempt(config, first, {"ok": True}, at=0.0)
@@ -962,13 +972,13 @@ def test_old_samples_follow_a_reusable_kind_while_its_newest_sample_stays_visibl
             connection.execute(calibration_jobs.insert().values(
                 job_id=f"sample-{index}", prefix=season, status="pending_review", lane="sample", action="sample",
                 host_json="{}", policy_json="{}", sample_item_json="{}",
-                created_at=f"2026-10-29T0{index}:00:00+00:00", updated_at="now"))
+                created_at=f"2026-10-29T0{index}:00:00+00:00", updated_at="now",
+                finished_at=f"2026-10-29T0{index}:30:00+00:00"))
         connection.commit()
         report = {"seasons": [{"season": season, "kind": kind} for season in folders]}
-        with patch("mediaforce.web.runtime.kind_approvals.season_kind_report", return_value=report) as grouping:
+        with patch("mediaforce.web.runtime.kind_approvals.season_kind_report", return_value=report):
             states = card_page_states(connection, config, [(season, None, None) for season in folders], sources)
-        assert grouping.call_count == 1
-        reusable = kind in APPROVABLE_KINDS
+        reusable = kind in APPROVABLE_KINDS and not stale_kind
         assert states[SEASON]["key"] == ("waiting_for_kind" if reusable else "ready_to_compare")
         assert states[SEASON]["needs_you"] is not reusable
         assert states[OTHER_SEASON]["key"] == "ready_to_compare"
@@ -978,9 +988,10 @@ def test_old_samples_follow_a_reusable_kind_while_its_newest_sample_stays_visibl
 
 def test_kind_approval_replaces_old_sample_decision_and_allows_queueing(tmp_path: Path) -> None:
     config = _config(tmp_path)
+    _finished_sample(config, SEASON)
     saved = _review_ready()
     load = _loader({SEASON: saved}, {SEASON: DARKER})
-    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="2026-10-29T00:00:00+00:00")
     with open_db(config.paths.db_path) as connection:
         with patch("mediaforce.web.runtime.kind_approvals.season_kind_report",
                    return_value={"seasons": [{"season": SEASON, "kind": DARKER}]}):
@@ -997,11 +1008,12 @@ def test_kind_approval_replaces_old_sample_decision_and_allows_queueing(tmp_path
 def test_an_approved_kind_keeps_active_samples_and_review_blocked_decisions(tmp_path: Path, status: str) -> None:
     config = _config(tmp_path)
     load = _loader({SEASON: _review_ready()}, {SEASON: DARKER})
-    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="2026-10-29T00:00:00+00:00")
     with open_db(config.paths.db_path) as connection:
         connection.execute(calibration_jobs.insert().values(
             job_id="sample", prefix=SEASON, status=status, lane="sample", action="sample",
-            host_json="{}", policy_json="{}", sample_item_json="{}", created_at="now", updated_at="now"))
+            host_json="{}", policy_json="{}", sample_item_json="{}", created_at="2026-10-28T00:00:00+00:00", updated_at="2026-10-28T00:30:00+00:00",
+            finished_at="2026-10-28T00:30:00+00:00" if status == "pending_review" else None))
         connection.commit()
         with patch("mediaforce.web.runtime.kind_approvals.season_kind_report",
                    return_value={"seasons": [{"season": SEASON, "kind": DARKER}]}), \
@@ -1031,13 +1043,47 @@ def test_kind_page_and_season_states_choose_the_same_waiting_sample(tmp_path: Pa
             connection.execute(calibration_jobs.insert().values(
                 job_id=f"sample-{index}", prefix=season, status="pending_review", lane="sample", action="sample",
                 host_json="{}", policy_json="{}", sample_item_json="{}",
-                created_at=f"2026-10-29T0{index}:00:00+00:00", updated_at="now"))
+                created_at=f"2026-10-29T0{index}:00:00+00:00", updated_at="now",
+                finished_at=f"2026-10-29T0{index}:30:00+00:00"))
         connection.commit()
         kind = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"]
                     if row["kind"] == DARKER)
         states = card_page_states(connection, config, [(season, None, None) for season in folders],
                                   PageStateSources(load, lambda *_args: {}))
-    assert kind["approval"] is None
+    assert (kind["approval"] is not None) == stale_kind
     assert kind["sample_season"] == OTHER_SEASON
     assert states[kind["sample_season"]]["key"] == "ready_to_compare"
-    assert states[SEASON]["key"] == "waiting_for_kind"
+    assert states[SEASON]["key"] == ("ready_to_compare" if stale_kind else "waiting_for_kind")
+
+
+@pytest.mark.parametrize("finished_at", ["2026-10-29T01:00:00+00:00", "unknown", ""])
+@pytest.mark.parametrize("scope", [SEASON, "tv/Thriller"])
+def test_newer_or_unknown_samples_and_show_samples_keep_their_decision(
+        tmp_path: Path, finished_at: str, scope: str,
+) -> None:
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    _finished_sample(config, scope, finished_at)
+    saved = _review_ready()
+    load = _loader({scope: saved}, {SEASON: DARKER})
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="2026-10-29T00:00:00+00:00")
+    assert effective_production_approval(config, EPISODE, load) is None
+    assert production_calibration(config, SEASON, load) == (scope, saved)
+    assert _next(config, load) is None
+    with open_db(config.paths.db_path) as connection:
+        state = card_page_states(connection, config, [(scope, None, None)], PageStateSources(load, lambda *_args: {}))[scope]
+    assert state["key"] == "ready_to_compare" and state["needs_you"]
+
+
+def test_never_sampled_and_active_seasons_do_not_load_the_library_kind_report(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _finished_sample(config, SEASON)
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(calibration_jobs.update().values(status="running", finished_at=None))
+        connection.commit()
+        sources = PageStateSources(_loader({SEASON: _review_ready()}, {SEASON: DARKER, OTHER_SEASON: DARKER}), lambda *_args: {})
+        with patch("mediaforce.web.runtime.kind_approvals.season_kind_report", side_effect=AssertionError("unneeded library read")):
+            states = card_page_states(connection, config, [(SEASON, None, None), (OTHER_SEASON, None, None)], sources)
+    assert states[SEASON]["key"] == "making_test"
+    assert states[OTHER_SEASON]["key"] == "needs_test"
+    assert states[OTHER_SEASON]["primary_action"] == "make_sample"

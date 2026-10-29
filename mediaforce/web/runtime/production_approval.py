@@ -27,6 +27,7 @@ Changing them leaves the approval and its contract as they are, so finished file
 import copy
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, Protocol, runtime_checkable
 
@@ -34,6 +35,7 @@ from mediaforce.core.audio_presets import PRESET_AUDIO_KEYS, owner_sound_keys
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.type_defs import int_value, object_dict
+from mediaforce.library.candidate_selection import season_identity
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash, review_gate
 from mediaforce.web.runtime.production_holds import approval_identity
@@ -90,7 +92,30 @@ class KindSampleSource(Protocol):
 
 
 def following_kind(config: MediaforceConfig, prefix: str, load: LoadCalibrationState) -> str | None:
+    approval = _kind_approval(config, prefix, load)
+    if approval is not None and approval.current:
+        return approval.kind
     return load.following_kinds(config).get(prefix) if isinstance(load, KindSampleSource) else None
+
+
+def season_prefix_of(config: MediaforceConfig, rel_path: str) -> str | None:
+    path = PurePosixPath(str(rel_path or "").strip().strip("/"))
+    if len(path.parts) < 3 or (len(path.parts) == 3 and path.suffix):
+        return None
+    identity = season_identity({"rel_path": path.as_posix()}, library_types=config.library_type_map)
+    return identity.season_prefix if identity is not None else None
+
+
+def sample_finished_before(job: Mapping[str, Any] | None, boundary: Any) -> bool:
+    payload = object_dict(job)
+    if payload.get("lane") != "sample" or payload.get("status") not in {"pending_review", "completed", "failed", "stopped"}:
+        return False
+    try:
+        finished = datetime.fromisoformat(str(payload.get("finished_at") or "").replace("Z", "+00:00"))
+        cutoff = datetime.fromisoformat(str(boundary or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return finished.tzinfo is not None and cutoff.tzinfo is not None and finished < cutoff
 
 
 def approval_prefixes(rel_path: str) -> list[str]:

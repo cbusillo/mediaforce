@@ -52,7 +52,7 @@ from mediaforce.web.runtime.folder_actions import quality_risk_blocks_production
 from mediaforce.web.runtime.folder_tuning_advice import review_gate
 from mediaforce.web.runtime.job_runtime import retryable_saved_sample_job, sample_target_size_failure
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    cached_calibration_loader, effective_production_approval, following_kind
+    cached_calibration_loader, effective_production_approval, following_kind, holds_approval, season_prefix_of
 
 PageStateKey = Literal[
     "needs_test",
@@ -372,14 +372,19 @@ def _facts(
 ) -> PageStateFacts:
     source_job_id = str(object_dict(workflow).get("source_job_id") or "")
     approval = effective_production_approval(config, prefix, load_calibration)
+    calibration = load_calibration(config, prefix)
+    follows = None
+    if (calibration is not None and not holds_approval(calibration) and season_prefix_of(config, prefix) == prefix
+            and str(object_dict(sample_job).get("status") or "") not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES):
+        follows = following_kind(config, prefix, load_calibration)
     return PageStateFacts(
         prefix=prefix,
         workflow=workflow,
         encode_job=load_encode_job(connection, source_job_id) if source_job_id else None,
         sample_job=sample_job if _is_sample_job(sample_job) else None,
-        calibration=load_calibration(config, prefix),
+        calibration=calibration,
         approval=approval,
-        following_kind=following_kind(config, prefix, load_calibration),
+        following_kind=follows,
         approval_review_blocked=review_blocked(approval) if approval is not None and approval.current else False,
         staged_integrity=staged_integrity,
         lifecycle=lifecycle,

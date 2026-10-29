@@ -25,16 +25,16 @@ from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, RUNNABLE_ENCODE_JOB_KINDS, load_queue_state
 from mediaforce.core.type_defs import object_dict
-from mediaforce.library.candidate_selection import season_identity
 from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
 from mediaforce.library.content_kinds import evidence_stamp, season_evidence, season_grouping, season_kind_report, \
     season_stamp
 from mediaforce.library.source_evidence import SourceEvidenceContext
-from mediaforce.tuning.calibration_jobs import load_latest_jobs_for_prefixes
+from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, production_calibration
+    approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
+    production_calibration, sample_finished_before, season_prefix_of
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
 from mediaforce.web.runtime.production_holds import approval_identity
@@ -110,15 +110,6 @@ def stop_kind_approval(config: MediaforceConfig, kind: str) -> bool:
     return True
 
 
-def season_prefix_of(config: MediaforceConfig, rel_path: str) -> str | None:
-    """The TV season a file or season folder belongs to; None for a show, a movie or a file in a show folder."""
-    path = PurePosixPath(str(rel_path or "").strip().strip("/"))
-    if len(path.parts) < 3 or (len(path.parts) == 3 and path.suffix):
-        return None
-    identity = season_identity({"rel_path": path.as_posix()}, library_types=config.library_type_map)
-    return identity.season_prefix if identity is not None else None
-
-
 class SeasonKinds:
     """Each season's kind from the live database, read again only when its evidence changes.
 
@@ -169,12 +160,13 @@ class KindAwareLoader:
         with open_readonly_db(config.paths.db_path) as connection:
             report = _kind_report(connection, config, load)
             representatives = {
-                kind: _season_with_sample(connection, [row["season"] for row in report["seasons"] if row["kind"] == kind])
-                for kind in APPROVABLE_KINDS if _approval_facts(load_kind_approval(config, kind)) is None
+                kind: _newest_sample(connection, [row["season"] for row in report["seasons"] if row["kind"] == kind])
+                for kind in APPROVABLE_KINDS if not holds_approval(load_kind_approval(config, kind))
             }
+            jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in report["seasons"]])
         return {row["season"]: row["kind"] for row in report["seasons"]
-                if row["kind"] in APPROVABLE_KINDS
-                and row["season"] != representatives.get(row["kind"])
+                if row["kind"] in representatives
+                and sample_finished_before(jobs.get(row["season"]), object_dict(representatives[row["kind"]]).get("created_at"))
                 and effective_production_approval(config, row["season"], load) is None}
 
     def kind_approval(self, config: MediaforceConfig, rel_path: str) -> EffectiveApproval | None:
@@ -189,7 +181,17 @@ class KindAwareLoader:
         calibration = load_kind_approval(config, str(kind))
         if calibration is None:
             return None
-        return EffectiveApproval(season, calibration, production_approval_contract(calibration), kind=kind)
+        approval = EffectiveApproval(season, calibration, production_approval_contract(calibration), kind=kind)
+        for prefix in approval_prefixes(rel_path):
+            if self._load(config, prefix) is None:
+                continue
+            if prefix != season or not approval.current or not config.paths.db_path.exists():
+                return None
+            with open_readonly_db(config.paths.db_path) as connection:
+                job = load_latest_job(connection, prefix)
+            if not sample_finished_before(job, calibration.get("kind_approved_at")):
+                return None
+        return approval
 
 
 KIND_QUEUE_WAITS_CODE = "kind_queue_waits"
@@ -329,9 +331,9 @@ SOURCE_KIND_DIFFERS_CODE = "source_kind_differs"
 
 
 def _approval_facts(calibration: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    payload = object_dict(calibration)
-    if not EffectiveApproval(str(payload.get("from_prefix") or ""), payload, production_approval_contract(payload)).current:
+    if not holds_approval(calibration):
         return None
+    payload = object_dict(calibration)
     contract = object_dict(production_approval_contract(payload))
     size_goal = object_dict(object_dict(contract.get("operator_intent")).get("size_goal"))
     return {"from_prefix": payload.get("from_prefix"), "approved_at": payload.get("kind_approved_at"),
@@ -433,15 +435,15 @@ def _lent_settings(
 SAMPLE_IN_HAND_STATUSES = SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES | SAMPLE_FAILED_STATUSES | {"pending_review"}
 
 
-def _season_with_sample(connection: DBClient, seasons: list[str]) -> str | None:
-    """The season of a kind whose sample is being made, waits to be watched, or stopped and needs making again, the
-    newest when there are several. A season's newest sample decides, as on its own page.
-
-    Approving a sample gives its show a folder approval, so that season leaves the kind and the page offers its setting.
-    """
+def _newest_sample(connection: DBClient, seasons: list[str]) -> dict[str, Any] | None:
     jobs = [job for job in load_latest_jobs_for_prefixes(connection, seasons).values()
             if job.get("lane") == "sample" and job.get("status") in SAMPLE_IN_HAND_STATUSES]
-    return str(max(jobs, key=lambda job: str(job.get("created_at") or ""))["prefix"]) if jobs else None
+    return max(jobs, key=lambda job: str(job.get("created_at") or "")) if jobs else None
+
+
+def _season_with_sample(connection: DBClient, seasons: list[str]) -> str | None:
+    job = _newest_sample(connection, seasons)
+    return str(job["prefix"]) if job else None
 
 
 def _kind_report(
