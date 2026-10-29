@@ -27,8 +27,8 @@ Use straightforward, typed, production-ready Python.
 - FastAPI backend code lives under `mediaforce/`
 - Prefer updating existing helpers and modules over adding parallel abstractions
 - Keep runtime/config assumptions out of code when they belong in config
-- Use Ruff for fast Python annotation/style enforcement and PyCharm inspection
-  for cleanup of actionable Python warnings
+- Use Ruff for fast Python annotation/style enforcement.
+- Follow [inspection authority](../policies/acceptance-gate.md#inspection-authority) for IDE validation.
 - Prefer narrow, justified suppressions only when a warning is a confirmed tool
   false positive that cannot be fixed in code
 
