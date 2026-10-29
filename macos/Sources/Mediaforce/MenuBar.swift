@@ -202,12 +202,10 @@ enum MenuBarGlyph {
 }
 
 extension MainWindowFacts {
-    /// What the menu's status line opens, following the same order as its words: the season being compressed, or
-    /// Computers while work waits for one. Nil when the line names nothing to open.
     var statusOpens: Place? {
         if work.pausedByOwner || work.stopReasons.contains("storage_unavailable") { return nil }
         if work.stopReasons.contains("no_computer_ready") { return .computer(nil) }
-        if work.runningCount > 0, let season = work.runningSeasons.first { return .item(season.prefix) }
+        if work.runningCount > 0 { return work.runningSeasons.first.map { .item($0.prefix) } }
         if work.waitingCount > 0 { return nil }
         if work.checksPaused { return .library }
         return nil

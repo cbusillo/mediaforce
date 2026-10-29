@@ -49,6 +49,11 @@ final class MenuBarTests: XCTestCase {
         let running = try facts(work: work(checksPaused: true, running: 1, seasons: ["tv/ER/Season 1"]))
         XCTAssertEqual(Words.workHeadline(running), Words.workHeadline(try facts(work: work(running: 1))))
         XCTAssertEqual(Words.menuStatus(running), Words.menuStatus(try facts(work: work(running: 1, seasons: ["tv/ER/Season 1"]))))
+
+        let waitingSamples = try facts(work: work(), ownerWaiting: true)
+        let checksWithSamples = try facts(work: work(checksPaused: true), ownerWaiting: true)
+        XCTAssertTrue(try XCTUnwrap(Words.workExplanation(checksWithSamples))
+            .contains(try XCTUnwrap(Words.workExplanation(waitingSamples))))
     }
 
     func testPausedChecksDoNotBecomeASampleWaitingReason() throws {
@@ -74,6 +79,7 @@ final class MenuBarTests: XCTestCase {
         XCTAssertEqual(try facts(work: work(checksPaused: true)).statusOpens, .library)
         XCTAssertEqual(try facts(work: work(checksPaused: true, running: 1, seasons: ["tv/ER/Season 1"])).statusOpens,
                        .item("tv/ER/Season 1"))
+        XCTAssertNil(try facts(work: work(checksPaused: true, running: 1)).statusOpens)
     }
 
     func testAComputerNeedingTheOwnerIsWaitingForYou() throws {

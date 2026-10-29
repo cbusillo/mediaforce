@@ -233,7 +233,7 @@ extension Words {
             sentences.append("Work is waiting and no computer can take it right now. See Computers for why.")
         }
         sentences.append(contentsOf: work.originalCheckWaitReasons)
-        if sentences.isEmpty, work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
+        if work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
             sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
         }
         if !work.seasonsNeedingYou.isEmpty {

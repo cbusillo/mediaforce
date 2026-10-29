@@ -238,7 +238,6 @@ class ReadPathPurityTests(unittest.TestCase):
 
         with patch(
             "mediaforce.web.runtime.queue_actions.resume_evidence_queue",
-            create=True,
             side_effect=EvidenceQueueConflict,
         ), self.assertRaises(EvidenceQueueConflict):
             endpoint()
