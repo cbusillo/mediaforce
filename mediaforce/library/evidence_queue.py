@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Sequence
 
-from sqlalchemy import and_, bindparam, case, func, or_, select, true, update
+from sqlalchemy import and_, bindparam, case, false, func, or_, select, true, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.config import MediaforceConfig
@@ -768,16 +768,19 @@ def _original_digest_required() -> Any:
     )
     return and_(
         func.coalesce(library_item_evidence_state.c.work_reason, "") == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
-        ~_observed_original_receipt_exists(), library_item_evidence_state.c.library_item_id.not_in(cached),
+        library_item_evidence_state.c.library_item_id.not_in(cached),
     )
 
 
 def _release_controller_digest_waits(
-        connection: DBClient, batch_id: str, updated_at: str, *, window_open: bool = False,
+        connection: DBClient, batch_id: str, updated_at: str, *, window_open: bool = False, waiting_reason: str | None = None,
 ) -> None:
     connection.execute(update(library_item_evidence_state).where(
         library_item_evidence_state.c.work_batch_id == batch_id,
-        library_item_evidence_state.c.work_status == "waiting_window",
+        or_(library_item_evidence_state.c.work_status == "waiting_window",
+            and_(true() if window_open else false(), library_item_evidence_state.c.work_status == "retry_wait",
+                 library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
+                 library_item_evidence_state.c.last_error == waiting_reason)),
         true() if window_open else ~_original_digest_required(),
     ).values(work_status="queued", retry_not_before=None, last_error=None, updated_at=updated_at))
 
@@ -792,7 +795,7 @@ def refresh_controller_digest_waits(connection: DBClient, window: ControllerDige
     now_iso = now.isoformat(timespec="seconds")
     owned = library_item_evidence_state.c.work_batch_id == batch
     needs_digest = _original_digest_required()
-    _release_controller_digest_waits(connection, batch, now_iso, window_open=window.is_open)
+    _release_controller_digest_waits(connection, batch, now_iso, window_open=window.is_open, waiting_reason=window.waiting_reason)
     if window.is_open:
         return
     opens_at = window.next_opens_at

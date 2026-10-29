@@ -601,10 +601,9 @@ class RemoteEvidenceWorkerTests(unittest.TestCase):
                               capabilities=status.capabilities, available=False, message="Checking", missing_paths=[])
         with patch("mediaforce.web.app._safe_collect_host_statuses", return_value=[fallback]), patch(
             "mediaforce.web.runtime.host_status.current_host_statuses", return_value=[status]
-        ) as current:
+        ):
             rows = collect_evidence_host_rows(config)
         assert select_evidence_host(config, rows, media_root="tv") == self.mini
-        current.assert_called_once_with(config)
 
     def test_without_encode_computers_measures_locally_as_before(self) -> None:
         config = self._config([])

@@ -20,7 +20,9 @@ _ENCODE_CAPABILITY = "encode_queue"
 
 
 class ControllerDigestWindowClosed(ScheduleWindowClosedError):
-    pass
+    def __init__(self, reason: str, next_opens_at: datetime | None = None) -> None:
+        super().__init__(reason)
+        self.next_opens_at = next_opens_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +43,7 @@ class ControllerDigestWindow:
 
     def require_open(self) -> None:
         if not self.is_open:
-            raise ControllerDigestWindowClosed(self.waiting_reason)
+            raise ControllerDigestWindowClosed(self.waiting_reason, self.next_opens_at)
 
     @contextmanager
     def guard(self, controller: ManagedProcessController) -> Iterator[None]:

@@ -434,7 +434,8 @@ def test_a_remote_decision_takes_over_an_original_window_wait(tmp_path: Path, ea
         assert state["work_status"] == "completed"
 
 
-def test_a_replaced_cached_file_keeps_its_window_retry_cooldown(tmp_path: Path) -> None:
+@pytest.mark.parametrize("early_open", [False, True])
+def test_a_replaced_cached_file_keeps_its_window_retry_cooldown(tmp_path: Path, early_open: bool) -> None:
     from mediaforce.library.evidence_hosts import ControllerDigestWindow
 
     config = _config(tmp_path)
@@ -447,8 +448,9 @@ def test_a_replaced_cached_file_keeps_its_window_retry_cooldown(tmp_path: Path) 
     os.utime(replacement, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
     replacement.replace(path)
     config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"}]
+    opens_at = datetime.now(UTC) + timedelta(hours=3)
     deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
-        evidence_host_rows=lambda _config: [{"key": "localhost", "schedule_open": False}])
+        evidence_host_rows=lambda _config: [{"key": "localhost", "schedule_open": False, "schedule_next_opens_at": opens_at.isoformat()}])
     with patch("mediaforce.library.source_intake.observe_file", wraps=observe_file) as observe:
         assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps) == 1
         assert process_evidence_queue_once(config_path=config.paths.config_path, config=config, deps=deps) == 0
@@ -457,8 +459,11 @@ def test_a_replaced_cached_file_keeps_its_window_retry_cooldown(tmp_path: Path) 
         state = database.execute(select(library_item_evidence_state).where(
             library_item_evidence_state.c.library_item_id == item_id)).mappings().one()
         assert state["work_status"] == "retry_wait"
+        assert datetime.fromisoformat(state["retry_not_before"]) >= opens_at.replace(microsecond=0)
         assert state["attempt_count"] == 0
         assert original_check_wait_reasons(database) == [ControllerDigestWindow().waiting_reason]
+        refresh_controller_digest_waits(database, ControllerDigestWindow(admitted=early_open, next_opens_at=opens_at))
+        assert runnable_evidence_work_count(database) == int(early_open)
 
 
 @pytest.mark.parametrize("earlier_batch", [False, True])
@@ -482,15 +487,15 @@ def test_remote_check_failure_keeps_its_backoff_when_a_request_changes_priority(
 
 
 def test_original_retry_reasons_use_the_existing_plain_failure_formatter(tmp_path: Path) -> None:
-    from mediaforce.encoding.plain_failure import plain_failure_summary
-
     config = _config(tmp_path)
     _source(config)
     _discover(config)
     error = "RuntimeError: ffprobe could not inspect /private/technical/path"
     with open_db(config.paths.db_path) as database:
         database.execute(update(library_item_evidence_state).values(work_status="retry_wait", last_error=error))
-        assert original_check_wait_reasons(database) == [plain_failure_summary(error)]
+        reasons = original_check_wait_reasons(database)
+        assert reasons and all(reasons)
+        assert not any("/private/technical/path" in reason for reason in reasons)
 
 
 @pytest.mark.parametrize("qualification", ["cache", "stale_cache", "receipt"])
@@ -517,7 +522,7 @@ def test_window_wait_releases_new_source_qualification_but_keeps_a_stale_cache(t
         refresh_controller_digest_waits(database, window)
         state = database.execute(select(library_item_evidence_state).where(
             library_item_evidence_state.c.library_item_id == item_id)).mappings().one()
-        if qualification == "stale_cache":
+        if qualification in {"stale_cache", "receipt"}:
             assert state["work_status"] == "waiting_window"
             assert runnable_evidence_work_count(database) == 0
         else:

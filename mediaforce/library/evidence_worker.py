@@ -26,7 +26,7 @@ from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, fin
 from mediaforce.encoding.remote_media import RemoteMediaCommands, RemoteMediaConnections, RemoteMediaHostUnavailableError
 from mediaforce.library.evidence_hosts import ControllerDigestWindowClosed, EVIDENCE_HOST_WAIT_REASON, collect_evidence_host_rows, controller_digest_window, \
     evidence_source_path_on_host, remote_evidence_hosts, select_evidence_host, unmeasurable_evidence_roots
-from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, MAX_CONCURRENT_EVIDENCE_FILES, SOURCE_ROOT_WAIT_REASON, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
+from mediaforce.library.evidence_queue import EVIDENCE_BACKGROUND_RETRY_SECONDS, DEFAULT_EVIDENCE_BATCH_LIMIT, MAX_CONCURRENT_EVIDENCE_FILES, SOURCE_ROOT_WAIT_REASON, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, EvidenceWorkClaim, claim_next_evidence_work, \
     current_library_item_source_fingerprint, evidence_queue_summary, extend_evidence_claim, heartbeat_evidence_work, \
     load_evidence_queue_state, load_evidence_work_claim, mark_evidence_attempt_started, original_intake_hold, recover_evidence_queue, \
     refresh_controller_digest_waits, transition_evidence_work, waiting_evidence_host_roots
@@ -516,7 +516,9 @@ def _run_evidence_claim(
     except (EvidenceWorkDeferred, ControllerDigestWindowClosed) as exc:
         stop_heartbeats()
         for owned in claims:
-            _defer_claim(config, owned, deps, work_status="retry_wait", reason=str(exc), restore_attempt=owned.evidence_kind in started)
+            _defer_claim(config, owned, deps, work_status="retry_wait", reason=str(exc), restore_attempt=owned.evidence_kind in started,
+                         retry_at=(exc.next_opens_at or datetime.now(UTC) + timedelta(seconds=EVIDENCE_BACKGROUND_RETRY_SECONDS))
+                         if isinstance(exc, ControllerDigestWindowClosed) else None)
         return len(claims)
     except ProcessCancelledError:
         stop_heartbeats()
@@ -906,10 +908,11 @@ def _defer_claim(
         work_status: str,
         reason: str,
         restore_attempt: bool,
+        retry_at: datetime | None = None,
 ) -> None:
     """Wait for something outside this file to come back, without using up one of its attempts."""
     retry_not_before = (
-        datetime.now(UTC) + timedelta(seconds=deps.source_retry_delay_seconds)
+        retry_at or datetime.now(UTC) + timedelta(seconds=deps.source_retry_delay_seconds)
     ).isoformat(timespec="seconds")
     _finish_claim(
         config,
