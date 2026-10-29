@@ -673,8 +673,18 @@ def pause_evidence_queue(connection: DBClient, *, updated_at: str | None = None)
     return _set_queue_control(connection, is_paused=True, updated_at=updated_at)
 
 
-def resume_evidence_queue(connection: DBClient, *, updated_at: str | None = None) -> dict[str, Any]:
-    return _set_queue_control(connection, is_paused=False, updated_at=updated_at)
+def resume_evidence_queue(
+        connection: DBClient,
+        *,
+        updated_at: str | None = None,
+        within_transaction: bool = False,
+) -> dict[str, Any]:
+    return _set_queue_control(
+        connection,
+        is_paused=False,
+        updated_at=updated_at,
+        within_transaction=within_transaction,
+    )
 
 
 def cancel_evidence_queue(connection: DBClient, *, updated_at: str | None = None) -> dict[str, Any]:
@@ -1312,18 +1322,22 @@ def _set_queue_control(
         *,
         is_paused: bool,
         updated_at: str | None,
+        within_transaction: bool = False,
 ) -> dict[str, Any]:
     now_iso = updated_at or timestamp()
-    connection.commit()
-    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    if not within_transaction:
+        connection.commit()
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
     try:
         state = load_evidence_queue_state(connection)
         batch_id = str(state.get("batch_id") or "")
         if not batch_id or str(state.get("status") or "") not in EVIDENCE_QUEUE_ACTIVE_STATUSES:
-            connection.rollback()
+            if not within_transaction:
+                connection.rollback()
             return evidence_queue_summary(connection)
         if bool(state.get("cancel_requested")):
-            connection.rollback()
+            if not within_transaction:
+                connection.rollback()
             return evidence_queue_summary(connection)
         if not is_paused and background_work_is_paused(connection):
             raise EvidenceQueueConflict(
@@ -1339,7 +1353,8 @@ def _set_queue_control(
         )
         _refresh_evidence_queue_state(connection, batch_id=batch_id, updated_at=now_iso)
     except BaseException:
-        connection.rollback()
+        if not within_transaction:
+            connection.rollback()
         raise
     return evidence_queue_summary(connection)
 

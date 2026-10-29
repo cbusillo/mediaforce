@@ -15,7 +15,7 @@ from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import evidence_queue_state, scan_runs
 from mediaforce.encoding.encode_queue import load_queue_state, save_queue_state
 from mediaforce.library.background_work import background_work_is_paused, set_background_work_paused
-from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_QUEUE_NAME, load_evidence_queue_state
+from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_QUEUE_NAME, EvidenceQueueConflict, load_evidence_queue_state
 from mediaforce.web import app as web_app
 from mediaforce.web.runtime import tool_capabilities
 
@@ -215,7 +215,40 @@ class ReadPathPurityTests(unittest.TestCase):
                     state = load_queue_state(connection)
                     self.assertFalse(state["is_paused"])
                     self.assertFalse(state["stop_requested"])
-                    self.assertTrue(load_evidence_queue_state(connection)["is_paused"])
+                    self.assertFalse(load_evidence_queue_state(connection)["is_paused"])
+
+    def test_native_resume_rolls_back_every_queue_when_evidence_resume_conflicts(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            set_background_work_paused(connection, is_paused=True)
+            state = load_queue_state(connection)
+            state.update({"is_paused": True, "stop_requested": True, "updated_at": "2026-10-29T12:00:00Z"})
+            save_queue_state(connection, state)
+            connection.execute(evidence_queue_state.insert().values(
+                queue_name=DEFAULT_EVIDENCE_QUEUE_NAME,
+                batch_id="paused-batch",
+                status="paused",
+                is_paused=1,
+                cancel_requested=0,
+                updated_at="2026-10-29T12:00:00Z",
+            ))
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config):
+            app = web_app.create_app(self.config.paths.config_path)
+        endpoint = self._endpoint(app, "/api/encode-queue/resume", "api_resume_encode_queue")
+
+        with patch(
+            "mediaforce.web.runtime.queue_actions.resume_evidence_queue",
+            side_effect=EvidenceQueueConflict,
+        ), self.assertRaises(EvidenceQueueConflict):
+            endpoint()
+
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertTrue(load_queue_state(connection)["is_paused"])
+            self.assertTrue(load_queue_state(connection)["stop_requested"])
+            self.assertTrue(background_work_is_paused(connection))
+            evidence_state = load_evidence_queue_state(connection)
+            self.assertTrue(evidence_state["is_paused"])
+            self.assertFalse(evidence_state["cancel_requested"])
 
     @staticmethod
     def _endpoint(app: FastAPI, path: str, name: str) -> Callable[..., Any]:

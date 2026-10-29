@@ -32,9 +32,11 @@ from mediaforce.library.evidence_state import EVIDENCE_STATE_CLASSIFICATION_REQU
 from mediaforce.library.evidence_worker import EVIDENCE_JOB_HEARTBEAT_SECONDS, EVIDENCE_JOB_LEASE_SECONDS, \
     EvidenceWorkerDeps, process_evidence_queue_once, run_evidence_queue_until_blocked
 from mediaforce.library.source_prefetch import StopSignal
+from mediaforce.web.runtime.app_window import app_window_payload
 from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker, cadence_queue_partition, \
     cadence_safety_partition
 from mediaforce.web.runtime.operator_work import start_ready_evidence_work
+from mediaforce.web.runtime.queue_actions import resume_encode_queue_action
 
 
 class EvidenceWorkerTests(unittest.TestCase):
@@ -887,6 +889,56 @@ class EvidenceWorkerTests(unittest.TestCase):
                 },
             ],
         )
+
+    def test_native_read_and_resume_preserve_the_paused_evidence_batch_and_terminal_rows(self) -> None:
+        queued_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+        merged_id, _path = self._insert_item(2, cadence_summary_json=None, media_fingerprint_json=None)
+        failed_id, _path = self._insert_item(3, cadence_summary_json=None, media_fingerprint_json=None)
+        cancelled_id, _path = self._insert_item(4, cadence_summary_json=None, media_fingerprint_json=None)
+        with open_db(self.config.paths.db_path) as connection:
+            cadence_evidence_blocker(connection, self.config, "tv/show/item-1.mkv", library_item_ids=[queued_id],
+                decision_label="queueing this sample", work_reason="sample_safety")
+            paused_batch = evidence_queue_summary(connection)["batch_id"]
+            queue_decision_evidence_work(connection, self.config, "tv/show/item-2.mkv", library_item_ids=[merged_id],
+                evidence_kind=CADENCE_EVIDENCE_KIND, work_reason="encode_safety", start_new_batch=True)
+            connection.execute(update(library_item_evidence_state).where(
+                library_item_evidence_state.c.library_item_id == failed_id,
+                library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+            ).values(work_batch_id=paused_batch, work_status="failed", attempt_count=3))
+            connection.execute(update(library_item_evidence_state).where(
+                library_item_evidence_state.c.library_item_id == cancelled_id,
+                library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+            ).values(work_batch_id=paused_batch, work_status="cancelled", attempt_count=2))
+            payload = app_window_payload(connection, library_types=self.config.library_type_map, season_cards=[],
+                computers=[], controller_storage={"mounts": []}, storage_admits_work=True,
+                observed_at=datetime(2026, 10, 29, tzinfo=UTC))
+            after_read = evidence_queue_summary(connection)
+            active_batches = connection.execute(select(library_item_evidence_state.c.work_batch_id).where(
+                library_item_evidence_state.c.library_item_id.in_([queued_id, merged_id]),
+                library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+            )).scalars().all()
+
+        resume_encode_queue_action(connection_factory=lambda: open_db(self.config.paths.db_path), config=self.config,
+            now_iso=lambda: "2026-10-29T12:00:00+00:00")
+        with open_db(self.config.paths.db_path) as connection:
+            claim = claim_next_evidence_work(connection, worker_id="native-resume", lease_seconds=30)
+            terminal = connection.execute(select(
+                library_item_evidence_state.c.library_item_id,
+                library_item_evidence_state.c.work_status,
+                library_item_evidence_state.c.attempt_count,
+            ).where(library_item_evidence_state.c.library_item_id.in_([failed_id, cancelled_id]),
+                library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND).order_by(
+                library_item_evidence_state.c.library_item_id)).all()
+
+        self.assertEqual(after_read["batch_id"], paused_batch)
+        self.assertTrue(after_read["is_paused"])
+        self.assertEqual(active_batches, [paused_batch, paused_batch])
+        self.assertIsNotNone(claim)
+        assert claim is not None
+        self.assertEqual(claim.batch_id, paused_batch)
+        self.assertIn(claim.library_item_id, {queued_id, merged_id})
+        self.assertEqual(terminal, [(failed_id, "failed", 3), (cancelled_id, "cancelled", 2)])
+        self.assertTrue(payload["work"]["checks_paused"])
 
     def test_cadence_decision_blocker_does_not_requeue_measured_blocked_cadence(self) -> None:
         item_id, _path = self._insert_item(
