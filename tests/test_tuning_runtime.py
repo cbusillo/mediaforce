@@ -67,7 +67,7 @@ from mediaforce.web.app import _build_multimodal_review_pack, _build_seed_policy
 from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, calibration_completion_status, \
     run_calibration_job
-from mediaforce.web.runtime.completed_runtime import ORIGINALS_REMOVED_EVENT, completed_page_payload, record_deleted_original_backups
+from mediaforce.web.runtime.completed_runtime import completed_page_payload, record_deleted_original_backups
 from mediaforce.web.runtime.dashboard_payloads import dashboard_summary_payload, reconcile_pending_review_samples
 from mediaforce.library.media_scopes import MediaScopeConflict
 from mediaforce.web.runtime.folder_ai_tuning import (
