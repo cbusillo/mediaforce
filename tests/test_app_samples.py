@@ -172,19 +172,20 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
             app, main_window_payload=dict, tv_shows_payload=dict, movies_payload=dict, other_media_payload=dict,
             sample_payload=lambda _prefix: None,
             make_sample_action=lambda *_args: {},
-            approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
-                prefix, confirm, draft_hash, save_profile=save, queue_encode=queue,
+            approve_sample_action=lambda prefix, confirm, draft_hash, scope: approve_sample(
+                prefix, confirm, draft_hash, save_profile=save, queue_encode=queue, scope=scope,
             ),
             compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=queue),
         )
         return _route(app, f"/api/app/samples/{{prefix:path}}/{action}", "POST")
 
     ok = {"ok": True}
-    watched = {"reviewed_draft_hash": "draft-1"}
+    watched = {"reviewed_draft_hash": "draft-1", "approval_scope": "season"}
     assert _post(endpoint(ok, ok), {"confirm": ["size_tradeoff", 7], **watched}) == (
         200, {"ok": True, "compressing": True, "reason": None},
     )
     assert saved[-1] == (PREFIX, False, True, "draft-1", "")
+    assert _post(endpoint(ok, ok), {"reviewed_draft_hash": "draft-1"})[1]["ok"]
     assert _post(endpoint(folder_actions.ReviewedDraftChanged(), ok), watched) == (
         409, {"ok": False, "code": "sample_changed"},
     )
@@ -308,3 +309,33 @@ def test_a_sample_that_needs_making_again_is_made_again_until_it_fails_too_often
     assert samples_to_remake(cards, lambda prefix: failures.get(prefix, 0)) == [
         "tv/Clips gone/Season 1", "tv/Failed once/Season 1",
     ]
+
+
+@pytest.mark.parametrize("scope", ["darker_live_action", "season", "bright_live_action"])
+def test_representative_approval_uses_the_explicit_reviewed_scope(scope: str) -> None:
+    calls: list[str] = []
+    result = approve_sample(
+        PREFIX, set(), "draft-1", scope=scope, representative_kind="darker_live_action",
+        save_profile=lambda *_args: calls.append("save") or {"ok": True},
+        queue_encode=lambda *_args: calls.append("queue") or {"ok": True},
+        approve_kind=lambda kind, prefix, draft: calls.append(f"kind:{kind}:{prefix}:{draft}") or {"ok": True},
+    )
+    if scope == "bright_live_action":
+        assert result == {"ok": False, "code": "approval_scope_changed"}
+        assert calls == []
+    else:
+        assert result["ok"] and result["compressing"]
+        assert calls == (["save", f"kind:{scope}:{PREFIX}:draft-1", "queue"] if scope != "season" else ["save", "queue"])
+
+
+@pytest.mark.parametrize("kind_code", ["source_kind_differs", "sample_changed"])
+def test_a_post_save_kind_refusal_reports_the_saved_season_and_real_queue_result(kind_code: str) -> None:
+    calls: list[str] = []
+    result = approve_sample(
+        PREFIX, set(), "draft-1", scope="darker_live_action", representative_kind="darker_live_action",
+        save_profile=lambda *_args: calls.append("save") or {"ok": True},
+        queue_encode=lambda *_args: calls.append("queue") or {"ok": False, "code": "free_space_reserve"},
+        approve_kind=lambda *_args: {"ok": False, "code": kind_code},
+    )
+    assert result == {"ok": True, "compressing": False, "reason": "free_space_reserve", "kind_code": kind_code}
+    assert calls == ["save", "queue"]

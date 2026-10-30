@@ -133,6 +133,7 @@ from mediaforce.web.routes import register_app_window_routes, register_completed
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status
+from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
     samples_to_remake, start_compressing
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
@@ -140,7 +141,7 @@ from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_wor
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, approve_kind_action, \
-    background_queue_blocker, kinds_payload, next_kind_season, record_kind_attempt, stop_kind_approval
+    background_queue_blocker, kinds_payload, next_kind_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
@@ -2252,9 +2253,23 @@ def create_app(
             return None
         return folder, _folder_status_payload(normalized_prefix)
 
+    def _app_sample_kind(prefix: str) -> str | None:
+        return sample_approval_kind(
+            config, _kinds_payload(), prefix, _load_calibration_state(config, prefix), kind_of=_season_kinds,
+        )
+
     def _app_sample_payload(normalized_prefix: str) -> dict[str, Any] | None:
         payloads = _season_payloads(normalized_prefix)
-        return sample_facts(*payloads) if payloads else None
+        if payloads is None:
+            return None
+        facts = sample_facts(*payloads)
+        return {**facts, "approval_kind": _app_sample_kind(normalized_prefix) if facts["state"] == "ready_to_compare" else None}
+
+    def _approve_app_kind(kind: str, from_prefix: str, reviewed_draft_hash: str | None = None) -> dict[str, Any]:
+        return approve_kind_action(
+            config, kind, from_prefix, load_calibration_state=_load_calibration_state, kind_of=_season_kinds,
+            approved_at=_now_iso(), reviewed_draft_hash=reviewed_draft_hash,
+        )
 
     def _make_app_sample_action(normalized_prefix: str, size: str | None) -> dict[str, Any]:
         payloads = _season_payloads(normalized_prefix)
@@ -2271,20 +2286,18 @@ def create_app(
         movies_payload=lambda: movies_payload(_dashboard_movie_library_details_payload()["titles"]),
         other_media_payload=lambda: other_media_payload(_dashboard_other_library_details_payload()),
         sample_payload=_app_sample_payload,
-        approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
+        approve_sample_action=lambda prefix, confirm, draft_hash, scope: approve_sample(
             prefix, confirm, draft_hash,
             save_profile=lambda *args: _save_profile_action(*args, require_reviewed_draft=True),
-            queue_encode=_queue_folder_encode_action,
+            queue_encode=_queue_folder_encode_action, scope=scope,
+            representative_kind=_app_sample_kind(prefix) if scope != "season" else None, approve_kind=_approve_app_kind,
         ),
         make_sample_action=_make_app_sample_action,
         compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=_queue_folder_encode_action),
         item_payload=lambda prefix: item_payload(config, prefix, sound=_show_audio_preset_payload),
         player_file=lambda library_item_id, side: player_file(config, library_item_id, side),
         kinds_payload=_kinds_payload,
-        approve_kind_action=lambda kind, from_prefix: approve_kind_action(
-            config, kind, from_prefix, load_calibration_state=_load_calibration_state, kind_of=_season_kinds,
-            approved_at=_now_iso(),
-        ),
+        approve_kind_action=_approve_app_kind,
         stop_kind_action=lambda kind: {"ok": True, "stopped": stop_kind_approval(config, kind)},
     )
     register_child_recovery_routes(app, recover_children_action=_recover_children_action)
@@ -3912,14 +3925,7 @@ def _review_url(config: MediaforceConfig, output_path: Path) -> str:
 
 
 def _review_file_from_url(config: MediaforceConfig, value: str) -> Path | None:
-    prefix = "/review-media/"
-    if not value.startswith(prefix):
-        return None
-    candidate = (config.paths.review_dir / value.removeprefix(prefix)).resolve()
-    review_root = config.paths.review_dir.resolve()
-    if not candidate.is_relative_to(review_root):
-        return None
-    return candidate
+    return review_file_from_url(config.paths.review_dir, value)
 
 
 def _remove_path_if_exists(path: Path) -> None:

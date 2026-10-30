@@ -41,6 +41,9 @@ The current implementation covers:
   original-file archival under the transcode root,
   and user-approved cleanup of those rollback copies
 
+Approving a live-action kind’s representative sample approves the kind across
+its shows. The kind keeps the watched sample as its evidence. Choose
+“Approve only this season” for a season-only decision.
 Live-action seasons can follow one approval for their kind of content. Older unapproved
 season samples stop asking separately when they finished before the kind was
 approved or before its newest sample was requested. Newer samples, uncertain timing,
@@ -89,7 +92,7 @@ For migration authoring and review workflow, see
 `docs/development/database-tooling.md`.
 
 Transient calibration artifacts are also cleaned up automatically. By default,
-Mediaforce purges cached review clips, temporary calibration manifests, and
+Mediaforce purges cached review clips that no kind approval still references, temporary calibration manifests, and
 `/Volumes/media/transcode/_calibration/` scratch outputs after `14` days.
 While the server or CLI is in active use, it also retries that cleanup sweep at
 most once per hour so stale files get another chance to disappear if an earlier
@@ -130,6 +133,18 @@ On macOS, Mediaforce now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
 `/opt/homebrew/opt/ffmpeg-full/bin` when present so VMAF support survives PATH
 changes and normal formula upgrades. You can override either binary with
 `MEDIAFORCE_FFMPEG` or `MEDIAFORCE_FFPROBE`.
+
+Library in the Mac sidebar combines TV, Movies and Other. Expand Library to
+browse TV or Movies on their own; Other appears when it contains media. Each
+uses the same storage summary and state shelves, opening the existing show,
+movie or folder page. TV's finished seasons, approved samples and biggest
+unstarted shows remain available in Library and TV. Browse all opens the
+complete Media list for the selected library, and a shelf heading opens that
+state. The separate Media sidebar entry shows everything. State, search and
+table/poster controls stay in Media, without a second library picker.
+All summaries show current size and how much remains original; the combined
+Library also links to total space saved. Storage totals and computer status
+remain visible when a list cannot load.
 
 The sidebar keeps the last kinds received while retrying an unanswered refresh.
 

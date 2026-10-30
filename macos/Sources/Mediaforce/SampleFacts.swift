@@ -18,6 +18,7 @@ struct SampleFacts: Decodable, Sendable {
     let goalBytes: Int64
     let sizeStatus: String?
     let draftHash: String?
+    let approvalKind: String?
     // The latest a running sample should be ready by, from comparable finished samples; nil when they can't tell.
     let readyInSeconds: Int?
     let sizeChoices: [SizeChoice]
@@ -76,10 +77,15 @@ struct SampleFacts: Decodable, Sendable {
 
 struct SampleApproval: Equatable {
     let reviewedDraftHash: String
+    var scope = "season"
     var confirmed: [String] = []
 
+    func changeNotice(_ facts: SampleFacts?) -> ActionNotice {
+        facts?.draftHash == reviewedDraftHash ? .approvalScopeChanged : .sampleChanged
+    }
+
     func stillReviewed(_ facts: SampleFacts?) -> Bool {
-        (facts?.draftHash ?? "") == reviewedDraftHash
+        (facts?.draftHash ?? "") == reviewedDraftHash && (scope == "season" || facts?.approvalKind == scope)
     }
 }
 
@@ -87,6 +93,7 @@ struct SampleActionResult: Decodable, Sendable {
     let ok: Bool
     let code: String?
     let compressing: Bool?
+    let kindCode: String?
     let reason: String?
 
     static let choiceReasons: Set<String> = ["confirm_legacy_size", "confirm_compression_goal", "approval_needs_fresh_sample"]

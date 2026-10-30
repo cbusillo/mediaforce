@@ -15,6 +15,8 @@ enum Words {
     static func backTitle(_ place: Place) -> String {
         switch place {
         case .library: library
+        case .libraryKind(let kind): mediaKind(kind)
+        case .mediaKind(let kind, _): kind == .everything ? media : mediaKind(kind)
         case .needsYou: needsYou
         case .spaceSaved: spaceSaved
         case .media: media
@@ -24,6 +26,11 @@ enum Words {
         case .sample(let prefix): sampleTitle(folderName(prefix))
         case .computer: "Computers"
         }
+    }
+
+    static func libraryReadFailure(_ kind: MediaKind, hasPrevious: Bool) -> String {
+        let state = hasPrevious ? "list may be out of date" : "didn't load"
+        return "\(mediaKind(kind)) \(state). Retrying."
     }
 
     static func size(_ bytes: Int64) -> String {
@@ -388,6 +395,26 @@ extension Words {
 }
 
 extension Words {
+    static let watchApprovedSample = "Watch approved sample"
+    static let approveOnlySeason = "Approve only this season"
+
+    static func sampleApproval(scope: String) -> String {
+        scope == "season" ? approveSample : "Approve \(kindName(scope))"
+    }
+
+    static func sampleResult(_ result: SampleActionResult) -> ActionNotice? {
+        if let code = result.kindCode {
+            var notice = ActionNotice.kindNotExtended(code)
+            if result.compressing != true {
+                let queue = result.needsChoice ? ActionNotice.compressNeedsChoice : .approvedNotCompressing
+                notice = ActionNotice(title: notice.title, message: notice.message + " " + queue.message)
+            }
+            return notice
+        }
+        if result.compressing == true { return nil }
+        return result.needsChoice ? .compressNeedsChoice : .approvedNotCompressing
+    }
+
     static let approveSample = "Approve and compress the season"
     static let makeSampleAgain = "Make sample again"
     static let makeSample = "Make sample"
@@ -506,7 +533,9 @@ extension Words {
         switch (facts.state, facts.action) {
         case ("making_test", _): "Making the sample now."
         case ("sample_waiting", _): "The sample waits for a free computer."
-        case ("ready_to_compare", _): "The sample is ready. Watch it next to the original."
+        case ("ready_to_compare", _): facts.approvalKind.map {
+            "Watch the sample. Approving it sets how all \(kindName($0).lowercased()) shows should look."
+        } ?? "The sample is ready. Watch it next to the original."
         case ("needs_help", "choose_size"): "The sample can't reach the size goal at good quality. Choose another size."
         case ("needs_help", "retry_encode"): "Compressing stopped. Finished episodes are safe; the rest need trying again."
         case ("needs_help", "review_files"): "Some files need you before the season can go on."
@@ -571,6 +600,10 @@ extension Words {
 }
 
 extension ActionNotice {
+    static func kindNotExtended(_ code: String) -> ActionNotice {
+        ActionNotice(title: "This season was approved; its kind wasn't", message: Words.kindRefusal(code))
+    }
+
     static let sampleRefused = ActionNotice(
         title: "Mediaforce didn't do that",
         message: "It refused the request. The page shows what Mediaforce reports now."
@@ -579,6 +612,11 @@ extension ActionNotice {
     static let approvedNotCompressing = ActionNotice(
         title: "Compressing didn't start",
         message: "The sample is approved, but the season isn't compressing. Press Start compressing to try again."
+    )
+
+    static let approvalScopeChanged = ActionNotice(
+        title: "This sample no longer decides the kind",
+        message: "Approve only this season, or open the kind to review its current choice. Nothing was approved."
     )
 
     static let sampleChanged = ActionNotice(
@@ -1379,7 +1417,6 @@ extension Words {
 extension Words {
     static let media = "Media"
     static let seasonsHeading = "Seasons"
-    static let kindLabel = "Kind"
     static let viewLabel = "View"
     static let tableView = "Show as a table"
     static let posterView = "Show as posters"
@@ -1481,6 +1518,7 @@ extension Words {
 
     static func kindRefusal(_ code: String?) -> String {
         switch code {
+        case "sample_changed": "The approved sample changed before it could be used for this kind. The kind wasn't changed."
         case "approval_not_current": "That show's sample approval has changed. Approve its sample again first."
         case "size_goal_not_scalable": "That setting is a size per episode, so it can't carry to other shows."
         case "source_kind_differs": "That show's sample was made on a season of another kind."

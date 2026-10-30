@@ -55,6 +55,7 @@ struct KindsFacts: Decodable, Sendable, Equatable {
     struct Approval: Decodable, Sendable, Equatable {
         let fromPrefix: String
         let approvedAt: String?
+        let sampleMoments: [SampleFacts.Moment]?
         let sizeGoalMode: String?
         let sizeGoalMb: Double?
         let libraryItemId: Int?

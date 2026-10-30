@@ -153,6 +153,7 @@ struct PlaceRequest: Equatable {
 
 enum Place: Hashable {
     case library, needsYou, spaceSaved, media
+    case libraryKind(MediaKind), mediaKind(MediaKind, LibraryStateGroup? = nil)
     // Settings › Computers, on one computer when it names one.
     case computer(String?)
     case sample(String)
@@ -208,7 +209,7 @@ struct MainWindow: View {
                     Group {
                         switch navigation.place {
                         case .needsYou:
-                            NeedsYouPage(facts: facts, open: go)
+                            NeedsYouPage(facts: facts, posters: model.posters, open: go)
                         case .spaceSaved:
                             SpaceSavedPage(facts: facts, model: model) { go(.item($0)) }
                                 // Deleting backups changes what the page shows, so it reads its facts again at once.
@@ -222,15 +223,19 @@ struct MainWindow: View {
                                      namePage: { navigation.name(.item(prefix), $0) })
                                 .id(prefix)
                         case .media: MediaPage(model: model) { go(.item($0)) }
+                        case .mediaKind(let kind, let state):
+                            MediaPage(model: model, kind: kind, stateGroup: state) { go(.item($0)) }.id(navigation.place)
+                        case .libraryKind(let kind):
+                            LibraryPage(model: model, kind: kind, open: go).id(kind)
                         case .seasonsWithoutKind:
-                            MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { go(.media) }) { go(.item($0)) }
+                            MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { go(.media) }, kind: .tv) { go(.item($0)) }
                         case .kind(let code):
                             if let kind = model.kinds?.kinds.first(where: { $0.kind == code }) {
                                 KindPage(kind: kind, leftOut: model.kinds?.leftOut.count ?? 0, model: model,
                                          openItem: { go(.item($0)) }, openSample: { go(.sample($0)) },
                                          openLeftOut: { go(.seasonsWithoutKind) })
                             }
-                        default: LibraryPage(facts: facts, posters: model.posters) { go($0) }
+                        default: LibraryPage(model: model, open: go)
                         }
                     }
                     .safeAreaInset(edge: .top, spacing: 0) {
@@ -361,14 +366,22 @@ struct Sidebar: View {
     let facts: MainWindowFacts
     let model: MainWindowModel
     @AppStorage("kindsShown") private var kindsShown = true
+    @AppStorage("librariesShown") private var librariesShown = true
 
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $place) {
                 SidebarRow(title: Words.needsYou, symbol: "hand.raised", trailing: "\(Attention.waitingOnYou(facts))")
                     .tag(Place.needsYou)
-                Label(Words.library, systemImage: "books.vertical")
-                    .tag(Place.library)
+                DisclosureGroup(isExpanded: $librariesShown) {
+                    ForEach(MediaKind.libraries(in: facts.library)) { kind in
+                        Label(Words.mediaKind(kind), systemImage: kind.symbol)
+                            .tag(Place.libraryKind(kind))
+                    }
+                } label: {
+                    Label(Words.library, systemImage: "books.vertical")
+                }
+                .tag(Place.library)
                 SidebarRow(title: Words.spaceSaved, symbol: "arrow.down.right.and.arrow.up.left", trailing: Words.size(facts.spaceSaved.bytes))
                     .tag(Place.spaceSaved)
                 // No count: the page counts shows, titles and folders, while the facts count other media by file.

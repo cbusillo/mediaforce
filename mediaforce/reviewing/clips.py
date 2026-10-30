@@ -11,6 +11,14 @@ from mediaforce.hosts.config import ssh_target_for_host
 from mediaforce.remote import ssh_client_options
 
 
+def review_file_from_url(review_dir: Path, value: str) -> Path | None:
+    prefix = "/review-media/"
+    if not value.startswith(prefix):
+        return None
+    candidate = (review_dir / value.removeprefix(prefix)).resolve()
+    return candidate if candidate.is_relative_to(review_dir.resolve()) else None
+
+
 def encode_preview_clips(
         *,
         source_path: Path,
