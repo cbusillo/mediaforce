@@ -64,11 +64,7 @@ still answers when that storage is gone, and it starts no work.
 
 ## Show posters
 
-Needs you uses the same cached posters as Media beside each show's or movie's
-decision. Computer and original-backup decisions have system icons. Names open
-the relevant page, with the shared waiting mark beside them and the decision's
-buttons beside its explanation. The page name and waiting count stay in the
-window title bar.
+Needs you uses the same cached posters as Media.
 
 `GET /api/app/posters/{show_prefix}`, for example `/api/app/posters/tv/Futurama`,
 returns the show's poster image, or `404` with `{"poster": "none"}` when

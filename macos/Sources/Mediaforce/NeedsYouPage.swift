@@ -16,7 +16,7 @@ struct NeedsYouPage: View {
                 HStack(alignment: .top, spacing: 14) {
                     artwork(item)
                     VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
                             WaitingMark()
                             if let place = item.opens {
                                 Button(item.title) { open(place) }
@@ -60,7 +60,7 @@ struct NeedsYouPage: View {
     private func actionTitle(_ place: Place) -> String {
         switch place {
         case .sample: "Open sample"
-        case .item: "Open season"
+        case .item: "Open"
         case .computer: "Open computer"
         case .spaceSaved: "Review original backups"
         default: "Open"
