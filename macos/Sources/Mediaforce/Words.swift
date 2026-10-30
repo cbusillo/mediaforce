@@ -387,6 +387,7 @@ extension Words {
 }
 
 extension Words {
+    static let watchApprovedSample = "Watch approved sample"
     static let approveOnlySeason = "Approve only this season"
 
     static func sampleApproval(scope: String) -> String {

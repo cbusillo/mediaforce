@@ -292,7 +292,9 @@ def test_unreadable_kind_evidence_preserves_review_files(config: MediaforceConfi
     approval_file = kind_approval_file(config, APPROVABLE_KINDS[0])
     approval_file.parent.mkdir(parents=True)
     approval_file.write_text(contents)
+    unrelated_scratch = _work_folder(config.staging_root / "_calibration", "scratch", age_days=30)
 
     _sweep(config)
 
     assert watched.exists()
+    assert not unrelated_scratch.exists()

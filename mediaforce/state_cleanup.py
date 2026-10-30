@@ -68,7 +68,6 @@ def _purge_due_transient_artifacts(config: MediaforceConfig) -> bool:
     support_dir = config.paths.db_path.parent
     try:
         rollback_stage = retained_deploy_stage(support_dir)
-        kind_review_paths = _retained_kind_review_paths(config)
         protected = (*protected_runtime_roots(support_dir), Path(__file__).resolve().parents[1])
     except RuntimeProtectionError as exc:
         LOGGER.warning("%s", exc)
@@ -90,7 +89,12 @@ def _purge_due_transient_artifacts(config: MediaforceConfig) -> bool:
     cutoff = now - (retention_days * SECONDS_PER_DAY)
     temp_cutoff = max(cutoff, now - _orphan_temp_retention_seconds(config))
     process_snapshot = _cleanup_process_snapshot(config)
-    _prune_children(config.paths.review_dir, cutoff, protected_paths=kind_review_paths)
+    try:
+        kind_review_paths = _retained_kind_review_paths(config)
+    except RuntimeProtectionError as exc:
+        LOGGER.warning("%s", exc)
+    else:
+        _prune_children(config.paths.review_dir, cutoff, protected_paths=kind_review_paths)
     for staging_root in staging_roots:
         root_verified = not _root_requires_unverified_process_check(
             staging_root, process_snapshot
@@ -134,9 +138,9 @@ def _retained_kind_review_paths(config: MediaforceConfig) -> tuple[Path, ...]:
         except FileNotFoundError:
             continue
         except (OSError, ValueError) as exc:
-            raise RuntimeProtectionError("Cannot read kind sample evidence; cleanup refused") from exc
+            raise RuntimeProtectionError("Cannot read kind sample evidence; review cleanup skipped") from exc
         if not isinstance(payload, dict):
-            raise RuntimeProtectionError("Invalid kind sample evidence; cleanup refused")
+            raise RuntimeProtectionError("Invalid kind sample evidence; review cleanup skipped")
         for moment in sample_moments(payload):
             for side in ("original", "sample"):
                 path = review_file_from_url(config.paths.review_dir, str(object_dict(moment.get(side)).get("url") or ""))

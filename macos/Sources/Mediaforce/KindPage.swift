@@ -48,9 +48,10 @@ struct KindPage: View {
                     Text(Words.kindNothingToWatch).foregroundStyle(.secondary)
                 }
                 if !offering {
-                    KindDecision(kind: kind, setting: setting, model: model, openItem: openItem)
+                    KindDecision(kind: kind, setting: setting, model: model, openItem: openItem,
+                                 showSample: chosen != nil && kind.approval?.sampleMoments?.isEmpty == false ? { chosen = nil } : nil)
                 }
-                KindShows(kind: kind, playing: offering ? kind.sampleShow : setting?.show, leftOut: leftOut, posters: model.posters,
+                KindShows(kind: kind, playing: offering ? kind.sampleShow : (kind.approval != nil && chosen == nil ? nil : setting?.show), leftOut: leftOut, posters: model.posters,
                           choose: { chosen = $0 }, open: openItem, openLeftOut: openLeftOut,
                           offer: offer)
             }
@@ -98,6 +99,7 @@ struct KindDecision: View {
     let openItem: (String) -> Void
     @State private var working = false
     @State private var refusal: String?
+    var showSample: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
@@ -110,6 +112,9 @@ struct KindDecision: View {
                 }
                 .labelStyle(KindCheckLabel())
                 Spacer(minLength: 12)
+                if let showSample {
+                    Button(Words.watchApprovedSample, action: showSample)
+                }
                 Button(Words.stopUsingKind) { act { try await $0.stopKind(kind.kind) } }
             } else if let setting {
                 Button(Words.showSetting(setting.name, setting)) { openItem(setting.show) }

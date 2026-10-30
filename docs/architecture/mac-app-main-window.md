@@ -315,8 +315,8 @@ approval being copied. If it refuses after the season was saved, the successful
 season result includes `kind_code`; the app says the season was approved but
 the kind was not, with the refusal reason.
 
-Review cleanup retains the clips referenced by saved kind approvals and refuses
-the sweep if their records cannot be read. Stopping a kind releases those clips
+Review cleanup retains the clips referenced by saved kind approvals and skips only
+review-clip cleanup if their records cannot be read. Stopping a kind releases those clips
 to the normal age-based cleanup. Missing legacy clips remain unavailable rather
 than being replaced by a different sample; a show can still be selected for a
 published-episode comparison. A changed approval scope is reported separately
