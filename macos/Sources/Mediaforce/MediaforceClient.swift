@@ -59,8 +59,8 @@ struct MediaforceClient: Sendable {
         return try await decode(SampleFacts.self, from: request)
     }
 
-    func approveSample(_ prefix: String, confirm: [String], draftHash: String) async throws -> SampleActionResult {
-        try await sampleAction(prefix, "approve", body: ["confirm": confirm, "reviewed_draft_hash": draftHash])
+    func approveSample(_ prefix: String, confirm: [String], draftHash: String, scope: String = "season") async throws -> SampleActionResult {
+        try await sampleAction(prefix, "approve", body: ["confirm": confirm, "reviewed_draft_hash": draftHash, "approval_scope": scope])
     }
 
     func makeSample(_ prefix: String, size: String?) async throws -> SampleActionResult {

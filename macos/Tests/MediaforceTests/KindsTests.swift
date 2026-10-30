@@ -29,6 +29,16 @@ final class KindsTests: XCTestCase {
         XCTAssertEqual(decided.approval?.showPrefix, "tv/Raising Hope")
     }
 
+    func testTheApprovedKindCarriesItsOwnSavedSampleClips() throws {
+        let decided = try facts(approval: """
+        {"from_prefix": "tv/Raising Hope/Season 2", "approved_at": "now", "library_item_id": null,
+         "sample_moments": [{"at_seconds": 600, "original": {"url": "/watched/source.mp4", "size_bytes": 1000},
+                             "sample": {"url": "/watched/sample.mp4", "size_bytes": 100}}]}
+        """).kinds[0]
+        XCTAssertEqual(decided.approval?.sampleMoments?.first?.sample.url, "/watched/sample.mp4")
+        XCTAssertNil(try facts().kinds[0].approval)
+    }
+
     func testAKindNamesTheShowWhoseSampleIsBeingMadeAndWhereEachShowsSampleWouldBe() throws {
         let kind = try facts().kinds[0]
         XCTAssertEqual(kind.sampleShow, "tv/Psych")

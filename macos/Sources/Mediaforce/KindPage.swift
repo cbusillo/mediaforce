@@ -21,16 +21,23 @@ struct KindPage: View {
         let offer: ((KindsFacts.Show) -> Void)? = offering && kind.sampleSeason == nil && !asking ? { makeSample($0) } : nil
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                if kind.shows.isEmpty && kind.settings.isEmpty {
+                if kind.shows.isEmpty && kind.settings.isEmpty && kind.approval == nil {
                     Text(Words.kindEmpty(kind.kind)).foregroundStyle(.secondary)
                 } else if offering, let season = kind.sampleSeason {
-                    SampleWork(prefix: season, model: model, facts: $sample, namesSeason: true, openItem: openItem,
-                               acted: { await model.refreshKinds() })
+                    SampleWork(prefix: season, model: model, facts: $sample, namesSeason: true, openItem: openItem)
                         .id(season)
                 } else if offering, let biggest = kind.shows.first {
                     Button(Words.makeSampleOf(biggest.name)) { makeSample(biggest) }
                         .buttonStyle(.borderedProminent)
                         .disabled(asking)
+                } else if kind.approval != nil, chosen == nil {
+                    if let moments = kind.approval?.sampleMoments, !moments.isEmpty {
+                        ComparePlayer(players: players, model: model, moments: .clips(moments),
+                                      names: PictureNames(compressed: Words.sample),
+                                      gettingReady: Words.gettingSampleReady, couldNotPlay: Words.couldNotPlaySample)
+                    } else {
+                        Text(Words.couldNotPlaySample).foregroundStyle(.secondary)
+                    }
                 } else if let episode = setting?.libraryItemId {
                     ComparePlayer(players: players, model: model)
                         .task(id: episode) {
@@ -41,9 +48,10 @@ struct KindPage: View {
                     Text(Words.kindNothingToWatch).foregroundStyle(.secondary)
                 }
                 if !offering {
-                    KindDecision(kind: kind, setting: setting, model: model, openItem: openItem)
+                    KindDecision(kind: kind, setting: setting, model: model, openItem: openItem,
+                                 showSample: chosen != nil && kind.approval?.sampleMoments?.isEmpty == false ? { chosen = nil } : nil)
                 }
-                KindShows(kind: kind, playing: offering ? kind.sampleShow : setting?.show, leftOut: leftOut, posters: model.posters,
+                KindShows(kind: kind, playing: offering ? kind.sampleShow : (kind.approval != nil && chosen == nil ? nil : setting?.show), leftOut: leftOut, posters: model.posters,
                           choose: { chosen = $0 }, open: openItem, openLeftOut: openLeftOut,
                           offer: offer)
             }
@@ -57,6 +65,7 @@ struct KindPage: View {
         .navigationTitle(Words.kindName(kind.kind))
         .navigationSubtitle(Words.kindSubtitle(kind))
         .onChange(of: kind.kind) {
+            players.pause()
             chosen = nil
             sample = nil
         }
@@ -90,6 +99,7 @@ struct KindDecision: View {
     let openItem: (String) -> Void
     @State private var working = false
     @State private var refusal: String?
+    var showSample: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
@@ -102,6 +112,9 @@ struct KindDecision: View {
                 }
                 .labelStyle(KindCheckLabel())
                 Spacer(minLength: 12)
+                if let showSample {
+                    Button(Words.watchApprovedSample, action: showSample)
+                }
                 Button(Words.stopUsingKind) { act { try await $0.stopKind(kind.kind) } }
             } else if let setting {
                 Button(Words.showSetting(setting.name, setting)) { openItem(setting.show) }

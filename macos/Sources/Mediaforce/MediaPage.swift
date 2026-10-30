@@ -239,7 +239,7 @@ struct MediaPoster: View {
 
     var body: some View {
         Group {
-            if row.kind != .other, let image = posters.image(for: row.posterPrefix ?? row.id) {
+            if let image = posters.image(for: row.posterPrefix ?? row.id) {
                 Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
                     .frame(width: width, height: width * 1.5)
             } else if width > 60 {
