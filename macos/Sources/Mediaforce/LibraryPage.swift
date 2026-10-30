@@ -3,6 +3,7 @@ import SwiftUI
 struct LibraryPage: View {
     let model: MainWindowModel
     var kind = MediaKind.everything
+    @State private var listing = MediaListing()
     let open: (Place) -> Void
 
     private var mediaPlace: Place { kind == .everything ? .media : .mediaKind(kind) }
@@ -24,27 +25,26 @@ struct LibraryPage: View {
                 }
             }
             Button("Browse all", action: { open(mediaPlace) }).buttonStyle(QuietLinkStyle())
-            RefreshingPage(title: kind == .everything ? Words.library : Words.mediaKind(kind), scrolls: false,
-                           load: { await MediaListing.load(model.client, kind: kind) }) { (listing: MediaListing) in
-                let rows = listing.rows
-                ForEach(listing.unavailable) { kind in
-                    Text("\(Words.mediaKind(kind)) didn't load. Retrying.").font(.callout).foregroundStyle(.secondary)
-                }
-                if rows.contains(where: \.listCutShort) {
-                    Text(Words.otherMediaTruncated).font(.callout).foregroundStyle(.secondary)
-                }
-                MediaShelves(rows: rows.filter { !includesTV || $0.kind != .tv }, posters: model.posters, open: { open(.item($0)) },
-                             showOnly: { open(.mediaKind(kind, $0)) })
-                if let facts = model.facts {
-                    Latest(events: Array(facts.events.filter { event in
-                        kind == .everything || rows.contains { event.relPath == $0.id || event.relPath.hasPrefix($0.id + "/") }
-                    }.prefix(4)), posters: model.posters, open: open)
-                }
+            if listing.loading { ProgressView() }
+            ForEach(listing.unavailable) { kind in
+                Text(Words.libraryReadFailure(kind, hasPrevious: listing.hasLoaded(kind)))
+                    .font(.callout).foregroundStyle(.secondary)
             }
-            .padding(.horizontal, -34)
+            if listing.rows.contains(where: \.listCutShort) {
+                Text(Words.otherMediaTruncated).font(.callout).foregroundStyle(.secondary)
+            }
+            MediaShelves(rows: listing.rows, posters: model.posters, open: { open(.item($0)) },
+                         showOnly: { open(.mediaKind(kind, $0)) })
+            if let facts = model.facts {
+                let events = Array(facts.events.filter { event in
+                    kind == .everything || listing.rows.contains { event.relPath == $0.id || event.relPath.hasPrefix($0.id + "/") }
+                }.prefix(4))
+                if !events.isEmpty { Latest(events: events, posters: model.posters, open: open) }
+            }
             if let facts = model.facts {
                 Computers(computers: facts.computers) { open(.computer($0)) }
             }
         }
+        .task { await listing.watch(model.client, kind: kind) }
     }
 }

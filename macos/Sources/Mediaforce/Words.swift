@@ -28,6 +28,11 @@ enum Words {
         }
     }
 
+    static func libraryReadFailure(_ kind: MediaKind, hasPrevious: Bool) -> String {
+        let state = hasPrevious ? "list may be out of date" : "didn't load"
+        return "\(mediaKind(kind)) \(state). Retrying."
+    }
+
     static func size(_ bytes: Int64) -> String {
         let value = Double(bytes)
         if value >= 1e12 { return (value / 1e12).formatted(.number.precision(.fractionLength(2))) + " TB" }

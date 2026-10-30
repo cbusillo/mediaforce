@@ -9,23 +9,22 @@ struct MediaPage: View {
     var showEverything: () -> Void = {}
     @AppStorage("mediaPageView") private var view = MediaView.table
     @State private var search = ""
+    @State private var listing = MediaListing()
     var kind = MediaKind.everything
     @State var stateGroup: LibraryStateGroup?
     let openItem: (String) -> Void
 
     var body: some View {
-        RefreshingPage(title: onlySeasons == nil ? (kind == .everything ? Words.media : Words.mediaKind(kind)) : Words.seasonsWithoutKindTitle,
-                       scrolls: view != .table,
-                       factsSubtitle: { loaded in
-                           let rows = listed(loaded.rows)
-                           return Words.shown(visibleRows(rows).count, of: rows.count, onlySeasons == nil ? "item" : "season")
-                       },
-                       load: { await MediaListing.load(model.client, kind: kind) }) { (loaded: MediaListing) in
-            let rows = listed(loaded.rows)
-            ForEach(loaded.unavailable) { kind in
-                Text("\(Words.mediaKind(kind)) didn't load. Retrying.").font(.callout).foregroundStyle(.secondary)
+        let rows = listing.hasLoaded ? listed(listing.rows) : []
+        let visible = visibleRows(rows)
+        PageFrame(title: onlySeasons == nil ? (kind == .everything ? Words.media : Words.mediaKind(kind)) : Words.seasonsWithoutKindTitle,
+                  subtitle: listing.hasLoaded ? Words.shown(visible.count, of: rows.count, onlySeasons == nil ? "item" : "season") : "",
+                  scrolls: view != .table) {
+            if listing.loading { ProgressView() }
+            ForEach(listing.unavailable) { kind in
+                Text(Words.libraryReadFailure(kind, hasPrevious: listing.hasLoaded(kind)))
+                    .font(.callout).foregroundStyle(.secondary)
             }
-            let visible = visibleRows(rows)
             HStack(spacing: 12) {
                 LibraryStatePicker(selection: $stateGroup)
                 Spacer()
@@ -48,7 +47,7 @@ struct MediaPage: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            if visible.isEmpty {
+            if visible.isEmpty && listing.hasLoaded && listing.unavailable.isEmpty {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text(Words.noMatchingMedia).foregroundStyle(.secondary)
                     if stateGroup != nil || !search.isEmpty {
@@ -64,6 +63,7 @@ struct MediaPage: View {
                 MediaTable(rows: visible, posters: model.posters, open: openItem)
             }
         }
+        .task { await listing.watch(model.client, kind: kind) }
     }
 
     private func listed(_ loaded: [MediaRow]) -> [MediaRow] {
@@ -120,28 +120,53 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-struct MediaListing: Sendable {
-    let rows: [MediaRow]
-    let unavailable: [MediaKind]
+@MainActor
+@Observable
+final class MediaListing {
+    private var snapshots: [MediaKind: [MediaRow]] = [:]
+    private(set) var unavailable: [MediaKind] = []
+    private(set) var loading = true
+    private var request = 0
 
-    @MainActor
-    static func load(_ client: MediaforceClient, kind: MediaKind) async -> MediaListing {
-        guard kind == .everything else { return await read(client, kind: kind) }
-        async let tv = read(client, kind: .tv)
-        async let movies = read(client, kind: .movies)
-        async let other = read(client, kind: .other)
-        let parts = await [tv, movies, other]
-        return MediaListing(rows: parts.flatMap(\.rows).sorted { ($0.stateRank, -$0.bytes) < ($1.stateRank, -$1.bytes) },
-                            unavailable: parts.flatMap(\.unavailable))
+    var hasLoaded: Bool { !snapshots.isEmpty }
+    func hasLoaded(_ kind: MediaKind) -> Bool { snapshots[kind] != nil }
+    var rows: [MediaRow] {
+        snapshots.values.flatMap { $0 }.sorted { ($0.stateRank, -$0.bytes, $0.id) < ($1.stateRank, -$1.bytes, $1.id) }
     }
 
-    @MainActor
-    private static func read(_ client: MediaforceClient, kind: MediaKind) async -> MediaListing {
-        do {
-            return MediaListing(rows: try await MediaRow.load(client, kind: kind), unavailable: [])
-        } catch {
-            return MediaListing(rows: [], unavailable: [kind])
+    func watch(_ client: MediaforceClient, kind: MediaKind) async {
+        while !Task.isCancelled {
+            await refresh(client, kind: kind)
+            try? await Task.sleep(for: MainWindowModel.refreshInterval)
         }
+    }
+
+    func refresh(_ client: MediaforceClient, kind: MediaKind) async {
+        request += 1
+        let current = request
+        let kinds: [MediaKind] = kind == .everything ? [.tv, .movies, .other] : [kind]
+        let results = await withTaskGroup(of: Read.self) { group in
+            for kind in kinds {
+                group.addTask {
+                    do { return Read(kind: kind, rows: try await MediaRow.load(client, kind: kind)) }
+                    catch { return Read(kind: kind, rows: nil) }
+                }
+            }
+            var results: [Read] = []
+            for await result in group { results.append(result) }
+            return results
+        }
+        guard !Task.isCancelled, current == request else { return }
+        unavailable = kinds.filter { kind in results.contains { $0.kind == kind && $0.rows == nil } }
+        for result in results {
+            if let rows = result.rows { snapshots[result.kind] = rows }
+        }
+        loading = false
+    }
+
+    private struct Read: Sendable {
+        let kind: MediaKind
+        let rows: [MediaRow]?
     }
 }
 

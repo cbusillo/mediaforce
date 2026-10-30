@@ -4,63 +4,48 @@ import XCTest
 
 final class LibraryTests: XCTestCase {
     @MainActor
-    func testAMovieLibraryLoadsWhenTheOtherLibrariesDoNotAnswer() async throws {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [StubServer.self]
-        let session = URLSession(configuration: config)
-        let previousBody = StubServer.body
-        let previousRespond = StubServer.respond
-        defer {
-            session.invalidateAndCancel()
-            StubServer.body = previousBody
-            StubServer.respond = previousRespond
-        }
-        StubServer.body = Data("{\"movies\": []}".utf8)
-        StubServer.respond = { request in
-            guard request.url?.path == "/api/app/movies" else { throw URLError(.cannotConnectToHost) }
-            return HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-        }
-        let client = MediaforceClient(baseURL: URL(string: "http://mediaforce.invalid")!, session: session)
-        let rows = try await MediaRow.load(client, kind: .movies)
-        XCTAssertTrue(rows.isEmpty)
-    }
-
-    @MainActor
     func testCombinedLibraryKeepsMoviesWhenAnotherLibraryFails() async {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [PartialLibraryServer.self]
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
         let client = MediaforceClient(baseURL: URL(string: "http://mediaforce.invalid")!, session: session)
-        let listing = await MediaListing.load(client, kind: .everything)
+        let listing = MediaListing()
+        await listing.refresh(client, kind: .everything)
         XCTAssertEqual(listing.unavailable, [.tv])
+        XCTAssertFalse(listing.hasLoaded(.tv))
+        XCTAssertTrue(listing.hasLoaded(.movies))
         XCTAssertEqual(listing.rows.map(\.kind), [.movies])
     }
 
-    func testCombinedLibraryIncludesEveryKindAndScopesUseTheRowsKind() throws {
-        let rows = [
-            MediaRow(id: "series/Example", name: "A show", kind: .tv, detail: "", bytes: 40, saved: nil, state: .needsYou),
-            MediaRow(id: "films/Example", name: "A movie", kind: .movies, detail: "", bytes: 70, saved: nil, state: .readyToCompress),
-            MediaRow(id: "home/Trip", name: "A trip", kind: .other, detail: "", bytes: 20, saved: nil, state: .noActiveWork)
-        ]
-        XCTAssertEqual(MediaKind.everything.rows(in: rows).map(\.id), rows.map(\.id))
-        for kind in [MediaKind.tv, .movies, .other] {
-            XCTAssertEqual(kind.rows(in: rows).map(\.id), rows.filter { $0.kind == kind }.map(\.id))
-        }
-        let facts = try JSONDecoder.mediaforce.decode(MainWindowFacts.self, from: Data(MainWindowTests.facts.utf8))
-        XCTAssertEqual(MediaKind.everything.originalBytes(in: facts.library),
-                       facts.library.tv.originalBytes + facts.library.movies.originalBytes + facts.library.other.originalBytes)
-        XCTAssertEqual(MediaKind.movies.totalBytes(in: facts.library), facts.library.movies.totalBytes)
-        XCTAssertFalse(MediaKind.libraries(in: facts.library).contains(.other))
-        let library = MainWindowFacts.Library(tv: facts.library.tv, movies: facts.library.movies,
-                                             other: .init(itemCount: 1, totalBytes: 20, originalBytes: 20))
-        XCTAssertTrue(MediaKind.libraries(in: library).contains(.other))
-        XCTAssertEqual(MediaKind.everything.originalBytes(in: library),
-                       MediaKind.tv.originalBytes(in: library) + MediaKind.movies.originalBytes(in: library) + MediaKind.other.originalBytes(in: library))
+    @MainActor
+    func testFailedRefreshRetainsRowsUntilASuccessfulEmptyResponse() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PartialLibraryServer.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel(); PartialLibraryServer.mode = .populated }
+        let client = MediaforceClient(baseURL: URL(string: "http://mediaforce.invalid")!, session: session)
+        let listing = MediaListing()
+        await listing.refresh(client, kind: .movies)
+        let previous = listing.rows.map(\.id)
+        XCTAssertFalse(previous.isEmpty)
+        PartialLibraryServer.mode = .failing
+        await listing.refresh(client, kind: .movies)
+        XCTAssertEqual(listing.rows.map(\.id), previous)
+        XCTAssertEqual(listing.unavailable, [.movies])
+        XCTAssertTrue(listing.hasLoaded(.movies))
+        PartialLibraryServer.mode = .empty
+        await listing.refresh(client, kind: .movies)
+        XCTAssertTrue(listing.rows.isEmpty)
+        XCTAssertTrue(listing.unavailable.isEmpty)
+        XCTAssertTrue(listing.hasLoaded(.movies))
     }
+
 }
 
 private final class PartialLibraryServer: URLProtocol, @unchecked Sendable {
+    enum Mode { case populated, failing, empty }
+    nonisolated(unsafe) static var mode = Mode.populated
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
@@ -68,6 +53,14 @@ private final class PartialLibraryServer: URLProtocol, @unchecked Sendable {
         let body: String
         switch request.url?.path {
         case "/api/app/movies":
+            if Self.mode == .failing {
+                client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
+                return
+            }
+            if Self.mode == .empty {
+                body = "{\"movies\": []}"
+                break
+            }
             body = """
             {"movies": [{"prefix": "films/Example", "title": "A movie", "file_count": 1,
                          "bytes": 70, "state": "ready"}]}

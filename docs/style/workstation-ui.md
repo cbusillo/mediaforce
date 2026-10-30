@@ -47,7 +47,7 @@ has to look up is a defect.
 - The Mac sidebar's Library choice and the window title identify the active
   library. Library itself combines them. Do not repeat the library choice as
   a second filter in Media.
-- Use one compact four-metric strip and one compact current-work summary. Do not
+- Use one compact storage summary and one compact current-work summary. Do not
   duplicate active rows as a card gallery or repeat one recommended row as a
   hero block.
 - Let metrics and current work sit calmly on the workstation canvas. The
