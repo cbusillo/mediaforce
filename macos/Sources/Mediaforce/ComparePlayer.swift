@@ -321,6 +321,7 @@ struct PlayerSurface: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         view.layer = AVPlayerLayer(player: player)
+        view.layer?.backgroundColor = NSColor.black.cgColor
         view.wantsLayer = true
         return view
     }

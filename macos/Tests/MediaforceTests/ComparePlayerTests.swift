@@ -16,9 +16,24 @@ final class ComparePlayerTests: XCTestCase {
             let host = NSHostingView(rootView: PlayerSurface(player: player))
             host.frame = NSRect(x: 0, y: 0, width: 320, height: 180)
             let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            defer { window.close() }
             window.contentView = host
             host.layoutSubtreeIfNeeded()
             let surface = try XCTUnwrap(picture(in: host))
+            window.setContentSize(NSSize(width: 480, height: 270))
+            host.layoutSubtreeIfNeeded()
+            XCTAssertEqual(surface.layer?.bounds.size, surface.bounds.size)
+            XCTAssertTrue(surface.layer?.animationKeys()?.isEmpty ?? true)
+            var pixel = [UInt8](repeating: 0, count: 4)
+            try pixel.withUnsafeMutableBytes { bytes in
+                let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: 1, height: 1,
+                                                      bitsPerComponent: 8, bytesPerRow: 4,
+                                                      space: CGColorSpaceCreateDeviceRGB(),
+                                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                surface.layer?.render(in: context)
+            }
+            XCTAssertEqual(pixel, [0, 0, 0, 255], "Empty picture areas must cover the other side of a wipe")
             let page = ScrollReceiver()
             surface.nextResponder = page
             let target = surface.hitTest(NSPoint(x: surface.bounds.midX, y: surface.bounds.midY)) ?? surface
@@ -42,7 +57,10 @@ final class ComparePlayerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
         let players = ComparePlayers()
         players.load(compressed: url, original: url)
-        try await wait { !players.preparing }
+        try await wait {
+            !players.preparing && abs(players.main.currentTime().seconds - players.position) < 0.001 &&
+            abs(players.original.currentTime().seconds - players.position) < 0.001
+        }
         XCTAssertFalse(players.failed)
         for position in [1.0, 3.0, 2.0] {
             players.seek(to: position)
@@ -54,17 +72,17 @@ final class ComparePlayerTests: XCTestCase {
         players.step(by: 1)
         try await wait {
             players.main.currentTime().seconds > 2 &&
-            players.main.currentTime() == players.original.currentTime()
+            abs(players.main.currentTime().seconds - players.original.currentTime().seconds) < 0.001
         }
         XCTAssertFalse(players.playing)
     }
 
-    private func wait(_ condition: () -> Bool) async throws {
+    private func wait(file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool) async throws {
         for _ in 0..<250 {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(20))
         }
-        XCTFail("The local players did not reach the requested moment")
+        XCTFail("The local players did not reach the requested moment", file: file, line: line)
     }
 
     private func clip() async throws -> URL {
