@@ -17,11 +17,14 @@ struct MediaPage: View {
         RefreshingPage(title: onlySeasons == nil ? (kind == .everything ? Words.media : Words.mediaKind(kind)) : Words.seasonsWithoutKindTitle,
                        scrolls: view != .table,
                        factsSubtitle: { loaded in
-                           let rows = listed(loaded)
+                           let rows = listed(loaded.rows)
                            return Words.shown(visibleRows(rows).count, of: rows.count, onlySeasons == nil ? "item" : "season")
                        },
-                       load: { try await MediaRow.load(model.client, kind: kind) }) { (loaded: [MediaRow]) in
-            let rows = listed(loaded)
+                       load: { await MediaListing.load(model.client, kind: kind) }) { (loaded: MediaListing) in
+            let rows = listed(loaded.rows)
+            ForEach(loaded.unavailable) { kind in
+                Text("\(Words.mediaKind(kind)) didn't load. Retrying.").font(.callout).foregroundStyle(.secondary)
+            }
             let visible = visibleRows(rows)
             HStack(spacing: 12) {
                 LibraryStatePicker(selection: $stateGroup)
@@ -113,6 +116,31 @@ enum MediaKind: String, CaseIterable, Identifiable, Sendable {
         case .tv: library.tv.totalBytes
         case .movies: library.movies.totalBytes
         case .other: library.other.totalBytes
+        }
+    }
+}
+
+struct MediaListing: Sendable {
+    let rows: [MediaRow]
+    let unavailable: [MediaKind]
+
+    @MainActor
+    static func load(_ client: MediaforceClient, kind: MediaKind) async -> MediaListing {
+        guard kind == .everything else { return await read(client, kind: kind) }
+        async let tv = read(client, kind: .tv)
+        async let movies = read(client, kind: .movies)
+        async let other = read(client, kind: .other)
+        let parts = await [tv, movies, other]
+        return MediaListing(rows: parts.flatMap(\.rows).sorted { ($0.stateRank, -$0.bytes) < ($1.stateRank, -$1.bytes) },
+                            unavailable: parts.flatMap(\.unavailable))
+    }
+
+    @MainActor
+    private static func read(_ client: MediaforceClient, kind: MediaKind) async -> MediaListing {
+        do {
+            return MediaListing(rows: try await MediaRow.load(client, kind: kind), unavailable: [])
+        } catch {
+            return MediaListing(rows: [], unavailable: [kind])
         }
     }
 }
@@ -221,7 +249,7 @@ struct MediaTable: View {
     let posters: PosterStore
     let open: (String) -> Void
     @State private var selected: MediaRow.ID?
-    @State var sortOrder = [KeyPathComparator(\MediaRow.stateRank), KeyPathComparator(\MediaRow.bytes, order: .reverse)]
+    @State private var sortOrder = [KeyPathComparator(\MediaRow.stateRank), KeyPathComparator(\MediaRow.bytes, order: .reverse)]
 
     var body: some View {
         Table(rows.sorted(using: sortOrder), selection: $selected, sortOrder: $sortOrder) {

@@ -222,13 +222,13 @@ struct MainWindow: View {
                             ItemPage(prefix: prefix, model: model, openSample: { go(.sample($0)) }, openItem: { go(.item($0)) },
                                      namePage: { navigation.name(.item(prefix), $0) })
                                 .id(prefix)
-                        case .media: MediaPage(model: model, kind: navigation.libraryKind) { go(.item($0)) }.id(navigation.libraryKind)
+                        case .media: MediaPage(model: model) { go(.item($0)) }
                         case .mediaKind(let kind, let state):
                             MediaPage(model: model, kind: kind, stateGroup: state) { go(.item($0)) }.id(navigation.place)
                         case .libraryKind(let kind):
                             LibraryPage(model: model, kind: kind, open: go).id(kind)
                         case .seasonsWithoutKind:
-                            MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { go(.media) }) { go(.item($0)) }
+                            MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { go(.media) }, kind: .tv) { go(.item($0)) }
                         case .kind(let code):
                             if let kind = model.kinds?.kinds.first(where: { $0.kind == code }) {
                                 KindPage(kind: kind, leftOut: model.kinds?.leftOut.count ?? 0, model: model,

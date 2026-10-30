@@ -1378,7 +1378,6 @@ extension Words {
 extension Words {
     static let media = "Media"
     static let seasonsHeading = "Seasons"
-    static let kindLabel = "Kind"
     static let viewLabel = "View"
     static let tableView = "Show as a table"
     static let posterView = "Show as posters"

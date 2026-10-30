@@ -8,7 +8,13 @@ final class LibraryTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StubServer.self]
         let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel(); StubServer.respond = nil }
+        let previousBody = StubServer.body
+        let previousRespond = StubServer.respond
+        defer {
+            session.invalidateAndCancel()
+            StubServer.body = previousBody
+            StubServer.respond = previousRespond
+        }
         StubServer.body = Data("{\"movies\": []}".utf8)
         StubServer.respond = { request in
             guard request.url?.path == "/api/app/movies" else { throw URLError(.cannotConnectToHost) }
@@ -17,6 +23,18 @@ final class LibraryTests: XCTestCase {
         let client = MediaforceClient(baseURL: URL(string: "http://mediaforce.invalid")!, session: session)
         let rows = try await MediaRow.load(client, kind: .movies)
         XCTAssertTrue(rows.isEmpty)
+    }
+
+    @MainActor
+    func testCombinedLibraryKeepsMoviesWhenAnotherLibraryFails() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PartialLibraryServer.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let client = MediaforceClient(baseURL: URL(string: "http://mediaforce.invalid")!, session: session)
+        let listing = await MediaListing.load(client, kind: .everything)
+        XCTAssertEqual(listing.unavailable, [.tv])
+        XCTAssertEqual(listing.rows.map(\.kind), [.movies])
     }
 
     func testCombinedLibraryIncludesEveryKindAndScopesUseTheRowsKind() throws {
@@ -40,4 +58,30 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(MediaKind.everything.originalBytes(in: library),
                        MediaKind.tv.originalBytes(in: library) + MediaKind.movies.originalBytes(in: library) + MediaKind.other.originalBytes(in: library))
     }
+}
+
+private final class PartialLibraryServer: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let body: String
+        switch request.url?.path {
+        case "/api/app/movies":
+            body = """
+            {"movies": [{"prefix": "films/Example", "title": "A movie", "file_count": 1,
+                         "bytes": 70, "state": "ready"}]}
+            """
+        case "/api/app/other": body = "{\"items\": [], \"truncated\": false}"
+        default:
+            client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
+            return
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

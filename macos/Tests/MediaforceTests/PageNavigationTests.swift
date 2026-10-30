@@ -40,18 +40,6 @@ final class PageNavigationTests: XCTestCase {
         XCTAssertEqual(navigation.place, .spaceSaved)
     }
 
-    func testMediaKeepsTheSidebarLibraryUntilLibraryCombinesThemAgain() {
-        var navigation = PageNavigation()
-        navigation.select(.libraryKind(.movies))
-        navigation.open(.item("films/Example"))
-        navigation.goBack()
-        XCTAssertEqual(navigation.place, .libraryKind(.movies))
-        navigation.select(.media)
-        XCTAssertEqual(navigation.libraryKind, .movies)
-        navigation.select(.library)
-        XCTAssertEqual(navigation.libraryKind, .everything)
-    }
-
     func testBackUsesTheTitleThePageDisplayedInsteadOfItsFolder() {
         var navigation = PageNavigation()
         let season = Place.item("tv/Example/S02")
