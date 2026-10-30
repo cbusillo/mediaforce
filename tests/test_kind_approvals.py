@@ -81,12 +81,16 @@ def _approved(config: MediaforceConfig, *, size_mode: str = "normalized", job_id
 
 
 def _loader(folders: dict[str, dict[str, Any]], kinds: dict[str, str], asked: list[str] | None = None) -> KindAwareLoader:
-    def kind_of(_config: MediaforceConfig, season: str) -> str | None:
-        if asked is not None:
-            asked.append(season)
-        return kinds.get(season)
+    class Kinds:
+        def __call__(self, _config: MediaforceConfig, season: str) -> str | None:
+            if asked is not None:
+                asked.append(season)
+            return kinds.get(season)
 
-    return KindAwareLoader(lambda _config, prefix: folders.get(prefix), kind_of)
+        def awaiting_measurement(self, _config: MediaforceConfig, season: str) -> bool:
+            return kinds.get(season) == "unmeasured"
+
+    return KindAwareLoader(lambda _config, prefix: folders.get(prefix), Kinds())
 
 
 def test_only_a_current_live_action_approval_per_45_minutes_can_cover_a_kind(tmp_path: Path) -> None:
@@ -1154,3 +1158,24 @@ def test_unmeasured_seasons_keep_running_samples_and_wait_after_they_finish(tmp_
     expected = {"running": "making_test", "queued": "sample_waiting"}.get(status, "waiting_for_measurement")
     assert state["key"] == expected
     assert not state["needs_you"]
+
+
+@pytest.mark.parametrize("measured", [False, True])
+def test_missing_genres_only_waits_for_measurement_when_original_measurements_are_missing(tmp_path: Path, measured: bool) -> None:
+    config = _config(tmp_path)
+    with open_db(config.paths.db_path) as connection:
+        item_id = _content_item(connection, EPISODE, status="discovered", codec="h264", current_dark=0.5)
+        connection.commit()
+    kinds = SeasonKinds()
+    load = KindAwareLoader(lambda *_args: _review_ready(), kinds)
+    sources = PageStateSources(load, lambda *_args: {})
+    with open_db(config.paths.db_path) as connection:
+        before = card_page_states(connection, config, [(SEASON, None, None)], sources)[SEASON]
+        assert before["key"] == "waiting_for_measurement" and not before["needs_you"]
+        if measured:
+            _admit_historical_original(connection, item_id, dark=0.5)
+            connection.commit()
+        state = card_page_states(connection, config, [(SEASON, None, None)], sources)[SEASON]
+    assert kinds(config, SEASON) == "unmeasured"
+    assert state["key"] == ("ready_to_compare" if measured else "waiting_for_measurement")
+    assert state["needs_you"] == measured

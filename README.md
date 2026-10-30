@@ -45,7 +45,7 @@ Live-action seasons can follow one approval for their kind of content. Older una
 season samples stop asking separately when they finished before the kind was
 approved or before its newest sample was requested. Newer samples, uncertain timing,
 and existing folder approvals keep their own decision. While the kind waits for a
-choice, its newest sample stays available. Unmeasured seasons wait for measuring without asking for a sample decision, even
+choice, its newest sample stays available. Seasons missing original measurements wait for measuring without a sample decision, even
 when an older sample is saved. After measuring, they follow their kind; measured
 seasons without a reusable kind keep their own sample decisions.
 Saved sample files are retained. Finished production files are checked and

@@ -97,7 +97,7 @@ class SeasonMeasurementSource(Protocol):
     def awaiting_measurement(self, config: MediaforceConfig, prefix: str) -> bool: ...
 
 
-def awaiting_measurement(config: MediaforceConfig, prefix: str, load: LoadCalibrationState) -> bool:
+def awaiting_measurement(config: MediaforceConfig, prefix: str, load: object) -> bool:
     return isinstance(load, SeasonMeasurementSource) and load.awaiting_measurement(config, prefix)
 
 
@@ -193,6 +193,7 @@ class _CachedCalibrationLoader:
         self._load = load_calibration_state
         self._cache: dict[str, dict[str, Any] | None] = {}
         self._following: dict[str, str] | None = None
+        self._measurements: dict[str, bool] = {}
 
     def __call__(self, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
         if prefix not in self._cache:
@@ -203,7 +204,9 @@ class _CachedCalibrationLoader:
         return _kind_approval(config, rel_path, self._load)
 
     def awaiting_measurement(self, config: MediaforceConfig, prefix: str) -> bool:
-        return awaiting_measurement(config, prefix, self._load)
+        if prefix not in self._measurements:
+            self._measurements[prefix] = awaiting_measurement(config, prefix, self._load)
+        return self._measurements[prefix]
 
     def following_kinds(self, config: MediaforceConfig) -> dict[str, str]:
         following = self._following

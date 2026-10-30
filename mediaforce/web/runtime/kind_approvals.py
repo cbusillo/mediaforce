@@ -29,11 +29,11 @@ from mediaforce.library.item_presence import LIBRARY_ITEM_PRESENT
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
 from mediaforce.library.workflow_state import ENCODE_CANDIDATE_STATUSES, derive_item_workflow_state
 from mediaforce.library.content_kinds import evidence_stamp, season_evidence, season_grouping, season_kind_report, \
-    season_stamp
+    season_stamp, SeasonGrouping
 from mediaforce.library.source_evidence import SourceEvidenceContext
 from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
+    approval_prefixes, awaiting_measurement, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
     production_calibration, sample_allows_kind, season_prefix_of
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
@@ -119,10 +119,18 @@ class SeasonKinds:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._kinds: dict[str, tuple[tuple[Any, ...], str]] = {}
+        self._kinds: dict[str, tuple[tuple[Any, ...], SeasonGrouping]] = {}
         self._evidence: tuple[tuple[Any, ...], tuple[set[int], SourceEvidenceContext]] | None = None
 
     def __call__(self, config: MediaforceConfig, season_prefix: str) -> str | None:
+        grouping = self.grouping(config, season_prefix)
+        return grouping.kind if grouping is not None else None
+
+    def awaiting_measurement(self, config: MediaforceConfig, prefix: str) -> bool:
+        grouping = self.grouping(config, prefix)
+        return grouping is not None and grouping.reason == "no_measured_original"
+
+    def grouping(self, config: MediaforceConfig, season_prefix: str) -> SeasonGrouping | None:
         if not config.paths.db_path.exists():
             return None
         with self._lock, open_readonly_db(config.paths.db_path) as connection:
@@ -133,10 +141,10 @@ class SeasonKinds:
                 return cached[1]
             if self._evidence is None or self._evidence[0] != shared:
                 self._evidence = (shared, season_evidence(connection))
-            kind = season_grouping(connection, season_prefix, library_types=config.library_type_map,
-                                   evidence=self._evidence[1]).kind
-            self._kinds[season_prefix] = (stamp, kind)
-            return kind
+            grouping = season_grouping(connection, season_prefix, library_types=config.library_type_map,
+                                       evidence=self._evidence[1])
+            self._kinds[season_prefix] = (stamp, grouping)
+            return grouping
 
 
 class KindAwareLoader:
@@ -154,7 +162,7 @@ class KindAwareLoader:
         return self._load(config, prefix)
 
     def awaiting_measurement(self, config: MediaforceConfig, prefix: str) -> bool:
-        return self._kind_of(config, prefix) == "unmeasured"
+        return awaiting_measurement(config, prefix, self._kind_of)
 
     def following_kinds(self, config: MediaforceConfig) -> dict[str, str]:
         if not config.paths.db_path.exists():
