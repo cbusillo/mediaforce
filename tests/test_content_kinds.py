@@ -245,3 +245,14 @@ def test_a_file_kept_original_no_longer_waits(connection: DBClient) -> None:
     report = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False)
 
     assert report["seasons"] == []
+
+
+@pytest.mark.parametrize("codec,roots", [("wmv2", ["tv"]), ("h264", [])])
+def test_unmeasured_seasons_outside_automatic_intake_name_the_prerequisite(
+        connection: DBClient, codec: str, roots: list[str],
+) -> None:
+    _item(connection, "tv/Old show/Season 1/e1.mkv", status="discovered", codec=codec, current_dark=0.5)
+    row = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False,
+                             measurement_roots=roots)["seasons"][0]
+    assert row["kind"] == "unmeasured"
+    assert row["measurement_reasons"] == ["automatic_measurement_unavailable"]

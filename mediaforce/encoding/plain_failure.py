@@ -52,6 +52,20 @@ _KNOWN_MESSAGES: tuple[tuple[str, str], ...] = (
 )
 
 _FAILURE_KIND_SUMMARIES = {
+    "automatic_measurement_unavailable": "These files are outside the current automatic measuring pipeline.",
+    "original_unavailable": "The original is not available for measuring.",
+    "original_not_assessed": "The original has not been identified safely.",
+    "conflicting_measurements": "The original measurements disagree.",
+    "historical_output_conflict": "The original's identity conflicts with a compressed copy.",
+    "known_output_match": "The supposed original matches a compressed copy.",
+    "possible_output_match": "The supposed original may be a compressed copy.",
+    "known_output_unresolved": "Mediaforce could not rule out a compressed copy.",
+    "raw_probe_unavailable": "Mediaforce could not read the original's picture and sound details.",
+    "mediaforce_stamp": "This file is already marked as a compressed copy.",
+    "historical_output_codec_or_unknown": "The file's format does not identify it safely as an original.",
+    "historical_output_encoder": "The file may have been compressed before.",
+    "digest_unavailable": "Mediaforce could not read enough of the original to identify it.",
+    "measurement_failed": "Mediaforce could not measure an original.",
     "worker_restart": "Mediaforce restarted while this was working.",
     "stale_lease": "The computer doing this stopped reporting in.",
     "host_unavailable": "The computer doing this wasn't available.",

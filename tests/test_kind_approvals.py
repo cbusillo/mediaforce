@@ -12,12 +12,12 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from test_web_route_security import _json_request, _route_endpoint
 from test_page_state import _review_ready
-from sqlalchemy import create_engine
-from test_content_kinds import _admit_historical_original, _item as _content_item
+from sqlalchemy import create_engine, select
+from test_content_kinds import _admit_historical_original, _fingerprint, _item as _content_item
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, upsert_runtime_folder_policy_override
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
-from mediaforce.core.db_tables import calibration_jobs, encode_jobs, library_items, metadata, motion_keep_decisions, series_metadata, source_admissions, source_generations, \
+from mediaforce.core.db_tables import calibration_jobs, encode_jobs, library_item_evidence_state, library_items, metadata, motion_keep_decisions, series_metadata, source_admissions, source_generations, source_measurements, \
     source_transitions, staged_artifacts
 from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, clear_terminal_encode_jobs_for_prefix, encode_run_manifest_files, \
     encode_run_manifest_rel_paths, load_encode_job, save_encode_job, save_queue_state
@@ -25,7 +25,7 @@ from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 from mediaforce.web.runtime.encode_runtime import CONTROLLER_RESTART_STOP_REASON, KEPT_ORIGINAL_TERMINAL_REASON, unfinished_child_reason
 from mediaforce.library.content_kinds import season_evidence, season_grouping
-from mediaforce.library.source_evidence import append_version
+from mediaforce.library.source_evidence import append_measurement, append_version
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
@@ -977,14 +977,15 @@ def test_old_samples_follow_a_reusable_kind_while_its_newest_sample_stays_visibl
                 created_at=f"2026-10-29T0{index}:00:00+00:00", updated_at="now",
                 finished_at=f"2026-10-29T0{index}:30:00+00:00"))
         connection.commit()
-        report = {"seasons": [{"season": season, "kind": kind} for season in folders]}
+        report = {"seasons": [{"season": season, "kind": kind, "reason": "no_measured_original" if kind == "unmeasured" else None} for season in folders]}
         with patch("mediaforce.web.runtime.kind_approvals.season_kind_report", return_value=report):
             states = card_page_states(connection, config, [(season, None, None) for season in folders], sources)
         reusable = kind in APPROVABLE_KINDS and not stale_kind
-        assert states[SEASON]["key"] == ("waiting_for_kind" if reusable else "ready_to_compare")
-        assert states[SEASON]["needs_you"] is not reusable
-        assert states[OTHER_SEASON]["key"] == "ready_to_compare"
-        assert states[OTHER_SEASON]["needs_you"]
+        assert states[SEASON]["key"] == ("waiting_for_measurement" if kind == "unmeasured" else
+                                         "waiting_for_kind" if reusable else "ready_to_compare")
+        assert states[SEASON]["needs_you"] == (not reusable and kind != "unmeasured")
+        assert states[OTHER_SEASON]["key"] == ("waiting_for_measurement" if kind == "unmeasured" else "ready_to_compare")
+        assert states[OTHER_SEASON]["needs_you"] == (kind != "unmeasured")
         assert load(config, SEASON) == folders[SEASON]
 
 
@@ -1083,7 +1084,10 @@ def test_newer_or_unknown_samples_and_show_samples_keep_their_decision(
     assert effective_production_approval(config, EPISODE, load) is None
     assert production_calibration(config, SEASON, load) == (scope, saved)
     assert _next(config, load) is None
-    with open_db(config.paths.db_path) as connection:
+    with open_db(config.paths.db_path) as connection, patch(
+        "mediaforce.web.runtime.kind_approvals.season_kind_report",
+        return_value={"seasons": [{"season": SEASON, "kind": DARKER}]},
+    ):
         state = card_page_states(connection, config, [(scope, None, None)], PageStateSources(load, lambda *_args: {}))[scope]
     assert state["key"] == "ready_to_compare" and state["needs_you"]
 
@@ -1113,6 +1117,111 @@ def test_undecided_kind_preserves_an_older_sample_with_a_saved_parent_sample(tmp
         with patch("mediaforce.web.runtime.kind_approvals.season_kind_report", return_value=report):
             state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
     assert state["key"] == "ready_to_compare" and state["needs_you"]
+
+
+@pytest.mark.parametrize("measured_kind", [DARKER, "mixed"])
+def test_measurement_releases_old_samples_to_the_kind_or_its_own_decision(tmp_path: Path, measured_kind: str) -> None:
+    from mediaforce.web.runtime.app_window import app_window_payload
+
+    config = _config(tmp_path)
+    saved = _review_ready()
+    kinds = {SEASON: "unmeasured"}
+    load = _loader({SEASON: saved}, kinds)
+    _finished_sample(config, SEASON)
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="2026-10-29T00:00:00+00:00")
+    sources = PageStateSources(load, lambda *_args: {})
+    def report(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        kind = kinds[SEASON]
+        return {"seasons": [{"season": SEASON, "kind": kind,
+                              "reason": "no_measured_original" if kind == "unmeasured" else None}]}
+
+    with open_db(config.paths.db_path) as connection, patch(
+        "mediaforce.web.runtime.kind_approvals.season_kind_report", side_effect=report,
+    ):
+        waiting = card_page_states(connection, config, [(SEASON, None, None)], sources)[SEASON]
+        assert waiting["key"] == "waiting_for_measurement"
+        assert not waiting["needs_you"] and waiting["primary_action"] is None
+        window = app_window_payload(connection, season_cards=[{"prefix": SEASON, "page_state": waiting}],
+                                    computers=[], controller_storage={}, storage_admits_work=False,
+                                    library_types=config.library_type_map, observed_at=datetime.now(UTC))
+        assert not window["samples"]["waiting_on_you"]
+        assert not window["work"]["seasons_needing_you"]
+        kinds[SEASON] = measured_kind
+        measured = card_page_states(connection, config, [(SEASON, None, None)], sources)[SEASON]
+    assert measured["key"] == ("ready_to_make" if measured_kind == DARKER else "ready_to_compare")
+    assert measured["needs_you"] == (measured_kind != DARKER)
+    assert load(config, SEASON) == saved
+
+
+@pytest.mark.parametrize("status", ["running", "queued", "failed", "pending_review"])
+def test_unmeasured_seasons_keep_running_samples_and_wait_after_they_finish(tmp_path: Path, status: str) -> None:
+    config = _config(tmp_path)
+    _finished_sample(config, SEASON)
+    _waiting_episode(config, EPISODE, 1_000)
+    load = _loader({SEASON: _review_ready()}, {SEASON: "unmeasured"})
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(calibration_jobs.update().values(status=status))
+        connection.commit()
+        state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
+    expected = {"running": "making_test", "queued": "sample_waiting"}.get(status, "waiting_for_measurement")
+    assert state["key"] == expected
+    assert not state["needs_you"]
+
+
+@pytest.mark.parametrize("measured", [False, True])
+@pytest.mark.parametrize("saved_sample", [False, True])
+def test_missing_genres_only_waits_for_measurement_when_original_measurements_are_missing(
+        tmp_path: Path, measured: bool, saved_sample: bool,
+) -> None:
+    config = _config(tmp_path)
+    with open_db(config.paths.db_path) as connection:
+        item_id = _content_item(connection, EPISODE, status="discovered", codec="h264", current_dark=0.5)
+        connection.commit()
+    kinds = SeasonKinds()
+    load = KindAwareLoader(lambda _config, prefix: _review_ready() if saved_sample and prefix == SEASON else None, kinds)
+    sources = PageStateSources(load, lambda *_args: {})
+    with open_db(config.paths.db_path) as connection:
+        before = card_page_states(connection, config, [(SEASON, None, None)], sources)[SEASON]
+        assert before["key"] == "waiting_for_measurement" and not before["needs_you"]
+        if measured:
+            _admit_historical_original(connection, item_id, dark=0.5)
+            connection.commit()
+        state = card_page_states(connection, config, [(SEASON, None, None)], sources)[SEASON]
+    assert kinds(config, SEASON) == "unmeasured"
+    assert state["key"] == (("ready_to_compare" if saved_sample else "needs_test") if measured else "waiting_for_measurement")
+    assert state["needs_you"] == (measured and saved_sample)
+
+
+@pytest.mark.parametrize("failed_fingerprint", [None, "stale", "current"])
+def test_blocked_measuring_names_source_conflicts_and_current_failures_without_sample_approval(
+        tmp_path: Path, failed_fingerprint: str | None,
+) -> None:
+    config = _config(tmp_path)
+    with open_db(config.paths.db_path) as connection:
+        item_id = _content_item(connection, EPISODE, status="discovered", codec="h264", current_dark=0.5)
+        _admit_historical_original(connection, item_id, dark=0.5)
+        first = connection.execute(select(source_measurements)).mappings().one()
+        append_measurement(connection, version_id=first["version_id"], kind=first["kind"],
+                           binding=first["binding"], summary=_fingerprint(0.0),
+                           provenance=json.loads(first["provenance_json"]), measured_at=None, recorded_at="now")
+        if failed_fingerprint:
+            fingerprint = connection.execute(select(library_items.c.content_version_fingerprint)
+                                             .where(library_items.c.id == item_id)).scalar_one()
+            connection.execute(library_item_evidence_state.insert().values(
+                library_item_id=item_id, evidence_kind="media_fingerprint", state="missing", policy_hash="fixture",
+                work_status="failed", work_source_fingerprint=fingerprint if failed_fingerprint == "current" else "old",
+                last_error="storage_io", updated_at="now"))
+        connection.commit()
+        report = kinds_payload(connection, config, load_calibration_state=lambda *_args: None)
+        assert report["unmeasured_seasons"] == 1
+        load = KindAwareLoader(lambda *_args: _review_ready(), SeasonKinds())
+        state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
+    assert state["key"] == "waiting_for_measurement" and not state["needs_you"]
+    assert state["primary_action"] is None
+    assert state["wait_detail"]
+    waits = load.sample_waits(config)[SEASON]
+    assert waits.measurement_reasons == (("conflicting_measurements", "original_unavailable", "storage_io") if failed_fingerprint == "current"
+                                         else ("conflicting_measurements", "original_unavailable"))
 
 
 def test_kind_sample_approval_covers_other_shows_and_keeps_watched_evidence(tmp_path: Path) -> None:

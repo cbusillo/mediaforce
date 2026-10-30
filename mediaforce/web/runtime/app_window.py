@@ -267,6 +267,7 @@ def _tv_season(identity: Mapping[str, Any], card: Mapping[str, Any]) -> dict[str
         "prefix": identity["prefix"],
         "season": identity["season"],
         "state": state.get("key"),
+        "wait_detail": state.get("wait_detail"),
         "action": state.get("primary_action"),
         "failure": state.get("failure"),
         "tone": state.get("tone"),

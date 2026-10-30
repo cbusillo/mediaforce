@@ -176,6 +176,7 @@ enum Words {
         case ("needs_help", _): "Sample needs making again"
         case ("ready_to_make", _): "Approved"
         case ("needs_test", _): "Needs sample"
+        case ("waiting_for_measurement", _): "Waiting for measuring"
         case ("waiting_for_kind", _): "Waiting for its kind"
         case ("sample_waiting", _): "Sample waiting"
         case ("making_test", _): "Making sample"
@@ -540,6 +541,7 @@ extension Words {
         case ("needs_help", "review_files"): "Some files need you before the season can go on."
         case ("needs_help", _): "The sample needs making again."
         case ("needs_test", _): "This season has no sample yet."
+        case ("waiting_for_measurement", _): facts.waitDetail ?? "This season needs original measurements before its kind can be chosen."
         case ("waiting_for_kind", _): "This season will follow the choice for its kind of content."
         case ("ready_to_make", _): "Approved. The season waits to be compressed."
         case ("making_season", _): "Compressing the season."
@@ -660,6 +662,7 @@ extension Words {
     }
 
     static func tvSeasonState(_ season: TVShowsFacts.Season) -> String {
+        if season.state == "waiting_for_measurement", let detail = season.waitDetail { return detail }
         if season.needsYou, !["ready_to_compare", "needs_help"].contains(season.state), season.action != "decide_motion" {
             return "\(seasonState(season.state, season.action)). Some files need you."
         }

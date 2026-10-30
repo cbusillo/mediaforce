@@ -76,6 +76,14 @@ final class SampleTests: XCTestCase {
         XCTAssertNil(Words.sampleCoverage(notMade))
     }
 
+    func testBlockedMeasuringShowsItsSavedReasonWithoutApprovalActions() throws {
+        var payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Self.facts(state: "waiting_for_measurement", action: nil).utf8)) as? [String: Any])
+        payload["wait_detail"] = "Measuring is blocked. The original measurements disagree."
+        let facts = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: JSONSerialization.data(withJSONObject: payload))
+        XCTAssertEqual(Words.sampleHeadline(facts), facts.waitDetail)
+        XCTAssertTrue(facts.actions.isEmpty)
+    }
+
     func testAnApprovalHoldsOnlyForTheSampleTheOwnerWatched() throws {
         let watched = try decode(Self.facts())
         let approval = SampleApproval(reviewedDraftHash: try XCTUnwrap(watched.draftHash))
@@ -101,7 +109,7 @@ final class SampleTests: XCTestCase {
     }
 
     func testEveryStateHasItsOwnHeadlineAndOnlyKnownGuardsAsk() throws {
-        let states = ["making_test", "sample_waiting", "ready_to_compare", "needs_test", "ready_to_make", "making_season", "finished"]
+        let states = ["waiting_for_measurement", "making_test", "sample_waiting", "ready_to_compare", "needs_test", "ready_to_make", "making_season", "finished"]
         let headlines = try states.map { Words.sampleHeadline(try decode(Self.facts(state: $0))) }
         XCTAssertEqual(Set(headlines).count, states.count)
         XCTAssertFalse(headlines.contains(Words.sampleHeadline(try decode(Self.facts(state: "a state the app does not know")))))

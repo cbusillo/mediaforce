@@ -35,7 +35,7 @@ from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs
 from mediaforce.web.runtime.app_samples import sample_moments
 from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
+    SampleWait, approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
     production_calibration, sample_allows_kind, season_prefix_of
 from mediaforce.web.runtime.completed_runtime import confirmed_originals_removed_item_ids
 from mediaforce.web.runtime.page_state import SAMPLE_FAILED_STATUSES, SAMPLE_RUNNING_STATUSES, SAMPLE_WAITING_STATUSES
@@ -159,16 +159,16 @@ class KindAwareLoader:
     def __call__(self, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
         return self._load(config, prefix)
 
-    def following_kinds(self, config: MediaforceConfig) -> dict[str, str]:
+    def sample_waits(self, config: MediaforceConfig) -> dict[str, SampleWait]:
         if not config.paths.db_path.exists():
             return {}
         pending = [kind for kind in APPROVABLE_KINDS if not holds_approval(load_kind_approval(config, kind))]
-        if not pending:
-            return {}
         load = cached_calibration_loader(self._load)
         with open_readonly_db(config.paths.db_path) as connection:
             contents = _kind_contents(connection, config, load)
             rows = contents.report["seasons"]
+            waits = {row["season"]: SampleWait(measurement_reasons=tuple(row.get("measurement_reasons", ())))
+                     for row in rows if row.get("reason") == "no_measured_original"}
             boundaries = {}
             for kind in pending:
                 settings = _lent_settings(kind, contents.approvals, contents.episodes,
@@ -179,10 +179,11 @@ class KindAwareLoader:
                     representative = _newest_sample(connection, [row["season"] for row in rows if row["kind"] == kind])
                     boundaries[kind] = object_dict(representative).get("created_at")
             jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in rows])
-        return {row["season"]: row["kind"] for row in rows
-                if row["kind"] in boundaries
-                and sample_allows_kind(config, row["season"], load, jobs.get(row["season"]), boundaries[row["kind"]])
-                and effective_production_approval(config, row["season"], load) is None}
+        waits.update({row["season"]: SampleWait(kind=row["kind"]) for row in rows
+                      if row["kind"] in boundaries
+                      and sample_allows_kind(config, row["season"], load, jobs.get(row["season"]), boundaries[row["kind"]])
+                      and effective_production_approval(config, row["season"], load) is None})
+        return waits
 
     def kind_approval(self, config: MediaforceConfig, rel_path: str) -> EffectiveApproval | None:
         # No season's kind is read until the Director has approved a kind.
@@ -468,6 +469,7 @@ def _kind_report(
         return approval is not None and approval.current
 
     return season_kind_report(connection, library_types=config.library_type_map, folder_approved=folder_approved,
+                              measurement_roots=config.source_root_map,
                               sample_seasons=sample_seasons)
 
 
