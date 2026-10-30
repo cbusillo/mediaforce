@@ -318,15 +318,16 @@ struct FrameLabel: View {
 struct PlayerSurface: NSViewRepresentable {
     let player: AVPlayer
 
-    func makeNSView(context: Context) -> AVPlayerView {
-        let view = AVPlayerView()
-        view.controlsStyle = .none
-        view.player = player
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.layer = AVPlayerLayer(player: player)
+        view.layer?.backgroundColor = NSColor.black.cgColor
+        view.wantsLayer = true
         return view
     }
 
-    func updateNSView(_ view: AVPlayerView, context: Context) {
-        view.player = player
+    func updateNSView(_ view: NSView, context: Context) {
+        (view.layer as? AVPlayerLayer)?.player = player
     }
 }
 

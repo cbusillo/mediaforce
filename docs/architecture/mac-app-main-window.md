@@ -181,6 +181,10 @@ copying the picture and making the sound stereo AAC, into the `player`
 folder of the web state folder (`paths.web_state_dir`); the newest six stay cached. It answers byte
 ranges, so the player can seek.
 
+Scrolling over either comparison picture scrolls the page, or pans both pictures
+at actual size; it never scrubs a video. Seeking and frame stepping use the
+shared controls and move both pictures together.
+
 ## Settings
 
 Mediaforce > Settings… (⌘,) opens the Settings window, one tab per section of
