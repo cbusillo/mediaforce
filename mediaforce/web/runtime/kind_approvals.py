@@ -153,6 +153,9 @@ class KindAwareLoader:
     def __call__(self, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
         return self._load(config, prefix)
 
+    def awaiting_measurement(self, config: MediaforceConfig, prefix: str) -> bool:
+        return self._kind_of(config, prefix) == "unmeasured"
+
     def following_kinds(self, config: MediaforceConfig) -> dict[str, str]:
         if not config.paths.db_path.exists():
             return {}

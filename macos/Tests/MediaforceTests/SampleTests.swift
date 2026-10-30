@@ -86,7 +86,7 @@ final class SampleTests: XCTestCase {
     }
 
     func testEveryStateHasItsOwnHeadlineAndOnlyKnownGuardsAsk() throws {
-        let states = ["making_test", "sample_waiting", "ready_to_compare", "needs_test", "ready_to_make", "making_season", "finished"]
+        let states = ["waiting_for_measurement", "making_test", "sample_waiting", "ready_to_compare", "needs_test", "ready_to_make", "making_season", "finished"]
         let headlines = try states.map { Words.sampleHeadline(try decode(Self.facts(state: $0))) }
         XCTAssertEqual(Set(headlines).count, states.count)
         XCTAssertFalse(headlines.contains(Words.sampleHeadline(try decode(Self.facts(state: "a state the app does not know")))))

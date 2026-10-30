@@ -980,10 +980,11 @@ def test_old_samples_follow_a_reusable_kind_while_its_newest_sample_stays_visibl
         with patch("mediaforce.web.runtime.kind_approvals.season_kind_report", return_value=report):
             states = card_page_states(connection, config, [(season, None, None) for season in folders], sources)
         reusable = kind in APPROVABLE_KINDS and not stale_kind
-        assert states[SEASON]["key"] == ("waiting_for_kind" if reusable else "ready_to_compare")
-        assert states[SEASON]["needs_you"] is not reusable
-        assert states[OTHER_SEASON]["key"] == "ready_to_compare"
-        assert states[OTHER_SEASON]["needs_you"]
+        assert states[SEASON]["key"] == ("waiting_for_measurement" if kind == "unmeasured" else
+                                         "waiting_for_kind" if reusable else "ready_to_compare")
+        assert states[SEASON]["needs_you"] == (not reusable and kind != "unmeasured")
+        assert states[OTHER_SEASON]["key"] == ("waiting_for_measurement" if kind == "unmeasured" else "ready_to_compare")
+        assert states[OTHER_SEASON]["needs_you"] == (kind != "unmeasured")
         assert load(config, SEASON) == folders[SEASON]
 
 
@@ -1112,3 +1113,44 @@ def test_undecided_kind_preserves_an_older_sample_with_a_saved_parent_sample(tmp
         with patch("mediaforce.web.runtime.kind_approvals.season_kind_report", return_value=report):
             state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
     assert state["key"] == "ready_to_compare" and state["needs_you"]
+
+
+@pytest.mark.parametrize("measured_kind", [DARKER, "mixed"])
+def test_measurement_releases_old_samples_to_the_kind_or_its_own_decision(tmp_path: Path, measured_kind: str) -> None:
+    from mediaforce.web.runtime.app_window import app_window_payload
+
+    config = _config(tmp_path)
+    saved = _review_ready()
+    kinds = {SEASON: "unmeasured"}
+    load = _loader({SEASON: saved}, kinds)
+    _finished_sample(config, SEASON)
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="2026-10-29T00:00:00+00:00")
+    sources = PageStateSources(load, lambda *_args: {})
+    with open_db(config.paths.db_path) as connection:
+        waiting = card_page_states(connection, config, [(SEASON, None, None)], sources)[SEASON]
+        assert waiting["key"] == "waiting_for_measurement"
+        assert not waiting["needs_you"] and waiting["primary_action"] is None
+        window = app_window_payload(connection, season_cards=[{"prefix": SEASON, "page_state": waiting}],
+                                    computers=[], controller_storage={}, storage_admits_work=False,
+                                    library_types=config.library_type_map, observed_at=datetime.now(UTC))
+        assert not window["samples"]["waiting_on_you"]
+        assert not window["work"]["seasons_needing_you"]
+        kinds[SEASON] = measured_kind
+        measured = card_page_states(connection, config, [(SEASON, None, None)], sources)[SEASON]
+    assert measured["key"] == ("ready_to_make" if measured_kind == DARKER else "ready_to_compare")
+    assert measured["needs_you"] == (measured_kind != DARKER)
+    assert load(config, SEASON) == saved
+
+
+@pytest.mark.parametrize("status", ["running", "queued", "failed", "pending_review"])
+def test_unmeasured_seasons_keep_running_samples_and_wait_after_they_finish(tmp_path: Path, status: str) -> None:
+    config = _config(tmp_path)
+    _finished_sample(config, SEASON)
+    load = _loader({SEASON: _review_ready()}, {SEASON: "unmeasured"})
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(calibration_jobs.update().values(status=status))
+        connection.commit()
+        state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
+    expected = {"running": "making_test", "queued": "sample_waiting"}.get(status, "waiting_for_measurement")
+    assert state["key"] == expected
+    assert not state["needs_you"]

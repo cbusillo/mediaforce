@@ -92,6 +92,15 @@ class KindSampleSource(Protocol):
     def following_kinds(self, config: MediaforceConfig) -> dict[str, str]: ...
 
 
+@runtime_checkable
+class SeasonMeasurementSource(Protocol):
+    def awaiting_measurement(self, config: MediaforceConfig, prefix: str) -> bool: ...
+
+
+def awaiting_measurement(config: MediaforceConfig, prefix: str, load: LoadCalibrationState) -> bool:
+    return isinstance(load, SeasonMeasurementSource) and load.awaiting_measurement(config, prefix)
+
+
 def following_kind(config: MediaforceConfig, prefix: str, load: LoadCalibrationState) -> str | None:
     approval = _kind_approval(config, prefix, load)
     if approval is not None and approval.current:
@@ -192,6 +201,9 @@ class _CachedCalibrationLoader:
 
     def kind_approval(self, config: MediaforceConfig, rel_path: str) -> EffectiveApproval | None:
         return _kind_approval(config, rel_path, self._load)
+
+    def awaiting_measurement(self, config: MediaforceConfig, prefix: str) -> bool:
+        return awaiting_measurement(config, prefix, self._load)
 
     def following_kinds(self, config: MediaforceConfig) -> dict[str, str]:
         following = self._following

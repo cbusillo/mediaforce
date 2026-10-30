@@ -52,11 +52,12 @@ from mediaforce.web.runtime.folder_actions import quality_risk_blocks_production
 from mediaforce.web.runtime.folder_tuning_advice import review_gate
 from mediaforce.web.runtime.job_runtime import retryable_saved_sample_job, sample_target_size_failure
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    cached_calibration_loader, effective_production_approval, following_kind, holds_approval, season_prefix_of
+    awaiting_measurement, cached_calibration_loader, effective_production_approval, following_kind, holds_approval, season_prefix_of
 
 PageStateKey = Literal[
     "needs_test",
     "waiting_for_kind",
+    "waiting_for_measurement",
     "sample_waiting",
     "making_test",
     "ready_to_compare",
@@ -170,6 +171,7 @@ class PageStateFacts:
     approval: EffectiveApproval | None = None
     approval_review_blocked: bool = False
     following_kind: str | None = None
+    awaiting_measurement: bool = False
     # The staged-file summary, when the caller read one.
     staged_integrity: Mapping[str, Any] | None = None
     # The scope's lifecycle payload with its motion-pattern counts, for a TV scope.
@@ -205,7 +207,7 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     sample_status = str(sample_job.get("status") or "")
     calibration = object_dict(facts.calibration) if facts.calibration is not None else None
     follows_kind = facts.following_kind if not facts.approval_review_blocked else None
-    if follows_kind and sample_status not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES:
+    if (follows_kind or facts.awaiting_measurement) and sample_status not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES:
         sample_job, sample_status, calibration = {}, "", None
 
     if lane == "processing":
@@ -262,6 +264,9 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
         return PageState("ready_to_finish", "ready", primary_action=_workflow_action(workflow, "promote_outputs"))
     if lane == "complete" or workflow.get("state") == "complete":
         return PageState("finished", "success")
+
+    if facts.awaiting_measurement:
+        return PageState("waiting_for_measurement", "quiet")
 
     approval = facts.approval
     if approval is not None and approval.current and approval.contract is not None:
@@ -385,6 +390,8 @@ def _facts(
         calibration=calibration,
         approval=approval,
         following_kind=follows,
+        awaiting_measurement=(approval is None and season_prefix_of(config, prefix) == prefix
+                              and awaiting_measurement(config, prefix, load_calibration)),
         approval_review_blocked=review_blocked(approval) if approval is not None and approval.current else False,
         staged_integrity=staged_integrity,
         lifecycle=lifecycle,
