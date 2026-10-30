@@ -12,6 +12,11 @@ still answers when that storage is gone, and it starts no work.
 
 ## Sections
 
+Every comparison page and full-screen comparison uses the shared `ComparePlayer`.
+Its picture surfaces display video through `AVPlayerLayer`, with playback and
+seeking owned by the shared controls. Scrolling over either picture reaches the
+page (or pans the pictures together at actual size); it never scrubs a video.
+
 - `work`: `state` is `running`, `idle`, `paused` (the owner paused the queue)
   or `stopped`. `stop_reasons` say why work cannot start, even while paused:
   `storage_unavailable` (the same rule that admits encode work) and
