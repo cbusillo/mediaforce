@@ -1,45 +1,48 @@
 import SwiftUI
 
 struct LibraryPage: View {
-    let facts: MainWindowFacts
-    let posters: PosterStore
-    // Opens what a name, poster or slice on the page names.
+    let model: MainWindowModel
+    var kind = MediaKind.everything
     let open: (Place) -> Void
 
+    private var mediaPlace: Place { kind == .everything ? .media : .mediaKind(kind) }
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                // Only when there is something to explain; the title bar already says what the work is doing.
-                if Words.workExplanation(facts) != nil || facts.lastChange != nil {
-                    WorkStatus(facts: facts, open: open)
-                        .padding(.bottom, 22)
+        RefreshingPage(title: kind == .everything ? Words.library : Words.mediaKind(kind),
+                       subtitle: model.facts.map(Words.workHeadline) ?? "",
+                       load: { try await MediaRow.load(model.client, kind: kind) }) { (loaded: [MediaRow]) in
+            let rows = kind.rows(in: loaded)
+            if let facts = model.facts {
+                if let explanation = Words.workExplanation(facts) {
+                    Text(explanation).foregroundStyle(.secondary)
                 }
-                StorageBar(facts: facts, open: open)
-                    .padding(.bottom, 26)
-                HStack(alignment: .top, spacing: 28) {
-                    VStack(alignment: .leading, spacing: 20) {
-                        FinishedShelf(seasons: Array(facts.recentlyFinishedSeasons.prefix(6)), posters: posters, open: open)
-                        if !facts.samples.approvedNotStarted.isEmpty {
-                            SampleShelf(facts: facts, posters: posters) { open(.sample($0)) }
-                        }
-                        Latest(events: Array(facts.events.prefix(4)), posters: posters, open: open)
-                    }
-                    .frame(width: 556, alignment: .leading)
-                    VStack(alignment: .leading, spacing: 26) {
-                        BiggestTable(shows: Array(facts.biggestNotStarted.prefix(BiggestTable.rowLimit)), samples: facts.samples.waitingOnYou,
-                                     posters: posters, open: open)
-                        Computers(computers: facts.computers) { open(.computer($0)) }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                StorageBar(facts: facts, kind: kind, open: open)
+            }
+            HStack {
+                Text(Words.count(rows.count, "item")).foregroundStyle(.secondary)
+                Spacer()
+                Button("Browse all", action: { open(mediaPlace) }).buttonStyle(QuietLinkStyle())
+            }
+            if rows.contains(where: \.listCutShort) {
+                Text(Words.otherMediaTruncated).font(.callout).foregroundStyle(.secondary)
+            }
+            if rows.isEmpty {
+                Text(Words.noMatchingMedia).foregroundStyle(.secondary)
+            } else {
+                MediaShelves(rows: rows, posters: model.posters, open: { open(.item($0)) },
+                             showOnly: { open(.mediaKind(kind, $0)) })
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("\(min(rows.count, 9)) biggest items").font(.headline)
+                    MediaTable(rows: Array(rows.sorted { $0.bytes > $1.bytes }.prefix(9)),
+                               posters: model.posters, open: { open(.item($0)) },
+                               sortOrder: [KeyPathComparator(\MediaRow.bytes, order: .reverse)])
+                        .scrollDisabled(true)
+                        .frame(height: CGFloat(min(rows.count, 9)) * 46 + 32)
                 }
             }
-            .padding(.horizontal, 34)
-            .padding(.vertical, 20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            if let facts = model.facts {
+                Computers(computers: facts.computers) { open(.computer($0)) }
+            }
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .background(Color(nsColor: .textBackgroundColor))
-        .navigationTitle(Words.library)
-        .navigationSubtitle(Words.workHeadline(facts))
     }
 }

@@ -15,6 +15,8 @@ enum Words {
     static func backTitle(_ place: Place) -> String {
         switch place {
         case .library: library
+        case .libraryKind(let kind): mediaKind(kind)
+        case .mediaKind(let kind, _): kind == .everything ? media : mediaKind(kind)
         case .needsYou: needsYou
         case .spaceSaved: spaceSaved
         case .media: media

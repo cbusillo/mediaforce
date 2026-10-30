@@ -6,7 +6,7 @@ final class PageNavigationTests: XCTestCase {
         let show = Place.item("tv/Example")
         let season = Place.item("tv/Example/Season 2")
         let sample = Place.sample("tv/Example/Season 2")
-        for origin in [Place.library, .media, .spaceSaved, .kind("cartoon"), .seasonsWithoutKind] {
+        for origin in [Place.library, .libraryKind(.movies), .mediaKind(.other), .media, .spaceSaved, .kind("cartoon"), .seasonsWithoutKind] {
             var navigation = PageNavigation()
             navigation.select(origin)
             navigation.open(show)
@@ -38,6 +38,18 @@ final class PageNavigationTests: XCTestCase {
         navigation.open(item)
         navigation.goBack()
         XCTAssertEqual(navigation.place, .spaceSaved)
+    }
+
+    func testMediaKeepsTheSidebarLibraryUntilLibraryCombinesThemAgain() {
+        var navigation = PageNavigation()
+        navigation.select(.libraryKind(.movies))
+        navigation.open(.item("films/Example"))
+        navigation.goBack()
+        XCTAssertEqual(navigation.place, .libraryKind(.movies))
+        navigation.select(.media)
+        XCTAssertEqual(navigation.libraryKind, .movies)
+        navigation.select(.library)
+        XCTAssertEqual(navigation.libraryKind, .everything)
     }
 
     func testBackUsesTheTitleThePageDisplayedInsteadOfItsFolder() {

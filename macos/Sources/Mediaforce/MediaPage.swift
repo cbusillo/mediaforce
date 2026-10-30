@@ -1,35 +1,29 @@
 import SwiftUI
 
-/// Everything in the library in one list: TV shows, movies and other media, with a kind filter, a state filter and
+/// Everything in the selected library in one list: TV shows, movies and other media, with a state filter and
 /// search, shown as a table or as poster shelves. Each row opens that show's, movie's or folder's page.
 struct MediaPage: View {
     let model: MainWindowModel
     // Only these seasons, one row each, when the page opens from the seasons no kind of content covers.
     var onlySeasons: [KindsFacts.LeftOutSeason]?
     var showEverything: () -> Void = {}
-    let openItem: (String) -> Void
     @AppStorage("mediaPageView") private var view = MediaView.table
     @State private var search = ""
-    @State private var kind = MediaKind.everything
-    @State private var stateGroup: LibraryStateGroup?
+    var kind = MediaKind.everything
+    @State var stateGroup: LibraryStateGroup?
+    let openItem: (String) -> Void
 
     var body: some View {
-        RefreshingPage(title: onlySeasons == nil ? Words.media : Words.seasonsWithoutKindTitle,
+        RefreshingPage(title: onlySeasons == nil ? (kind == .everything ? Words.media : Words.mediaKind(kind)) : Words.seasonsWithoutKindTitle,
                        scrolls: view != .table,
                        factsSubtitle: { loaded in
                            let rows = listed(loaded)
                            return Words.shown(visibleRows(rows).count, of: rows.count, onlySeasons == nil ? "item" : "season")
                        },
-                       load: { try await MediaRow.load(model.client) }) { (loaded: [MediaRow]) in
+                       load: { try await MediaRow.load(model.client, kind: kind) }) { (loaded: [MediaRow]) in
             let rows = listed(loaded)
             let visible = visibleRows(rows)
             HStack(spacing: 12) {
-                Picker(Words.kindLabel, selection: $kind) {
-                    ForEach(MediaKind.allCases) { Text(Words.mediaKind($0)).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
                 LibraryStatePicker(selection: $stateGroup)
                 Spacer()
                 TextField(Words.searchMedia, text: $search)
@@ -54,9 +48,8 @@ struct MediaPage: View {
             if visible.isEmpty {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text(Words.noMatchingMedia).foregroundStyle(.secondary)
-                    if kind != .everything || stateGroup != nil || !search.isEmpty {
+                    if stateGroup != nil || !search.isEmpty {
                         Button(Words.clearFilters) {
-                            kind = .everything
                             stateGroup = nil
                             search = ""
                         }
@@ -71,12 +64,11 @@ struct MediaPage: View {
     }
 
     private func listed(_ loaded: [MediaRow]) -> [MediaRow] {
-        onlySeasons.map { MediaRow.seasons($0, shows: loaded) } ?? loaded
+        kind.rows(in: onlySeasons.map { MediaRow.seasons($0, shows: loaded) } ?? loaded)
     }
 
     private func visibleRows(_ rows: [MediaRow]) -> [MediaRow] {
-        rows.filter { (kind == .everything || $0.kind == kind)
-            && (stateGroup == nil || $0.state == stateGroup)
+        rows.filter { (stateGroup == nil || $0.state == stateGroup)
             && (search.isEmpty || $0.name.localizedStandardContains(search)) }
     }
 }
@@ -85,9 +77,44 @@ enum MediaView: String {
     case table, posters
 }
 
-enum MediaKind: String, CaseIterable, Identifiable {
+enum MediaKind: String, CaseIterable, Identifiable, Sendable {
     case everything, tv, movies, other
     var id: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .everything: "books.vertical"
+        case .tv: "tv"
+        case .movies: "film"
+        case .other: "rectangle.stack"
+        }
+    }
+
+    static func libraries(in library: MainWindowFacts.Library) -> [MediaKind] {
+        [.tv, .movies] + (library.other.itemCount > 0 ? [.other] : [])
+    }
+
+    func rows(in rows: [MediaRow]) -> [MediaRow] {
+        rows.filter { self == .everything || $0.kind == self }
+    }
+
+    func originalBytes(in library: MainWindowFacts.Library) -> Int64 {
+        switch self {
+        case .everything: library.tv.originalBytes + library.movies.originalBytes + library.other.originalBytes
+        case .tv: library.tv.originalBytes
+        case .movies: library.movies.originalBytes
+        case .other: library.other.originalBytes
+        }
+    }
+
+    func totalBytes(in library: MainWindowFacts.Library) -> Int64 {
+        switch self {
+        case .everything: library.tv.totalBytes + library.movies.totalBytes + library.other.totalBytes
+        case .tv: library.tv.totalBytes
+        case .movies: library.movies.totalBytes
+        case .other: library.other.totalBytes
+        }
+    }
 }
 
 struct MediaRow: Identifiable, Sendable {
@@ -120,20 +147,20 @@ struct MediaRow: Identifiable, Sendable {
     }
 
     @MainActor
-    static func load(_ client: MediaforceClient) async throws -> [MediaRow] {
-        async let tv = client.tvShows()
-        async let movies = client.movies()
-        async let other = client.otherMedia()
+    static func load(_ client: MediaforceClient, kind: MediaKind = .everything) async throws -> [MediaRow] {
+        async let tv: TVShowsFacts? = kind == .everything || kind == .tv ? client.tvShows() : nil
+        async let movies: MoviesFacts? = kind == .everything || kind == .movies ? client.movies() : nil
+        async let other: OtherMediaFacts? = kind == .everything || kind == .other ? client.otherMedia() : nil
         let (shows, films, others) = try await (tv, movies, other)
-        let rows = shows.shows.map {
+        let rows = (shows?.shows ?? []).map {
             MediaRow(id: $0.showPrefix, name: $0.show, kind: .tv, detail: Words.count($0.seasonCount, "season"),
                      bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)
-        } + films.movies.map {
+        } + (films?.movies ?? []).map {
             MediaRow(id: $0.prefix, name: $0.title, kind: .movies, detail: Words.count($0.fileCount, "file"),
                      bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup)
-        } + others.items.map {
+        } + (others?.items ?? []).map {
             MediaRow(id: $0.prefix, name: $0.title, kind: .other, detail: Words.count($0.fileCount, "file"),
-                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup, listCutShort: others.truncated)
+                     bytes: $0.bytes, saved: $0.estimatedSavedBytes, state: $0.stateGroup, listCutShort: others?.truncated ?? false)
         }
         // What needs the Director comes first, then the biggest.
         return rows.sorted { ($0.stateRank, -$0.bytes) < ($1.stateRank, -$1.bytes) }
@@ -194,7 +221,7 @@ struct MediaTable: View {
     let posters: PosterStore
     let open: (String) -> Void
     @State private var selected: MediaRow.ID?
-    @State private var sortOrder = [KeyPathComparator(\MediaRow.stateRank), KeyPathComparator(\MediaRow.bytes, order: .reverse)]
+    @State var sortOrder = [KeyPathComparator(\MediaRow.stateRank), KeyPathComparator(\MediaRow.bytes, order: .reverse)]
 
     var body: some View {
         Table(rows.sorted(using: sortOrder), selection: $selected, sortOrder: $sortOrder) {
