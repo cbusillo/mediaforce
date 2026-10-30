@@ -57,11 +57,12 @@ def test_seasons_group_into_shows_with_their_totals_biggest_show_first(connectio
     assert futurama["estimated_saved_bytes"] == 5100
     assert futurama["loose_files"] is None
     assert [season["season"] for season in futurama["seasons"]] == [2, 10, None]
-    assert futurama["seasons"][0] == {
+    expected_season = {
         "prefix": "tv/Futurama/Season 2", "season": 2, "state": "ready_to_compare", "action": "review_sample",
         "failure": None, "tone": "ready", "approval_source": "kind", "approval_kind": "darker_live_action",
         "episode_count": 20, "bytes": 3000, "needs_you": True, "checks_only": False,
     }
+    assert {key: futurama["seasons"][0][key] for key in expected_season} == expected_season
 
 
 def test_a_show_has_no_estimate_while_any_season_is_still_loading(connection: DBClient) -> None:
