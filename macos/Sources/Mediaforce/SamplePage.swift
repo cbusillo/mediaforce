@@ -156,20 +156,15 @@ struct SampleWork: View {
                 self.approval = nil
                 return .sampleChanged
             }
-            return result.ok ? compressingNotice(result) : .sampleRefused
+            return result.ok ? Words.sampleResult(result) : .sampleRefused
         }
     }
 
     private func compress() {
         act {
             let result = try await $0.compressSeason(prefix)
-            return result.ok ? compressingNotice(result) : .sampleRefused
+            return result.ok ? Words.sampleResult(result) : .sampleRefused
         }
-    }
-
-    private func compressingNotice(_ result: SampleActionResult) -> ActionNotice? {
-        if result.compressing == true { return nil }
-        return result.needsChoice ? .compressNeedsChoice : .approvedNotCompressing
     }
 
     private func make(size: String?) {
@@ -251,7 +246,7 @@ struct SampleActions: View {
                 Button(Words.sampleApproval(scope: facts.approvalKind ?? "season")) { approve(facts.approvalKind ?? "season") }
                     .buttonStyle(.borderedProminent)
                 if facts.approvalKind != nil {
-                    Button("Approve only this season") { approve("season") }
+                    Button(Words.approveOnlySeason) { approve("season") }
                 }
             }
             if actions.contains(.startCompressing) {

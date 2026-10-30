@@ -387,8 +387,16 @@ extension Words {
 }
 
 extension Words {
+    static let approveOnlySeason = "Approve only this season"
+
     static func sampleApproval(scope: String) -> String {
         scope == "season" ? approveSample : "Approve \(kindName(scope))"
+    }
+
+    static func sampleResult(_ result: SampleActionResult) -> ActionNotice? {
+        if let code = result.kindCode { return .kindNotExtended(code) }
+        if result.compressing == true { return nil }
+        return result.needsChoice ? .compressNeedsChoice : .approvedNotCompressing
     }
 
     static let approveSample = "Approve and compress the season"
@@ -575,6 +583,10 @@ extension Words {
 }
 
 extension ActionNotice {
+    static func kindNotExtended(_ code: String) -> ActionNotice {
+        ActionNotice(title: "This season was approved; its kind wasn't", message: Words.kindRefusal(code))
+    }
+
     static let sampleRefused = ActionNotice(
         title: "Mediaforce didn't do that",
         message: "It refused the request. The page shows what Mediaforce reports now."
@@ -1484,6 +1496,7 @@ extension Words {
 
     static func kindRefusal(_ code: String?) -> String {
         switch code {
+        case "sample_changed": "The approved sample changed before it could be used for this kind. The kind wasn't changed."
         case "approval_not_current": "That show's sample approval has changed. Approve its sample again first."
         case "size_goal_not_scalable": "That setting is a size per episode, so it can't carry to other shows."
         case "source_kind_differs": "That show's sample was made on a season of another kind."

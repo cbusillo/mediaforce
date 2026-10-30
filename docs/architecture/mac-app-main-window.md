@@ -306,6 +306,11 @@ child job IDs for waiting reasons, beyond the short file preview, so a season
 only inherits reasons for its own files. Older summaries gain those IDs on the
 next progress refresh. Until then their existing unscoped warning remains.
 
-Kind facts retain the approved sample's season from the saved approval even
-after it leaves the waiting list. The kind page can reopen that sample when
-no published episode is available for comparison yet.
+Kind facts retain the approved sample's season and `sample_moments` from the
+saved kind approval even after the season is resampled or leaves the waiting
+list. The kind page plays those saved clips directly, without opening the
+season's current draft. A replacement draft is not the approved kind's
+representative. Post-save extension also checks the reviewed draft against the
+approval being copied. If it refuses after the season was saved, the successful
+season result includes `kind_code`; the app says the season was approved but
+the kind was not, with the refusal reason.

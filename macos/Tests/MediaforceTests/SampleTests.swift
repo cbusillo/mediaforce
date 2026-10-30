@@ -94,7 +94,7 @@ final class SampleTests: XCTestCase {
         XCTAssertFalse(approval.stillReviewed(try decode(Self.facts())))
         XCTAssertNotEqual(Words.sampleApproval(scope: kind), Words.sampleApproval(scope: "season"))
         XCTAssertTrue(Words.sampleApproval(scope: kind).contains(Words.kindName(kind)))
-        XCTAssertTrue(Words.sampleHeadline(scoped).contains(Words.kindName(kind).lowercased()))
+        XCTAssertNotEqual(Words.sampleHeadline(scoped), Words.sampleHeadline(try decode(Self.facts())))
         XCTAssertTrue(SampleApproval(reviewedDraftHash: "draft-1").stillReviewed(scoped))
     }
 
@@ -167,6 +167,18 @@ final class SampleClientTests: XCTestCase {
         XCTAssertEqual(sent["confirm"] as? [String], ["high_impact"])
         XCTAssertEqual(sent["reviewed_draft_hash"] as? String, "draft-1")
         XCTAssertEqual(sent["approval_scope"] as? String, "darker_live_action")
+    }
+
+    func testAChangedKindAfterSavingNamesThePartialApprovalEvenIfCompressionStarted() throws {
+        for compressing in [true, false] {
+            let body = """
+                {"ok": true, "compressing": \(compressing), "kind_code": "sample_changed"}
+                """
+            let result = try JSONDecoder.mediaforce.decode(SampleActionResult.self, from: Data(body.utf8))
+            let notice = try XCTUnwrap(Words.sampleResult(result))
+            XCTAssertEqual(notice.message, Words.kindRefusal("sample_changed"))
+            XCTAssertNotEqual(notice.title, ActionNotice.sampleRefused.title)
+        }
     }
 
     func testOnlyAReasonThatNeedsAChoiceIsSaidAsOne() async throws {

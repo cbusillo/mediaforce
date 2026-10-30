@@ -24,21 +24,26 @@ struct KindPage: View {
                 if kind.shows.isEmpty && kind.settings.isEmpty && kind.approval == nil {
                     Text(Words.kindEmpty(kind.kind)).foregroundStyle(.secondary)
                 } else if offering, let season = kind.sampleSeason {
-                    SampleWork(prefix: season, model: model, facts: $sample, namesSeason: true, openItem: openItem,
-                               acted: { await model.refreshKinds() })
+                    SampleWork(prefix: season, model: model, facts: $sample, namesSeason: true, openItem: openItem)
                         .id(season)
                 } else if offering, let biggest = kind.shows.first {
                     Button(Words.makeSampleOf(biggest.name)) { makeSample(biggest) }
                         .buttonStyle(.borderedProminent)
                         .disabled(asking)
+                } else if kind.approval != nil, chosen == nil {
+                    if let moments = kind.approval?.sampleMoments, !moments.isEmpty {
+                        ComparePlayer(players: players, model: model, moments: .clips(moments),
+                                      names: PictureNames(compressed: Words.sample),
+                                      gettingReady: Words.gettingSampleReady, couldNotPlay: Words.couldNotPlaySample)
+                    } else {
+                        Text(Words.couldNotPlaySample).foregroundStyle(.secondary)
+                    }
                 } else if let episode = setting?.libraryItemId {
                     ComparePlayer(players: players, model: model)
                         .task(id: episode) {
                             players.opensAt = ComparePlayer.moments[0]
                             players.load(episode, compressed: true, originalBackup: true, client: model.client)
                         }
-                } else if kind.approval != nil, let season = kind.sampleSeason {
-                    Button("Watch approved sample") { openSample(season) }
                 } else if setting != nil {
                     Text(Words.kindNothingToWatch).foregroundStyle(.secondary)
                 }

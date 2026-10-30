@@ -2264,10 +2264,10 @@ def create_app(
         facts = sample_facts(*payloads)
         return {**facts, "approval_kind": _app_sample_kind(normalized_prefix) if facts["state"] == "ready_to_compare" else None}
 
-    def _approve_app_kind(kind: str, from_prefix: str) -> dict[str, Any]:
+    def _approve_app_kind(kind: str, from_prefix: str, reviewed_draft_hash: str | None = None) -> dict[str, Any]:
         return approve_kind_action(
             config, kind, from_prefix, load_calibration_state=_load_calibration_state, kind_of=_season_kinds,
-            approved_at=_now_iso(),
+            approved_at=_now_iso(), reviewed_draft_hash=reviewed_draft_hash,
         )
 
     def _make_app_sample_action(normalized_prefix: str, size: str | None) -> dict[str, Any]:

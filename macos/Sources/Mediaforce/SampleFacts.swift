@@ -88,6 +88,7 @@ struct SampleActionResult: Decodable, Sendable {
     let ok: Bool
     let code: String?
     let compressing: Bool?
+    let kindCode: String?
     let reason: String?
 
     static let choiceReasons: Set<String> = ["confirm_legacy_size", "confirm_compression_goal", "approval_needs_fresh_sample"]

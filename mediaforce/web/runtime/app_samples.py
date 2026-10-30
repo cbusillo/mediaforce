@@ -35,7 +35,7 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
         "state": page_state.get("key"),
         "action": page_state.get("primary_action"),
         "failure": page_state.get("failure"),
-        "moments": _moments(calibration),
+        "moments": sample_moments(calibration),
         "coverage_summary": object_dict(
             object_dict(calibration.get("sample_item")).get("representative_selection")
         ).get("coverage_summary"),
@@ -76,7 +76,7 @@ def approve_sample(
         queue_encode: QueueEncodeFn,
         scope: str = "season",
         representative_kind: str | None = None,
-        approve_kind: Callable[[str, str], Mapping[str, Any]] | None = None,
+        approve_kind: Callable[[str, str, str], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if scope != "season" and (scope != representative_kind or approve_kind is None):
         return {"ok": False, "code": "sample_changed"}
@@ -91,9 +91,9 @@ def approve_sample(
     if not saved.get("ok"):
         return REFUSED
     if scope != "season" and approve_kind is not None:
-        extended = approve_kind(scope, prefix)
+        extended = approve_kind(scope, prefix, reviewed_draft_hash)
         if not extended.get("ok"):
-            return dict(extended)
+            return {**start_compressing(prefix, queue_encode=queue_encode), "kind_code": extended.get("code") or "refused"}
     return start_compressing(prefix, queue_encode=queue_encode)
 
 
@@ -237,7 +237,7 @@ def _goal_bytes(folder: Mapping[str, Any]) -> int:
     )
 
 
-def _moments(calibration: Mapping[str, Any]) -> list[dict[str, Any]]:
+def sample_moments(calibration: Mapping[str, Any]) -> list[dict[str, Any]]:
     if calibration.get("browser_review_ready") is not True:
         return []
     moments = []

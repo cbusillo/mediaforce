@@ -311,28 +311,31 @@ def test_a_sample_that_needs_making_again_is_made_again_until_it_fails_too_often
     ]
 
 
-@pytest.mark.parametrize("scope", ["darker_live_action", "season", "", "bright_live_action"])
+@pytest.mark.parametrize("scope", ["darker_live_action", "season", "bright_live_action"])
 def test_representative_approval_uses_the_explicit_reviewed_scope(scope: str) -> None:
     calls: list[str] = []
     result = approve_sample(
         PREFIX, set(), "draft-1", scope=scope, representative_kind="darker_live_action",
         save_profile=lambda *_args: calls.append("save") or {"ok": True},
         queue_encode=lambda *_args: calls.append("queue") or {"ok": True},
-        approve_kind=lambda kind, prefix: calls.append(f"kind:{kind}:{prefix}") or {"ok": True},
+        approve_kind=lambda kind, prefix, draft: calls.append(f"kind:{kind}:{prefix}:{draft}") or {"ok": True},
     )
-    if scope in ("", "bright_live_action"):
+    if scope == "bright_live_action":
         assert result == {"ok": False, "code": "sample_changed"}
         assert calls == []
     else:
         assert result["ok"] and result["compressing"]
-        assert calls == (["save", f"kind:{scope}:{PREFIX}", "queue"] if scope != "season" else ["save", "queue"])
+        assert calls == (["save", f"kind:{scope}:{PREFIX}:draft-1", "queue"] if scope != "season" else ["save", "queue"])
 
 
-def test_changed_kind_eligibility_never_saves_or_starts_compression() -> None:
+@pytest.mark.parametrize("kind_code", ["source_kind_differs", "sample_changed"])
+def test_a_post_save_kind_refusal_reports_the_saved_season_and_real_queue_result(kind_code: str) -> None:
+    calls: list[str] = []
     result = approve_sample(
-        PREFIX, set(), "draft-1", scope="darker_live_action", representative_kind=None,
-        save_profile=lambda *_args: pytest.fail("saved after eligibility changed"),
-        queue_encode=lambda *_args: pytest.fail("queued after eligibility changed"),
-        approve_kind=lambda *_args: pytest.fail("extended after eligibility changed"),
+        PREFIX, set(), "draft-1", scope="darker_live_action", representative_kind="darker_live_action",
+        save_profile=lambda *_args: calls.append("save") or {"ok": True},
+        queue_encode=lambda *_args: calls.append("queue") or {"ok": False, "code": "free_space_reserve"},
+        approve_kind=lambda *_args: {"ok": False, "code": kind_code},
     )
-    assert result == {"ok": False, "code": "sample_changed"}
+    assert result == {"ok": True, "compressing": False, "reason": "free_space_reserve", "kind_code": kind_code}
+    assert calls == ["save", "queue"]

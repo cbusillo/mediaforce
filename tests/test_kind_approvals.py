@@ -29,7 +29,7 @@ from mediaforce.library.source_evidence import append_version
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
-from mediaforce.web.runtime.app_samples import approve_sample
+from mediaforce.web.runtime.app_samples import approve_sample, sample_moments
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
 from mediaforce.web.routes.app_window import register_app_window_routes
@@ -393,7 +393,7 @@ def test_the_kinds_facts_say_what_each_kind_covers_and_how_it_is_decided(tmp_pat
     assert kinds[DARKER]["sample_season"] is None
     assert kinds[DARKER]["settings"] == []
     assert kinds[DARKER]["approval"] == {"from_prefix": APPROVED_SEASON, "approved_at": "2026-10-26T01:00:00+00:00",
-                                         "size_goal_mode": "normalized", "size_goal_mb": 300.0, "library_item_id": None}
+                                         "size_goal_mode": "normalized", "size_goal_mb": 300.0, "library_item_id": None, "sample_moments": []}
     assert kinds["bright_live_action"]["approval"] is None and kinds["cartoon"]["one_time"]
     assert facts["unmeasured_seasons"] == 1
     assert facts["left_out"] == [{"season": "tv/Fresh/Season 1", "kind": "unmeasured", "waiting_bytes": 1000}]
@@ -1118,6 +1118,12 @@ def test_undecided_kind_preserves_an_older_sample_with_a_saved_parent_sample(tmp
 def test_kind_sample_approval_covers_other_shows_and_keeps_watched_evidence(tmp_path: Path) -> None:
     config = _config(tmp_path)
     calibration = _approved_on(config, f"{APPROVED_SEASON}/e01.mkv")
+    calibration["browser_review_ready"] = True
+    calibration["review_pairs"] = [{
+        "source_clip": {"path": "/review-media/watched/source.mp4", "timestamp_seconds": 600.0, "size_bytes": 1000},
+        "preview_clip": {"path": "/review-media/watched/preview.mp4", "size_bytes": 100},
+    }]
+    watched_moments = sample_moments(calibration)
     folders: dict[str, dict[str, Any]] = {}
     kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER, OTHER_SEASON: DARKER}
     load = _loader(folders, kinds)
@@ -1133,27 +1139,31 @@ def test_kind_sample_approval_covers_other_shows_and_keeps_watched_evidence(tmp_
     assert sample_approval_kind(config, before, APPROVED_SEASON, calibration, kind_of=lambda _config, source: kinds.get(source)) == DARKER
 
     def save(*_args: Any) -> dict[str, Any]:
-        folders[APPROVED_SEASON] = calibration
+        folders[APPROVED_SEASON] = {**calibration, "accepted_draft_hash": "draft-1"}
         return {"ok": True}
 
     result = approve_sample(
         APPROVED_SEASON, set(), "draft-1", scope=DARKER,
         representative_kind=sample_approval_kind(config, before, APPROVED_SEASON, calibration, kind_of=lambda _config, source: kinds.get(source)), save_profile=save,
         queue_encode=lambda *_args: {"ok": True},
-        approve_kind=lambda kind, prefix: approve_kind_action(
+        approve_kind=lambda kind, prefix, draft: approve_kind_action(
             config, kind, prefix, load_calibration_state=load, kind_of=lambda _config, source_season: kinds.get(source_season),
-            approved_at="2026-10-30T01:44:00+00:00",
+            approved_at="2026-10-30T01:44:00+00:00", reviewed_draft_hash=draft,
         ),
     )
     assert result["ok"]
     approval = effective_production_approval(config, SEASON, load)
     assert approval is not None and approval.kind == DARKER and approval.current
     _finished_sample(config, OTHER_SEASON, "2026-10-30T02:00:00+00:00")
+    folders[APPROVED_SEASON] = {**calibration, "job_id": "replacement-sample", "review_pairs": []}
     with open_db(config.paths.db_path) as connection:
         after = kinds_payload(connection, config, load_calibration_state=load)
     darker = next(kind for kind in after["kinds"] if kind["kind"] == DARKER)
     assert darker["sample_season"] == APPROVED_SEASON
     assert darker["approval"]["from_prefix"] == APPROVED_SEASON
+    assert darker["approval"]["sample_moments"] == watched_moments
+    assert sample_approval_kind(config, after, APPROVED_SEASON, folders[APPROVED_SEASON],
+                                kind_of=lambda _config, source: kinds.get(source)) is None
 
 
 @pytest.mark.parametrize("size_mode,source_kind,job_id,eligible", [
@@ -1173,11 +1183,15 @@ def test_only_a_scalable_sample_of_the_kind_offers_kind_approval(
     result = sample_approval_kind(config, facts, APPROVED_SEASON, calibration, kind_of=lambda *_args: source_kind)
     assert (result == DARKER) == eligible
     assert not any(key.startswith("accepted_") for key in calibration)
-    if not eligible:
-        refused = approve_sample(
-            APPROVED_SEASON, set(), "draft-1", scope=DARKER, representative_kind=result,
-            save_profile=lambda *_args: pytest.fail("saved an ineligible kind sample"),
-            queue_encode=lambda *_args: pytest.fail("queued an ineligible kind sample"),
-            approve_kind=lambda *_args: pytest.fail("extended an ineligible kind sample"),
-        )
-        assert not refused["ok"]
+
+
+
+def test_kind_extension_never_copies_a_different_approved_draft(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    calibration = {**_approved_on(config, f"{APPROVED_SEASON}/e01.mkv"), "accepted_draft_hash": "replacement-draft"}
+    result = approve_kind_action(
+        config, DARKER, APPROVED_SEASON, load_calibration_state=_loader({APPROVED_SEASON: calibration}, {}),
+        kind_of=lambda *_args: DARKER, approved_at="now", reviewed_draft_hash="watched-draft",
+    )
+    assert result == {"ok": False, "code": "sample_changed"}
+    assert load_kind_approval(config, DARKER) is None
