@@ -41,6 +41,9 @@ The current implementation covers:
   original-file archival under the transcode root,
   and user-approved cleanup of those rollback copies
 
+Approving a live-action kind’s representative sample approves the kind across
+its shows. The kind keeps the watched sample as its evidence. Choose
+“Approve only this season” for a season-only decision.
 Live-action seasons can follow one approval for their kind of content. Older unapproved
 season samples stop asking separately when they finished before the kind was
 approved or before its newest sample was requested. Newer samples, uncertain timing,

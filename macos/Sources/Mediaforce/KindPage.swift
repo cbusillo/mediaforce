@@ -21,7 +21,7 @@ struct KindPage: View {
         let offer: ((KindsFacts.Show) -> Void)? = offering && kind.sampleSeason == nil && !asking ? { makeSample($0) } : nil
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                if kind.shows.isEmpty && kind.settings.isEmpty {
+                if kind.shows.isEmpty && kind.settings.isEmpty && kind.approval == nil {
                     Text(Words.kindEmpty(kind.kind)).foregroundStyle(.secondary)
                 } else if offering, let season = kind.sampleSeason {
                     SampleWork(prefix: season, model: model, facts: $sample, namesSeason: true, openItem: openItem,
@@ -37,6 +37,8 @@ struct KindPage: View {
                             players.opensAt = ComparePlayer.moments[0]
                             players.load(episode, compressed: true, originalBackup: true, client: model.client)
                         }
+                } else if kind.approval != nil, let season = kind.sampleSeason {
+                    Button("Watch approved sample") { openSample(season) }
                 } else if setting != nil {
                     Text(Words.kindNothingToWatch).foregroundStyle(.secondary)
                 }

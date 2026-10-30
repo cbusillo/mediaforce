@@ -300,3 +300,11 @@ when the current controller is restored. A running show summary records all
 child job IDs for waiting reasons, beyond the short file preview, so a season
 only inherits reasons for its own files. Older summaries gain those IDs on the
 next progress refresh. Until then their existing unscoped warning remains.
+
+The shared sample controls use `approval_kind` from the sample facts to name
+what approval covers before the click. `approval_scope` binds the request to
+that kind or to an explicit `season` choice. A changed representative refuses
+the kind request before saving; draft-hash checks and existing confirmations
+still apply. Kind approval reuses the current folder approval and its quality
+and scalable-size guards. Kind facts retain the approved sample's season from
+the saved approval even after that season leaves the waiting list.

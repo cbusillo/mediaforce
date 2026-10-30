@@ -71,7 +71,7 @@ struct SampleWork: View {
                             .controlSize(.small)
                     }
                     SampleActions(
-                        facts: facts, working: working, approve: startApproval, make: { make(size: $0) },
+                        facts: facts, working: working, approve: { startApproval(scope: $0) }, make: { make(size: $0) },
                         compress: compress, openItem: { openItem(prefix) }
                     )
                 }
@@ -102,7 +102,7 @@ struct SampleWork: View {
             isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
             presenting: confirming
         ) { code in
-            Button(Words.approveSample) {
+            Button(Words.sampleApproval(scope: approval?.scope ?? "season")) {
                 approval?.confirmed.append(String(code.dropFirst("confirm_".count)))
                 approve()
             }
@@ -126,8 +126,8 @@ struct SampleWork: View {
         } while !Task.isCancelled
     }
 
-    private func startApproval() {
-        approval = SampleApproval(reviewedDraftHash: facts?.draftHash ?? "")
+    private func startApproval(scope: String) {
+        approval = SampleApproval(reviewedDraftHash: facts?.draftHash ?? "", scope: scope)
         approve()
     }
 
@@ -147,7 +147,7 @@ struct SampleWork: View {
             return
         }
         act {
-            let result = try await $0.approveSample(prefix, confirm: approval.confirmed, draftHash: approval.reviewedDraftHash)
+            let result = try await $0.approveSample(prefix, confirm: approval.confirmed, draftHash: approval.reviewedDraftHash, scope: approval.scope)
             if let code = result.code, Words.sampleConfirmation(code) != nil {
                 confirming = code
                 return nil
@@ -192,6 +192,7 @@ struct SampleWork: View {
             working = false
             refreshes += 1
             await model.refresh()
+            await model.refreshKinds()
             await acted()
         }
     }
@@ -238,7 +239,7 @@ struct SizeChoices: View {
 struct SampleActions: View {
     let facts: SampleFacts
     let working: Bool
-    let approve: () -> Void
+    let approve: (String) -> Void
     let make: (String?) -> Void
     let compress: () -> Void
     let openItem: () -> Void
@@ -247,8 +248,11 @@ struct SampleActions: View {
         let actions = facts.actions
         HStack(spacing: 10) {
             if actions.contains(.approve) {
-                Button(Words.approveSample, action: approve)
+                Button(Words.sampleApproval(scope: facts.approvalKind ?? "season")) { approve(facts.approvalKind ?? "season") }
                     .buttonStyle(.borderedProminent)
+                if facts.approvalKind != nil {
+                    Button("Approve only this season") { approve("season") }
+                }
             }
             if actions.contains(.startCompressing) {
                 Button(Words.startCompressing, action: compress)

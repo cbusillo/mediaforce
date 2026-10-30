@@ -172,15 +172,15 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
             app, main_window_payload=dict, tv_shows_payload=dict, movies_payload=dict, other_media_payload=dict,
             sample_payload=lambda _prefix: None,
             make_sample_action=lambda *_args: {},
-            approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
-                prefix, confirm, draft_hash, save_profile=save, queue_encode=queue,
+            approve_sample_action=lambda prefix, confirm, draft_hash, scope: approve_sample(
+                prefix, confirm, draft_hash, save_profile=save, queue_encode=queue, scope=scope,
             ),
             compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=queue),
         )
         return _route(app, f"/api/app/samples/{{prefix:path}}/{action}", "POST")
 
     ok = {"ok": True}
-    watched = {"reviewed_draft_hash": "draft-1"}
+    watched = {"reviewed_draft_hash": "draft-1", "approval_scope": "season"}
     assert _post(endpoint(ok, ok), {"confirm": ["size_tradeoff", 7], **watched}) == (
         200, {"ok": True, "compressing": True, "reason": None},
     )
@@ -308,3 +308,29 @@ def test_a_sample_that_needs_making_again_is_made_again_until_it_fails_too_often
     assert samples_to_remake(cards, lambda prefix: failures.get(prefix, 0)) == [
         "tv/Clips gone/Season 1", "tv/Failed once/Season 1",
     ]
+
+
+@pytest.mark.parametrize("scope", ["darker_live_action", "season", "", "bright_live_action"])
+def test_representative_approval_uses_the_explicit_reviewed_scope(scope: str) -> None:
+    calls: list[str] = []
+    result = approve_sample(
+        PREFIX, set(), "draft-1", scope=scope, representative_kind="darker_live_action",
+        save_profile=lambda *_args: calls.append("save") or {"ok": True},
+        queue_encode=lambda *_args: calls.append("queue") or {"ok": True},
+        approve_kind=lambda kind, prefix: calls.append(f"kind:{kind}:{prefix}") or {"ok": True},
+    )
+    if scope in ("", "bright_live_action"):
+        assert result == {"ok": False, "code": "sample_changed"}
+        assert calls == []
+    else:
+        assert result["ok"] and result["compressing"]
+        assert calls == (["save", f"kind:{scope}:{PREFIX}", "queue"] if scope != "season" else ["save", "queue"])
+
+
+def test_kind_refusal_never_starts_compression() -> None:
+    result = approve_sample(
+        PREFIX, set(), "draft-1", scope="darker_live_action", representative_kind="darker_live_action",
+        save_profile=lambda *_args: {"ok": True}, queue_encode=lambda *_args: pytest.fail("queued after refusal"),
+        approve_kind=lambda *_args: {"ok": False, "code": "size_goal_not_scalable"},
+    )
+    assert result == {"ok": False, "code": "size_goal_not_scalable"}

@@ -74,8 +74,12 @@ def approve_sample(
         *,
         save_profile: SaveProfileFn,
         queue_encode: QueueEncodeFn,
+        scope: str = "season",
+        representative_kind: str | None = None,
+        approve_kind: Callable[[str, str], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Approve the sample the owner watched and start compressing the season, like the season page's approval."""
+    if scope != "season" and (scope != representative_kind or approve_kind is None):
+        return {"ok": False, "code": "sample_changed"}
     try:
         saved = save_profile(prefix, "high_impact" in confirm, "size_tradeoff" in confirm, reviewed_draft_hash, "")
     except ReviewedDraftChanged:
@@ -86,6 +90,10 @@ def approve_sample(
         return REFUSED
     if not saved.get("ok"):
         return REFUSED
+    if scope != "season" and approve_kind is not None:
+        extended = approve_kind(scope, prefix)
+        if not extended.get("ok"):
+            return dict(extended)
     return start_compressing(prefix, queue_encode=queue_encode)
 
 

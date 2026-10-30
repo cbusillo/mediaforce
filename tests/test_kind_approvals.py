@@ -29,6 +29,7 @@ from mediaforce.library.source_evidence import append_version
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
+from mediaforce.web.runtime.app_samples import approve_sample
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
 from mediaforce.web.routes.app_window import register_app_window_routes
@@ -36,7 +37,7 @@ from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash,
 from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, APPROVAL_NOT_CURRENT_CODE, KIND_IS_ONE_TIME_CODE, \
     KIND_QUEUE_WAITS_CODE, KIND_RETRY_SECONDS, SIZE_GOAL_NOT_SCALABLE_CODE, KindAwareLoader, KindSeason, SeasonKinds, \
     NO_FOLDER_APPROVAL_CODE, SOURCE_KIND_DIFFERS_CODE, approve_kind, approve_kind_action, background_queue_blocker, kinds_payload, load_kind_approval, \
-    next_kind_season, record_kind_attempt, stop_kind_approval
+    next_kind_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
 from mediaforce.web.runtime.page_state import PageStateFacts, PageStateSources, card_page_states, decide_page_state
 from mediaforce.web.runtime.production_approval import effective_production_approval, production_approval_matches, \
     production_calibration
@@ -1112,3 +1113,44 @@ def test_undecided_kind_preserves_an_older_sample_with_a_saved_parent_sample(tmp
         with patch("mediaforce.web.runtime.kind_approvals.season_kind_report", return_value=report):
             state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
     assert state["key"] == "ready_to_compare" and state["needs_you"]
+
+
+def test_kind_sample_approval_covers_other_shows_and_keeps_watched_evidence(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    calibration = _approved_on(config, f"{APPROVED_SEASON}/e01.mkv")
+    folders: dict[str, dict[str, Any]] = {}
+    kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER, OTHER_SEASON: DARKER}
+    load = _loader(folders, kinds)
+    _finished_sample(config, APPROVED_SEASON)
+    with open_db(config.paths.db_path) as connection:
+        for season in kinds:
+            published = _content_item(connection, f"{season}/e00.mkv", status="promoted", codec="av1", current_dark=0.0)
+            _admit_historical_original(connection, published, dark=0.5)
+            _content_item(connection, f"{season}/e01.mkv", status="discovered", codec="h264", current_dark=0.0)
+            connection.execute(series_metadata.insert().values(
+                series_prefix="/".join(season.split("/")[:2]), tmdb_genres_json='["Drama"]', updated_at="now"))
+        before = kinds_payload(connection, config, load_calibration_state=load)
+    assert sample_approval_kind(before, APPROVED_SEASON) == DARKER
+
+    def save(*_args: Any) -> dict[str, Any]:
+        folders[APPROVED_SEASON] = calibration
+        return {"ok": True}
+
+    result = approve_sample(
+        APPROVED_SEASON, set(), "draft-1", scope=DARKER,
+        representative_kind=sample_approval_kind(before, APPROVED_SEASON), save_profile=save,
+        queue_encode=lambda *_args: {"ok": True},
+        approve_kind=lambda kind, prefix: approve_kind_action(
+            config, kind, prefix, load_calibration_state=load, kind_of=lambda _config, source_season: kinds.get(source_season),
+            approved_at="2026-10-30T01:44:00+00:00",
+        ),
+    )
+    assert result["ok"]
+    approval = effective_production_approval(config, SEASON, load)
+    assert approval is not None and approval.kind == DARKER and approval.current
+    _finished_sample(config, OTHER_SEASON, "2026-10-30T02:00:00+00:00")
+    with open_db(config.paths.db_path) as connection:
+        after = kinds_payload(connection, config, load_calibration_state=load)
+    darker = next(kind for kind in after["kinds"] if kind["kind"] == DARKER)
+    assert darker["sample_season"] == APPROVED_SEASON
+    assert darker["approval"]["from_prefix"] == APPROVED_SEASON

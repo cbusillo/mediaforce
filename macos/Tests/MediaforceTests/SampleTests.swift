@@ -85,6 +85,19 @@ final class SampleTests: XCTestCase {
         XCTAssertFalse(approval.stillReviewed(nil))
     }
 
+    func testKindApprovalNamesItsScopeAndExpiresWhenRepresentationChanges() throws {
+        let scopedJSON = Self.facts().replacingOccurrences(of: #""draft_hash""#, with: #""approval_kind": "darker_live_action", "draft_hash""#)
+        let scoped = try decode(scopedJSON)
+        let kind = try XCTUnwrap(scoped.approvalKind)
+        let approval = SampleApproval(reviewedDraftHash: "draft-1", scope: kind)
+        XCTAssertTrue(approval.stillReviewed(scoped))
+        XCTAssertFalse(approval.stillReviewed(try decode(Self.facts())))
+        XCTAssertNotEqual(Words.sampleApproval(scope: kind), Words.sampleApproval(scope: "season"))
+        XCTAssertTrue(Words.sampleApproval(scope: kind).contains(Words.kindName(kind)))
+        XCTAssertTrue(Words.sampleHeadline(scoped).contains(Words.kindName(kind).lowercased()))
+        XCTAssertTrue(SampleApproval(reviewedDraftHash: "draft-1").stillReviewed(scoped))
+    }
+
     func testEveryStateHasItsOwnHeadlineAndOnlyKnownGuardsAsk() throws {
         let states = ["making_test", "sample_waiting", "ready_to_compare", "needs_test", "ready_to_make", "making_season", "finished"]
         let headlines = try states.map { Words.sampleHeadline(try decode(Self.facts(state: $0))) }
@@ -145,7 +158,7 @@ final class SampleClientTests: XCTestCase {
 
     func testARefusedApprovalIsAnAnswerNotAFailure() async throws {
         let result = try await client(status: 409, body: #"{"ok": false, "code": "confirm_size_tradeoff"}"#)
-            .approveSample("tv/Lucifer/Season 2", confirm: ["high_impact"], draftHash: "draft-1")
+            .approveSample("tv/Lucifer/Season 2", confirm: ["high_impact"], draftHash: "draft-1", scope: "darker_live_action")
         XCTAssertEqual(result.code, "confirm_size_tradeoff")
         let request = try XCTUnwrap(Self.requests.first)
         XCTAssertEqual(request.httpMethod, "POST")
@@ -153,6 +166,7 @@ final class SampleClientTests: XCTestCase {
         let sent = try XCTUnwrap(StubServerBody.json(request))
         XCTAssertEqual(sent["confirm"] as? [String], ["high_impact"])
         XCTAssertEqual(sent["reviewed_draft_hash"] as? String, "draft-1")
+        XCTAssertEqual(sent["approval_scope"] as? String, "darker_live_action")
     }
 
     func testOnlyAReasonThatNeedsAChoiceIsSaidAsOne() async throws {

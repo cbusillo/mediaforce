@@ -18,7 +18,7 @@ def register_app_window_routes(
         movies_payload: Callable[[], dict[str, Any]],
         other_media_payload: Callable[[], dict[str, Any]],
         sample_payload: Callable[[str], dict[str, Any] | None],
-        approve_sample_action: Callable[[str, Collection[str], str], dict[str, Any]],
+        approve_sample_action: Callable[[str, Collection[str], str, str], dict[str, Any]],
         make_sample_action: Callable[[str, str | None], dict[str, Any]],
         compress_season_action: Callable[[str], dict[str, Any]],
         item_payload: Callable[[str], dict[str, Any] | None] | None = None,
@@ -96,6 +96,7 @@ def register_app_window_routes(
             prefix.strip("/"),
             {value for value in confirm if isinstance(value, str)} if isinstance(confirm, list) else set(),
             str(body.get("reviewed_draft_hash") or ""),
+            str(body.get("approval_scope") or ""),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 

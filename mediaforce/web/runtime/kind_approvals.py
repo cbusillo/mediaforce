@@ -529,7 +529,9 @@ def kinds_payload(
                       sorted(shows[kind].items(), key=lambda entry: (-entry[1]["waiting_bytes"], entry[0]))],
             "settings": _lent_settings(kind, approvals_by_show, episodes, kinds_by_season),
             "approval": approvals[kind],
-            "sample_season": _season_with_sample(connection, [season for found in seasons[kind].values() for _, season in found]),
+            "sample_season": _approved_sample_season(config, kind) or _season_with_sample(
+                connection, [season for found in seasons[kind].values() for _, season in found],
+            ),
         } for kind in KINDS_IN_ORDER],
         "left_out": [{"season": row["season"], "kind": row["kind"], "waiting_bytes": int(row["waiting_bytes"])}
                      for row in report["seasons"] if row["kind"] in LEFT_OUT_KINDS],
@@ -537,6 +539,18 @@ def kinds_payload(
         "unmeasured_seasons": int(object_dict(totals.get("unmeasured")).get("seasons") or 0),
         "folder_approved_seasons": int(object_dict(totals.get("folder_approved")).get("seasons") or 0),
     }
+
+
+def _approved_sample_season(config: MediaforceConfig, kind: str) -> str | None:
+    calibration = load_kind_approval(config, kind)
+    if calibration is None or not EffectiveApproval("", calibration, production_approval_contract(calibration)).current:
+        return None
+    return season_prefix_of(config, str(object_dict(calibration.get("sample_item")).get("rel_path") or ""))
+
+
+def sample_approval_kind(kinds: Mapping[str, Any], prefix: str) -> str | None:
+    return next((entry["kind"] for entry in kinds.get("kinds", [])
+                 if entry["kind"] in APPROVABLE_KINDS and entry.get("sample_season") == prefix), None)
 
 
 def approve_kind_action(

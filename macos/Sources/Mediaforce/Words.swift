@@ -387,6 +387,10 @@ extension Words {
 }
 
 extension Words {
+    static func sampleApproval(scope: String) -> String {
+        scope == "season" ? approveSample : "Approve \(kindName(scope))"
+    }
+
     static let approveSample = "Approve and compress the season"
     static let makeSampleAgain = "Make sample again"
     static let makeSample = "Make sample"
@@ -505,7 +509,9 @@ extension Words {
         switch (facts.state, facts.action) {
         case ("making_test", _): "Making the sample now."
         case ("sample_waiting", _): "The sample waits for a free computer."
-        case ("ready_to_compare", _): "The sample is ready. Watch it next to the original."
+        case ("ready_to_compare", _): facts.approvalKind.map {
+            "Watch the sample. Approving it sets how all \(kindName($0).lowercased()) shows should look."
+        } ?? "The sample is ready. Watch it next to the original."
         case ("needs_help", "choose_size"): "The sample can't reach the size goal at good quality. Choose another size."
         case ("needs_help", "retry_encode"): "Compressing stopped. Finished episodes are safe; the rest need trying again."
         case ("needs_help", "review_files"): "Some files need you before the season can go on."

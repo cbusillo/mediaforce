@@ -140,7 +140,7 @@ from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_wor
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, approve_kind_action, \
-    background_queue_blocker, kinds_payload, next_kind_season, record_kind_attempt, stop_kind_approval
+    background_queue_blocker, kinds_payload, next_kind_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
@@ -2254,7 +2254,13 @@ def create_app(
 
     def _app_sample_payload(normalized_prefix: str) -> dict[str, Any] | None:
         payloads = _season_payloads(normalized_prefix)
-        return sample_facts(*payloads) if payloads else None
+        return {**sample_facts(*payloads), "approval_kind": sample_approval_kind(_kinds_payload(), normalized_prefix)} if payloads else None
+
+    def _approve_app_kind(kind: str, from_prefix: str) -> dict[str, Any]:
+        return approve_kind_action(
+            config, kind, from_prefix, load_calibration_state=_load_calibration_state, kind_of=_season_kinds,
+            approved_at=_now_iso(),
+        )
 
     def _make_app_sample_action(normalized_prefix: str, size: str | None) -> dict[str, Any]:
         payloads = _season_payloads(normalized_prefix)
@@ -2271,20 +2277,18 @@ def create_app(
         movies_payload=lambda: movies_payload(_dashboard_movie_library_details_payload()["titles"]),
         other_media_payload=lambda: other_media_payload(_dashboard_other_library_details_payload()),
         sample_payload=_app_sample_payload,
-        approve_sample_action=lambda prefix, confirm, draft_hash: approve_sample(
+        approve_sample_action=lambda prefix, confirm, draft_hash, scope: approve_sample(
             prefix, confirm, draft_hash,
             save_profile=lambda *args: _save_profile_action(*args, require_reviewed_draft=True),
-            queue_encode=_queue_folder_encode_action,
+            queue_encode=_queue_folder_encode_action, scope=scope,
+            representative_kind=sample_approval_kind(_kinds_payload(), prefix), approve_kind=_approve_app_kind,
         ),
         make_sample_action=_make_app_sample_action,
         compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=_queue_folder_encode_action),
         item_payload=lambda prefix: item_payload(config, prefix, sound=_show_audio_preset_payload),
         player_file=lambda library_item_id, side: player_file(config, library_item_id, side),
         kinds_payload=_kinds_payload,
-        approve_kind_action=lambda kind, from_prefix: approve_kind_action(
-            config, kind, from_prefix, load_calibration_state=_load_calibration_state, kind_of=_season_kinds,
-            approved_at=_now_iso(),
-        ),
+        approve_kind_action=_approve_app_kind,
         stop_kind_action=lambda kind: {"ok": True, "stopped": stop_kind_approval(config, kind)},
     )
     register_child_recovery_routes(app, recover_children_action=_recover_children_action)
