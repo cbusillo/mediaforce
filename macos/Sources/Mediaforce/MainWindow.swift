@@ -209,7 +209,7 @@ struct MainWindow: View {
                     Group {
                         switch navigation.place {
                         case .needsYou:
-                            NeedsYouPage(facts: facts, open: go)
+                            NeedsYouPage(facts: facts, posters: model.posters, open: go)
                         case .spaceSaved:
                             SpaceSavedPage(facts: facts, model: model) { go(.item($0)) }
                                 // Deleting backups changes what the page shows, so it reads its facts again at once.

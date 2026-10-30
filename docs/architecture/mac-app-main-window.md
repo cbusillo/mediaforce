@@ -64,6 +64,8 @@ still answers when that storage is gone, and it starts no work.
 
 ## Show posters
 
+Needs you uses the same cached posters as Media.
+
 `GET /api/app/posters/{show_prefix}`, for example `/api/app/posters/tv/Futurama`,
 returns the show's poster image, or `404` with `{"poster": "none"}` when
 Mediaforce has no poster for it. The app then shows the show's name instead.
