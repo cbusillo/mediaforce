@@ -41,6 +41,9 @@ The current implementation covers:
   original-file archival under the transcode root,
   and user-approved cleanup of those rollback copies
 
+Approving a live-action kind’s representative sample approves the kind across
+its shows. The kind keeps the watched sample as its evidence. Choose
+“Approve only this season” for a season-only decision.
 Live-action seasons can follow one approval for their kind of content. Older unapproved
 season samples stop asking separately when they finished before the kind was
 approved or before its newest sample was requested. Newer samples, uncertain timing,
@@ -85,7 +88,7 @@ For migration authoring and review workflow, see
 `docs/development/database-tooling.md`.
 
 Transient calibration artifacts are also cleaned up automatically. By default,
-Mediaforce purges cached review clips, temporary calibration manifests, and
+Mediaforce purges cached review clips that no kind approval still references, temporary calibration manifests, and
 `/Volumes/media/transcode/_calibration/` scratch outputs after `14` days.
 While the server or CLI is in active use, it also retries that cleanup sweep at
 most once per hour so stale files get another chance to disappear if an earlier

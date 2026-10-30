@@ -89,8 +89,13 @@ compressing would take), `goal_bytes`, `size_status`, `draft_hash`, and the
 `size_choices` keys with their per-episode `target_bytes`.
 
 `POST .../approve` with `confirm` (`high_impact`, `size_tradeoff`) and
-`reviewed_draft_hash` approves the sample and starts compressing the season,
-like the web page's approval. It answers `{"ok": true, "compressing": bool}`,
+`reviewed_draft_hash` approves the sample and starts compressing the season.
+`approval_kind` in ready sample facts names a representative kind only when
+the draft meets its scalable-size and measured-kind guards. The shared controls
+name that kind before the click, with an explicit season-only alternative.
+`approval_scope` takes that kind or `season` (also the default for older
+callers). A kind request checks those guards and the representative again
+before saving, then reuses the existing kind approval path. It answers `{"ok": true, "compressing": bool}`,
 or `409` with `code` `confirm_high_impact` or `confirm_size_tradeoff` when the
 approval check wants the Director to confirm again, `sample_changed` when the
 sample is no longer the draft the Director watched (nothing is approved), or
@@ -303,3 +308,19 @@ when the current controller is restored. A running show summary records all
 child job IDs for waiting reasons, beyond the short file preview, so a season
 only inherits reasons for its own files. Older summaries gain those IDs on the
 next progress refresh. Until then their existing unscoped warning remains.
+
+Kind facts retain the approved sample's season and `sample_moments` from the
+saved kind approval even after the season is resampled or leaves the waiting
+list. The kind page plays those saved clips directly, without opening the
+season's current draft. A replacement draft is not the approved kind's
+representative. Post-save extension also checks the reviewed draft against the
+approval being copied. If it refuses after the season was saved, the successful
+season result includes `kind_code`; the app says the season was approved but
+the kind was not, with the refusal reason.
+
+Review cleanup retains the clips referenced by saved kind approvals and skips only
+review-clip cleanup if their records cannot be read. Stopping a kind releases those clips
+to the normal age-based cleanup. Missing legacy clips remain unavailable rather
+than being replaced by a different sample; a show can still be selected for a
+published-episode comparison. A changed approval scope is reported separately
+from a changed draft, and partial-approval notices include any queue hold.
