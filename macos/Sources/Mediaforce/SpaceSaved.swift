@@ -269,8 +269,8 @@ struct SpaceSavedBar: View {
     let backupBytes: Int64
     var openBackups: (() -> Void)?
 
-    private var nowBytes: Int64 { library.tv.totalBytes + library.movies.totalBytes + library.other.totalBytes }
-    private var stillOriginalBytes: Int64 { library.tv.originalBytes + library.movies.originalBytes + library.other.originalBytes }
+    private var nowBytes: Int64 { MediaKind.everything.totalBytes(in: library) }
+    private var stillOriginalBytes: Int64 { MediaKind.everything.originalBytes(in: library) }
     private var compressedBytes: Int64 { nowBytes - stillOriginalBytes }
 
     var body: some View {

@@ -10,10 +10,15 @@ struct LibraryPage: View {
     private var includesTV: Bool { kind == .everything || kind == .tv }
 
     var body: some View {
+        let rows = listing.rows
         PageFrame(title: kind == .everything ? Words.library : Words.mediaKind(kind),
                   subtitle: model.facts.map(Words.workHeadline) ?? "") {
             if let facts = model.facts {
-                WorkStatus(facts: facts, open: open)
+                if kind == .everything && (Words.workExplanation(facts) != nil || facts.lastChange != nil) {
+                    WorkStatus(facts: facts, open: open)
+                } else if let explanation = Words.workExplanation(facts) {
+                    Text(explanation).foregroundStyle(.secondary)
+                }
                 StorageBar(facts: facts, kind: kind, open: open)
                 if includesTV {
                     FinishedShelf(seasons: Array(facts.recentlyFinishedSeasons.prefix(6)), posters: model.posters, open: open)
@@ -30,14 +35,17 @@ struct LibraryPage: View {
                 Text(Words.libraryReadFailure(kind, hasPrevious: listing.hasLoaded(kind)))
                     .font(.callout).foregroundStyle(.secondary)
             }
-            if listing.rows.contains(where: \.listCutShort) {
+            if rows.contains(where: \.listCutShort) {
                 Text(Words.otherMediaTruncated).font(.callout).foregroundStyle(.secondary)
             }
-            MediaShelves(rows: listing.rows, posters: model.posters, open: { open(.item($0)) },
+            if rows.isEmpty && listing.hasLoaded && listing.unavailable.isEmpty {
+                Text(Words.noMatchingMedia).foregroundStyle(.secondary)
+            }
+            MediaShelves(rows: rows, posters: model.posters, open: { open(.item($0)) },
                          showOnly: { open(.mediaKind(kind, $0)) })
             if let facts = model.facts {
                 let events = Array(facts.events.filter { event in
-                    kind == .everything || listing.rows.contains { event.relPath == $0.id || event.relPath.hasPrefix($0.id + "/") }
+                    kind == .everything || rows.contains { event.relPath == $0.id || event.relPath.hasPrefix($0.id + "/") }
                 }.prefix(4))
                 if !events.isEmpty { Latest(events: events, posters: model.posters, open: open) }
             }

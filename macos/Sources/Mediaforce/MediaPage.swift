@@ -27,6 +27,9 @@ struct MediaPage: View {
             }
             HStack(spacing: 12) {
                 LibraryStatePicker(selection: $stateGroup)
+                if stateGroup != nil || !search.isEmpty {
+                    Button(Words.clearFilters) { stateGroup = nil; search = "" }
+                }
                 Spacer()
                 TextField(Words.searchMedia, text: $search)
                     .textFieldStyle(.roundedBorder)
@@ -42,7 +45,7 @@ struct MediaPage: View {
             if onlySeasons != nil {
                 Button(Words.showEverything, action: showEverything).buttonStyle(QuietLinkStyle()).font(.callout)
             }
-            if rows.contains(where: \.listCutShort) && (kind == .everything || kind == .other) {
+            if rows.contains(where: \.listCutShort) {
                 Text(Words.otherMediaTruncated)
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -50,12 +53,7 @@ struct MediaPage: View {
             if visible.isEmpty && listing.hasLoaded && listing.unavailable.isEmpty {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text(Words.noMatchingMedia).foregroundStyle(.secondary)
-                    if stateGroup != nil || !search.isEmpty {
-                        Button(Words.clearFilters) {
-                            stateGroup = nil
-                            search = ""
-                        }
-                    }
+
                 }
             } else if view == .posters {
                 MediaShelves(rows: visible, posters: model.posters, open: openItem) { stateGroup = $0 }
@@ -126,7 +124,6 @@ final class MediaListing {
     private var snapshots: [MediaKind: [MediaRow]] = [:]
     private(set) var unavailable: [MediaKind] = []
     private(set) var loading = true
-    private var request = 0
 
     var hasLoaded: Bool { !snapshots.isEmpty }
     func hasLoaded(_ kind: MediaKind) -> Bool { snapshots[kind] != nil }
@@ -142,8 +139,6 @@ final class MediaListing {
     }
 
     func refresh(_ client: MediaforceClient, kind: MediaKind) async {
-        request += 1
-        let current = request
         let kinds: [MediaKind] = kind == .everything ? [.tv, .movies, .other] : [kind]
         let results = await withTaskGroup(of: Read.self) { group in
             for kind in kinds {
@@ -156,7 +151,7 @@ final class MediaListing {
             for await result in group { results.append(result) }
             return results
         }
-        guard !Task.isCancelled, current == request else { return }
+        guard !Task.isCancelled else { return }
         unavailable = kinds.filter { kind in results.contains { $0.kind == kind && $0.rows == nil } }
         for result in results {
             if let rows = result.rows { snapshots[result.kind] = rows }

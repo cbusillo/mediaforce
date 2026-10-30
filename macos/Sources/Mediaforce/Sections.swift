@@ -42,7 +42,7 @@ struct StorageBar: View {
             metric(Words.size(kind.originalBytes(in: facts.library)), label: "Still original")
             if kind == .everything {
                 Button { open(.spaceSaved) } label: {
-                    metric(Words.size(facts.spaceSaved.bytes), label: "Space saved")
+                    metric(Words.size(facts.spaceSaved.bytes), label: Words.spaceSaved)
                 }
                 .buttonStyle(.plain)
                 .pointerStyle(.link)

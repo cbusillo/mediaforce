@@ -136,7 +136,7 @@ complete Media list for the selected library, and a shelf heading opens that
 state. The separate Media sidebar entry shows everything. State, search and
 table/poster controls stay in Media, without a second library picker.
 All summaries show current size and how much remains original; the combined
-Library also links to total space saved. Summary facts and computer status
+Library also links to total space saved. Storage totals and computer status
 remain visible when a list cannot load.
 
 The sidebar keeps the last kinds received while retrying an unanswered refresh.
