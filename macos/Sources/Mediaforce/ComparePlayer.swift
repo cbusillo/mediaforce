@@ -487,8 +487,8 @@ final class ComparePlayers {
             if wasPlaying {
                 await play(from: time, request)
             } else {
-                async let mainSeek = main.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
-                async let originalSeek = comparing ? original.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) : true
+                async let mainSeek = seek(main, to: time, request)
+                async let originalSeek = comparing ? seek(original, to: time, request) : true
                 _ = await (mainSeek, originalSeek)
             }
             if settling == request { settling = nil }
@@ -509,8 +509,8 @@ final class ComparePlayers {
     }
 
     private func play(from time: CMTime, _ request: Int) async {
-        async let mainSeek = main.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
-        async let originalSeek = comparing ? original.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) : true
+        async let mainSeek = seek(main, to: time, request)
+        async let originalSeek = comparing ? seek(original, to: time, request) : true
         _ = await (mainSeek, originalSeek)
         guard request == requests else { return }
         guard comparing else {
@@ -523,6 +523,11 @@ final class ComparePlayers {
         original.automaticallyWaitsToMinimizeStalling = false
         main.setRate(1, time: time, atHostTime: start)
         original.setRate(1, time: time, atHostTime: start)
+    }
+
+    private func seek(_ player: AVPlayer, to time: CMTime, _ request: Int) async -> Bool {
+        guard request == requests else { return false }
+        return await player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
     }
 
     private func nextRequest() -> Int {

@@ -181,7 +181,8 @@ file itself when it was never replaced), or `404` when that side is gone. The
 Mac player cannot open MKV, so the first request remuxes the file to MP4,
 copying the picture and making the sound stereo AAC, into the `player`
 folder of the web state folder (`paths.web_state_dir`); the newest six stay cached. It answers byte
-ranges, so the player can seek.
+ranges, so the player can seek. Each side of the comparison checks that its
+seek still belongs to the latest request before moving, including while paused.
 
 Scrolling over either comparison picture scrolls the page, or pans both pictures
 at actual size; it never scrubs a video. Seeking and frame stepping use the
