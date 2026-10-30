@@ -1168,13 +1168,16 @@ def test_unmeasured_seasons_keep_running_samples_and_wait_after_they_finish(tmp_
 
 
 @pytest.mark.parametrize("measured", [False, True])
-def test_missing_genres_only_waits_for_measurement_when_original_measurements_are_missing(tmp_path: Path, measured: bool) -> None:
+@pytest.mark.parametrize("saved_sample", [False, True])
+def test_missing_genres_only_waits_for_measurement_when_original_measurements_are_missing(
+        tmp_path: Path, measured: bool, saved_sample: bool,
+) -> None:
     config = _config(tmp_path)
     with open_db(config.paths.db_path) as connection:
         item_id = _content_item(connection, EPISODE, status="discovered", codec="h264", current_dark=0.5)
         connection.commit()
     kinds = SeasonKinds()
-    load = KindAwareLoader(lambda *_args: _review_ready(), kinds)
+    load = KindAwareLoader(lambda _config, prefix: _review_ready() if saved_sample and prefix == SEASON else None, kinds)
     sources = PageStateSources(load, lambda *_args: {})
     with open_db(config.paths.db_path) as connection:
         before = card_page_states(connection, config, [(SEASON, None, None)], sources)[SEASON]
@@ -1184,8 +1187,8 @@ def test_missing_genres_only_waits_for_measurement_when_original_measurements_ar
             connection.commit()
         state = card_page_states(connection, config, [(SEASON, None, None)], sources)[SEASON]
     assert kinds(config, SEASON) == "unmeasured"
-    assert state["key"] == ("ready_to_compare" if measured else "waiting_for_measurement")
-    assert state["needs_you"] == measured
+    assert state["key"] == (("ready_to_compare" if saved_sample else "needs_test") if measured else "waiting_for_measurement")
+    assert state["needs_you"] == (measured and saved_sample)
 
 
 @pytest.mark.parametrize("failed_fingerprint", [None, "stale", "current"])
@@ -1216,5 +1219,5 @@ def test_blocked_measuring_names_source_conflicts_and_current_failures_without_s
     assert state["primary_action"] is None
     assert state["wait_detail"]
     waits = load.sample_waits(config)[SEASON]
-    assert waits.measurement_reasons == (("conflicting_measurements", "storage_io") if failed_fingerprint == "current"
-                                         else ("conflicting_measurements",))
+    assert waits.measurement_reasons == (("conflicting_measurements", "original_unavailable", "storage_io") if failed_fingerprint == "current"
+                                         else ("conflicting_measurements", "original_unavailable"))

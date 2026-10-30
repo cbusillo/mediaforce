@@ -12,7 +12,7 @@ from mediaforce.core.db_tables import library_item_evidence_state, library_items
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.library.candidate_selection import season_identity
 from mediaforce.library.motion_keep_state import library_item_ids_kept_original
-from mediaforce.library.source_evidence import SourceEvidence, SourceEvidenceContext, load_source_evidence_bulk, load_source_evidence_context
+from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES, SourceEvidence, SourceEvidenceContext, load_source_evidence_bulk, load_source_evidence_context
 
 # Kinds of content group seasons by number ranges of their originals' measured traits, so that one
 # approval can cover every season that measures the same (Director decision, #517, 2026-10-22).
@@ -167,7 +167,7 @@ def _in_folder(prefix: str) -> tuple[Any, Any]:
 
 def _present_items(connection: DBClient, season_prefix: str | None = None) -> Sequence[Mapping[str, Any]]:
     query = select(
-        library_items.c.id, library_items.c.rel_path, library_items.c.status, library_items.c.video_codec,
+        library_items.c.id, library_items.c.rel_path, library_items.c.media_root, library_items.c.status, library_items.c.video_codec,
         library_items.c.size_bytes,
     ).where(library_items.c.missing_since.is_(None))
     if season_prefix is not None:
@@ -274,10 +274,19 @@ def _failed_measurements(connection: DBClient) -> dict[int, str]:
 
 def _measurement_reasons(
         episodes: Sequence[Mapping[str, Any]], evidence: Mapping[int, SourceEvidence], failed: Mapping[int, str],
+        measurement_roots: Collection[str] | None,
 ) -> list[str]:
     reasons = {trait.reason for item in episodes if int(item["id"]) in evidence
                for trait in [evidence[int(item["id"])].traits["media_fingerprint"]]
-               if trait.reason not in {None, "missing_source_measurement", "source_attachment_unresolved"}}
+               if trait.reason not in {None, "missing_source_measurement", "source_attachment_unresolved", "original_rule_changed"}}
+    for item in episodes:
+        original = evidence.get(int(item["id"]))
+        if original is not None:
+            if original.availability == "unavailable":
+                reasons.add("original_unavailable")
+        elif (item["video_codec"] not in HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]
+              or (measurement_roots is not None and item["media_root"] not in measurement_roots)):
+            reasons.add("automatic_measurement_unavailable")
     reasons.update(failed[int(item["id"])] for item in episodes if int(item["id"]) in failed)
     return sorted(reason for reason in reasons if reason)
 
@@ -288,6 +297,7 @@ def season_kind_report(
         library_types: Mapping[str, str],
         folder_approved: Callable[[str], bool],
         sample_seasons: Collection[str] = (),
+    measurement_roots: Collection[str] | None = None,
 ) -> dict[str, Any]:
     admitted = _admitted_item_ids(connection)
     context = load_source_evidence_context(connection)
@@ -322,7 +332,7 @@ def season_kind_report(
         totals[grouping.kind]["seasons"] += 1
         totals[grouping.kind]["waiting_bytes"] += waiting_bytes
         rows.append({"season": prefix, **grouping.to_payload(),
-                     "measurement_reasons": _measurement_reasons(seasons[prefix], evidence_by_item, failed)
+                     "measurement_reasons": _measurement_reasons(seasons[prefix], evidence_by_item, failed, measurement_roots)
                      if grouping.reason == "no_measured_original" else [],
                      "waiting_episodes": len(waiting),
                      "waiting_bytes": waiting_bytes})

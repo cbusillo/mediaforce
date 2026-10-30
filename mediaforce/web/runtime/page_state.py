@@ -1,42 +1,3 @@
-"""The one state a folder page or library card leads with, and the action it offers.
-
-The server decides it from database rows and saved samples, never from the hour-long job notice the
-page payload carries, so a page and its library card agree and nothing changes when a notice expires.
-The Mac app maps the key to wording.
-
-Order, first match wins:
-
-1. ``making_season``: an encode run is working on the scope (the workflow state's wider-run rules).
-2. ``needs_help`` / ``season``: an encode run stopped on one of the scope's files, unless the page's
-   own sample is newer than the stop. The newer sample is how the owner answers a stopped run, so
-   its state leads instead.
-3. ``needs_help`` / ``files``: a finished file is blocked, unless a fresh sample awaits review; a
-   blocked file is made again only after a fresh sample is approved.
-4. The page's own sample, in its order: ``making_test``, ``sample_waiting``, ``needs_help`` /
-   ``test`` for a sample that stopped, ``ready_to_compare`` for a sample awaiting review. A sample
-   outranks validating, finishing and finished because it is the owner's newest request for the
-   scope, and approving it changes which settings its files are published under.
-5. ``ready_to_check``, ``finish_blocked`` / ``ready_to_finish``, ``finished``: the workflow lanes. A
-   file the owner kept original for its motion pattern is settled, so a scope whose remaining files
-   are all published or kept original is ``finished``.
-6. ``ready_to_make``: the approval governing the scope (the nearest folder holding one, see
-   ``production_approval``) is current, records its contract, and the review evidence still allows
-   production. Under such an approval a scope where neither queueing nor an override the page
-   offers would take or start a check for any file, and some file is held for its measured motion
-   pattern, is ``motion_held`` instead, so nothing offers to compress files queueing would refuse.
-   The counts come from the scope's lifecycle payload, which reads the queue's own motion-pattern
-   gate. It is quiet when no one can change the outcome, and asks for attention when the show's
-   encode-as-is decision could accept some of the files.
-7. ``needs_help`` / ``test``: the page's saved sample cannot be reviewed.
-8. ``waiting_for_kind``: an older unapproved sample follows its reusable kind. The newest sample
-   offered by that kind stays available until a current approval covers it. Active samples and
-   review-blocked decisions stay visible.
-9. ``needs_test``.
-
-The page's own sample is the newest sample job and the saved sample at exactly its folder. A sample
-of one episode inside a season, or of the show around it, never sets the season's sample state.
-"""
-
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -312,17 +273,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
 def _measurement_wait_detail(reasons: tuple[str, ...]) -> str | None:
     if not reasons:
         return None
-    descriptions = {
-        "original_not_assessed": "The original has not been identified safely.",
-        "conflicting_measurements": "The original measurements disagree.",
-        "historical_output_conflict": "The original's identity conflicts with a compressed copy.",
-        "known_output_match": "The supposed original matches a compressed copy.",
-        "possible_output_match": "The supposed original may be a compressed copy.",
-        "original_rule_changed": "Mediaforce needs to identify the original again.",
-    }
-    summaries = sorted({descriptions.get(reason) or plain_failure_summary(reason, failure_kind=reason) or "Mediaforce couldn't measure an original."
-                        for reason in reasons})
-    return "Measuring is blocked. " + " ".join(summaries)
+    summaries = {plain_failure_summary(reason, failure_kind=reason) for reason in reasons}
+    return "Measuring is blocked. " + " ".join(sorted(summary for summary in summaries if summary))
 
 
 def folder_page_state(

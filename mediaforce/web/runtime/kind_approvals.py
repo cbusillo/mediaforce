@@ -462,6 +462,7 @@ def _kind_report(
         return approval is not None and approval.current
 
     return season_kind_report(connection, library_types=config.library_type_map, folder_approved=folder_approved,
+                              measurement_roots=config.source_root_map,
                               sample_seasons=sample_seasons)
 
 

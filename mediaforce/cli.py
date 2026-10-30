@@ -320,6 +320,7 @@ def _main(
                 connection,
                 library_types=config.library_type_map,
                 folder_approved=lambda prefix: _current_folder_approval(config, prefix),
+                measurement_roots=config.source_root_map,
             )
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
