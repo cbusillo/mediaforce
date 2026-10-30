@@ -413,7 +413,8 @@ def test_a_kind_offers_each_shows_biggest_season_to_sample_and_names_the_one_bei
         for show in ["tv/Drama", "tv/Crime"]:
             connection.execute(series_metadata.insert().values(series_prefix=show, tmdb_genres_json='["Drama"]',
                                                                updated_at="now"))
-        load = _loader({}, {})
+        folders: dict[str, dict[str, Any]] = {}
+        load = _loader(folders, {})
 
         def kind_facts() -> dict[str, Any]:
             facts = kinds_payload(connection, config, load_calibration_state=load)
@@ -425,8 +426,8 @@ def test_a_kind_offers_each_shows_biggest_season_to_sample_and_names_the_one_bei
                 host_json="{}", policy_json="{}", sample_item_json="{}", created_at=created_at, updated_at=created_at))
 
         before = kind_facts()
-        # A full run and a sample already approved hold no sample to make or watch.
         sample_job("tv/Crime/Season 1", "running", "2026-10-26T01:00:00+00:00", lane="full")
+        folders["tv/Drama/Season 1"] = _approved_on(config, "tv/Drama/Season 1/e00.mkv")
         sample_job("tv/Drama/Season 1", "completed", "2026-10-26T02:00:00+00:00")
         settled = kind_facts()
         sample_job("tv/Crime/Season 2", "pending_review", "2026-10-26T03:00:00+00:00")
@@ -1024,8 +1025,11 @@ def test_an_approved_kind_keeps_active_samples_and_review_blocked_decisions(tmp_
     assert states[SEASON]["needs_you"] == (status == "pending_review")
 
 
+@pytest.mark.parametrize("sample_status", ["pending_review", "completed"])
 @pytest.mark.parametrize("stale_kind", [False, True])
-def test_kind_page_and_season_states_choose_the_same_waiting_sample(tmp_path: Path, stale_kind: bool) -> None:
+def test_kind_page_and_season_states_choose_the_same_waiting_sample(
+        tmp_path: Path, stale_kind: bool, sample_status: str,
+) -> None:
     config = _config(tmp_path)
     if stale_kind:
         _approve_stale_kind(config, DARKER)
@@ -1041,7 +1045,7 @@ def test_kind_page_and_season_states_choose_the_same_waiting_sample(tmp_path: Pa
             connection.execute(series_metadata.insert().values(
                 series_prefix="/".join(season.split("/")[:2]), tmdb_genres_json='["Drama"]', updated_at="now"))
             connection.execute(calibration_jobs.insert().values(
-                job_id=f"sample-{index}", prefix=season, status="pending_review", lane="sample", action="sample",
+                job_id=f"sample-{index}", prefix=season, status=sample_status, lane="sample", action="sample",
                 host_json="{}", policy_json="{}", sample_item_json="{}",
                 created_at=f"2026-10-29T0{index}:00:00+00:00", updated_at="now",
                 finished_at=f"2026-10-29T0{index}:30:00+00:00"))
