@@ -15,6 +15,8 @@ enum Words {
     static func backTitle(_ place: Place) -> String {
         switch place {
         case .library: library
+        case .libraryKind(let kind): mediaKind(kind)
+        case .mediaKind(let kind, _): kind == .everything ? media : mediaKind(kind)
         case .needsYou: needsYou
         case .spaceSaved: spaceSaved
         case .media: media
@@ -24,6 +26,11 @@ enum Words {
         case .sample(let prefix): sampleTitle(folderName(prefix))
         case .computer: "Computers"
         }
+    }
+
+    static func libraryReadFailure(_ kind: MediaKind, hasPrevious: Bool) -> String {
+        let state = hasPrevious ? "list may be out of date" : "didn't load"
+        return "\(mediaKind(kind)) \(state). Retrying."
     }
 
     static func size(_ bytes: Int64) -> String {
@@ -1376,7 +1383,6 @@ extension Words {
 extension Words {
     static let media = "Media"
     static let seasonsHeading = "Seasons"
-    static let kindLabel = "Kind"
     static let viewLabel = "View"
     static let tableView = "Show as a table"
     static let posterView = "Show as posters"

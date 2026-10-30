@@ -6,7 +6,7 @@ final class PageNavigationTests: XCTestCase {
         let show = Place.item("tv/Example")
         let season = Place.item("tv/Example/Season 2")
         let sample = Place.sample("tv/Example/Season 2")
-        for origin in [Place.library, .media, .spaceSaved, .kind("cartoon"), .seasonsWithoutKind] {
+        for origin in [Place.library, .libraryKind(.movies), .mediaKind(.other), .media, .spaceSaved, .kind("cartoon"), .seasonsWithoutKind] {
             var navigation = PageNavigation()
             navigation.select(origin)
             navigation.open(show)

@@ -127,6 +127,18 @@ On macOS, Mediaforce now prefers Homebrew's `ffmpeg-full` and `ffprobe` from
 changes and normal formula upgrades. You can override either binary with
 `MEDIAFORCE_FFMPEG` or `MEDIAFORCE_FFPROBE`.
 
+Library in the Mac sidebar combines TV, Movies and Other. Expand Library to
+browse TV or Movies on their own; Other appears when it contains media. Each
+uses the same storage summary and state shelves, opening the existing show,
+movie or folder page. TV's finished seasons, approved samples and biggest
+unstarted shows remain available in Library and TV. Browse all opens the
+complete Media list for the selected library, and a shelf heading opens that
+state. The separate Media sidebar entry shows everything. State, search and
+table/poster controls stay in Media, without a second library picker.
+All summaries show current size and how much remains original; the combined
+Library also links to total space saved. Storage totals and computer status
+remain visible when a list cannot load.
+
 The sidebar keeps the last kinds received while retrying an unanswered refresh.
 
 API reads only report persisted catalog and job state; opening or
