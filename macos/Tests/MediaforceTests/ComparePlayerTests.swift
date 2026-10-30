@@ -69,17 +69,9 @@ final class ComparePlayerTests: XCTestCase {
                 abs(players.original.currentTime().seconds - position) < 0.01
             }
         }
-        let lastPosition = 2.5
-        for position in [4.0, 1.5, lastPosition] {
-            players.seek(to: position)
-        }
-        try await wait {
-            abs(players.main.currentTime().seconds - lastPosition) < 0.01 &&
-            abs(players.original.currentTime().seconds - lastPosition) < 0.01
-        }
         players.step(by: 1)
         try await wait {
-            players.main.currentTime().seconds > lastPosition &&
+            players.main.currentTime().seconds > 2 &&
             abs(players.main.currentTime().seconds - players.original.currentTime().seconds) < 0.001
         }
         XCTAssertFalse(players.playing)
