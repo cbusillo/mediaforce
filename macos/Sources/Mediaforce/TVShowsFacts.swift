@@ -35,6 +35,7 @@ struct TVShowsFacts: Decodable, Sendable {
         let prefix: String
         let season: Int?
         let state: String?
+        let waitDetail: String?
         let action: String?
         let failure: String?
         let tone: String?
@@ -45,7 +46,7 @@ struct TVShowsFacts: Decodable, Sendable {
         var id: String { prefix }
 
         enum CodingKeys: CodingKey {
-            case prefix, season, state, action, failure, tone, episodeCount, bytes, needsYou, checksOnly
+            case prefix, season, state, waitDetail, action, failure, tone, episodeCount, bytes, needsYou, checksOnly
         }
 
         init(from decoder: Decoder) throws {
@@ -53,6 +54,7 @@ struct TVShowsFacts: Decodable, Sendable {
             prefix = try container.decode(String.self, forKey: .prefix)
             season = try container.decodeIfPresent(Int.self, forKey: .season)
             state = try container.decodeIfPresent(String.self, forKey: .state)
+            waitDetail = try container.decodeIfPresent(String.self, forKey: .waitDetail)
             action = try container.decodeIfPresent(String.self, forKey: .action)
             failure = try container.decodeIfPresent(String.self, forKey: .failure)
             tone = try container.decodeIfPresent(String.self, forKey: .tone)

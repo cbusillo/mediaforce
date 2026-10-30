@@ -7,7 +7,7 @@ from typing import Any, Literal
 from sqlalchemy import func, literal_column, select
 
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import library_items, series_metadata, source_admissions, source_measurements, \
+from mediaforce.core.db_tables import library_item_evidence_state, library_items, series_metadata, source_admissions, source_measurements, \
     source_transitions, source_versions, staged_artifacts, target_production_outcomes
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.library.candidate_selection import season_identity
@@ -261,6 +261,27 @@ def _series_animation(connection: DBClient, series_prefix: str | None = None) ->
     return animation
 
 
+def _failed_measurements(connection: DBClient) -> dict[int, str]:
+    rows = connection.execute(select(library_item_evidence_state.c.library_item_id, library_item_evidence_state.c.last_error)
+                              .join(library_items, library_items.c.id == library_item_evidence_state.c.library_item_id)
+                              .where(library_items.c.missing_since.is_(None),
+                                     library_item_evidence_state.c.evidence_kind == "media_fingerprint",
+                                     library_item_evidence_state.c.work_status == "failed",
+                                     library_item_evidence_state.c.work_source_fingerprint == func.coalesce(
+                                         library_items.c.content_version_fingerprint, library_items.c.fingerprint))).mappings()
+    return {int(row["library_item_id"]): str(row["last_error"] or "measurement_failed") for row in rows}
+
+
+def _measurement_reasons(
+        episodes: Sequence[Mapping[str, Any]], evidence: Mapping[int, SourceEvidence], failed: Mapping[int, str],
+) -> list[str]:
+    reasons = {trait.reason for item in episodes if int(item["id"]) in evidence
+               for trait in [evidence[int(item["id"])].traits["media_fingerprint"]]
+               if trait.reason not in {None, "missing_source_measurement", "source_attachment_unresolved"}}
+    reasons.update(failed[int(item["id"])] for item in episodes if int(item["id"]) in failed)
+    return sorted(reason for reason in reasons if reason)
+
+
 def season_kind_report(
         connection: DBClient,
         *,
@@ -286,6 +307,7 @@ def season_kind_report(
     )
     groupings = {prefix: season_kind(_original_traits(seasons[prefix], admitted, evidence_by_item),
                                     animated=animation.get(series_of[prefix])) for prefix in measured_seasons}
+    failed = _failed_measurements(connection)
     rows = []
     totals: dict[str, Counter[str]] = defaultdict(Counter)
     for prefix in sorted(seasons):
@@ -299,7 +321,10 @@ def season_kind_report(
         waiting_bytes = sum(int_value(item["size_bytes"]) for item in waiting)
         totals[grouping.kind]["seasons"] += 1
         totals[grouping.kind]["waiting_bytes"] += waiting_bytes
-        rows.append({"season": prefix, **grouping.to_payload(), "waiting_episodes": len(waiting),
+        rows.append({"season": prefix, **grouping.to_payload(),
+                     "measurement_reasons": _measurement_reasons(seasons[prefix], evidence_by_item, failed)
+                     if grouping.reason == "no_measured_original" else [],
+                     "waiting_episodes": len(waiting),
                      "waiting_bytes": waiting_bytes})
     report: dict[str, Any] = {
         "content_kinds_version": CONTENT_KINDS_VERSION,

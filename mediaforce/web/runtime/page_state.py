@@ -46,13 +46,14 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding.encode_queue import load_encode_job
+from mediaforce.encoding.plain_failure import plain_failure_summary
 from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.web.runtime.folder_actions import quality_risk_blocks_production
 from mediaforce.web.runtime.folder_tuning_advice import review_gate
 from mediaforce.web.runtime.job_runtime import retryable_saved_sample_job, sample_target_size_failure
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
-    awaiting_measurement, cached_calibration_loader, effective_production_approval, following_kind, holds_approval, season_prefix_of
+    SampleWait, cached_calibration_loader, effective_production_approval, holds_approval, sample_wait, season_prefix_of
 
 PageStateKey = Literal[
     "needs_test",
@@ -139,6 +140,7 @@ class PageState:
     approval_source: str | None = None
     approval_kind: str | None = None
     needs_you: bool = False
+    wait_detail: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -151,6 +153,7 @@ class PageState:
             "approval_source": self.approval_source,
             "approval_kind": self.approval_kind,
             "needs_you": self.needs_you,
+            "wait_detail": self.wait_detail,
         }
 
 
@@ -170,8 +173,7 @@ class PageStateFacts:
     # The approval governing this folder, from the nearest folder holding one.
     approval: EffectiveApproval | None = None
     approval_review_blocked: bool = False
-    following_kind: str | None = None
-    awaiting_measurement: bool = False
+    sample_wait: SampleWait | None = None
     # The staged-file summary, when the caller read one.
     staged_integrity: Mapping[str, Any] | None = None
     # The scope's lifecycle payload with its motion-pattern counts, for a TV scope.
@@ -206,8 +208,9 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     sample_job = object_dict(facts.sample_job)
     sample_status = str(sample_job.get("status") or "")
     calibration = object_dict(facts.calibration) if facts.calibration is not None else None
-    follows_kind = facts.following_kind if not facts.approval_review_blocked else None
-    if (follows_kind or facts.awaiting_measurement) and sample_status not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES:
+    wait = facts.sample_wait if not facts.approval_review_blocked else None
+    follows_kind = wait.kind if wait is not None else None
+    if wait and sample_status not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES:
         sample_job, sample_status, calibration = {}, "", None
 
     if lane == "processing":
@@ -265,8 +268,8 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     if lane == "complete" or workflow.get("state") == "complete":
         return PageState("finished", "success")
 
-    if facts.awaiting_measurement:
-        return PageState("waiting_for_measurement", "quiet")
+    if wait is not None and wait.measurement_reasons is not None:
+        return PageState("waiting_for_measurement", "quiet", wait_detail=_measurement_wait_detail(wait.measurement_reasons))
 
     approval = facts.approval
     if approval is not None and approval.current and approval.contract is not None:
@@ -304,6 +307,22 @@ def _decide_page_state(facts: PageStateFacts) -> PageState:
     if follows_kind:
         return PageState("waiting_for_kind", "quiet", approval_source="kind", approval_kind=follows_kind)
     return PageState("needs_test", "quiet", primary_action="make_sample")
+
+
+def _measurement_wait_detail(reasons: tuple[str, ...]) -> str | None:
+    if not reasons:
+        return None
+    descriptions = {
+        "original_not_assessed": "The original has not been identified safely.",
+        "conflicting_measurements": "The original measurements disagree.",
+        "historical_output_conflict": "The original's identity conflicts with a compressed copy.",
+        "known_output_match": "The supposed original matches a compressed copy.",
+        "possible_output_match": "The supposed original may be a compressed copy.",
+        "original_rule_changed": "Mediaforce needs to identify the original again.",
+    }
+    summaries = sorted({descriptions.get(reason) or plain_failure_summary(reason, failure_kind=reason) or "Mediaforce couldn't measure an original."
+                        for reason in reasons})
+    return "Measuring is blocked. " + " ".join(summaries)
 
 
 def folder_page_state(
@@ -378,10 +397,14 @@ def _facts(
     source_job_id = str(object_dict(workflow).get("source_job_id") or "")
     approval = effective_production_approval(config, prefix, load_calibration)
     calibration = load_calibration(config, prefix)
-    follows = None
-    if (calibration is not None and not holds_approval(calibration) and season_prefix_of(config, prefix) == prefix
+    wait = None
+    if (season_prefix_of(config, prefix) == prefix
             and str(object_dict(sample_job).get("status") or "") not in SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES):
-        follows = following_kind(config, prefix, load_calibration)
+        if approval is None:
+            wait = sample_wait(config, prefix, load_calibration)
+        elif (approval.kind is not None and approval.current and calibration is not None
+              and not holds_approval(calibration)):
+            wait = SampleWait(kind=approval.kind)
     return PageStateFacts(
         prefix=prefix,
         workflow=workflow,
@@ -389,9 +412,7 @@ def _facts(
         sample_job=sample_job if _is_sample_job(sample_job) else None,
         calibration=calibration,
         approval=approval,
-        following_kind=follows,
-        awaiting_measurement=(approval is None and season_prefix_of(config, prefix) == prefix
-                              and awaiting_measurement(config, prefix, load_calibration)),
+        sample_wait=wait,
         approval_review_blocked=review_blocked(approval) if approval is not None and approval.current else False,
         staged_integrity=staged_integrity,
         lifecycle=lifecycle,

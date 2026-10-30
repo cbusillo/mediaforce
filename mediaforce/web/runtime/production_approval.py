@@ -87,25 +87,19 @@ def _kind_approval(config: MediaforceConfig, rel_path: str, load: LoadCalibratio
     return load.kind_approval(config, rel_path) if isinstance(load, KindApprovalSource) else None
 
 
-@runtime_checkable
-class KindSampleSource(Protocol):
-    def following_kinds(self, config: MediaforceConfig) -> dict[str, str]: ...
+@dataclass(frozen=True, slots=True)
+class SampleWait:
+    kind: str | None = None
+    measurement_reasons: tuple[str, ...] | None = None
 
 
 @runtime_checkable
-class SeasonMeasurementSource(Protocol):
-    def awaiting_measurement(self, config: MediaforceConfig, prefix: str) -> bool: ...
+class SampleWaitSource(Protocol):
+    def sample_waits(self, config: MediaforceConfig) -> dict[str, SampleWait]: ...
 
 
-def awaiting_measurement(config: MediaforceConfig, prefix: str, load: object) -> bool:
-    return isinstance(load, SeasonMeasurementSource) and load.awaiting_measurement(config, prefix)
-
-
-def following_kind(config: MediaforceConfig, prefix: str, load: LoadCalibrationState) -> str | None:
-    approval = _kind_approval(config, prefix, load)
-    if approval is not None and approval.current:
-        return approval.kind
-    return load.following_kinds(config).get(prefix) if isinstance(load, KindSampleSource) else None
+def sample_wait(config: MediaforceConfig, prefix: str, load: LoadCalibrationState) -> SampleWait | None:
+    return load.sample_waits(config).get(prefix) if isinstance(load, SampleWaitSource) else None
 
 
 def season_prefix_of(config: MediaforceConfig, rel_path: str) -> str | None:
@@ -192,8 +186,7 @@ class _CachedCalibrationLoader:
     def __init__(self, load_calibration_state: LoadCalibrationState) -> None:
         self._load = load_calibration_state
         self._cache: dict[str, dict[str, Any] | None] = {}
-        self._following: dict[str, str] | None = None
-        self._measurements: dict[str, bool] = {}
+        self._sample_waits: dict[str, SampleWait] | None = None
 
     def __call__(self, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
         if prefix not in self._cache:
@@ -203,17 +196,12 @@ class _CachedCalibrationLoader:
     def kind_approval(self, config: MediaforceConfig, rel_path: str) -> EffectiveApproval | None:
         return _kind_approval(config, rel_path, self._load)
 
-    def awaiting_measurement(self, config: MediaforceConfig, prefix: str) -> bool:
-        if prefix not in self._measurements:
-            self._measurements[prefix] = awaiting_measurement(config, prefix, self._load)
-        return self._measurements[prefix]
-
-    def following_kinds(self, config: MediaforceConfig) -> dict[str, str]:
-        following = self._following
-        if following is None:
-            following = self._load.following_kinds(config) if isinstance(self._load, KindSampleSource) else {}
-            self._following = following
-        return following
+    def sample_waits(self, config: MediaforceConfig) -> dict[str, SampleWait]:
+        waits = self._sample_waits
+        if waits is None:
+            waits = self._load.sample_waits(config) if isinstance(self._load, SampleWaitSource) else {}
+            self._sample_waits = waits
+        return waits
 
 
 def production_approval_contract(calibration: Mapping[str, Any]) -> dict[str, Any] | None:

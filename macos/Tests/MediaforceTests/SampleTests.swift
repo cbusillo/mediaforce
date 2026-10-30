@@ -76,6 +76,14 @@ final class SampleTests: XCTestCase {
         XCTAssertNil(Words.sampleCoverage(notMade))
     }
 
+    func testBlockedMeasuringShowsItsSavedReasonWithoutApprovalActions() throws {
+        var payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Self.facts(state: "waiting_for_measurement", action: nil).utf8)) as? [String: Any])
+        payload["wait_detail"] = "Measuring is blocked. The original measurements disagree."
+        let facts = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: JSONSerialization.data(withJSONObject: payload))
+        XCTAssertEqual(Words.sampleHeadline(facts), facts.waitDetail)
+        XCTAssertTrue(facts.actions.isEmpty)
+    }
+
     func testAnApprovalHoldsOnlyForTheSampleTheOwnerWatched() throws {
         let watched = try decode(Self.facts())
         let approval = SampleApproval(reviewedDraftHash: try XCTUnwrap(watched.draftHash))

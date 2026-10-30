@@ -33,6 +33,7 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
     return {
         **season_identity(str(folder["prefix"])),
         "state": page_state.get("key"),
+        "wait_detail": page_state.get("wait_detail"),
         "action": page_state.get("primary_action"),
         "failure": page_state.get("failure"),
         "moments": _moments(calibration),

@@ -47,7 +47,9 @@ approved or before its newest sample was requested. Newer samples, uncertain tim
 and existing folder approvals keep their own decision. While the kind waits for a
 choice, its newest sample stays available. Seasons missing original measurements wait for measuring without a sample decision, even
 when an older sample is saved. After measuring, they follow their kind; measured
-seasons without a reusable kind keep their own sample decisions.
+seasons without a reusable kind keep their own sample decisions. A blocked
+measurement names its reason on the season and sample page; it does not ask
+for approval of the old sample.
 Saved sample files are retained. Finished production files are checked and
 published automatically one at a time under their current approval. Manual
 checking and publishing remain explicit overrides. Rollback copies stay until

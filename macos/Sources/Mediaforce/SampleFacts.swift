@@ -6,6 +6,7 @@ struct SampleFacts: Decodable, Sendable {
     let show: String
     let season: Int?
     let state: String?
+    let waitDetail: String?
     let action: String?
     let failure: String?
     let moments: [Moment]
