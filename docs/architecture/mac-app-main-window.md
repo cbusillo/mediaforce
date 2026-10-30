@@ -87,8 +87,13 @@ compressing would take), `goal_bytes`, `size_status`, `draft_hash`, and the
 `size_choices` keys with their per-episode `target_bytes`.
 
 `POST .../approve` with `confirm` (`high_impact`, `size_tradeoff`) and
-`reviewed_draft_hash` approves the sample and starts compressing the season,
-like the web page's approval. It answers `{"ok": true, "compressing": bool}`,
+`reviewed_draft_hash` approves the sample and starts compressing the season.
+`approval_kind` in ready sample facts names a representative kind only when
+the draft meets its scalable-size and measured-kind guards. The shared controls
+name that kind before the click, with an explicit season-only alternative.
+`approval_scope` takes that kind or `season` (also the default for older
+callers). A kind request checks those guards and the representative again
+before saving, then reuses the existing kind approval path. It answers `{"ok": true, "compressing": bool}`,
 or `409` with `code` `confirm_high_impact` or `confirm_size_tradeoff` when the
 approval check wants the Director to confirm again, `sample_changed` when the
 sample is no longer the draft the Director watched (nothing is approved), or
@@ -301,10 +306,6 @@ child job IDs for waiting reasons, beyond the short file preview, so a season
 only inherits reasons for its own files. Older summaries gain those IDs on the
 next progress refresh. Until then their existing unscoped warning remains.
 
-The shared sample controls use `approval_kind` from the sample facts to name
-what approval covers before the click. `approval_scope` binds the request to
-that kind or to an explicit `season` choice. A changed representative refuses
-the kind request before saving; draft-hash checks and existing confirmations
-still apply. Kind approval reuses the current folder approval and its quality
-and scalable-size guards. Kind facts retain the approved sample's season from
-the saved approval even after that season leaves the waiting list.
+Kind facts retain the approved sample's season from the saved approval even
+after it leaves the waiting list. The kind page can reopen that sample when
+no published episode is available for comparison yet.

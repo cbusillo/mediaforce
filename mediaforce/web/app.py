@@ -2252,9 +2252,17 @@ def create_app(
             return None
         return folder, _folder_status_payload(normalized_prefix)
 
+    def _app_sample_kind(prefix: str) -> str | None:
+        return sample_approval_kind(
+            config, _kinds_payload(), prefix, _load_calibration_state(config, prefix), kind_of=_season_kinds,
+        )
+
     def _app_sample_payload(normalized_prefix: str) -> dict[str, Any] | None:
         payloads = _season_payloads(normalized_prefix)
-        return {**sample_facts(*payloads), "approval_kind": sample_approval_kind(_kinds_payload(), normalized_prefix)} if payloads else None
+        if payloads is None:
+            return None
+        facts = sample_facts(*payloads)
+        return {**facts, "approval_kind": _app_sample_kind(normalized_prefix) if facts["state"] == "ready_to_compare" else None}
 
     def _approve_app_kind(kind: str, from_prefix: str) -> dict[str, Any]:
         return approve_kind_action(
@@ -2281,7 +2289,7 @@ def create_app(
             prefix, confirm, draft_hash,
             save_profile=lambda *args: _save_profile_action(*args, require_reviewed_draft=True),
             queue_encode=_queue_folder_encode_action, scope=scope,
-            representative_kind=sample_approval_kind(_kinds_payload(), prefix), approve_kind=_approve_app_kind,
+            representative_kind=_app_sample_kind(prefix) if scope != "season" else None, approve_kind=_approve_app_kind,
         ),
         make_sample_action=_make_app_sample_action,
         compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=_queue_folder_encode_action),

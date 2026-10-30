@@ -185,6 +185,7 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
         200, {"ok": True, "compressing": True, "reason": None},
     )
     assert saved[-1] == (PREFIX, False, True, "draft-1", "")
+    assert _post(endpoint(ok, ok), {"reviewed_draft_hash": "draft-1"})[1]["ok"]
     assert _post(endpoint(folder_actions.ReviewedDraftChanged(), ok), watched) == (
         409, {"ok": False, "code": "sample_changed"},
     )
@@ -327,10 +328,11 @@ def test_representative_approval_uses_the_explicit_reviewed_scope(scope: str) ->
         assert calls == (["save", f"kind:{scope}:{PREFIX}", "queue"] if scope != "season" else ["save", "queue"])
 
 
-def test_kind_refusal_never_starts_compression() -> None:
+def test_changed_kind_eligibility_never_saves_or_starts_compression() -> None:
     result = approve_sample(
-        PREFIX, set(), "draft-1", scope="darker_live_action", representative_kind="darker_live_action",
-        save_profile=lambda *_args: {"ok": True}, queue_encode=lambda *_args: pytest.fail("queued after refusal"),
-        approve_kind=lambda *_args: {"ok": False, "code": "size_goal_not_scalable"},
+        PREFIX, set(), "draft-1", scope="darker_live_action", representative_kind=None,
+        save_profile=lambda *_args: pytest.fail("saved after eligibility changed"),
+        queue_encode=lambda *_args: pytest.fail("queued after eligibility changed"),
+        approve_kind=lambda *_args: pytest.fail("extended after eligibility changed"),
     )
-    assert result == {"ok": False, "code": "size_goal_not_scalable"}
+    assert result == {"ok": False, "code": "sample_changed"}

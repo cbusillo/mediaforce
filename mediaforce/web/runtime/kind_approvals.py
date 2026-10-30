@@ -32,6 +32,7 @@ from mediaforce.library.content_kinds import evidence_stamp, season_evidence, se
     season_stamp
 from mediaforce.library.source_evidence import SourceEvidenceContext
 from mediaforce.tuning.calibration_jobs import load_latest_job, load_latest_jobs_for_prefixes
+from mediaforce.web.runtime.folder_tuning_advice import calibration_policy_hash
 from mediaforce.web.runtime.production_approval import EffectiveApproval, LoadCalibrationState, \
     approval_prefixes, cached_calibration_loader, effective_production_approval, holds_approval, production_approval_contract, \
     production_calibration, sample_allows_kind, season_prefix_of
@@ -93,7 +94,11 @@ def _extension_refusal(approval: EffectiveApproval) -> str | None:
     """Why this folder approval cannot cover a kind, or None when it can."""
     if not holds_approval(approval.calibration) or not approval.current or approval.contract is None:
         return APPROVAL_NOT_CURRENT_CODE
-    size_goal = object_dict(object_dict(approval.contract.get("operator_intent")).get("size_goal"))
+    return _size_extension_refusal(approval.contract)
+
+
+def _size_extension_refusal(contract: Mapping[str, Any]) -> str | None:
+    size_goal = object_dict(object_dict(contract.get("operator_intent")).get("size_goal"))
     # A size per episode fits only that show's runtime; a size per 45 minutes carries to other shows.
     if size_goal.get("mode") != "normalized":
         return SIZE_GOAL_NOT_SCALABLE_CODE
@@ -548,9 +553,27 @@ def _approved_sample_season(config: MediaforceConfig, kind: str) -> str | None:
     return season_prefix_of(config, str(object_dict(calibration.get("sample_item")).get("rel_path") or ""))
 
 
-def sample_approval_kind(kinds: Mapping[str, Any], prefix: str) -> str | None:
-    return next((entry["kind"] for entry in kinds.get("kinds", [])
+def sample_approval_kind(
+        config: MediaforceConfig, kinds: Mapping[str, Any], prefix: str, calibration: Mapping[str, Any] | None,
+        *, kind_of: KindOf,
+) -> str | None:
+    kind = next((str(entry["kind"]) for entry in kinds.get("kinds", [])
                  if entry["kind"] in APPROVABLE_KINDS and entry.get("sample_season") == prefix), None)
+    payload = object_dict(calibration)
+    if kind is None or not payload.get("job_id") or str(payload.get("mode") or "sample") != "sample":
+        return None
+    contract = production_approval_contract({
+        **payload, "accepted_sample_job_id": payload["job_id"], "accepted_policy_hash": calibration_policy_hash(payload),
+    })
+    if contract is None or _size_extension_refusal(contract) is not None:
+        return None
+    return kind if _sample_kind_refusal(config, kind, payload, kind_of) is None else None
+
+
+def _sample_kind_refusal(config: MediaforceConfig, kind: str, calibration: Mapping[str, Any], kind_of: KindOf) -> str | None:
+    sample_path = str(object_dict(calibration.get("sample_item")).get("rel_path") or "")
+    sample_season = season_prefix_of(config, sample_path) if sample_path else None
+    return None if sample_season is not None and kind_of(config, sample_season) == kind else SOURCE_KIND_DIFFERS_CODE
 
 
 def approve_kind_action(
@@ -573,8 +596,6 @@ def approve_kind_action(
     approval = effective_production_approval(config, from_prefix, load_calibration_state)
     if approval is None or approval.kind is not None:
         return {"ok": False, "code": NO_FOLDER_APPROVAL_CODE}
-    sample_path = str(object_dict(approval.calibration.get("sample_item")).get("rel_path") or "")
-    sample_season = season_prefix_of(config, sample_path) if sample_path else None
-    if sample_season is None or kind_of(config, sample_season) != kind:
-        return {"ok": False, "code": SOURCE_KIND_DIFFERS_CODE}
+    if refusal := _sample_kind_refusal(config, kind, approval.calibration, kind_of):
+        return {"ok": False, "code": refusal}
     return approve_kind(config, kind, approval.prefix, approval.calibration, approved_at=approved_at)

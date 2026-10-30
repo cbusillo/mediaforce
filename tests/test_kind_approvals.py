@@ -1130,7 +1130,7 @@ def test_kind_sample_approval_covers_other_shows_and_keeps_watched_evidence(tmp_
             connection.execute(series_metadata.insert().values(
                 series_prefix="/".join(season.split("/")[:2]), tmdb_genres_json='["Drama"]', updated_at="now"))
         before = kinds_payload(connection, config, load_calibration_state=load)
-    assert sample_approval_kind(before, APPROVED_SEASON) == DARKER
+    assert sample_approval_kind(config, before, APPROVED_SEASON, calibration, kind_of=lambda _config, source: kinds.get(source)) == DARKER
 
     def save(*_args: Any) -> dict[str, Any]:
         folders[APPROVED_SEASON] = calibration
@@ -1138,7 +1138,7 @@ def test_kind_sample_approval_covers_other_shows_and_keeps_watched_evidence(tmp_
 
     result = approve_sample(
         APPROVED_SEASON, set(), "draft-1", scope=DARKER,
-        representative_kind=sample_approval_kind(before, APPROVED_SEASON), save_profile=save,
+        representative_kind=sample_approval_kind(config, before, APPROVED_SEASON, calibration, kind_of=lambda _config, source: kinds.get(source)), save_profile=save,
         queue_encode=lambda *_args: {"ok": True},
         approve_kind=lambda kind, prefix: approve_kind_action(
             config, kind, prefix, load_calibration_state=load, kind_of=lambda _config, source_season: kinds.get(source_season),
@@ -1154,3 +1154,30 @@ def test_kind_sample_approval_covers_other_shows_and_keeps_watched_evidence(tmp_
     darker = next(kind for kind in after["kinds"] if kind["kind"] == DARKER)
     assert darker["sample_season"] == APPROVED_SEASON
     assert darker["approval"]["from_prefix"] == APPROVED_SEASON
+
+
+@pytest.mark.parametrize("size_mode,source_kind,job_id,eligible", [
+    ("normalized", DARKER, "sample-job", True), ("absolute", DARKER, "sample-job", False),
+    ("normalized", "bright_live_action", "sample-job", False), ("normalized", DARKER, "", False),
+])
+def test_only_a_scalable_sample_of_the_kind_offers_kind_approval(
+        tmp_path: Path, size_mode: str, source_kind: str, job_id: str, eligible: bool,
+) -> None:
+    config = _config(tmp_path)
+    calibration = _approved(config, size_mode=size_mode, job_id=job_id)
+    calibration["sample_item"]["rel_path"] = f"{APPROVED_SEASON}/e01.mkv"
+    for key in list(calibration):
+        if key.startswith("accepted_"):
+            calibration.pop(key)
+    facts = {"kinds": [{"kind": DARKER, "sample_season": APPROVED_SEASON}]}
+    result = sample_approval_kind(config, facts, APPROVED_SEASON, calibration, kind_of=lambda *_args: source_kind)
+    assert (result == DARKER) == eligible
+    assert not any(key.startswith("accepted_") for key in calibration)
+    if not eligible:
+        refused = approve_sample(
+            APPROVED_SEASON, set(), "draft-1", scope=DARKER, representative_kind=result,
+            save_profile=lambda *_args: pytest.fail("saved an ineligible kind sample"),
+            queue_encode=lambda *_args: pytest.fail("queued an ineligible kind sample"),
+            approve_kind=lambda *_args: pytest.fail("extended an ineligible kind sample"),
+        )
+        assert not refused["ok"]

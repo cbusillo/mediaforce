@@ -96,7 +96,7 @@ def register_app_window_routes(
             prefix.strip("/"),
             {value for value in confirm if isinstance(value, str)} if isinstance(confirm, list) else set(),
             str(body.get("reviewed_draft_hash") or ""),
-            str(body.get("approval_scope") or ""),
+            str(body.get("approval_scope") or "season"),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
