@@ -139,10 +139,12 @@ class SeasonKinds:
             cached = self._kinds.get(season_prefix)
             if cached is not None and cached[0] == stamp:
                 return cached[1]
-            if self._evidence is None or self._evidence[0] != shared:
-                self._evidence = (shared, season_evidence(connection))
+            evidence = self._evidence
+            if evidence is None or evidence[0] != shared:
+                evidence = (shared, season_evidence(connection))
+                self._evidence = evidence
             grouping = season_grouping(connection, season_prefix, library_types=config.library_type_map,
-                                       evidence=self._evidence[1])
+                                       evidence=evidence[1])
             self._kinds[season_prefix] = (stamp, grouping)
             return grouping
 

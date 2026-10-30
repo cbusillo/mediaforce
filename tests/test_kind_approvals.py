@@ -87,7 +87,8 @@ def _loader(folders: dict[str, dict[str, Any]], kinds: dict[str, str], asked: li
                 asked.append(season)
             return kinds.get(season)
 
-        def awaiting_measurement(self, _config: MediaforceConfig, season: str) -> bool:
+        @staticmethod
+        def awaiting_measurement(_config: MediaforceConfig, season: str) -> bool:
             return kinds.get(season) == "unmeasured"
 
     return KindAwareLoader(lambda _config, prefix: folders.get(prefix), Kinds())
