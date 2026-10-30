@@ -133,6 +133,7 @@ from mediaforce.web.routes import register_app_window_routes, register_completed
 from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status
+from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
     samples_to_remake, start_compressing
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
@@ -3924,14 +3925,7 @@ def _review_url(config: MediaforceConfig, output_path: Path) -> str:
 
 
 def _review_file_from_url(config: MediaforceConfig, value: str) -> Path | None:
-    prefix = "/review-media/"
-    if not value.startswith(prefix):
-        return None
-    candidate = (config.paths.review_dir / value.removeprefix(prefix)).resolve()
-    review_root = config.paths.review_dir.resolve()
-    if not candidate.is_relative_to(review_root):
-        return None
-    return candidate
+    return review_file_from_url(config.paths.review_dir, value)
 
 
 def _remove_path_if_exists(path: Path) -> None:

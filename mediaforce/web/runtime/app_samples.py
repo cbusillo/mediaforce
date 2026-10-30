@@ -1,8 +1,10 @@
 from collections.abc import Callable, Collection, Iterable, Mapping
 from typing import Any
+from pathlib import Path
 
 from fastapi import HTTPException
 
+from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_followup_request, sample_goal_request, \
     with_compression_intent
@@ -79,7 +81,7 @@ def approve_sample(
         approve_kind: Callable[[str, str, str], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if scope != "season" and (scope != representative_kind or approve_kind is None):
-        return {"ok": False, "code": "sample_changed"}
+        return {"ok": False, "code": "approval_scope_changed"}
     try:
         saved = save_profile(prefix, "high_impact" in confirm, "size_tradeoff" in confirm, reviewed_draft_hash, "")
     except ReviewedDraftChanged:
@@ -237,13 +239,18 @@ def _goal_bytes(folder: Mapping[str, Any]) -> int:
     )
 
 
-def sample_moments(calibration: Mapping[str, Any]) -> list[dict[str, Any]]:
+def sample_moments(calibration: Mapping[str, Any], *, review_dir: Path | None = None) -> list[dict[str, Any]]:
     if calibration.get("browser_review_ready") is not True:
         return []
     moments = []
     for pair in object_list(calibration.get("review_pairs")):
         original, sample = object_dict(pair.get("source_clip")), object_dict(pair.get("preview_clip"))
         if original.get("path") and sample.get("path"):
+            if review_dir is not None and not all(
+                (path := review_file_from_url(review_dir, str(clip["path"]))) is not None and path.is_file()
+                for clip in (original, sample)
+            ):
+                continue
             moments.append({
                 "at_seconds": float_value(original.get("timestamp_seconds")),
                 "original": {"url": original["path"], "size_bytes": int_value(original.get("size_bytes"))},

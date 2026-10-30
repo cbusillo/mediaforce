@@ -88,7 +88,7 @@ For migration authoring and review workflow, see
 `docs/development/database-tooling.md`.
 
 Transient calibration artifacts are also cleaned up automatically. By default,
-Mediaforce purges cached review clips, temporary calibration manifests, and
+Mediaforce purges cached review clips that no kind approval still references, temporary calibration manifests, and
 `/Volumes/media/transcode/_calibration/` scratch outputs after `14` days.
 While the server or CLI is in active use, it also retries that cleanup sweep at
 most once per hour so stale files get another chance to disappear if an earlier

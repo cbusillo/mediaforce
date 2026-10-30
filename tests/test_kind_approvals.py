@@ -1123,6 +1123,11 @@ def test_kind_sample_approval_covers_other_shows_and_keeps_watched_evidence(tmp_
         "source_clip": {"path": "/review-media/watched/source.mp4", "timestamp_seconds": 600.0, "size_bytes": 1000},
         "preview_clip": {"path": "/review-media/watched/preview.mp4", "size_bytes": 100},
     }]
+    watched_source = config.paths.review_dir / "watched" / "source.mp4"
+    watched_sample = config.paths.review_dir / "watched" / "preview.mp4"
+    watched_source.parent.mkdir(parents=True)
+    watched_source.write_bytes(b"original clip")
+    watched_sample.write_bytes(b"sample clip")
     watched_moments = sample_moments(calibration)
     folders: dict[str, dict[str, Any]] = {}
     kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER, OTHER_SEASON: DARKER}
@@ -1164,6 +1169,10 @@ def test_kind_sample_approval_covers_other_shows_and_keeps_watched_evidence(tmp_
     assert darker["approval"]["sample_moments"] == watched_moments
     assert sample_approval_kind(config, after, APPROVED_SEASON, folders[APPROVED_SEASON],
                                 kind_of=lambda _config, source: kinds.get(source)) is None
+    watched_source.unlink()
+    with open_db(config.paths.db_path) as connection:
+        missing = kinds_payload(connection, config, load_calibration_state=load)
+    assert next(kind for kind in missing["kinds"] if kind["kind"] == DARKER)["approval"]["sample_moments"] == []
 
 
 @pytest.mark.parametrize("size_mode,source_kind,job_id,eligible", [

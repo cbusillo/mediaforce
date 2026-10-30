@@ -394,7 +394,14 @@ extension Words {
     }
 
     static func sampleResult(_ result: SampleActionResult) -> ActionNotice? {
-        if let code = result.kindCode { return .kindNotExtended(code) }
+        if let code = result.kindCode {
+            var notice = ActionNotice.kindNotExtended(code)
+            if result.compressing != true {
+                let queue = result.needsChoice ? ActionNotice.compressNeedsChoice : .approvedNotCompressing
+                notice = ActionNotice(title: notice.title, message: notice.message + " " + queue.message)
+            }
+            return notice
+        }
         if result.compressing == true { return nil }
         return result.needsChoice ? .compressNeedsChoice : .approvedNotCompressing
     }
@@ -595,6 +602,11 @@ extension ActionNotice {
     static let approvedNotCompressing = ActionNotice(
         title: "Compressing didn't start",
         message: "The sample is approved, but the season isn't compressing. Press Start compressing to try again."
+    )
+
+    static let approvalScopeChanged = ActionNotice(
+        title: "This sample no longer decides the kind",
+        message: "Approve only this season, or open the kind to review its current choice. Nothing was approved."
     )
 
     static let sampleChanged = ActionNotice(

@@ -91,7 +91,9 @@ final class SampleTests: XCTestCase {
         let kind = try XCTUnwrap(scoped.approvalKind)
         let approval = SampleApproval(reviewedDraftHash: "draft-1", scope: kind)
         XCTAssertTrue(approval.stillReviewed(scoped))
-        XCTAssertFalse(approval.stillReviewed(try decode(Self.facts())))
+        let noLongerRepresentative = try decode(Self.facts())
+        XCTAssertFalse(approval.stillReviewed(noLongerRepresentative))
+        XCTAssertEqual(approval.changeNotice(noLongerRepresentative), .approvalScopeChanged)
         XCTAssertNotEqual(Words.sampleApproval(scope: kind), Words.sampleApproval(scope: "season"))
         XCTAssertTrue(Words.sampleApproval(scope: kind).contains(Words.kindName(kind)))
         XCTAssertNotEqual(Words.sampleHeadline(scoped), Words.sampleHeadline(try decode(Self.facts())))
@@ -170,14 +172,18 @@ final class SampleClientTests: XCTestCase {
     }
 
     func testAChangedKindAfterSavingNamesThePartialApprovalEvenIfCompressionStarted() throws {
-        for compressing in [true, false] {
+        for (compressing, reason) in [(true, "free_space_reserve"), (false, "free_space_reserve"), (false, "confirm_compression_goal")] {
             let body = """
-                {"ok": true, "compressing": \(compressing), "kind_code": "sample_changed"}
+                {"ok": true, "compressing": \(compressing), "reason": "\(reason)", "kind_code": "sample_changed"}
                 """
             let result = try JSONDecoder.mediaforce.decode(SampleActionResult.self, from: Data(body.utf8))
             let notice = try XCTUnwrap(Words.sampleResult(result))
-            XCTAssertEqual(notice.message, Words.kindRefusal("sample_changed"))
+            XCTAssertTrue(notice.message.hasPrefix(Words.kindRefusal("sample_changed")))
             XCTAssertNotEqual(notice.title, ActionNotice.sampleRefused.title)
+            if !compressing {
+                let queueNotice = result.needsChoice ? ActionNotice.compressNeedsChoice : .approvedNotCompressing
+                XCTAssertTrue(notice.message.contains(queueNotice.message))
+            }
         }
     }
 

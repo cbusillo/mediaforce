@@ -321,7 +321,7 @@ def test_representative_approval_uses_the_explicit_reviewed_scope(scope: str) ->
         approve_kind=lambda kind, prefix, draft: calls.append(f"kind:{kind}:{prefix}:{draft}") or {"ok": True},
     )
     if scope == "bright_live_action":
-        assert result == {"ok": False, "code": "sample_changed"}
+        assert result == {"ok": False, "code": "approval_scope_changed"}
         assert calls == []
     else:
         assert result["ok"] and result["compressing"]

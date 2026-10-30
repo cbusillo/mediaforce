@@ -79,6 +79,10 @@ struct SampleApproval: Equatable {
     var scope = "season"
     var confirmed: [String] = []
 
+    func changeNotice(_ facts: SampleFacts?) -> ActionNotice {
+        facts?.draftHash == reviewedDraftHash ? .approvalScopeChanged : .sampleChanged
+    }
+
     func stillReviewed(_ facts: SampleFacts?) -> Bool {
         (facts?.draftHash ?? "") == reviewedDraftHash && (scope == "season" || facts?.approvalKind == scope)
     }

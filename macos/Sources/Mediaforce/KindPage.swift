@@ -64,6 +64,7 @@ struct KindPage: View {
         .navigationTitle(Words.kindName(kind.kind))
         .navigationSubtitle(Words.kindSubtitle(kind))
         .onChange(of: kind.kind) {
+            players.pause()
             chosen = nil
             sample = nil
         }

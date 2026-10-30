@@ -11,7 +11,8 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import encode_jobs
-from mediaforce.core.type_defs import object_list
+from mediaforce.core.type_defs import object_dict, object_list
+from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.encoding.quality import (
     default_local_quality_temp_root,
     legacy_local_quality_temp_root,
@@ -67,6 +68,7 @@ def _purge_due_transient_artifacts(config: MediaforceConfig) -> bool:
     support_dir = config.paths.db_path.parent
     try:
         rollback_stage = retained_deploy_stage(support_dir)
+        kind_review_paths = _retained_kind_review_paths(config)
         protected = (*protected_runtime_roots(support_dir), Path(__file__).resolve().parents[1])
     except RuntimeProtectionError as exc:
         LOGGER.warning("%s", exc)
@@ -88,7 +90,7 @@ def _purge_due_transient_artifacts(config: MediaforceConfig) -> bool:
     cutoff = now - (retention_days * SECONDS_PER_DAY)
     temp_cutoff = max(cutoff, now - _orphan_temp_retention_seconds(config))
     process_snapshot = _cleanup_process_snapshot(config)
-    _prune_children(config.paths.review_dir, cutoff)
+    _prune_children(config.paths.review_dir, cutoff, protected_paths=kind_review_paths)
     for staging_root in staging_roots:
         root_verified = not _root_requires_unverified_process_check(
             staging_root, process_snapshot
@@ -119,6 +121,28 @@ def _purge_due_transient_artifacts(config: MediaforceConfig) -> bool:
     )
     _write_cleanup_stamp(config)
     return True
+
+
+def _retained_kind_review_paths(config: MediaforceConfig) -> tuple[Path, ...]:
+    from mediaforce.web.runtime.kind_approvals import APPROVABLE_KINDS, kind_approval_file
+    from mediaforce.web.runtime.app_samples import sample_moments
+
+    paths = []
+    for kind in APPROVABLE_KINDS:
+        try:
+            payload = json.loads(kind_approval_file(config, kind).read_text())
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            raise RuntimeProtectionError("Cannot read kind sample evidence; cleanup refused") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeProtectionError("Invalid kind sample evidence; cleanup refused")
+        for moment in sample_moments(payload):
+            for side in ("original", "sample"):
+                path = review_file_from_url(config.paths.review_dir, str(object_dict(moment.get(side)).get("url") or ""))
+                if path is not None:
+                    paths.append(path)
+    return tuple(paths)
 
 
 def _retention_days(config: MediaforceConfig) -> int:
@@ -182,6 +206,7 @@ def _prune_children(
     *,
     active_commands: tuple[str, ...] = (),
     root_verified: bool = True,
+    protected_paths: tuple[Path, ...] = (),
 ) -> None:
     if not root.exists():
         return
@@ -190,6 +215,8 @@ def _prune_children(
     except OSError:
         return
     for child in children:
+        if any(paths_overlap(child, protected) for protected in protected_paths):
+            continue
         if _mtime(child) >= cutoff:
             continue
         if _should_skip_process_owned_path(

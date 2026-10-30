@@ -343,7 +343,7 @@ NO_FOLDER_APPROVAL_CODE = "no_folder_approval"
 SOURCE_KIND_DIFFERS_CODE = "source_kind_differs"
 
 
-def _approval_facts(calibration: Mapping[str, Any] | None) -> dict[str, Any] | None:
+def _approval_facts(config: MediaforceConfig, calibration: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if not holds_approval(calibration):
         return None
     payload = object_dict(calibration)
@@ -351,7 +351,7 @@ def _approval_facts(calibration: Mapping[str, Any] | None) -> dict[str, Any] | N
     size_goal = object_dict(object_dict(contract.get("operator_intent")).get("size_goal"))
     return {"from_prefix": payload.get("from_prefix"), "approved_at": payload.get("kind_approved_at"),
             "size_goal_mode": size_goal.get("mode"), "size_goal_mb": size_goal.get("value_mb"),
-            "sample_moments": sample_moments(payload)}
+            "sample_moments": sample_moments(payload, review_dir=config.paths.review_dir)}
 
 
 LEFT_OUT_KINDS = ("mixed", "unmeasured")
@@ -519,7 +519,7 @@ def kinds_payload(
                     for show, found in by_show.items()}
              for kind, by_show in seasons.items()}
     totals = report["totals"]
-    approvals = {kind: _approval_facts(load_kind_approval(config, kind)) if kind in APPROVABLE_KINDS else None
+    approvals = {kind: _approval_facts(config, load_kind_approval(config, kind)) if kind in APPROVABLE_KINDS else None
                  for kind in KINDS_IN_ORDER}
     for approval in approvals.values():
         if approval:

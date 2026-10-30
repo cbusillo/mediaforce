@@ -136,14 +136,15 @@ struct SampleWork: View {
         self.approval = nil
         if confirming != nil {
             confirming = nil
-            model.notice = .sampleChanged
+            model.notice = approval.changeNotice(facts)
         }
     }
 
     private func approve() {
+        let changedNotice = approval?.changeNotice(facts) ?? .sampleChanged
         dropApprovalIfChanged()
         guard let approval else {
-            model.notice = .sampleChanged
+            model.notice = changedNotice
             return
         }
         act {
@@ -151,6 +152,10 @@ struct SampleWork: View {
             if let code = result.code, Words.sampleConfirmation(code) != nil {
                 confirming = code
                 return nil
+            }
+            if result.code == "approval_scope_changed" {
+                self.approval = nil
+                return .approvalScopeChanged
             }
             if result.code == "sample_changed" {
                 self.approval = nil
