@@ -211,7 +211,7 @@ struct MainWindow: View {
                     Group {
                         switch navigation.place {
                         case .activity:
-                            ActivityPage(facts: facts, posters: model.posters, open: go)
+                            ActivityPage(facts: facts, model: model, open: go)
                         case .needsYou:
                             NeedsYouPage(facts: facts, posters: model.posters, open: go)
                         case .spaceSaved:

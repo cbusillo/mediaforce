@@ -1,7 +1,6 @@
 import Foundation
 
 struct MainWindowFacts: Decodable, Sendable {
-    let activity: ActivityFacts?
     let observedAt: String
     let work: Work
     let library: Library

@@ -875,7 +875,7 @@ those stretches. Each working computer shows progress and a finish estimate
 when one is known. The numbered line-up names the file, estimated start and
 computer; unknown starts remain listed. These forecasts use the existing
 computer history and window rules, and may change as computers become free.
-The next approved season is named below them. “Held back for you” uses the
+Activity reads its forecast only while the page is open. The next approved season is named below them. “Held back for you” uses the
 same waiting items and links as Needs you, including original-backup cleanup.
 
 Past attempts still marked as held remain available below the current decisions;

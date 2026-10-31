@@ -23,6 +23,7 @@ def register_app_window_routes(
         compress_season_action: Callable[[str], dict[str, Any]],
         item_payload: Callable[[str], dict[str, Any] | None] | None = None,
         player_file: Callable[[int, str], Path | None] | None = None,
+        activity_payload: Callable[[], dict[str, Any]] | None = None,
         kinds_payload: Callable[[], dict[str, Any]] | None = None,
         approve_kind_action: Callable[[str, str], dict[str, Any]] | None = None,
         stop_kind_action: Callable[[str], dict[str, Any]] | None = None,
@@ -31,6 +32,13 @@ def register_app_window_routes(
     @app.get("/api/app/main-window")
     def api_app_main_window() -> JSONResponse:
         return JSONResponse(main_window_payload())
+
+    if activity_payload is not None:
+        read_activity = activity_payload
+
+        @app.get("/api/app/activity")
+        def api_app_activity() -> JSONResponse:
+            return JSONResponse(read_activity())
 
     @app.get("/api/app/tv-shows")
     def api_app_tv_shows() -> JSONResponse:

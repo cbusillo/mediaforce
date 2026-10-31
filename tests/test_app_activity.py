@@ -2,6 +2,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 from typing import Any
 
 from test_app_window import _encode_job, _item, connection
@@ -55,7 +57,7 @@ def test_forecast_preserves_jobs_without_changing_queue_and_honors_pause(connect
     connection.execute(encode_jobs.update().values(manifest_path=str(manifest)))
     connection.commit()
     computer = {"key": "mini", "label": "Mini", "available": True, "capabilities": ["encode_queue"],
-                "max_parallel_encodes": 1, "running_jobs": [], "schedule_profile": "always", "timezone": "UTC"}
+                "allowed_libraries": ["TV"], "max_parallel_encodes": 1, "running_jobs": [], "schedule_profile": "always", "timezone": "UTC"}
     sample = EncodeDurationSample(host_key="mini", host_label="Mini", encode_realtime_factor=1.0, quality_overhead_seconds=10)
     with patch("mediaforce.web.runtime.app_activity.load_encode_duration_samples", return_value=(sample,)):
         facts = activity_payload(connection, config, [computer], observed_at=NOW, next_season="tv/Next/Season 1", storage_admits_work=True)
@@ -85,3 +87,31 @@ def test_stale_held_attempts_remain_visible_without_becoming_queued_work(connect
     assert result["earlier_holds"][0]["prefix"] == prefix
     assert not result["lined_up"]
     assert connection.execute(encode_jobs.select()).mappings().one()["status"] == "needs_attention"
+
+
+@pytest.mark.parametrize("first_duration", [None, 100_000])
+def test_unknown_or_long_front_file_cannot_give_later_files_an_early_start(
+        connection: DBClient, tmp_path: Path, first_duration: float | None,
+) -> None:
+    for index, duration in enumerate((first_duration, 120)):
+        prefix = f"tv/Show/Season {index + 1}"
+        rel_path = f"{prefix}/episode.mkv"
+        item_id = _item(connection, rel_path)
+        connection.execute(library_items.update().where(library_items.c.id == item_id).values(duration_seconds=duration))
+        _encode_job(connection, prefix, status="queued")
+        manifest = tmp_path / f"manifest-{index}.json"
+        manifest.write_text(json.dumps({"items": [{"library_item_id": item_id, "rel_path": rel_path}]}))
+        connection.execute(encode_jobs.update().where(encode_jobs.c.prefix == prefix).values(manifest_path=str(manifest)))
+    connection.commit()
+    computer = {"key": "mini", "label": "Mini", "available": True, "capabilities": ["encode_queue"],
+                "schedule_profile": "always", "timezone": "UTC"}
+    sample = EncodeDurationSample(host_key="mini", host_label="Mini", encode_realtime_factor=1, quality_overhead_seconds=10)
+    with patch("mediaforce.web.runtime.app_activity.load_encode_duration_samples", return_value=(sample,)):
+        result = activity_payload(connection, _config(tmp_path), [computer], observed_at=NOW, next_season=None, storage_admits_work=True)
+    first, second = result["lined_up"]
+    assert second["starts_at"] is None
+    if first_duration is None:
+        assert first["starts_at"] is None
+    else:
+        assert datetime.fromisoformat(first["starts_at"]) == NOW
+        assert datetime.fromisoformat(first["finishes_at"]) > datetime.fromisoformat(result["ends_at"])

@@ -2,27 +2,24 @@ import SwiftUI
 
 struct ActivityPage: View {
     let facts: MainWindowFacts
-    let posters: PosterStore
+    let model: MainWindowModel
+    private var posters: PosterStore { model.posters }
     let open: (Place) -> Void
     private let nameWidth: CGFloat = 235
 
     var body: some View {
-        PageFrame(title: "Activity", subtitle: "The next 24 hours") {
+        RefreshingPage(title: "Activity", subtitle: "The next 24 hours", load: { try await model.client.activity() }) { activity in
             WorkStatus(facts: facts, open: open)
-            if let activity = facts.activity {
-                clock(activity)
-                ForEach(facts.computers) { computer in
-                    computerRow(computer, activity)
-                    Divider()
-                }
-                lineUp(activity)
-                if let next = activity.nextSeason {
-                    Button("Next: \(Words.season(next.show, next.season))") { open(.item(next.prefix)) }
-                        .buttonStyle(QuietLinkStyle(primary: true))
-                        .font(.headline)
-                }
-            } else {
-                Text("Activity details are not available from this server yet.").foregroundStyle(.secondary)
+            clock(activity)
+            ForEach(facts.computers) { computer in
+                computerRow(computer, activity)
+                Divider()
+            }
+            lineUp(activity)
+            if let next = activity.nextSeason {
+                Button("Next: \(Words.season(next.show, next.season))") { open(.item(next.prefix)) }
+                    .buttonStyle(QuietLinkStyle(primary: true))
+                    .font(.headline)
             }
             Text("Held back for you").font(.headline)
             let waiting = Attention.waitingItems(facts)
@@ -30,9 +27,10 @@ struct ActivityPage: View {
                 Text("Nothing needs you right now.").foregroundStyle(.secondary)
             }
             WaitingItems(items: waiting, posters: posters, open: open)
-            if let holds = facts.activity?.earlierHolds, !holds.isEmpty {
-                DisclosureGroup("Earlier work still marked as held (\(holds.count))") {
-                    Text("These are past attempts. Needs you above shows the current decisions.")
+            let holds = activity.earlierHolds
+            if !holds.isEmpty {
+                DisclosureGroup("Work still marked as held (\(holds.count))") {
+                    Text("Needs you above shows the current decisions. These records also include earlier attempts.")
                         .foregroundStyle(.secondary)
                     ForEach(holds) { file in
                         DecisionLine {
@@ -91,7 +89,7 @@ struct ActivityPage: View {
                     if let progress = file.progress {
                         ProgressView(value: progress).accessibilityLabel(file.title)
                     } else {
-                        ProgressView().controlSize(.small).accessibilityLabel("Measuring progress")
+                        ProgressView().progressViewStyle(.linear).controlSize(.small).accessibilityLabel("Measuring progress")
                     }
                 }
             }
@@ -128,7 +126,7 @@ struct ActivityPage: View {
                     Text("\(index + 1)").foregroundStyle(.tertiary).monospacedDigit().frame(width: 28, alignment: .trailing)
                     Button { open(.item(file.prefix)) } label: {
                         HStack(spacing: 10) {
-                            MediaPoster(titlePrefix: file.showPrefix, name: file.show, kind: .tv, posters: posters, width: 28)
+                            MediaPoster(titlePrefix: file.showPrefix, name: file.show, kind: file.mediaKind, posters: posters, width: 28)
                             Text(file.title).frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
@@ -187,15 +185,16 @@ private struct ActivityTimeline: View {
                 ForEach(Array(lanes.enumerated()), id: \.offset) { lane, files in
                     ForEach(files) { file in
                         if let timestamp = file.startsAt, let start = activity.fraction(timestamp), start < 1 {
-                            let end = file.finishesAt.flatMap(activity.fraction) ?? min(1, start + 0.18)
+                            let end = file.finishesAt.flatMap(activity.fraction)
+                            let width = end.map { max(0, geometry.size.width * ($0 - start) - 2) } ?? 44
                             Button { open(.item(file.prefix)) } label: {
                                 HStack(spacing: 6) {
-                                    MediaPoster(titlePrefix: file.showPrefix, name: file.show, kind: .tv, posters: posters, width: 24)
-                                    Text(file.title).font(.caption).lineLimit(2)
+                                    MediaPoster(titlePrefix: file.showPrefix, name: file.show, kind: file.mediaKind, posters: posters, width: 24)
+                                    Text(end == nil ? "?" : file.title).font(.caption).lineLimit(2)
                                     Spacer(minLength: 0)
                                 }
                                 .padding(4)
-                                .frame(width: max(0, geometry.size.width * (end - start) - 2), height: 44, alignment: .leading)
+                                .frame(width: width, height: 44, alignment: .leading)
                                 .background(runningIDs.contains(file.id) ? Color.accentColor.opacity(0.16) : Color(nsColor: .textBackgroundColor))
                                 .border(runningIDs.contains(file.id) ? Color.accentColor : Color.primary.opacity(0.18), width: 1)
                                 .clipped()

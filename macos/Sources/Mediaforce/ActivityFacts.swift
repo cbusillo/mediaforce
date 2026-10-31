@@ -33,6 +33,7 @@ struct ActivityFacts: Decodable, Sendable {
         let computerName: String?
         let waiting: String?
         let progress: Double?
+        var mediaKind: MediaKind { MediaKind(rawValue: String(prefix.split(separator: "/").first ?? "")) ?? .other }
 
     }
 

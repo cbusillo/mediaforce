@@ -161,6 +161,7 @@ class ReadPathPurityTests(unittest.TestCase):
         )
         hosts_endpoint = self._endpoint(app, "/api/hosts", "api_hosts")
         main_window_endpoint = self._endpoint(app, "/api/app/main-window", "api_app_main_window")
+        activity_endpoint = self._endpoint(app, "/api/app/activity", "api_app_activity")
         poster_endpoint = self._endpoint(app, "/api/app/posters/{title_prefix:path}", "api_app_title_poster")
 
         unexpected_process = AssertionError("GET request attempted to launch a child process")
@@ -176,12 +177,14 @@ class ReadPathPurityTests(unittest.TestCase):
             dashboard_scan_job_response = dashboard_scan_job_endpoint()
             hosts_response = hosts_endpoint(0)
             main_window_response = main_window_endpoint()
+            activity_response = activity_endpoint()
             poster_response = poster_endpoint("tv/missing")
 
         self.assertEqual(dashboard_response.status_code, 200)
         self.assertEqual(dashboard_scan_job_response.status_code, 200)
         self.assertEqual(hosts_response.status_code, 200)
         self.assertEqual(main_window_response.status_code, 200)
+        self.assertEqual(activity_response.status_code, 200)
         self.assertEqual(poster_response.status_code, 404)
         run_mock.assert_not_called()
         popen_mock.assert_not_called()
