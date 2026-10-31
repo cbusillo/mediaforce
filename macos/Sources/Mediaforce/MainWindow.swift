@@ -166,6 +166,7 @@ enum Place: Hashable {
 
     var notificationValue: String {
         switch self {
+        case .kind(let kind): "kind:\(kind)"
         case .sample(let prefix): "sample:\(prefix)"
         case .item(let prefix): "item:\(prefix)"
         case .computer(let key?): "computer:\(key)"
@@ -179,6 +180,7 @@ enum Place: Hashable {
     init?(notificationValue value: String) {
         let parts = value.split(separator: ":", maxSplits: 1).map(String.init)
         switch (parts.first, parts.count == 2 ? parts[1] : nil) {
+        case ("kind", let kind?): self = .kind(kind)
         case ("sample", let prefix?): self = .sample(prefix)
         case ("item", let prefix?): self = .item(prefix)
         case ("library", nil): self = .library
