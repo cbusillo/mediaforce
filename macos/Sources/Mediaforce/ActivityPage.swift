@@ -30,7 +30,7 @@ struct ActivityPage: View {
             let holds = activity.earlierHolds
             if !holds.isEmpty {
                 DisclosureGroup("Work still marked as held (\(holds.count))") {
-                    Text("Needs you above shows the current decisions. These records also include earlier attempts.")
+                    Text("Held back for you above shows the current decisions. These records also include earlier attempts.")
                         .foregroundStyle(.secondary)
                     ForEach(holds) { file in
                         DecisionLine {

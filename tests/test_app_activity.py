@@ -1,22 +1,48 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from typing import Any
 
-from test_app_window import _encode_job, _item, connection
+from test_app_window import _encode_job, connection
 from test_kind_approvals import _config
 
+from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import encode_jobs, library_items
+from mediaforce.core.db_tables import encode_jobs
 from mediaforce.encoding.duration_estimate import EncodeDurationSample
 from mediaforce.encoding.encode_queue import save_queue_state
 from mediaforce.web.runtime.app_activity import _running, _windows, activity_payload
 from mediaforce.web.runtime.encode_scheduler import encode_queue_schedule_profiles, schedule_policy_deps
 
 NOW = datetime(2026, 10, 31, 14, 0, tzinfo=UTC)
+
+
+def _queued_file(
+        connection: DBClient, tmp_path: Path, prefix: str, duration: float | None,
+        *, status: str = "queued", video: dict[str, Any] | None = None,
+) -> None:
+    _encode_job(connection, prefix, status=status)
+    manifest = tmp_path / f"{prefix.replace('/', '-')}.json"
+    manifest.write_text(json.dumps({"items": [{
+        "rel_path": f"{prefix}/episode.mkv", "duration_seconds": duration, "resolved_policy": {"video": video or {}},
+    }]}))
+    connection.execute(encode_jobs.update().where(encode_jobs.c.prefix == prefix).values(manifest_path=str(manifest)))
+    connection.commit()
+
+
+def _computer(schedule_profile: str = "always") -> dict[str, Any]:
+    return {"key": "mini", "label": "Mini", "available": True, "capabilities": ["encode_queue"],
+            "allowed_libraries": ["TV"], "max_parallel_encodes": 1, "running_jobs": [],
+            "schedule_profile": schedule_profile, "timezone": "UTC"}
+
+
+def _daytime_window(config: MediaforceConfig) -> None:
+    config.raw["encode_queue"] = {"schedule_profiles": [{
+        "key": "daytime", "mode": "night", "start_hour": 14, "end_hour": 19, "timezone": "host_local",
+    }]}
 
 
 def test_night_window_uses_real_hours_across_clock_change(tmp_path: Path) -> None:
@@ -49,15 +75,8 @@ def test_running_progress_keeps_unknown_finish_and_names_the_file() -> None:
 def test_forecast_preserves_jobs_without_changing_queue_and_honors_pause(connection: DBClient, tmp_path: Path) -> None:
     config = _config(tmp_path)
     prefix = "tv/Show/Season 1"
-    item_id = _item(connection, f"{prefix}/Show.S01E01.mkv")
-    connection.execute(library_items.update().where(library_items.c.id == item_id).values(duration_seconds=120))
-    _encode_job(connection, prefix, status="queued")
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({"items": [{"library_item_id": item_id, "rel_path": f"{prefix}/Show.S01E01.mkv"}]}))
-    connection.execute(encode_jobs.update().values(manifest_path=str(manifest)))
-    connection.commit()
-    computer = {"key": "mini", "label": "Mini", "available": True, "capabilities": ["encode_queue"],
-                "allowed_libraries": ["TV"], "max_parallel_encodes": 1, "running_jobs": [], "schedule_profile": "always", "timezone": "UTC"}
+    _queued_file(connection, tmp_path, prefix, 120)
+    computer = _computer()
     sample = EncodeDurationSample(host_key="mini", host_label="Mini", encode_realtime_factor=1.0, quality_overhead_seconds=10)
     with patch("mediaforce.web.runtime.app_activity.load_encode_duration_samples", return_value=(sample,)):
         facts = activity_payload(connection, config, [computer], observed_at=NOW, next_season="tv/Next/Season 1", storage_admits_work=True)
@@ -94,17 +113,8 @@ def test_unknown_or_long_front_file_cannot_give_later_files_an_early_start(
         connection: DBClient, tmp_path: Path, first_duration: float | None,
 ) -> None:
     for index, duration in enumerate((first_duration, 120)):
-        prefix = f"tv/Show/Season {index + 1}"
-        rel_path = f"{prefix}/episode.mkv"
-        item_id = _item(connection, rel_path)
-        connection.execute(library_items.update().where(library_items.c.id == item_id).values(duration_seconds=duration))
-        _encode_job(connection, prefix, status="queued")
-        manifest = tmp_path / f"manifest-{index}.json"
-        manifest.write_text(json.dumps({"items": [{"library_item_id": item_id, "rel_path": rel_path}]}))
-        connection.execute(encode_jobs.update().where(encode_jobs.c.prefix == prefix).values(manifest_path=str(manifest)))
-    connection.commit()
-    computer = {"key": "mini", "label": "Mini", "available": True, "capabilities": ["encode_queue"],
-                "schedule_profile": "always", "timezone": "UTC"}
+        _queued_file(connection, tmp_path, f"tv/Show/Season {index + 1}", duration)
+    computer = _computer()
     sample = EncodeDurationSample(host_key="mini", host_label="Mini", encode_realtime_factor=1, quality_overhead_seconds=10)
     with patch("mediaforce.web.runtime.app_activity.load_encode_duration_samples", return_value=(sample,)):
         result = activity_payload(connection, _config(tmp_path), [computer], observed_at=NOW, next_season=None, storage_admits_work=True)
@@ -115,3 +125,45 @@ def test_unknown_or_long_front_file_cannot_give_later_files_an_early_start(
     else:
         assert datetime.fromisoformat(first["starts_at"]) == NOW
         assert datetime.fromisoformat(first["finishes_at"]) > datetime.fromisoformat(result["ends_at"])
+
+
+@pytest.mark.parametrize(("duration", "video", "quality_overhead"), [
+    (100_000, {}, 10),
+    (900, {"thorough": True, "sample_every": "60s", "sample_duration": "300s"}, None),
+], ids=["long_file", "thorough_manifest_without_library_id"])
+def test_known_manifest_estimate_that_does_not_fit_leaves_room_for_later_work(
+        connection: DBClient, tmp_path: Path, duration: float, video: dict[str, Any], quality_overhead: float | None,
+) -> None:
+    config = _config(tmp_path)
+    _daytime_window(config)
+    long_prefix, short_prefix = "tv/Long/Season 1", "tv/Short/Season 1"
+    _queued_file(connection, tmp_path, long_prefix, duration, video=video)
+    _queued_file(connection, tmp_path, short_prefix, 120)
+    sample = EncodeDurationSample(host_key="mini", host_label="Mini", encode_realtime_factor=1, quality_overhead_seconds=quality_overhead)
+    with patch("mediaforce.web.runtime.app_activity.load_encode_duration_samples", return_value=(sample,)):
+        result = activity_payload(connection, config, [_computer("daytime")], observed_at=NOW, next_season=None, storage_admits_work=True)
+    by_prefix = {file["prefix"]: file for file in result["lined_up"]}
+    assert by_prefix[long_prefix]["starts_at"] is None
+    assert datetime.fromisoformat(by_prefix[short_prefix]["starts_at"]) == NOW
+
+
+@pytest.mark.parametrize("retry_delay", [600, 90_000])
+def test_retry_check_does_not_claim_or_block_a_computer(
+        connection: DBClient, tmp_path: Path, retry_delay: int,
+) -> None:
+    retry_prefix, queued_prefix = "tv/Retry/Season 1", "tv/Queued/Season 1"
+    _queued_file(connection, tmp_path, retry_prefix, 120, status="retry_backoff")
+    _queued_file(connection, tmp_path, queued_prefix, 120)
+    connection.execute(encode_jobs.update().where(encode_jobs.c.prefix == retry_prefix).values(
+        retry_not_before=(NOW + timedelta(seconds=retry_delay)).isoformat(), waiting_reason="Waiting for its computer to return",
+    ))
+    connection.commit()
+    sample = EncodeDurationSample(host_key="mini", host_label="Mini", encode_realtime_factor=1, quality_overhead_seconds=10)
+    with patch("mediaforce.web.runtime.app_activity.load_encode_duration_samples", return_value=(sample,)):
+        result = activity_payload(connection, _config(tmp_path), [_computer()], observed_at=NOW, next_season=None, storage_admits_work=True)
+    by_prefix = {file["prefix"]: file for file in result["lined_up"]}
+    assert by_prefix[retry_prefix]["starts_at"] is None
+    assert by_prefix[retry_prefix]["computer_key"] is None
+    assert by_prefix[retry_prefix]["waiting"]
+    assert datetime.fromisoformat(by_prefix[queued_prefix]["starts_at"]) == NOW
+    assert connection.execute(encode_jobs.select().where(encode_jobs.c.prefix == retry_prefix)).mappings().one()["status"] == "retry_backoff"

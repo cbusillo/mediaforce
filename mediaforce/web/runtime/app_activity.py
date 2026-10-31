@@ -1,20 +1,20 @@
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sqlalchemy import func, select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
-from mediaforce.core.db_tables import encode_jobs, library_items
+from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.plain_failure import plain_failure_summary
 from mediaforce.encoding.duration_estimate import estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples
 from mediaforce.encoding.encode_queue import EncodeRunFile, RUNNABLE_ENCODE_JOB_KINDS, encode_run_manifest_files, list_encode_jobs, load_queue_state
 from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.web.runtime.app_window import season_identity
-from mediaforce.web.runtime.encode_runtime import _host_allows_library
+from mediaforce.web.runtime.encode_runtime import _encode_job_estimate_items, _host_allows_library
 from mediaforce.web.runtime.encode_scheduler import (
     encode_queue_schedule_profiles, evaluate_encode_schedule_transition, schedule_policy_deps, schedule_profile_policy_for_host,
 )
@@ -50,9 +50,7 @@ def activity_payload(
     count = connection.execute(select(func.count()).select_from(encode_jobs)).scalar_one()
     jobs = list_encode_jobs(connection, statuses=("queued", "retry_backoff"), limit=count, job_kinds=RUNNABLE_ENCODE_JOB_KINDS)
     samples = load_encode_duration_samples(connection)
-    durations = {row["id"]: row["duration_seconds"] for row in connection.execute(
-        select(library_items.c.id, library_items.c.duration_seconds)
-    ).mappings()}
+    manifest_items_cache: dict[Path, list[dict[str, Any]] | None] = {}
     paused = bool(load_queue_state(connection).get("is_paused")) or background_work_is_paused(connection)
     lined_up = []
     for job in jobs:
@@ -61,39 +59,42 @@ def activity_payload(
                  "title": _job_title(job, files),
                  "starts_at": None, "finishes_at": None, "computer_key": None, "computer_name": None,
                  "waiting": "Waiting for a computer with an open work window"}
-        items = [{"duration_seconds": durations.get(file.library_item_id)} for file in files]
+        lined_up.append(entry)
+        if paused:
+            entry["waiting"] = "Paused. Starts after you resume work"
+            continue
+        if not storage_admits_work:
+            entry["waiting"] = "Waiting for shared storage"
+            continue
+        if job["status"] == "retry_backoff":
+            entry["waiting"] = plain_failure_summary(waiting_reason=job.get("waiting_reason")) or "Waiting for its retry check"
+            continue
+        items = _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache, strict_indexes=True)
         choices = []
         for slot in slots:
             computer = slot["computer"]
-            if not _host_allows_library(computer, job["prefix"].split("/")[0].lower()):
+            if slot["available"] is None or not _host_allows_library(computer, job["prefix"].split("/")[0].lower()):
                 continue
-            if not items or any(not item["duration_seconds"] for item in items):
+            if not items or any(float_value(item.get("duration_seconds")) <= 0 for item in items):
+                slot["available"] = None
                 continue
             estimate = estimate_encode_job_duration(items, computer, samples)
             if not estimate.host_sample_size:
+                slot["available"] = None
                 continue
-            earliest = max(slot["available"], _date(job.get("retry_not_before")) or observed_at)
             for window in slot["windows"]:
-                start = max(earliest, datetime.fromisoformat(window["starts_at"]))
+                start = max(slot["available"], datetime.fromisoformat(window["starts_at"]))
                 finish = start + timedelta(seconds=estimate.total_seconds)
                 if start < until and estimate_fits_before_schedule_close(estimate, {"schedule_closes_at": window["closes_at"]}, now=start):
                     choices.append((start, finish, slot))
                     break
-        if paused:
-            entry["waiting"] = "Paused. Starts after you resume work"
-        elif not storage_admits_work:
-            entry["waiting"] = "Waiting for shared storage"
-        elif choices:
+        if choices:
             start, finish, slot = min(choices, key=lambda choice: choice[0])
             slot["available"] = finish
             entry.update(starts_at=start.isoformat(), finishes_at=finish.isoformat(),
                          computer_key=slot["computer"]["key"], computer_name=slot["computer"].get("label"), waiting=None)
         else:
-            slots[:] = [slot for slot in slots if not _host_allows_library(
-                slot["computer"], job["prefix"].split("/")[0].lower(),
-            )]
             entry["waiting"] = plain_failure_summary(waiting_reason=job.get("waiting_reason")) or "Start time and computer are not known yet"
-        lined_up.append(entry)
     earlier_holds = []
     for job in list_encode_jobs(connection, statuses=("needs_attention",), limit=count, job_kinds=("single", "folder")):
         files = encode_run_manifest_files(job, strict_indexes=True)
