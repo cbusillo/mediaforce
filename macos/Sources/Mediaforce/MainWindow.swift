@@ -236,6 +236,8 @@ struct MainWindow: View {
                                 KindPage(kind: kind, leftOut: model.kinds?.leftOut.count ?? 0, model: model,
                                          openItem: { go(.item($0)) }, openSample: { go(.sample($0)) },
                                          openLeftOut: { go(.seasonsWithoutKind) })
+                            } else {
+                                LibraryPage(model: model, open: go)
                             }
                         default: LibraryPage(model: model, open: go)
                         }
