@@ -12,6 +12,17 @@ struct NeedsYouPage: View {
                 Text("Nothing needs you right now.")
                     .foregroundStyle(.secondary)
             }
+            WaitingItems(items: items, posters: posters, open: open)
+        }
+    }
+}
+
+struct WaitingItems: View {
+    let items: [AttentionNotice]
+    let posters: PosterStore
+    let open: (Place) -> Void
+
+    var body: some View {
             ForEach(items, id: \.id) { item in
                 HStack(alignment: .top, spacing: 14) {
                     artwork(item)
@@ -38,7 +49,6 @@ struct NeedsYouPage: View {
                 }
                 Divider()
             }
-        }
     }
 
     @ViewBuilder

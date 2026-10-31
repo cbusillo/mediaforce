@@ -1382,3 +1382,19 @@ def test_main_window_reuses_kind_measurements_and_the_next_read_sees_new_work(tm
         _content_item(connection, EPISODE, status="discovered", codec="h264", current_dark=0.0)
         connection.commit()
         assert kinds_payload(connection, config, load_calibration_state=load)["left_out"][0]["season"] == SEASON
+
+
+def test_activity_names_next_approved_season_while_production_waits_for_current_work(tmp_path: Path) -> None:
+    from mediaforce.web.runtime.kind_approvals import next_approved_season
+
+    config = _config(tmp_path)
+    _waiting_episode(config, EPISODE, 1_000)
+    _waiting_episode(config, f"{OTHER_SEASON}/e01.mkv", 2_000)
+    approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")
+    load = _loader({}, {SEASON: DARKER, OTHER_SEASON: DARKER})
+    _encode_job(config, OTHER_SEASON, "running")
+    with open_db(config.paths.db_path) as connection:
+        assert next_kind_season(connection, config, load_calibration_state=load, now=0) is None
+        following = next_approved_season(connection, config, load_calibration_state=load, now=0)
+        assert following is not None and following.season == SEASON
+        assert connection.execute(select(encode_jobs.c.status)).scalar_one() == "running"
