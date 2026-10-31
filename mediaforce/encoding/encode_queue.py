@@ -80,6 +80,20 @@ def unfinished_breakdown_summary(groups: list[dict[str, Any]]) -> str:
     return " · ".join(f"{int_value(group['count'])} {str(group['label']).strip()}" for group in groups)
 
 
+def unfinished_items_summary(counts: Mapping[str, Any]) -> str | None:
+    needs_attention = int_value(counts.get("left_out_needs_attention_item_count"))
+    failed = int_value(counts.get("left_out_failed_item_count"))
+    parts: list[str] = []
+    if needs_attention:
+        parts.append(f"{needs_attention} {'item' if needs_attention == 1 else 'items'} waiting for you")
+    if failed:
+        parts.append(f"{failed} that didn't finish")
+    if not parts:
+        return None
+    return " and ".join(parts)
+
+
+
 def ensure_queue_state(connection: DBClient, *, queue_name: str = DEFAULT_QUEUE_NAME, updated_at: str) -> None:
     statement = sqlite_insert(encode_queue_state).values(
         queue_name=queue_name,
@@ -484,6 +498,21 @@ def summarize_encode_queue(
         job_kinds=DISPLAY_ENCODE_JOB_KINDS,
         newest_first=True,
     )
+    from mediaforce.library.workflow_state import encode_job_attention_counts
+
+    attention_jobs = [*needs_attention, *(job for job in [*running, *queued]
+                                        if "left_out_needs_attention_item_count" in object_dict(job.get("progress")))]
+    attention_counts = (
+        encode_job_attention_counts(connection, attention_jobs, library_types=library_types) if attention_jobs else {}
+    )
+    needs_attention = [job for job in needs_attention if sum(attention_counts.get(str(job["job_id"]), {"unknown": 1}).values()) > 0]
+    for job in attention_jobs:
+        if (current := attention_counts.get(str(job["job_id"]))) is not None:
+            job["attention_counts"] = current
+            job["attention_summary"] = unfinished_items_summary(current)
+            if "left_out_needs_attention_item_count" in object_dict(job.get("progress")):
+                job["progress"] = {**object_dict(job.get("progress")), **current}
+    counts["needs_attention"] = len(needs_attention)
     for job in [*queued, *running, *recent, *needs_attention]:
         job["media_scope"] = resolve_media_scope(
             connection,

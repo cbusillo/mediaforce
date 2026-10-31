@@ -56,7 +56,7 @@ from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, DISPLAY_E
     ensure_queue_state, load_active_encode_job_for_prefix, load_latest_encode_job, \
     repair_persisted_encode_job_hosts, \
     queue_position as encode_queue_position, save_encode_job, summarize_encode_queue, \
-    unfinished_breakdown_groups, unfinished_breakdown_summary
+    unfinished_breakdown_groups, unfinished_breakdown_summary, unfinished_items_summary
 from mediaforce.execution import (
     build_svt_params,
     describe_item_plan,
@@ -165,7 +165,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_
 from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem, production_action_blocker
 from mediaforce.web.runtime.folder_cards import list_folder_cards
 from mediaforce.web.runtime.page_state import PageStateSources, card_page_states, folder_page_state
-from mediaforce.library.workflow_state import build_folder_workflow_state
+from mediaforce.library.workflow_state import build_folder_workflow_state, encode_job_attention_counts
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     restore_staged_artifact as runtime_restore_staged_artifact, \
     run_calibration_job as runtime_run_calibration_job, \
@@ -2937,6 +2937,7 @@ def _folder_badge_prefix(raw_prefix: Any) -> str:
 def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, str | None]]:
     rows = connection.execute(
         select(
+            encode_jobs.c.job_id,
             encode_jobs.c.prefix,
             encode_jobs.c.status,
             encode_jobs.c.error,
@@ -2948,6 +2949,7 @@ def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, 
     ).mappings().fetchall()
     badges: dict[str, dict[str, str | None]] = {}
     seen_prefixes: set[str] = set()
+    attention_jobs: list[dict[str, Any]] = []
     for row in rows:
         prefix = _folder_badge_prefix(row["prefix"])
         if not prefix or prefix in seen_prefixes:
@@ -2957,6 +2959,7 @@ def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, 
         # A folder still working keeps its badge when some of its files already need the owner.
         if str(row["status"] or "") != "needs_attention" and not any(group.get("needs_owner") for group in groups):
             continue
+        attention_jobs.append({"job_id": str(row["job_id"]), "prefix": prefix})
         badges[prefix] = {
             "label": "Needs attention",
             "tone": "warning",
@@ -2965,6 +2968,16 @@ def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, 
                 or plain_failure_summary(row["error"], waiting_reason=row["waiting_reason"])
             ),
         }
+    counts = encode_job_attention_counts(connection, attention_jobs) if attention_jobs else {}
+    for job in attention_jobs:
+        current = counts.get(str(job["job_id"]))
+        if current is None:
+            continue
+        prefix = str(job["prefix"])
+        if sum(current.values()) == 0:
+            del badges[prefix]
+        else:
+            badges[prefix]["detail"] = unfinished_items_summary(current)
     return badges
 
 
@@ -3037,21 +3050,10 @@ def _folder_review_badge(
         needs_attention_badges: dict[str, dict[str, str | None]] | None = None,
         calibration_job_badges: dict[str, dict[str, str | None]] | None = None,
 ) -> dict[str, str | None]:
-    if needs_attention_badges is not None:
-        badge = needs_attention_badges.get(prefix)
-        if badge is not None:
-            return badge
-    if connection is not None:
-        encode_job = load_latest_encode_job(connection, prefix)
-        if encode_job and str(encode_job.get("status") or "") == "needs_attention":
-            return {
-                "label": "Needs attention",
-                "tone": "warning",
-                "detail": plain_failure_summary(
-                    encode_job.get("error"),
-                    waiting_reason=encode_job.get("waiting_reason"),
-                ),
-            }
+    if needs_attention_badges is None and connection is not None:
+        needs_attention_badges = _folder_needs_attention_badges(connection)
+    if needs_attention_badges is not None and (badge := needs_attention_badges.get(prefix)) is not None:
+        return badge
 
     if calibration_job_badges is not None:
         badge = calibration_job_badges.get(prefix)
