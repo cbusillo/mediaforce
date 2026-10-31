@@ -1366,6 +1366,7 @@ def test_a_completed_sample_that_cannot_cover_a_kind_does_not_ask_or_hide_other_
         connection.execute(calibration_jobs.update().where(calibration_jobs.c.prefix == APPROVED_SEASON).values(status="completed"))
         connection.commit()
         darker = next(kind for kind in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if kind["kind"] == DARKER)
+    assert darker["sample_season"] == SEASON
     assert not darker["needs_you"]
     assert SEASON not in load.sample_waits(config)
 

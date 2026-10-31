@@ -179,9 +179,6 @@ class KindAwareLoader:
                     boundaries[kind] = object_dict(load(config, settings[0]["from_prefix"])).get("accepted_at")
                 else:
                     representative = contents.samples.get(kind)
-                    if representative and representative.get("status") == "completed" and not _scalable_sample(
-                            load(config, str(representative["prefix"]))):
-                        representative = None
                     boundaries[kind] = object_dict(representative).get("created_at")
             jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in rows])
         waits.update({row["season"]: SampleWait(kind=row["kind"]) for row in rows
@@ -511,9 +508,15 @@ def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibrat
                        | {str(job["prefix"]) for job in samples},
     )
     kinds_by_season = object_dict(report.get("kinds_by_season"))
-    newest = {str(kinds_by_season[job["prefix"]]): job
-              for job in sorted(samples, key=lambda sample: str(sample.get("created_at") or ""))
-              if job["prefix"] in kinds_by_season}
+    newest: dict[str, dict[str, Any]] = {}
+    for job in sorted(samples, key=lambda sample: str(sample.get("created_at") or "")):
+        kind = kinds_by_season.get(job["prefix"])
+        if kind is None:
+            continue
+        if kind in APPROVABLE_KINDS and job.get("status") == "completed" and not _scalable_sample(
+                load_calibration_state(config, str(job["prefix"]))):
+            continue
+        newest[str(kind)] = job
     return _KindContents(episodes, approvals_by_show, report, newest)
 
 
