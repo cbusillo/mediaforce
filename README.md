@@ -149,6 +149,9 @@ remain visible when a list cannot load.
 
 The sidebar keeps the last kinds received while retrying an unanswered refresh.
 
+The compression list counts current file questions. Published files and files settled by a
+later run stop asking for attention; their saved compression-job history stays intact.
+
 API reads only report persisted catalog and job state; opening or
 polling a page does not start scans, host probes, or media analysis. Catalog
 inventory refreshes in the background every `media.catalog_refresh_hours`

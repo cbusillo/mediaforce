@@ -8,6 +8,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.timezones import system_timezone, valid_timezone_name
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.plain_failure import plain_failure_summary
+from mediaforce.encoding.encode_queue import unfinished_items_summary
 
 SCHEDULE_DAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 SCHEDULE_CLOSE_WAITING_REASON = "Waiting for the next work window."
@@ -532,12 +533,13 @@ def _queue_left_out_item_counts(
         int_value(object_dict(job.get("progress")).get("left_out_failed_item_count"))
         for job in summed_jobs
     )
-    # A single job that reads needs_attention waits for the Director as a whole.
-    needs_attention += sum(
-        max(int_value(job.get("item_count")), 1)
-        for job in attention_jobs
-        if not _reports_left_out_items(job)
-    )
+    for job in attention_jobs:
+        if _reports_left_out_items(job):
+            continue
+        current = object_dict(job.get("attention_counts"))
+        needs_attention += (int_value(current.get("left_out_needs_attention_item_count")) if current
+                            else max(int_value(job.get("item_count")), 1))
+        failed += int_value(current.get("left_out_failed_item_count"))
     return {
         "left_out_needs_attention_item_count": needs_attention,
         "left_out_failed_item_count": failed,
@@ -545,17 +547,8 @@ def _queue_left_out_item_counts(
 
 
 def left_out_items_copy(counts: dict[str, Any]) -> str | None:
-    """Says how many items an estimate leaves out, or nothing when it covers everything."""
-    needs_attention = int_value(counts.get("left_out_needs_attention_item_count"))
-    failed = int_value(counts.get("left_out_failed_item_count"))
-    parts: list[str] = []
-    if needs_attention:
-        parts.append(f"{needs_attention} {'item' if needs_attention == 1 else 'items'} waiting for you")
-    if failed:
-        parts.append(f"{failed} that didn't finish")
-    if not parts:
-        return None
-    return f"leaves out {' and '.join(parts)}"
+    summary = unfinished_items_summary(counts)
+    return f"leaves out {summary}" if summary else None
 
 
 def decorate_encode_job_for_scheduler(
@@ -615,7 +608,7 @@ def decorate_encode_job_for_scheduler(
     elif status == "running":
         decorated["scheduler_status_copy"] = "running now"
     elif status == "needs_attention":
-        decorated["scheduler_status_copy"] = waiting_reason or "needs attention before retrying"
+        decorated["scheduler_status_copy"] = decorated.get("attention_summary") or waiting_reason or "needs attention before retrying"
     elif status == "retry_backoff":
         decorated["scheduler_status_copy"] = waiting_reason or "waiting for retry backoff"
     elif waiting_reason:

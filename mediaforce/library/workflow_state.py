@@ -15,8 +15,8 @@ from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, encode_ru
 from mediaforce.encoding.plain_failure import plain_failure_summary
 from mediaforce.library.item_presence import library_item_is_missing
 from mediaforce.library.motion_keep_state import kept_original_clause
-from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, normalize_scope_prefix, \
-    path_matches_scope, resolve_media_scope, resolve_media_scopes, scope_rel_path_filter, scopes_overlap
+from mediaforce.library.media_scopes import MediaScope, MediaScopeConflict, media_scope_from_prefix, normalize_scope_prefix, \
+    path_matches_scope, resolve_media_scope, resolve_media_scopes, scope_prefix_overlap_filter, scope_rel_path_filter, scopes_overlap
 from mediaforce.library.remake_intents import remake_intent
 from mediaforce.library.staged_validation import staged_validation_outcome
 
@@ -621,6 +621,38 @@ def _settled_paths(items: Iterable[ItemWorkflowState]) -> frozenset[str]:
     return frozenset(item.rel_path for item in items if item.state in {"complete", "kept_original", "missing"})
 
 
+def encode_job_attention_counts(
+        connection: DBClient,
+        jobs: list[dict[str, Any]],
+        *, library_types: Mapping[str, str] | None = None,
+) -> dict[str, dict[str, int]]:
+    try:
+        scopes = resolve_media_scopes(connection, list(dict.fromkeys(str(job["prefix"]) for job in jobs)),
+                                      library_types=library_types)
+    except MediaScopeConflict:
+        return {}
+    settled = _settled_paths(_derive_item_workflow_state(row, None)
+                             for row in _load_item_rows_for_scopes(connection, scopes))
+    rows = _workflow_encode_job_rows(connection, scopes=scopes)
+    overlapping = _overlapping_job_rows(rows)
+    part_files = _manifest_files_lookup()
+    counts: dict[str, dict[str, int]] = {}
+    for scope in scopes:
+        scope_rows = overlapping(scope)
+        problems = _current_file_problems(scope, scope_rows, part_files)
+        for job in jobs:
+            if job["prefix"] != scope.prefix:
+                continue
+            job_id = str(job["job_id"])
+            if problems is None:
+                continue
+            statuses = Counter(status for path, (status, run) in problems.items()
+                               if path not in settled and str(run["job_id"]) == job_id)
+            counts[job_id] = {"left_out_needs_attention_item_count": statuses["needs_attention"],
+                              "left_out_failed_item_count": statuses["failed"] + statuses["stopped"]}
+    return counts
+
+
 def _load_encode_job_state(
         connection: DBClient,
         scope: MediaScope,
@@ -814,6 +846,35 @@ def _wider_run_filter(
     return counts_for_scope
 
 
+def _current_file_problems(
+        scope: MediaScope,
+        overlapping_rows: list[DBRow],
+        part_files: Callable[[DBRow], tuple[str, ...]],
+) -> dict[str, tuple[str, DBRow]] | None:
+    runs = [row for row in overlapping_rows if row["job_kind"] in DISPLAY_ENCODE_JOB_KINDS]
+    # Runs older than the oldest one that needs attention cannot bring a problem back.
+    parts_by_parent = _parts_by_parent(overlapping_rows)
+    oldest = max((index for index, run in enumerate(runs)
+                  if run["status"] in ATTENTION_JOB_STATUSES or any(
+                      part["status"] in ATTENTION_JOB_STATUSES for part in parts_by_parent.get(str(run["job_id"]), ())
+                  )), default=-1)
+    newest_by_file: dict[str, tuple[str, DBRow]] = {}
+    for run in runs[:oldest + 1]:
+        # Within a run, a file's later part (a retry) comes first and replaces its earlier one.
+        for part in parts_by_parent.get(str(run["job_id"])) or [run]:
+            files = part_files(part)
+            if not files:
+                if part["status"] == "completed":
+                    continue
+                return None
+            for rel_path in files:
+                if path_matches_scope(rel_path, scope):
+                    newest_by_file.setdefault(rel_path, (str(part["status"]), run))
+    return {
+        rel_path: (status, run) for rel_path, (status, run) in newest_by_file.items() if status in ATTENTION_JOB_STATUSES
+    }
+
+
 def _wider_run_attention(
         scope: MediaScope,
         overlapping_rows: list[DBRow],
@@ -833,24 +894,10 @@ def _wider_run_attention(
 
     def attention_run(latest: DBRow) -> DBRow | None:
         wider = _job_is_wider(scope, str(latest["prefix"] or ""))
-        runs = [row for row in overlapping_rows if row["job_kind"] in DISPLAY_ENCODE_JOB_KINDS]
-        # Runs older than the oldest one that needs attention cannot bring a problem back.
-        oldest = max(index for index, run in enumerate(runs) if run["status"] in ATTENTION_JOB_STATUSES)
-        parts_by_parent = _parts_by_parent(overlapping_rows)
-        newest_by_file: dict[str, tuple[str, DBRow]] = {}
-        for run in runs[:oldest + 1]:
-            # Within a run, a file's later part (a retry) comes first and replaces its earlier one.
-            for part in parts_by_parent.get(str(run["job_id"])) or [run]:
-                files = part_files(part)
-                if not files:
-                    return latest
-                for rel_path in files:
-                    if path_matches_scope(rel_path, scope):
-                        newest_by_file.setdefault(rel_path, (str(part["status"]), run))
-        problems = {
-            rel_path: run for rel_path, (status, run) in newest_by_file.items() if status in ATTENTION_JOB_STATUSES
-        }
-        open_problem = next((run for rel_path, run in problems.items() if rel_path not in settled_paths), None)
+        problems = _current_file_problems(scope, overlapping_rows, part_files)
+        if problems is None:
+            return latest
+        open_problem = next((run for rel_path, (_status, run) in problems.items() if rel_path not in settled_paths), None)
         if not wider and not problems:
             return latest
         return open_problem
@@ -873,8 +920,8 @@ def _job_is_wider(scope: MediaScope, job_prefix: str) -> bool:
     return not job_prefix or scope.prefix.startswith(f"{job_prefix}/")
 
 
-def _workflow_encode_job_rows(connection: DBClient) -> list[DBRow]:
-    return list(connection.execute(
+def _workflow_encode_job_rows(connection: DBClient, *, scopes: list[MediaScope] | None = None) -> list[DBRow]:
+    statement = (
         select(
             encode_jobs.c.job_id,
             encode_jobs.c.parent_job_id,
@@ -888,7 +935,10 @@ def _workflow_encode_job_rows(connection: DBClient) -> list[DBRow]:
         )
         .where(encode_jobs.c.status.in_(JOB_STATUSES_FOR_WORKFLOW))
         .order_by(encode_jobs.c.created_at.desc(), literal_column("rowid").desc())
-    ).mappings().fetchall())
+    )
+    if scopes is not None:
+        statement = statement.where(or_(*(scope_prefix_overlap_filter(encode_jobs.c.prefix, scope) for scope in scopes)))
+    return list(connection.execute(statement).mappings().fetchall())
 
 
 def _encode_job_workflow_state(
