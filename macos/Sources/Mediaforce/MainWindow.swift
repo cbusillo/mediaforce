@@ -152,7 +152,7 @@ struct PlaceRequest: Equatable {
 }
 
 enum Place: Hashable {
-    case library, needsYou, spaceSaved, media
+    case library, needsYou, activity, spaceSaved, media
     case libraryKind(MediaKind), mediaKind(MediaKind, LibraryStateGroup? = nil)
     // Settings › Computers, on one computer when it names one.
     case computer(String?)
@@ -210,6 +210,8 @@ struct MainWindow: View {
                 } detail: {
                     Group {
                         switch navigation.place {
+                        case .activity:
+                            ActivityPage(facts: facts, model: model, open: go)
                         case .needsYou:
                             NeedsYouPage(facts: facts, posters: model.posters, open: go)
                         case .spaceSaved:
@@ -377,6 +379,8 @@ struct Sidebar: View {
             List(selection: $place) {
                 SidebarRow(title: Words.needsYou, symbol: "hand.raised", trailing: "\(Attention.waitingOnYou(facts))")
                     .tag(Place.needsYou)
+                Label("Activity", systemImage: "clock")
+                    .tag(Place.activity)
                 DisclosureGroup(isExpanded: $librariesShown) {
                     ForEach(MediaKind.libraries(in: facts.library)) { kind in
                         Label(Words.mediaKind(kind), systemImage: kind.symbol)

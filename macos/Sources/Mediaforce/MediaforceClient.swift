@@ -26,6 +26,12 @@ struct MediaforceClient: Sendable {
         return try await decode(MainWindowFacts.self, from: request)
     }
 
+    func activity() async throws -> ActivityFacts {
+        var request = URLRequest(url: baseURL.appending(path: "api/app/activity"))
+        request.timeoutInterval = Self.factsTimeout
+        return try await decode(ActivityFacts.self, from: request)
+    }
+
     func tvShows() async throws -> TVShowsFacts {
         var request = URLRequest(url: baseURL.appending(path: "api/app/tv-shows"))
         request.timeoutInterval = Self.factsTimeout

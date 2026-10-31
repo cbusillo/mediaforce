@@ -326,8 +326,19 @@ def next_kind_season(
 ) -> KindSeason | None:
     if background_queue_blocker(connection) is not None:
         return None
+    return next_approved_season(connection, config, load_calibration_state=load_calibration_state, now=now)
+
+
+def next_approved_season(
+        connection: DBClient, config: MediaforceConfig, *, load_calibration_state: LoadCalibrationState, now: float,
+) -> KindSeason | None:
     attempts = _load_attempts(config)
+    active_prefixes = connection.execute(select(encode_jobs.c.prefix).where(
+        encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES), encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS),
+    )).scalars().all()
     for season, waiting_bytes, files in _waiting_seasons(connection, config):
+        if any(season == prefix or season.startswith(f"{prefix}/") or prefix.startswith(f"{season}/") for prefix in active_prefixes):
+            continue
         approval = effective_production_approval(config, season, load_calibration_state)
         if approval is None or not approval.current:
             continue
