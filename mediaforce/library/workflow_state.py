@@ -15,7 +15,7 @@ from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, encode_ru
 from mediaforce.encoding.plain_failure import plain_failure_summary
 from mediaforce.library.item_presence import library_item_is_missing
 from mediaforce.library.motion_keep_state import kept_original_clause
-from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, normalize_scope_prefix, \
+from mediaforce.library.media_scopes import MediaScope, MediaScopeConflict, media_scope_from_prefix, normalize_scope_prefix, \
     path_matches_scope, resolve_media_scope, resolve_media_scopes, scope_prefix_overlap_filter, scope_rel_path_filter, scopes_overlap
 from mediaforce.library.remake_intents import remake_intent
 from mediaforce.library.staged_validation import staged_validation_outcome
@@ -626,8 +626,11 @@ def encode_job_attention_counts(
         jobs: list[dict[str, Any]],
         *, library_types: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, int]]:
-    scopes = resolve_media_scopes(connection, list(dict.fromkeys(str(job["prefix"]) for job in jobs)),
-                                  library_types=library_types)
+    try:
+        scopes = resolve_media_scopes(connection, list(dict.fromkeys(str(job["prefix"]) for job in jobs)),
+                                      library_types=library_types)
+    except MediaScopeConflict:
+        return {}
     settled = _settled_paths(_derive_item_workflow_state(row, None)
                              for row in _load_item_rows_for_scopes(connection, scopes))
     rows = _workflow_encode_job_rows(connection, scopes=scopes)

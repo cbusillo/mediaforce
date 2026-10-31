@@ -4250,6 +4250,20 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     self.assertEqual(queue["needs_attention"][0]["scheduler_status_copy"],
                                      unfinished_items_summary(queue["telemetry"]))
 
+    def test_folder_badge_keeps_unknown_attention_when_a_file_path_has_become_a_folder(self) -> None:
+        prefix = "tv/Show.mkv"
+        manifest = self._write_manifest("ambiguous-attention.json", [])
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(connection, self.root / "before.mkv", rel_path=prefix)
+            self._insert_library_item(connection, self.root / "after.mkv", rel_path=f"{prefix}/episode.mkv")
+            self._save_job(connection, job_id="ambiguous", manifest_name=manifest.name,
+                           host={}, status="needs_attention", attempt_count=1)
+            job = load_encode_job(connection, "ambiguous")
+            assert job is not None
+            job["prefix"] = prefix
+            save_encode_job(connection, job)
+            self.assertIn(prefix, web_app._folder_needs_attention_badges(connection))
+
     def test_encode_queue_summary_exposes_every_attention_job(self) -> None:
         self._write_manifest("manifest-attention-list.json", [])
         with open_db(self.config.paths.db_path) as connection:
