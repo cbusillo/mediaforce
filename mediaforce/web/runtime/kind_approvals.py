@@ -13,8 +13,10 @@ import json
 import os
 import tempfile
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -177,6 +179,9 @@ class KindAwareLoader:
                     boundaries[kind] = object_dict(load(config, settings[0]["from_prefix"])).get("accepted_at")
                 else:
                     representative = contents.samples.get(kind)
+                    if representative and representative.get("status") == "completed" and not _scalable_sample(
+                            load(config, str(representative["prefix"]))):
+                        representative = None
                     boundaries[kind] = object_dict(representative).get("created_at")
             jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in rows])
         waits.update({row["season"]: SampleWait(kind=row["kind"]) for row in rows
@@ -475,7 +480,23 @@ class _KindContents:
     samples: dict[str, dict[str, Any]]
 
 
+_request_kind_contents: ContextVar[tuple[MediaforceConfig, _KindContents] | None] = ContextVar("kind_contents", default=None)
+
+
+@contextmanager
+def kind_snapshot(connection: DBClient, config: MediaforceConfig, load: LoadCalibrationState) -> Iterator[None]:
+    token = _request_kind_contents.set((config, _kind_contents(connection, config, load)))
+    try:
+        yield
+    finally:
+        _request_kind_contents.reset(token)
+
+
 def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibration_state: LoadCalibrationState) -> _KindContents:
+    snapshot = _request_kind_contents.get()
+    if snapshot is not None and snapshot[0] is config:
+        return snapshot[1]
+
     def folders_only(loader_config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
         return load_calibration_state(loader_config, prefix)
 
@@ -530,7 +551,7 @@ def kinds_payload(
             show = "/".join(str(approval["from_prefix"]).split("/")[:2])
             lent = next((entry for entry in approvals_by_show.get(show, []) if entry.approval.prefix == approval["from_prefix"]), None)
             approval["library_item_id"] = _episode_made_under(episodes.get(show, []), lent.seasons) if lent else None
-    return {
+    payload: dict[str, Any] = {
         "kinds": [{
             "kind": kind,
             "one_time": kind not in APPROVABLE_KINDS,
@@ -550,6 +571,14 @@ def kinds_payload(
         "unmeasured_seasons": int(object_dict(totals.get("unmeasured")).get("seasons") or 0),
         "folder_approved_seasons": int(object_dict(totals.get("folder_approved")).get("seasons") or 0),
     }
+    for entry in payload["kinds"]:
+        if entry["needs_you"]:
+            season = str(entry["sample_season"])
+            entry["needs_you"] = sample_approval_kind(
+                config, payload, season, load_calibration_state(config, season),
+                kind_of=lambda _config, prefix: kinds_by_season.get(prefix),
+            ) == entry["kind"]
+    return payload
 
 
 def _approved_sample_season(config: MediaforceConfig, kind: str) -> str | None:
@@ -567,14 +596,19 @@ def sample_approval_kind(
                  if entry["kind"] in APPROVABLE_KINDS and entry.get("sample_season") == prefix
                  and _approved_sample_season(config, str(entry["kind"])) is None), None)
     payload = object_dict(calibration)
-    if kind is None or not payload.get("job_id") or str(payload.get("mode") or "sample") != "sample":
+    if kind is None or not _scalable_sample(payload):
         return None
+    return kind if _sample_kind_refusal(config, kind, payload, kind_of) is None else None
+
+
+def _scalable_sample(calibration: Mapping[str, Any] | None) -> bool:
+    payload = object_dict(calibration)
+    if not payload.get("job_id") or str(payload.get("mode") or "sample") != "sample":
+        return False
     contract = production_approval_contract({
         **payload, "accepted_sample_job_id": payload["job_id"], "accepted_policy_hash": calibration_policy_hash(payload),
     })
-    if contract is None or _size_extension_refusal(contract) is not None:
-        return None
-    return kind if _sample_kind_refusal(config, kind, payload, kind_of) is None else None
+    return contract is not None and _size_extension_refusal(contract) is None
 
 
 def _sample_kind_refusal(config: MediaforceConfig, kind: str, calibration: Mapping[str, Any], kind_of: KindOf) -> str | None:

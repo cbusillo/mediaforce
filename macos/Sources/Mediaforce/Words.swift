@@ -395,6 +395,7 @@ extension Words {
 }
 
 extension Words {
+    static let watchSample = "Watch sample"
     static let watchApprovedSample = "Watch approved sample"
     static let approveOnlySeason = "Approve only this season"
 

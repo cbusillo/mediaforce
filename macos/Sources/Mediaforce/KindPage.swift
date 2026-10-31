@@ -49,7 +49,7 @@ struct KindPage: View {
                 }
                 if !offering || kind.sampleSetting != nil {
                     KindDecision(kind: kind, setting: setting, model: model, openItem: openItem,
-                                 showSample: chosen != nil && kind.approval?.sampleMoments?.isEmpty == false ? { chosen = nil } : nil)
+                                 showSample: chosen != nil && (kind.approval?.sampleMoments?.isEmpty == false || kind.sampleSeason != nil) ? { chosen = nil } : nil)
                 }
                 KindShows(kind: kind, playing: offering ? kind.sampleShow : (kind.approval != nil && chosen == nil ? nil : setting?.show), leftOut: leftOut, posters: model.posters,
                           choose: { chosen = $0 }, open: openItem, openLeftOut: openLeftOut,
@@ -112,9 +112,6 @@ struct KindDecision: View {
                 }
                 .labelStyle(KindCheckLabel())
                 Spacer(minLength: 12)
-                if let showSample {
-                    Button(Words.watchApprovedSample, action: showSample)
-                }
                 Button(Words.stopUsingKind) { act { try await $0.stopKind(kind.kind) } }
             } else if let setting {
                 Button(Words.showSetting(setting.name, setting)) { openItem(setting.show) }
@@ -126,6 +123,9 @@ struct KindDecision: View {
                     Button(Words.useForKind(kind.kind)) { act { try await $0.approveKind(kind.kind, from: setting.fromPrefix) } }
                         .buttonStyle(.borderedProminent)
                 }
+            }
+            if let showSample {
+                Button(kind.approval == nil ? Words.watchSample : Words.watchApprovedSample, action: showSample)
             }
         }
         .disabled(working)
