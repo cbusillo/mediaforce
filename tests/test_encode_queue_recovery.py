@@ -4155,6 +4155,34 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
         self.assertTrue(all(object_dict(job["media_scope"])["domain"] == "movie" for job in summary["recent"]))
 
+    def test_encode_queue_attention_follows_current_files_without_rewriting_history(self) -> None:
+        paths = [f"tv/show/episode-{index}.mkv" for index in range(3)]
+        manifest = self._write_manifest("old-attention.json", [{"rel_path": path} for path in paths])
+        with open_db(self.config.paths.db_path) as connection:
+            ids = [self._insert_library_item(connection, Path(path), rel_path=path) for path in paths]
+            self._save_job(connection, job_id="old", manifest_name=manifest.name,
+                           host={}, status="needs_attention", attempt_count=1)
+            old = load_encode_job(connection, "old")
+            assert old is not None
+            old["item_count"] = 3
+            save_encode_job(connection, old)
+            connection.execute(update(library_items).where(library_items.c.id == ids[0]).values(status="promoted"))
+            newer_manifest = self._write_manifest("newer.json", [{"rel_path": paths[1]}])
+            self._save_job(connection, job_id="new", manifest_name=newer_manifest.name,
+                           host={}, status="completed", attempt_count=1)
+            summary = summarize_encode_queue(connection)
+            self.assertEqual(summary["needs_attention_count"], 1)
+            telemetry = web_app._decorate_encode_queue_for_scheduler(self.config, summary)["telemetry"]
+            self.assertEqual(telemetry["left_out_needs_attention_item_count"], 1)
+            connection.execute(update(library_items).where(library_items.c.id == ids[2]).values(status="promoted"))
+            summary = summarize_encode_queue(connection)
+            self.assertEqual(summary["needs_attention"], [])
+            self.assertEqual(summary["needs_attention_count"], 0)
+            self.assertFalse(build_folder_workflow_state(connection, "tv/show").needs_owner)
+            historical = load_encode_job(connection, "old")
+            assert historical is not None
+            self.assertEqual(historical["status"], "needs_attention")
+
     def test_encode_queue_summary_exposes_every_attention_job(self) -> None:
         self._write_manifest("manifest-attention-list.json", [])
         with open_db(self.config.paths.db_path) as connection:

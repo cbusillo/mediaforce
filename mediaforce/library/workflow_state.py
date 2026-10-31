@@ -621,6 +621,30 @@ def _settled_paths(items: Iterable[ItemWorkflowState]) -> frozenset[str]:
     return frozenset(item.rel_path for item in items if item.state in {"complete", "kept_original", "missing"})
 
 
+def encode_job_attention_counts(
+        connection: DBClient,
+        jobs: list[dict[str, Any]],
+        *, library_types: Mapping[str, str] | None = None,
+) -> dict[str, int]:
+    scopes = resolve_media_scopes(connection, list(dict.fromkeys(str(job["prefix"]) for job in jobs)),
+                                  library_types=library_types)
+    settled = _settled_paths(_derive_item_workflow_state(row, None)
+                             for row in _load_item_rows_for_scopes(connection, scopes))
+    rows = _workflow_encode_job_rows(connection)
+    overlapping = _overlapping_job_rows(rows)
+    part_files = _manifest_files_lookup()
+    counts: dict[str, int] = {}
+    for scope in scopes:
+        problems = _current_file_problems(scope, overlapping(scope), part_files)
+        if problems is None:
+            continue
+        by_job = Counter(str(run["job_id"]) for path, run in problems.items() if path not in settled)
+        for job in jobs:
+            if job["prefix"] == scope.prefix:
+                counts[str(job["job_id"])] = by_job[str(job["job_id"])]
+    return counts
+
+
 def _load_encode_job_state(
         connection: DBClient,
         scope: MediaScope,
@@ -814,6 +838,30 @@ def _wider_run_filter(
     return counts_for_scope
 
 
+def _current_file_problems(
+        scope: MediaScope,
+        overlapping_rows: list[DBRow],
+        part_files: Callable[[DBRow], tuple[str, ...]],
+) -> dict[str, DBRow] | None:
+    runs = [row for row in overlapping_rows if row["job_kind"] in DISPLAY_ENCODE_JOB_KINDS]
+    # Runs older than the oldest one that needs attention cannot bring a problem back.
+    oldest = max((index for index, run in enumerate(runs) if run["status"] in ATTENTION_JOB_STATUSES), default=-1)
+    parts_by_parent = _parts_by_parent(overlapping_rows)
+    newest_by_file: dict[str, tuple[str, DBRow]] = {}
+    for run in runs[:oldest + 1]:
+        # Within a run, a file's later part (a retry) comes first and replaces its earlier one.
+        for part in parts_by_parent.get(str(run["job_id"])) or [run]:
+            files = part_files(part)
+            if not files:
+                return None
+            for rel_path in files:
+                if path_matches_scope(rel_path, scope):
+                    newest_by_file.setdefault(rel_path, (str(part["status"]), run))
+    return {
+        rel_path: run for rel_path, (status, run) in newest_by_file.items() if status in ATTENTION_JOB_STATUSES
+    }
+
+
 def _wider_run_attention(
         scope: MediaScope,
         overlapping_rows: list[DBRow],
@@ -833,23 +881,9 @@ def _wider_run_attention(
 
     def attention_run(latest: DBRow) -> DBRow | None:
         wider = _job_is_wider(scope, str(latest["prefix"] or ""))
-        runs = [row for row in overlapping_rows if row["job_kind"] in DISPLAY_ENCODE_JOB_KINDS]
-        # Runs older than the oldest one that needs attention cannot bring a problem back.
-        oldest = max(index for index, run in enumerate(runs) if run["status"] in ATTENTION_JOB_STATUSES)
-        parts_by_parent = _parts_by_parent(overlapping_rows)
-        newest_by_file: dict[str, tuple[str, DBRow]] = {}
-        for run in runs[:oldest + 1]:
-            # Within a run, a file's later part (a retry) comes first and replaces its earlier one.
-            for part in parts_by_parent.get(str(run["job_id"])) or [run]:
-                files = part_files(part)
-                if not files:
-                    return latest
-                for rel_path in files:
-                    if path_matches_scope(rel_path, scope):
-                        newest_by_file.setdefault(rel_path, (str(part["status"]), run))
-        problems = {
-            rel_path: run for rel_path, (status, run) in newest_by_file.items() if status in ATTENTION_JOB_STATUSES
-        }
+        problems = _current_file_problems(scope, overlapping_rows, part_files)
+        if problems is None:
+            return latest
         open_problem = next((run for rel_path, run in problems.items() if rel_path not in settled_paths), None)
         if not wider and not problems:
             return latest

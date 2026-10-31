@@ -534,7 +534,7 @@ def _queue_left_out_item_counts(
     )
     # A single job that reads needs_attention waits for the Director as a whole.
     needs_attention += sum(
-        max(int_value(job.get("item_count")), 1)
+        int_value(job["needs_attention_item_count"]) if "needs_attention_item_count" in job else max(int_value(job.get("item_count")), 1)
         for job in attention_jobs
         if not _reports_left_out_items(job)
     )

@@ -484,6 +484,18 @@ def summarize_encode_queue(
         job_kinds=DISPLAY_ENCODE_JOB_KINDS,
         newest_first=True,
     )
+    from mediaforce.library.workflow_state import encode_job_attention_counts
+
+    attention_counts = (
+        encode_job_attention_counts(connection, needs_attention, library_types=library_types) if needs_attention else {}
+    )
+    needs_attention = [job for job in needs_attention if attention_counts.get(str(job["job_id"]), 1) > 0]
+    for job in needs_attention:
+        if (count := attention_counts.get(str(job["job_id"]))) is not None:
+            job["needs_attention_item_count"] = count
+            if "left_out_needs_attention_item_count" in object_dict(job.get("progress")):
+                job["progress"] = {**object_dict(job.get("progress")), "left_out_needs_attention_item_count": count}
+    counts["needs_attention"] = len(needs_attention)
     for job in [*queued, *running, *recent, *needs_attention]:
         job["media_scope"] = resolve_media_scope(
             connection,
