@@ -641,16 +641,12 @@ def encode_job_attention_counts(
             if job["prefix"] != scope.prefix:
                 continue
             job_id = str(job["job_id"])
-            current = problems
-            if current is None:
-                own_rows = [row for row in scope_rows if row["job_id"] == job_id or row["parent_job_id"] == job_id]
-                current = _current_file_problems(scope, own_rows, part_files)
-            if current is None:
+            if problems is None:
                 continue
-            statuses = Counter(status for path, (status, run) in current.items()
+            statuses = Counter(status for path, (status, run) in problems.items()
                                if path not in settled and str(run["job_id"]) == job_id)
-            counts[job_id] = {"needs_attention": statuses["needs_attention"],
-                              "failed": statuses["failed"] + statuses["stopped"]}
+            counts[job_id] = {"left_out_needs_attention_item_count": statuses["needs_attention"],
+                              "left_out_failed_item_count": statuses["failed"] + statuses["stopped"]}
     return counts
 
 
@@ -865,6 +861,8 @@ def _current_file_problems(
         for part in parts_by_parent.get(str(run["job_id"])) or [run]:
             files = part_files(part)
             if not files:
+                if part["status"] == "completed":
+                    continue
                 return None
             for rel_path in files:
                 if path_matches_scope(rel_path, scope):

@@ -81,7 +81,7 @@ from mediaforce.encoding.duration_estimate import EncodeDurationSample, load_enc
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
     load_active_encode_job_for_prefix, load_encode_job, load_latest_encode_job, \
     load_latest_terminal_encode_job_for_prefix, load_queue_state, repair_persisted_encode_job_hosts, \
-    save_encode_job, save_queue_state, summarize_encode_queue
+    save_encode_job, save_queue_state, summarize_encode_queue, unfinished_items_summary
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.media_scopes import media_scope_from_prefix
@@ -4160,6 +4160,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         manifest = self._write_manifest("old-attention.json", [{"rel_path": path} for path in paths])
         with open_db(self.config.paths.db_path) as connection:
             ids = [self._insert_library_item(connection, Path(path), rel_path=path) for path in paths]
+            default_badge = web_app._folder_review_badge(self.config, "tv/show", connection)
             self._save_job(connection, job_id="old", manifest_name=manifest.name,
                            host={}, status="needs_attention", attempt_count=1)
             old = load_encode_job(connection, "old")
@@ -4180,7 +4181,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(telemetry["left_out_needs_attention_item_count"], 1)
             connection.execute(update(library_items).where(library_items.c.id == ids[1]).values(status="promoted"))
             newer_manifest.unlink()
+            self._save_job(connection, job_id="latest-attention", manifest_name=manifest.name,
+                           host={}, status="needs_attention", attempt_count=1)
+            latest = load_encode_job(connection, "latest-attention")
+            assert latest is not None
+            latest["manifest_indexes"] = [2]
+            save_encode_job(connection, latest)
             summary = summarize_encode_queue(connection)
+            self.assertEqual([job["job_id"] for job in summary["needs_attention"]], ["latest-attention"])
             self.assertEqual(summary["needs_attention_count"], 1)
             telemetry = web_app._decorate_encode_queue_for_scheduler(self.config, summary)["telemetry"]
             self.assertEqual(telemetry["left_out_needs_attention_item_count"], 1)
@@ -4191,9 +4199,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertFalse(build_folder_workflow_state(connection, "tv/show").needs_owner)
             self.assertNotIn("tv/show", web_app._folder_needs_attention_badges(connection))
             for precomputed in (None, {}):
-                self.assertNotEqual(web_app._folder_review_badge(
+                self.assertEqual(web_app._folder_review_badge(
                     self.config, "tv/show", connection, needs_attention_badges=precomputed,
-                )["label"], "Needs attention")
+                ), default_badge)
             historical = load_encode_job(connection, "old")
             assert historical is not None
             self.assertEqual(historical["status"], "needs_attention")
@@ -4209,6 +4217,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             assert parent is not None
             parent.update(job_kind="folder", item_count=3, progress={
                 "left_out_needs_attention_item_count": 1, "left_out_failed_item_count": 2,
+                "unfinished_breakdown": [{"count": 3, "label": "fixture hold", "needs_owner": True}],
             })
             save_encode_job(connection, parent)
             for index, status in enumerate(("needs_attention", "failed", "stopped")):
@@ -4226,6 +4235,20 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     queue = web_app._decorate_encode_queue_for_scheduler(self.config, summarize_encode_queue(connection))
                     self.assertEqual(queue["telemetry"]["left_out_needs_attention_item_count"], 1)
                     self.assertEqual(queue["telemetry"]["left_out_failed_item_count"], 1)
+                    self.assertEqual(web_app._folder_needs_attention_badges(connection)["tv/show"]["detail"],
+                                     unfinished_items_summary(queue["telemetry"]))
+            connection.execute(update(library_items).where(library_items.c.id == ids[0]).values(status="promoted"))
+            parent["status"] = "needs_attention"
+            for reports_parts in (True, False):
+                with self.subTest(reports_parts=reports_parts):
+                    if not reports_parts:
+                        parent["progress"] = {}
+                    save_encode_job(connection, parent)
+                    queue = web_app._decorate_encode_queue_for_scheduler(self.config, summarize_encode_queue(connection))
+                    self.assertEqual(queue["telemetry"]["left_out_needs_attention_item_count"], 0)
+                    self.assertEqual(queue["telemetry"]["left_out_failed_item_count"], 1)
+                    self.assertEqual(queue["needs_attention"][0]["scheduler_status_copy"],
+                                     unfinished_items_summary(queue["telemetry"]))
 
     def test_encode_queue_summary_exposes_every_attention_job(self) -> None:
         self._write_manifest("manifest-attention-list.json", [])

@@ -56,7 +56,7 @@ from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, DISPLAY_E
     ensure_queue_state, load_active_encode_job_for_prefix, load_latest_encode_job, \
     repair_persisted_encode_job_hosts, \
     queue_position as encode_queue_position, save_encode_job, summarize_encode_queue, \
-    unfinished_breakdown_groups, unfinished_breakdown_summary
+    unfinished_breakdown_groups, unfinished_breakdown_summary, unfinished_items_summary
 from mediaforce.execution import (
     build_svt_params,
     describe_item_plan,
@@ -2956,8 +2956,16 @@ def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, 
             ),
         }
     counts = encode_job_attention_counts(connection, attention_jobs) if attention_jobs else {}
-    return {str(job["prefix"]): badges[str(job["prefix"])] for job in attention_jobs
-            if sum(counts.get(str(job["job_id"]), {"unknown": 1}).values()) > 0}
+    for job in attention_jobs:
+        current = counts.get(str(job["job_id"]))
+        if current is None:
+            continue
+        prefix = str(job["prefix"])
+        if sum(current.values()) == 0:
+            del badges[prefix]
+        else:
+            badges[prefix]["detail"] = unfinished_items_summary(current)
+    return badges
 
 
 def _folder_calibration_job_badges(connection: DBClient) -> dict[str, dict[str, str | None]]:
