@@ -17,6 +17,7 @@ final class AttentionTests: XCTestCase {
         computers: [(key: String, state: String, needsYou: Bool)] = [],
         computerReason: String? = nil,
         computerSince: String? = nil,
+        kinds: [(kind: String, sampleSeason: String)] = [],
         backups: Int = 0
     ) throws -> MainWindowFacts {
         let finishedJSON = finished.map { season in
@@ -28,6 +29,9 @@ final class AttentionTests: XCTestCase {
         let samplesJSON = waitingSamples.map { sample in
             #"{"prefix": "\#(sample.prefix)", "show_prefix": "tv/Expanse", "show": "The Expanse", "season": 3, "state": "\#(sample.state)", "action": "\#(sample.action)", "failure": null}"#
         }
+        let kindsJSON = kinds.map { kind in
+            #"{"kind": "\#(kind.kind)", "sample_season": "\#(kind.sampleSeason)"}"#
+        }
         let reason = computerReason.map { #""\#($0)""# } ?? "null"
         let since = computerSince.map { #""\#($0)""# } ?? "null"
         let computersJSON = computers.map { computer in
@@ -35,7 +39,7 @@ final class AttentionTests: XCTestCase {
         }
         let json = """
         {"observed_at": "2026-10-24T12:00:00+00:00",
-         "work": {"state": "idle", "paused_by_owner": false, "stop_reasons": [], "running_count": 0, "waiting_count": 0},
+         "work": {"state": "idle", "paused_by_owner": false, "stop_reasons": [], "running_count": 0, "waiting_count": 0, "kinds_needing_you": [\(kindsJSON.joined(separator: ","))]},
          "library": {"tv": {"show_count": 0, "season_count": 0, "episode_count": 0, "total_bytes": 0, "original_bytes": 0},
                      "movies": {"title_count": 0, "total_bytes": 0, "original_bytes": 0},
                      "other": {"item_count": 0, "total_bytes": 0, "original_bytes": 0}},
@@ -53,6 +57,21 @@ final class AttentionTests: XCTestCase {
 
     private let older = Finished(prefix: "tv/F/Season 2", at: "2026-10-20T00:00:00+00:00")
     private let newer = Finished(prefix: "tv/F/Season 3", at: "2026-10-22T00:00:00+00:00")
+
+    func testAKindDecisionNotifiesOnceCountsTheBadgeAndOpensTheKind() throws {
+        let before = Attention.review(try facts(), remembered: nil).memory
+        let pending = try facts(kinds: [("darker_live_action", "tv/The Blacklist/Season 10")])
+        let first = Attention.review(pending, remembered: before)
+        XCTAssertEqual(first.badgeCount, 1)
+        let sampleWaiting = try facts(waitingSamples: [("tv/E/Season 3", "ready_to_compare", "review_sample")])
+        XCTAssertEqual(Words.workHeadline(pending), Words.workHeadline(sampleWaiting))
+        XCTAssertNotEqual(Words.workHeadline(pending), Words.workHeadline(try facts()))
+        XCTAssertNotNil(Words.workExplanation(pending))
+        XCTAssertEqual(first.notices.map(\.opens), [.kind("darker_live_action")])
+        XCTAssertEqual(Attention.waitingItems(pending), first.notices)
+        XCTAssertTrue(Attention.review(pending, remembered: first.memory).notices.isEmpty)
+        XCTAssertEqual(Attention.review(try facts(), remembered: first.memory).badgeCount, 0)
+    }
 
     func testFirstLookNotifiesNothingButCountsTheBadge() throws {
         let now = try facts(finished: [older], waitingSamples: [("tv/E/Season 3", "ready_to_compare", "review_sample")], backups: 4)

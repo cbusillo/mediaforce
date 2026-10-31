@@ -78,6 +78,14 @@ struct Attention: Equatable, Sendable {
     }
 
     static func waitingNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {
+        let kinds = facts.work.kindsNeedingYou.map { kind in
+            AttentionNotice(
+                id: "kind:\(kind.kind):\(kind.sampleSeason)",
+                title: "\(Words.kindName(kind.kind)) needs your approval",
+                body: "Watch the sample and choose how this kind of content should look.",
+                opens: .kind(kind.kind)
+            )
+        }
         let samples = facts.samples.waitingOnYou.map(sampleNotice)
         let computers = facts.computers.filter(\.needsYou).map { computer in
             AttentionNotice(
@@ -95,7 +103,7 @@ struct Attention: Equatable, Sendable {
                 opens: .item(season.prefix)
             )
         }
-        return samples + seasons + computers
+        return kinds + samples + seasons + computers
     }
 
     private static func sampleNotice(_ sample: MainWindowFacts.Sample) -> AttentionNotice {

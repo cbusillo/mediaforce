@@ -81,14 +81,18 @@ def app_window_payload(
         controller_storage: Mapping[str, Any],
         storage_admits_work: bool,
         observed_at: datetime,
+        kinds: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     items = _present_items(connection, library_types)
     promotions = _promotions(connection)
     kept = _kept_original_rows(connection)
     seasons = _seasons(items)
     cards = [card for card in season_cards if card.get("prefix")]
+    pending_kinds = [{"kind": kind["kind"], "sample_season": kind["sample_season"]} for kind in kinds if kind.get("needs_you")]
+    kind_samples = {kind["sample_season"] for kind in pending_kinds}
     samples = _samples(cards)
     waiting_samples = {sample["prefix"] for sample in samples["waiting_on_you"]}
+    samples["waiting_on_you"] = [sample for sample in samples["waiting_on_you"] if sample["prefix"] not in kind_samples]
     finished = _finished_seasons(items, promotions, seasons, kept)
     events = _events(connection)
     computer_states = [_computer(row) for row in computers]
@@ -97,6 +101,7 @@ def app_window_payload(
         "observed_at": observed_at.isoformat(timespec="seconds"),
         "work": {
             **_work(connection, controller_storage, storage_admits_work, computer_states),
+            "kinds_needing_you": pending_kinds,
             "seasons_needing_you": [
                 _tv_season(season_identity(str(card["prefix"])), card) for card in cards
                 if (card.get("page_state") or {}).get("needs_you")

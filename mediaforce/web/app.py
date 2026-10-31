@@ -141,7 +141,7 @@ from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_wor
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
 from mediaforce.web.runtime.folder_state import state_slug
 from mediaforce.web.runtime.kind_approvals import KindAwareLoader, SeasonKinds, approve_kind_action, \
-    background_queue_blocker, kinds_payload, next_kind_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
+    background_queue_blocker, kind_snapshot, kinds_payload, next_kind_season, record_kind_attempt, sample_approval_kind, stop_kind_approval
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
@@ -1188,7 +1188,7 @@ def create_app(
     register_release_routes(app, work_snapshot=_release_work_snapshot)
 
     def _main_window_payload() -> dict[str, Any]:
-        with open_db(config.paths.db_path) as connection:
+        with open_db(config.paths.db_path) as connection, kind_snapshot(connection, config, _load_calibration_state):
             return app_window_payload(
                 connection,
                 library_types=config.library_type_map,
@@ -1197,6 +1197,7 @@ def create_app(
                 controller_storage=controller_storage_recovery_snapshot(config),
                 storage_admits_work=controller_storage_admission_issue(config, None) is None,
                 observed_at=datetime.now(UTC),
+                kinds=kinds_payload(connection, config, load_calibration_state=_load_calibration_state)["kinds"],
             )
 
     def _tv_shows_payload() -> dict[str, Any]:

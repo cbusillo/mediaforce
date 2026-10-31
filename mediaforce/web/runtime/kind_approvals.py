@@ -13,8 +13,10 @@ import json
 import os
 import tempfile
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -176,7 +178,7 @@ class KindAwareLoader:
                 if settings:
                     boundaries[kind] = object_dict(load(config, settings[0]["from_prefix"])).get("accepted_at")
                 else:
-                    representative = _newest_sample(connection, [row["season"] for row in rows if row["kind"] == kind])
+                    representative = contents.samples.get(kind)
                     boundaries[kind] = object_dict(representative).get("created_at")
             jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in rows])
         waits.update({row["season"]: SampleWait(kind=row["kind"]) for row in rows
@@ -450,15 +452,9 @@ def _lent_settings(
 SAMPLE_IN_HAND_STATUSES = SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES | SAMPLE_FAILED_STATUSES | {"pending_review", "completed"}
 
 
-def _newest_sample(connection: DBClient, seasons: list[str]) -> dict[str, Any] | None:
-    jobs = [job for job in load_latest_jobs_for_prefixes(connection, seasons).values()
+def _samples_in_hand(connection: DBClient, seasons: Collection[str]) -> list[dict[str, Any]]:
+    return [job for job in load_latest_jobs_for_prefixes(connection, list(seasons)).values()
             if job.get("lane") == "sample" and job.get("status") in SAMPLE_IN_HAND_STATUSES]
-    return max(jobs, key=lambda job: str(job.get("created_at") or "")) if jobs else None
-
-
-def _season_with_sample(connection: DBClient, seasons: list[str]) -> str | None:
-    job = _newest_sample(connection, seasons)
-    return str(job["prefix"]) if job else None
 
 
 def _kind_report(
@@ -478,20 +474,50 @@ class _KindContents:
     episodes: dict[str, list[tuple[str, int]]]
     approvals: dict[str, list[_ShowApproval]]
     report: dict[str, Any]
+    samples: dict[str, dict[str, Any]]
+
+
+_request_kind_contents: ContextVar[tuple[MediaforceConfig, _KindContents] | None] = ContextVar("kind_contents", default=None)
+
+
+@contextmanager
+def kind_snapshot(connection: DBClient, config: MediaforceConfig, load: LoadCalibrationState) -> Iterator[None]:
+    token = _request_kind_contents.set((config, _kind_contents(connection, config, load)))
+    try:
+        yield
+    finally:
+        _request_kind_contents.reset(token)
 
 
 def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibration_state: LoadCalibrationState) -> _KindContents:
+    snapshot = _request_kind_contents.get()
+    if snapshot is not None and snapshot[0] is config:
+        return snapshot[1]
+
     def folders_only(loader_config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
         return load_calibration_state(loader_config, prefix)
 
     episodes = _tv_episodes(connection, config)
     approvals_by_show = {show: found for show, files in episodes.items()
                          if (found := _show_approvals(config, show, files, folders_only))}
+    samples = _samples_in_hand(connection, {str(season) for files in episodes.values() for path, _ in files
+                                                if (season := season_prefix_of(config, path))})
     report = _kind_report(
         connection, config, folders_only,
-        sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found},
+        sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found}
+                       | {str(job["prefix"]) for job in samples},
     )
-    return _KindContents(episodes, approvals_by_show, report)
+    kinds_by_season = object_dict(report.get("kinds_by_season"))
+    newest: dict[str, dict[str, Any]] = {}
+    for job in sorted(samples, key=lambda sample: str(sample.get("created_at") or "")):
+        kind = kinds_by_season.get(job["prefix"])
+        if kind is None:
+            continue
+        if kind in APPROVABLE_KINDS and job.get("status") == "completed" and not _scalable_sample(
+                load_calibration_state(config, str(job["prefix"]))):
+            continue
+        newest[str(kind)] = job
+    return _KindContents(episodes, approvals_by_show, report, newest)
 
 
 def kinds_payload(
@@ -528,7 +554,7 @@ def kinds_payload(
             show = "/".join(str(approval["from_prefix"]).split("/")[:2])
             lent = next((entry for entry in approvals_by_show.get(show, []) if entry.approval.prefix == approval["from_prefix"]), None)
             approval["library_item_id"] = _episode_made_under(episodes.get(show, []), lent.seasons) if lent else None
-    return {
+    payload: dict[str, Any] = {
         "kinds": [{
             "kind": kind,
             "one_time": kind not in APPROVABLE_KINDS,
@@ -538,9 +564,9 @@ def kinds_payload(
                       sorted(shows[kind].items(), key=lambda entry: (-entry[1]["waiting_bytes"], entry[0]))],
             "settings": _lent_settings(kind, approvals_by_show, episodes, kinds_by_season),
             "approval": approvals[kind],
-            "sample_season": _approved_sample_season(config, kind) or _season_with_sample(
-                connection, [season for found in seasons[kind].values() for _, season in found],
-            ),
+            "sample_season": _approved_sample_season(config, kind) or object_dict(contents.samples.get(kind)).get("prefix"),
+            "needs_you": kind in APPROVABLE_KINDS and approvals[kind] is None
+                         and object_dict(contents.samples.get(kind)).get("status") in {"pending_review", "completed"},
         } for kind in KINDS_IN_ORDER],
         "left_out": [{"season": row["season"], "kind": row["kind"], "waiting_bytes": int(row["waiting_bytes"])}
                      for row in report["seasons"] if row["kind"] in LEFT_OUT_KINDS],
@@ -548,6 +574,14 @@ def kinds_payload(
         "unmeasured_seasons": int(object_dict(totals.get("unmeasured")).get("seasons") or 0),
         "folder_approved_seasons": int(object_dict(totals.get("folder_approved")).get("seasons") or 0),
     }
+    for entry in payload["kinds"]:
+        if entry["needs_you"]:
+            season = str(entry["sample_season"])
+            entry["needs_you"] = sample_approval_kind(
+                config, payload, season, load_calibration_state(config, season),
+                kind_of=lambda _config, prefix: kinds_by_season.get(prefix),
+            ) == entry["kind"]
+    return payload
 
 
 def _approved_sample_season(config: MediaforceConfig, kind: str) -> str | None:
@@ -565,14 +599,19 @@ def sample_approval_kind(
                  if entry["kind"] in APPROVABLE_KINDS and entry.get("sample_season") == prefix
                  and _approved_sample_season(config, str(entry["kind"])) is None), None)
     payload = object_dict(calibration)
-    if kind is None or not payload.get("job_id") or str(payload.get("mode") or "sample") != "sample":
+    if kind is None or not _scalable_sample(payload):
         return None
+    return kind if _sample_kind_refusal(config, kind, payload, kind_of) is None else None
+
+
+def _scalable_sample(calibration: Mapping[str, Any] | None) -> bool:
+    payload = object_dict(calibration)
+    if not payload.get("job_id") or str(payload.get("mode") or "sample") != "sample":
+        return False
     contract = production_approval_contract({
         **payload, "accepted_sample_job_id": payload["job_id"], "accepted_policy_hash": calibration_policy_hash(payload),
     })
-    if contract is None or _size_extension_refusal(contract) is not None:
-        return None
-    return kind if _sample_kind_refusal(config, kind, payload, kind_of) is None else None
+    return contract is not None and _size_extension_refusal(contract) is None
 
 
 def _sample_kind_refusal(config: MediaforceConfig, kind: str, calibration: Mapping[str, Any], kind_of: KindOf) -> str | None:

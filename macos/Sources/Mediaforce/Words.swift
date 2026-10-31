@@ -223,7 +223,7 @@ extension Words {
         if work.waitingCount > 0 { return "Waiting to start" }
         if !work.originalCheckWaitReasons.isEmpty { return "Waiting to check new originals" }
         if work.checksPaused { return checksPausedBar }
-        return facts.samples.waitingOnYou.isEmpty && work.seasonsNeedingYou.isEmpty ? "All caught up" : "Waiting for you"
+        return Attention.waitingOnYou(facts) > 0 ? "Waiting for you" : "All caught up"
     }
 
     static func workExplanation(_ facts: MainWindowFacts) -> String? {
@@ -246,6 +246,9 @@ extension Words {
         sentences.append(contentsOf: work.originalCheckWaitReasons)
         if work.runningCount == 0, work.waitingCount == 0, !facts.samples.waitingOnYou.isEmpty {
             sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
+        }
+        if !work.kindsNeedingYou.isEmpty {
+            sentences.append("\(count(work.kindsNeedingYou.count, "kind")) waiting for your approval in Needs you.")
         }
         if !work.seasonsNeedingYou.isEmpty {
             sentences.append("\(count(work.seasonsNeedingYou.count, "season")) waiting for you in Media.")
@@ -395,6 +398,7 @@ extension Words {
 }
 
 extension Words {
+    static let watchSample = "Watch sample"
     static let watchApprovedSample = "Watch approved sample"
     static let approveOnlySeason = "Approve only this season"
 

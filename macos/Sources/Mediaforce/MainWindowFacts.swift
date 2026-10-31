@@ -24,10 +24,11 @@ struct MainWindowFacts: Decodable, Sendable {
         var runningSeasons: [Season] = []
         let waitingCount: Int
         var originalCheckWaitReasons: [String] = []
+        var kindsNeedingYou: [PendingKind] = []
         var seasonsNeedingYou: [TVShowsFacts.Season] = []
 
         private enum CodingKeys: String, CodingKey {
-            case state, pausedByOwner, checksPaused, stopReasons, runningCount, runningSeasons, waitingCount, originalCheckWaitReasons, seasonsNeedingYou
+            case state, pausedByOwner, checksPaused, stopReasons, runningCount, runningSeasons, waitingCount, originalCheckWaitReasons, seasonsNeedingYou, kindsNeedingYou
         }
 
         init(from decoder: Decoder) throws {
@@ -40,8 +41,14 @@ struct MainWindowFacts: Decodable, Sendable {
             runningSeasons = try container.decodeIfPresent([Season].self, forKey: .runningSeasons) ?? []
             waitingCount = try container.decode(Int.self, forKey: .waitingCount)
             originalCheckWaitReasons = try container.decodeIfPresent([String].self, forKey: .originalCheckWaitReasons) ?? []
+            kindsNeedingYou = try container.decodeIfPresent([PendingKind].self, forKey: .kindsNeedingYou) ?? []
             seasonsNeedingYou = try container.decodeIfPresent([TVShowsFacts.Season].self, forKey: .seasonsNeedingYou) ?? []
         }
+    }
+
+    struct PendingKind: Decodable, Sendable {
+        let kind: String
+        let sampleSeason: String
     }
 
     struct Library: Decodable, Sendable {

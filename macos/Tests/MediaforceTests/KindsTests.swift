@@ -29,6 +29,16 @@ final class KindsTests: XCTestCase {
         XCTAssertEqual(decided.approval?.showPrefix, "tv/Raising Hope")
     }
 
+    func testTheNewestSamplesSettingComesBeforeAnOlderWatchableShow() throws {
+        let older = try facts().kinds[0].settings[0]
+        let latest = KindsFacts.Setting(show: "tv/The Blacklist", fromPrefix: "tv/The Blacklist/Season 10",
+                                       sizeGoalMode: "normalized", sizeGoalMb: 300, libraryItemId: nil)
+        let pending = KindsFacts.Kind(kind: "darker_live_action", oneTime: false, seasons: 1, waitingBytes: 1000,
+                                     shows: [], settings: [older, latest], approval: nil, sampleSeason: latest.fromPrefix)
+        XCTAssertEqual(pending.sampleSetting, latest)
+        XCTAssertEqual(pending.firstSetting, latest)
+    }
+
     func testTheApprovedKindCarriesItsOwnSavedSampleClips() throws {
         let decided = try facts(approval: """
         {"from_prefix": "tv/Raising Hope/Season 2", "approved_at": "now", "library_item_id": null,

@@ -49,7 +49,7 @@ struct NeedsYouPage: View {
                         kind: MediaKind(rawValue: String(prefix.split(separator: "/").first ?? "")) ?? .other,
                         posters: posters, width: 44)
         default:
-            Image(systemName: item.opens == .spaceSaved ? "trash" : "desktopcomputer")
+            Image(systemName: symbol(item.opens))
                 .font(.title2)
                 .foregroundStyle(.secondary)
                 .frame(width: 44, height: 66)
@@ -57,8 +57,17 @@ struct NeedsYouPage: View {
         }
     }
 
+    private func symbol(_ place: Place?) -> String {
+        switch place {
+        case .kind: "film"
+        case .spaceSaved: "trash"
+        default: "desktopcomputer"
+        }
+    }
+
     private func actionTitle(_ place: Place) -> String {
         switch place {
+        case .kind: "Review kind"
         case .sample: "Open sample"
         case .item: "Open"
         case .computer: "Open computer"
