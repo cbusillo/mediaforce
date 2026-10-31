@@ -486,15 +486,19 @@ def summarize_encode_queue(
     )
     from mediaforce.library.workflow_state import encode_job_attention_counts
 
+    attention_jobs = [*needs_attention, *(job for job in [*running, *queued]
+                                        if "left_out_needs_attention_item_count" in object_dict(job.get("progress")))]
     attention_counts = (
-        encode_job_attention_counts(connection, needs_attention, library_types=library_types) if needs_attention else {}
+        encode_job_attention_counts(connection, attention_jobs, library_types=library_types) if attention_jobs else {}
     )
-    needs_attention = [job for job in needs_attention if attention_counts.get(str(job["job_id"]), 1) > 0]
-    for job in needs_attention:
-        if (count := attention_counts.get(str(job["job_id"]))) is not None:
-            job["needs_attention_item_count"] = count
+    needs_attention = [job for job in needs_attention if sum(attention_counts.get(str(job["job_id"]), {"unknown": 1}).values()) > 0]
+    for job in attention_jobs:
+        if (current := attention_counts.get(str(job["job_id"]))) is not None:
+            job["needs_attention_item_count"] = current["needs_attention"]
             if "left_out_needs_attention_item_count" in object_dict(job.get("progress")):
-                job["progress"] = {**object_dict(job.get("progress")), "left_out_needs_attention_item_count": count}
+                job["progress"] = {**object_dict(job.get("progress")),
+                                   "left_out_needs_attention_item_count": current["needs_attention"],
+                                   "left_out_failed_item_count": current["failed"]}
     counts["needs_attention"] = len(needs_attention)
     for job in [*queued, *running, *recent, *needs_attention]:
         job["media_scope"] = resolve_media_scope(
