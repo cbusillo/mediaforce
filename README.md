@@ -28,7 +28,7 @@ The current implementation covers:
 - the Mac app: TV, Movies, and Other libraries, Activity, Finished, and
   Settings, talking to the local server's API
 - “Needs you” gathers every item counted by the Dock badge, with links to sample decisions,
-  seasons, computers, and original-backup cleanup. Opening the app from the Dock, its waiting
+  kind approvals, seasons, computers, and original-backup cleanup. Opening the app from the Dock, its waiting
   menu-bar notice, or a notification shows the list while anything waits
 - the Mac Media table fills the available window below its filters, with one
   scrollbar for its rows and a visible column header while browsing
@@ -48,7 +48,8 @@ Live-action seasons can follow one approval for their kind of content. Older una
 season samples stop asking separately when they finished before the kind was
 approved or before its newest sample was requested. Newer samples, uncertain timing,
 and existing folder approvals keep their own decision. While the kind waits for a
-choice, its newest sample stays available. Seasons missing original measurements wait for measuring without a sample decision, even
+choice, its newest sample stays available, even after that season finishes. A ready
+sample puts the kind in Needs you and opens its approval there. Seasons missing original measurements wait for measuring without a sample decision, even
 when an older sample is saved. After measuring, they follow their kind; measured
 seasons without a reusable kind keep their own sample decisions. A blocked
 measurement names its reason on the season and sample page; it does not ask

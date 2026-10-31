@@ -1197,6 +1197,7 @@ def create_app(
                 controller_storage=controller_storage_recovery_snapshot(config),
                 storage_admits_work=controller_storage_admission_issue(config, None) is None,
                 observed_at=datetime.now(UTC),
+                kinds=kinds_payload(connection, config, load_calibration_state=_load_calibration_state)["kinds"],
             )
 
     def _tv_shows_payload() -> dict[str, Any]:

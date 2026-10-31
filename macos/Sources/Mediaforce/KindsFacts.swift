@@ -22,12 +22,17 @@ struct KindsFacts: Decodable, Sendable, Equatable {
 
         var sampleShow: String? { sampleSeason?.split(separator: "/").prefix(2).joined(separator: "/") }
 
+        var sampleSetting: Setting? {
+            guard let sampleSeason else { return nil }
+            return settings.first { sampleSeason == $0.fromPrefix || sampleSeason.hasPrefix("\($0.fromPrefix)/") }
+        }
+
         /// The setting the page plays first: the decided one, else the first with an episode to watch.
         var firstSetting: Setting? {
             if let approval {
                 return settings.first { $0.fromPrefix == approval.fromPrefix } ?? approval.setting
             }
-            return settings.first { $0.libraryItemId != nil } ?? settings.first
+            return sampleSetting ?? settings.first { $0.libraryItemId != nil } ?? settings.first
         }
     }
 

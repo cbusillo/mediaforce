@@ -176,7 +176,7 @@ class KindAwareLoader:
                 if settings:
                     boundaries[kind] = object_dict(load(config, settings[0]["from_prefix"])).get("accepted_at")
                 else:
-                    representative = _newest_sample(connection, [row["season"] for row in rows if row["kind"] == kind])
+                    representative = contents.samples.get(kind)
                     boundaries[kind] = object_dict(representative).get("created_at")
             jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in rows])
         waits.update({row["season"]: SampleWait(kind=row["kind"]) for row in rows
@@ -450,15 +450,9 @@ def _lent_settings(
 SAMPLE_IN_HAND_STATUSES = SAMPLE_RUNNING_STATUSES | SAMPLE_WAITING_STATUSES | SAMPLE_FAILED_STATUSES | {"pending_review", "completed"}
 
 
-def _newest_sample(connection: DBClient, seasons: list[str]) -> dict[str, Any] | None:
-    jobs = [job for job in load_latest_jobs_for_prefixes(connection, seasons).values()
+def _samples_in_hand(connection: DBClient, seasons: Collection[str]) -> list[dict[str, Any]]:
+    return [job for job in load_latest_jobs_for_prefixes(connection, list(seasons)).values()
             if job.get("lane") == "sample" and job.get("status") in SAMPLE_IN_HAND_STATUSES]
-    return max(jobs, key=lambda job: str(job.get("created_at") or "")) if jobs else None
-
-
-def _season_with_sample(connection: DBClient, seasons: list[str]) -> str | None:
-    job = _newest_sample(connection, seasons)
-    return str(job["prefix"]) if job else None
 
 
 def _kind_report(
@@ -478,6 +472,7 @@ class _KindContents:
     episodes: dict[str, list[tuple[str, int]]]
     approvals: dict[str, list[_ShowApproval]]
     report: dict[str, Any]
+    samples: dict[str, dict[str, Any]]
 
 
 def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibration_state: LoadCalibrationState) -> _KindContents:
@@ -487,11 +482,18 @@ def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibrat
     episodes = _tv_episodes(connection, config)
     approvals_by_show = {show: found for show, files in episodes.items()
                          if (found := _show_approvals(config, show, files, folders_only))}
+    samples = _samples_in_hand(connection, {str(season) for files in episodes.values() for path, _ in files
+                                                if (season := season_prefix_of(config, path))})
     report = _kind_report(
         connection, config, folders_only,
-        sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found},
+        sample_seasons={entry.sample_season for found in approvals_by_show.values() for entry in found}
+                       | {str(job["prefix"]) for job in samples},
     )
-    return _KindContents(episodes, approvals_by_show, report)
+    kinds_by_season = object_dict(report.get("kinds_by_season"))
+    newest = {str(kinds_by_season[job["prefix"]]): job
+              for job in sorted(samples, key=lambda sample: str(sample.get("created_at") or ""))
+              if job["prefix"] in kinds_by_season}
+    return _KindContents(episodes, approvals_by_show, report, newest)
 
 
 def kinds_payload(
@@ -538,9 +540,9 @@ def kinds_payload(
                       sorted(shows[kind].items(), key=lambda entry: (-entry[1]["waiting_bytes"], entry[0]))],
             "settings": _lent_settings(kind, approvals_by_show, episodes, kinds_by_season),
             "approval": approvals[kind],
-            "sample_season": _approved_sample_season(config, kind) or _season_with_sample(
-                connection, [season for found in seasons[kind].values() for _, season in found],
-            ),
+            "sample_season": _approved_sample_season(config, kind) or object_dict(contents.samples.get(kind)).get("prefix"),
+            "needs_you": kind in APPROVABLE_KINDS and approvals[kind] is None
+                         and object_dict(contents.samples.get(kind)).get("status") in {"pending_review", "completed"},
         } for kind in KINDS_IN_ORDER],
         "left_out": [{"season": row["season"], "kind": row["kind"], "waiting_bytes": int(row["waiting_bytes"])}
                      for row in report["seasons"] if row["kind"] in LEFT_OUT_KINDS],

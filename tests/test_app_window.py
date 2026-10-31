@@ -506,3 +506,20 @@ def test_non_sample_season_attention_reaches_main_window_without_counting_sample
     facts = _payload(connection, cards=cards)
     assert [sample["prefix"] for sample in facts["samples"]["waiting_on_you"]] == ["tv/A/Season 1"]
     assert [season["prefix"] for season in facts["work"]["seasons_needing_you"]] == ["tv/B/Season 2"]
+
+
+@pytest.mark.parametrize("state", ["ready_to_compare", "making_season"])
+def test_kind_decision_replaces_its_sample_row_but_keeps_other_season_decisions(connection: DBClient, state: str) -> None:
+    prefix = "tv/Drama/Season 1"
+    cards = [{"prefix": prefix, "page_state": {"key": state, "needs_you": True}},
+             {"prefix": "tv/Other/Season 1", "page_state": {"key": "needs_help", "needs_you": True}}]
+    kinds = [{"kind": "darker_live_action", "sample_season": prefix, "needs_you": True},
+             {"kind": "bright_live_action", "sample_season": "tv/Other/Season 1", "needs_you": False}]
+    facts = app_window_payload(
+        connection, library_types=LIBRARY_TYPES, season_cards=cards, computers=[], controller_storage=READY_STORAGE,
+        storage_admits_work=True, observed_at=datetime.now(UTC), kinds=kinds,
+    )
+    assert facts["work"]["kinds_needing_you"] == [{"kind": kinds[0]["kind"], "sample_season": prefix}]
+    assert not facts["samples"]["waiting_on_you"]
+    expected = [cards[1]["prefix"]] if state == "ready_to_compare" else [prefix, cards[1]["prefix"]]
+    assert [season["prefix"] for season in facts["work"]["seasons_needing_you"]] == expected

@@ -17,11 +17,11 @@ struct KindPage: View {
 
     var body: some View {
         let setting = kind.settings.first { $0.show == chosen } ?? kind.firstSetting
-        let offering = kind.approval == nil && kind.settings.isEmpty
+        let offering = kind.approval == nil && chosen == nil && (kind.sampleSeason != nil || kind.settings.isEmpty)
         let offer: ((KindsFacts.Show) -> Void)? = offering && kind.sampleSeason == nil && !asking ? { makeSample($0) } : nil
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                if kind.shows.isEmpty && kind.settings.isEmpty && kind.approval == nil {
+                if kind.shows.isEmpty && kind.settings.isEmpty && kind.approval == nil && kind.sampleSeason == nil {
                     Text(Words.kindEmpty(kind.kind)).foregroundStyle(.secondary)
                 } else if offering, let season = kind.sampleSeason {
                     SampleWork(prefix: season, model: model, facts: $sample, namesSeason: true, openItem: openItem)
@@ -47,7 +47,7 @@ struct KindPage: View {
                 } else if setting != nil {
                     Text(Words.kindNothingToWatch).foregroundStyle(.secondary)
                 }
-                if !offering {
+                if !offering || kind.sampleSetting != nil {
                     KindDecision(kind: kind, setting: setting, model: model, openItem: openItem,
                                  showSample: chosen != nil && kind.approval?.sampleMoments?.isEmpty == false ? { chosen = nil } : nil)
                 }
