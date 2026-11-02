@@ -1424,6 +1424,7 @@ def test_unapproved_kind_is_visible_before_and_after_its_sample(tmp_path: Path, 
 
 
 @pytest.mark.parametrize("codec,enabled,reason", [("wmv2", True, "original_format_unidentified"),
+                                                 ("av1", True, "original_format_unidentified"),
                                                  ("h264", False, "measurement_library_disabled")])
 def test_measuring_outside_the_pipeline_names_the_reason_and_next_action(
         tmp_path: Path, codec: str, enabled: bool, reason: str,
@@ -1433,11 +1434,13 @@ def test_measuring_outside_the_pipeline_names_the_reason_and_next_action(
         config.raw["media"]["libraries"][0]["availability"] = "browse_only"
     with open_db(config.paths.db_path) as connection:
         _content_item(connection, EPISODE, status="discovered", codec=codec, current_dark=0.5)
+        if codec == "av1":
+            _content_item(connection, f"{SEASON}/e02.mkv", status="discovered", codec="hevc", current_dark=0.5)
         connection.commit()
         load = KindAwareLoader(lambda *_args: None, SeasonKinds())
         wait = load.sample_waits(config)[SEASON]
         state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
-    assert reason in wait.measurement_reasons
+    assert wait.measurement_reasons is not None and reason in wait.measurement_reasons
     assert state["key"] == "waiting_for_measurement" and not state["needs_you"]
     detail = state["wait_detail"]
     assert "original" in detail.lower() if enabled else "Settings" in detail
