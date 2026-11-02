@@ -145,6 +145,14 @@ def make_sample(
     return {"ok": True, "code": None} if result.get("ok") else REFUSED
 
 
+def kind_samples_to_make(kinds: Iterable[Mapping[str, Any]], cards: Iterable[Mapping[str, Any]]) -> list[str]:
+    states = {str(card["prefix"]): object_dict(card.get("page_state")) for card in cards}
+    return [str(show["sample_season"]) for kind in kinds
+            if not kind.get("approval") and not kind.get("sample_season")
+            for show in object_list(kind.get("shows"))[:1]
+            if states.get(str(show["sample_season"]), {}).get("key") in {"needs_test", "waiting_for_kind"}]
+
+
 def samples_to_remake(cards: Iterable[Mapping[str, Any]], failed_in_a_row: Callable[[str], int]) -> list[str]:
     """The seasons whose sample needs making again, which Mediaforce makes again by itself at the season's size goal
     (#1149), until that season's samples have failed SAMPLE_REMAKE_LIMIT times in a row."""

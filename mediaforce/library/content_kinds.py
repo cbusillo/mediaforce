@@ -284,9 +284,10 @@ def _measurement_reasons(
         if original is not None:
             if original.availability == "unavailable":
                 reasons.add("original_unavailable")
-        elif (item["video_codec"] not in HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]
-              or (measurement_roots is not None and item["media_root"] not in measurement_roots)):
-            reasons.add("automatic_measurement_unavailable")
+        elif item["video_codec"] not in HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]:
+            reasons.add("original_format_unidentified")
+        if measurement_roots is not None and item["media_root"] not in measurement_roots:
+            reasons.add("measurement_library_disabled")
     reasons.update(failed[int(item["id"])] for item in episodes if int(item["id"]) in failed)
     return sorted(reason for reason in reasons if reason)
 

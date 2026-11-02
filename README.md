@@ -48,12 +48,17 @@ Live-action seasons can follow one approval for their kind of content. Older una
 season samples stop asking separately when they finished before the kind was
 approved or before its newest sample was requested. Newer samples, uncertain timing,
 and existing folder approvals keep their own decision. While the kind waits for a
-choice, its newest sample stays available, even after that season finishes. A ready
-sample puts the kind in Needs you and opens its approval there. Seasons missing original measurements wait for measuring without a sample decision, even
+choice, its newest sample stays available, even after that season finishes.
+Every unapproved kind with waiting shows appears in Needs you, including while
+its sample is being prepared or needs attention. Mediaforce automatically requests
+a first sample using the existing sample queue and size settings. Needs you
+notifies again when the sample is ready to watch. Cartoons and 4K continue to need
+a choice for each show. Seasons missing original measurements wait for measuring without a sample decision, even
 when an older sample is saved. After measuring, they follow their kind; measured
 seasons without a reusable kind keep their own sample decisions. A blocked
-measurement names its reason on the season and sample page; it does not ask
-for approval of the old sample.
+measurement names its reason and next action on the season and sample page:
+enable library processing in Settings when disabled, or keep the original while
+Mediaforce needs support to identify its format safely. It does not ask for approval of the old sample.
 Saved sample files are retained. Finished production files are checked and
 published automatically one at a time under their current approval. Manual
 checking and publishing remain explicit overrides. Rollback copies stay until

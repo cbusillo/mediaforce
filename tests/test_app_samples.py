@@ -12,7 +12,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime import folder_actions
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
-    samples_to_remake, start_compressing
+    kind_samples_to_make, samples_to_remake, start_compressing
 
 PREFIX = "tv/Lucifer/Season 2"
 
@@ -339,3 +339,22 @@ def test_a_post_save_kind_refusal_reports_the_saved_season_and_real_queue_result
     )
     assert result == {"ok": True, "compressing": False, "reason": "free_space_reserve", "kind_code": kind_code}
     assert calls == ["save", "queue"]
+
+
+@pytest.mark.parametrize("state", ["needs_test", "waiting_for_kind", "making_test", "ready_to_compare", "waiting_for_measurement", "needs_help"])
+def test_first_kind_sample_uses_existing_sample_flow_only_when_it_can_start(state: str) -> None:
+    kinds = [{"kind": "bright_live_action", "approval": None, "sample_season": None,
+              "shows": [{"sample_season": PREFIX}]}]
+    cards = [{"prefix": PREFIX, **_status(state, None)}]
+    assert kind_samples_to_make(kinds, cards) == ([PREFIX] if state in {"needs_test", "waiting_for_kind"} else [])
+    for settled in [{"approval": {"from_prefix": PREFIX}}, {"sample_season": PREFIX}]:
+        assert not kind_samples_to_make([kinds[0] | settled], cards)
+
+
+def test_first_kind_samples_choose_one_season_per_kind_and_never_invent_an_approval() -> None:
+    kinds = [{"kind": kind, "approval": None, "sample_season": None,
+              "shows": [{"sample_season": prefix}, {"sample_season": "tv/Other/Season 1"}]}
+             for kind, prefix in [("bright_live_action", PREFIX), ("cartoon", "tv/Cartoon/Season 1")]]
+    cards = [{"prefix": prefix, **_status("needs_test", "make_sample")}
+             for prefix in [PREFIX, "tv/Cartoon/Season 1", "tv/Other/Season 1"]]
+    assert kind_samples_to_make(kinds, cards) == [PREFIX, "tv/Cartoon/Season 1"]

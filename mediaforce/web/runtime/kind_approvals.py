@@ -576,8 +576,8 @@ def kinds_payload(
             "settings": _lent_settings(kind, approvals_by_show, episodes, kinds_by_season),
             "approval": approvals[kind],
             "sample_season": _approved_sample_season(config, kind) or object_dict(contents.samples.get(kind)).get("prefix"),
-            "needs_you": kind in APPROVABLE_KINDS and approvals[kind] is None
-                         and object_dict(contents.samples.get(kind)).get("status") in {"pending_review", "completed"},
+            "sample_status": object_dict(contents.samples.get(kind)).get("status") or "not_started",
+            "needs_you": approvals[kind] is None and bool(shows[kind]),
         } for kind in KINDS_IN_ORDER],
         "left_out": [{"season": row["season"], "kind": row["kind"], "waiting_bytes": int(row["waiting_bytes"])}
                      for row in report["seasons"] if row["kind"] in LEFT_OUT_KINDS],
@@ -586,12 +586,13 @@ def kinds_payload(
         "folder_approved_seasons": int(object_dict(totals.get("folder_approved")).get("seasons") or 0),
     }
     for entry in payload["kinds"]:
-        if entry["needs_you"]:
-            season = str(entry["sample_season"])
-            entry["needs_you"] = sample_approval_kind(
-                config, payload, season, load_calibration_state(config, season),
-                kind_of=lambda _config, prefix: kinds_by_season.get(prefix),
-            ) == entry["kind"]
+        season = entry["sample_season"]
+        entry["sample_ready"] = (entry["sample_status"] in {"pending_review", "completed"}
+                                 and (entry["one_time"] or sample_approval_kind(
+                                     config, payload, str(season), load_calibration_state(config, str(season)),
+                                     kind_of=lambda _config, prefix: kinds_by_season.get(prefix),
+                                 ) == entry["kind"]))
+        entry["needs_you"] = entry["needs_you"] or (approvals[entry["kind"]] is None and entry["sample_ready"])
     return payload
 
 

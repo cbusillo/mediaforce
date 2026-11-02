@@ -523,3 +523,23 @@ def test_kind_decision_replaces_its_sample_row_but_keeps_other_season_decisions(
     assert not facts["samples"]["waiting_on_you"]
     expected = [cards[1]["prefix"]] if state == "ready_to_compare" else [prefix, cards[1]["prefix"]]
     assert [season["prefix"] for season in facts["work"]["seasons_needing_you"]] == expected
+
+
+@pytest.mark.parametrize("sample_ready", [False, True])
+def test_waiting_kind_reaches_needs_you_before_its_sample_exists_and_keeps_unrelated_decisions(
+        connection: DBClient, sample_ready: bool,
+) -> None:
+    prefix = "tv/Drama/Season 1"
+    kind = {"kind": "darker_live_action", "sample_season": prefix if sample_ready else None,
+            "sample_status": "pending_review" if sample_ready else "not_started", "sample_ready": sample_ready,
+            "one_time": False, "needs_you": True}
+    facts = app_window_payload(
+        connection, library_types=LIBRARY_TYPES,
+        season_cards=[{"prefix": prefix, "page_state": {"key": "ready_to_compare", "needs_you": True}}],
+        computers=[], controller_storage=READY_STORAGE, storage_admits_work=True, observed_at=datetime.now(UTC), kinds=[kind],
+    )
+    pending = facts["work"]["kinds_needing_you"]
+    assert len(pending) == 1
+    assert pending[0]["sample_ready"] == sample_ready
+    assert pending[0]["sample_season"] == kind["sample_season"]
+    assert bool(facts["samples"]["waiting_on_you"]) != sample_ready

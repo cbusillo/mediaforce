@@ -135,7 +135,7 @@ from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status
 from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
-    samples_to_remake, start_compressing
+    kind_samples_to_make, samples_to_remake, start_compressing
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
@@ -1887,6 +1887,13 @@ def create_app(
     def _remake_waiting_samples() -> None:
         with open_db(config.paths.db_path) as connection:
             cards = [asdict(card) for card in _list_library_detail_cards(config, connection)]
+        for season in kind_samples_to_make(_kinds_payload()["kinds"], cards):
+            payloads = _season_payloads(season)
+            if payloads is None or season not in kind_samples_to_make(
+                    _kinds_payload()["kinds"], [{**payloads[1], "prefix": season}]):
+                continue
+            result = make_sample(*payloads, None, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action)
+            LOGGER.info("Making the first sample for %s: %s", season, result.get("code") or result.get("ok"))
         for season in samples_to_remake(cards, _sample_failures_in_a_row):
             # The season is read again just before its sample is made, so one the owner changed meanwhile is left alone.
             payloads = _season_payloads(season)

@@ -1348,11 +1348,12 @@ def test_finished_seasons_newer_sample_stays_with_its_kind_and_reaches_attention
         kinds = kinds_payload(connection, config, load_calibration_state=load)["kinds"]
     darker = next(kind for kind in kinds if kind["kind"] == DARKER)
     assert darker["sample_season"] == APPROVED_SEASON
-    assert darker["needs_you"] == (not kind_approved and sample_status in {"pending_review", "completed"})
+    assert darker["needs_you"] == (not kind_approved)
+    assert darker["sample_ready"] == (not kind_approved and sample_status in {"pending_review", "completed"})
 
 
 @pytest.mark.parametrize("missing", [False, True])
-def test_a_completed_sample_that_cannot_cover_a_kind_does_not_ask_or_hide_other_samples(tmp_path: Path, missing: bool) -> None:
+def test_a_completed_sample_that_cannot_cover_a_kind_does_not_offer_kind_approval_or_hide_other_samples(tmp_path: Path, missing: bool) -> None:
     config = _config(tmp_path)
     folders = {SEASON: _review_ready()}
     if not missing:
@@ -1367,7 +1368,7 @@ def test_a_completed_sample_that_cannot_cover_a_kind_does_not_ask_or_hide_other_
         connection.commit()
         darker = next(kind for kind in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if kind["kind"] == DARKER)
     assert darker["sample_season"] == SEASON
-    assert not darker["needs_you"]
+    assert darker["needs_you"] and not darker["sample_ready"]
     assert SEASON not in load.sample_waits(config)
 
 
@@ -1398,3 +1399,45 @@ def test_activity_names_next_approved_season_while_production_waits_for_current_
         following = next_approved_season(connection, config, load_calibration_state=load, now=0)
         assert following is not None and following.season == SEASON
         assert connection.execute(select(encode_jobs.c.status)).scalar_one() == "running"
+
+
+@pytest.mark.parametrize("sample_status", [None, "running", "pending_review", "failed"])
+def test_unapproved_kind_is_visible_before_and_after_its_sample(tmp_path: Path, sample_status: str | None) -> None:
+    config = _config(tmp_path)
+    folders = {SEASON: _approved_on(config, f"{SEASON}/e00.mkv")}
+    for key in list(folders[SEASON]):
+        if key.startswith("accepted_"):
+            folders[SEASON].pop(key)
+    load = _loader(folders, {SEASON: DARKER})
+    if sample_status:
+        _finished_sample(config, SEASON)
+    with open_db(config.paths.db_path) as connection:
+        _completed_and_waiting_seasons(connection)
+        if sample_status:
+            connection.execute(calibration_jobs.update().values(status=sample_status))
+        connection.commit()
+        kinds = kinds_payload(connection, config, load_calibration_state=load)["kinds"]
+    darker = next(kind for kind in kinds if kind["kind"] == DARKER)
+    assert darker["needs_you"]
+    assert darker["sample_status"] == (sample_status or "not_started")
+    assert not next(kind for kind in kinds if kind["kind"] == "bright_live_action")["needs_you"]
+
+
+@pytest.mark.parametrize("codec,enabled,reason", [("wmv2", True, "original_format_unidentified"),
+                                                 ("h264", False, "measurement_library_disabled")])
+def test_measuring_outside_the_pipeline_names_the_reason_and_next_action(
+        tmp_path: Path, codec: str, enabled: bool, reason: str,
+) -> None:
+    config = _config(tmp_path)
+    if not enabled:
+        config.raw["media"]["libraries"][0]["availability"] = "browse_only"
+    with open_db(config.paths.db_path) as connection:
+        _content_item(connection, EPISODE, status="discovered", codec=codec, current_dark=0.5)
+        connection.commit()
+        load = KindAwareLoader(lambda *_args: None, SeasonKinds())
+        wait = load.sample_waits(config)[SEASON]
+        state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
+    assert reason in wait.measurement_reasons
+    assert state["key"] == "waiting_for_measurement" and not state["needs_you"]
+    detail = state["wait_detail"]
+    assert "original" in detail.lower() if enabled else "Settings" in detail

@@ -80,9 +80,9 @@ struct Attention: Equatable, Sendable {
     static func waitingNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {
         let kinds = facts.work.kindsNeedingYou.map { kind in
             AttentionNotice(
-                id: "kind:\(kind.kind):\(kind.sampleSeason)",
-                title: "\(Words.kindName(kind.kind)) needs your approval",
-                body: "Watch the sample and choose how this kind of content should look.",
+                id: "kind:\(kind.kind):\(kind.sampleSeason ?? ""):\(kind.sampleStatus ?? "pending_review"):\(kind.sampleReady ?? true)",
+                title: "\(Words.kindName(kind.kind)) is waiting",
+                body: kindWaitingReason(kind),
                 opens: .kind(kind.kind)
             )
         }
@@ -104,6 +104,23 @@ struct Attention: Equatable, Sendable {
             )
         }
         return kinds + samples + seasons + computers
+    }
+
+    private static func kindWaitingReason(_ kind: MainWindowFacts.PendingKind) -> String {
+        if kind.oneTime == true {
+            return "Each show needs its own choice. Open this kind to review its shows and samples."
+        }
+        if kind.sampleReady ?? true {
+            return "Watch the sample and choose how this kind of content should look."
+        }
+        switch kind.sampleStatus {
+        case "not_started":
+            return "Mediaforce will make a sample automatically. Watch it when it is ready, then approve this kind."
+        case "starting", "running", "stopping", "queued", "retry_backoff":
+            return "The sample is being prepared. Open this kind to see its progress and anything holding it up."
+        default:
+            return "The sample needs attention before you can approve this kind. Open it to see what to do next."
+        }
     }
 
     private static func sampleNotice(_ sample: MainWindowFacts.Sample) -> AttentionNotice {
