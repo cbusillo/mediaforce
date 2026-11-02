@@ -287,6 +287,22 @@ jobs:
           test_command="$(jq -er '.qualityGate.test.macApp | select(type == "string" and length > 0)' .github/github.json)"
           bash -euo pipefail -c "$test_command"
 
+      - name: Render Mac pages in light and dark with fixture data
+        run: |
+          TEST_RUNNER_MEDIAFORCE_RENDER_OUTPUT="$PWD/.build/mac-render" \
+            xcodebuild -project macos/Mediaforce.xcodeproj -scheme Mediaforce \
+            -destination 'platform=macOS' -derivedDataPath .build/mac-app \
+            test-without-building \
+            -only-testing:MediaforceTests/RenderTests/testMainPagesRenderWithFixtureDataInBothAppearances
+
+      - name: Keep rendered Mac pages
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: mac-pages
+          path: .build/mac-render/*.png
+          if-no-files-found: error
+
   # The one required check: every lane passed, or skipped on purpose.
   acceptance:
     needs: [changes, tests, file-integrity-macos, mac-app]

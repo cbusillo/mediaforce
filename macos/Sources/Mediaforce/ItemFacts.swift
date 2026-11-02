@@ -127,9 +127,7 @@ extension MediaforceClient {
     func item(_ prefix: String) async throws -> ItemFacts {
         var request = URLRequest(url: baseURL.appending(path: "api/app/items").appending(path: prefix))
         request.timeoutInterval = Self.factsTimeout
-        let (data, response) = try await session.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-        var facts = try JSONDecoder.mediaforce.decode(ItemFacts.self, from: data)
+        var facts = try await decode(ItemFacts.self, from: request)
         facts.markShowPage()
         return facts
     }

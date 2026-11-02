@@ -208,52 +208,7 @@ struct MainWindow: View {
                     Sidebar(place: Binding(get: { navigation.place }, set: { navigation.select($0) }), facts: facts, model: model)
                         .navigationSplitViewColumnWidth(214)
                 } detail: {
-                    Group {
-                        switch navigation.place {
-                        case .activity:
-                            ActivityPage(facts: facts, model: model, open: go)
-                        case .needsYou:
-                            NeedsYouPage(facts: facts, posters: model.posters, open: go)
-                        case .spaceSaved:
-                            SpaceSavedPage(facts: facts, model: model) { go(.item($0)) }
-                                // Deleting backups changes what the page shows, so it reads its facts again at once.
-                                .id(facts.originalBackups.count)
-                        // A new page for each prefix, so none shows the last one's name or facts while its own loads.
-                        case .sample(let prefix):
-                            SamplePage(prefix: prefix, model: model, openItem: { go(.item($0)) },
-                                       namePage: { navigation.name(.sample(prefix), $0) }).id(prefix)
-                        case .item(let prefix):
-                            ItemPage(prefix: prefix, model: model, openSample: { go(.sample($0)) }, openItem: { go(.item($0)) },
-                                     namePage: { navigation.name(.item(prefix), $0) })
-                                .id(prefix)
-                        case .media: MediaPage(model: model) { go(.item($0)) }
-                        case .mediaKind(let kind, let state):
-                            MediaPage(model: model, kind: kind, stateGroup: state) { go(.item($0)) }.id(navigation.place)
-                        case .libraryKind(let kind):
-                            LibraryPage(model: model, kind: kind, open: go).id(kind)
-                        case .seasonsWithoutKind:
-                            MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { go(.media) }, kind: .tv) { go(.item($0)) }
-                        case .kind(let code):
-                            if let kind = model.kinds?.kinds.first(where: { $0.kind == code }) {
-                                KindPage(kind: kind, leftOut: model.kinds?.leftOut.count ?? 0, model: model,
-                                         openItem: { go(.item($0)) }, openSample: { go(.sample($0)) },
-                                         openLeftOut: { go(.seasonsWithoutKind) })
-                            } else {
-                                LibraryPage(model: model, open: go)
-                            }
-                        default: LibraryPage(model: model, open: go)
-                        }
-                    }
-                    .safeAreaInset(edge: .top, spacing: 0) {
-                        VStack(spacing: 0) {
-                            ForEach(TopNotice.shown(connection: model.connection, facts: facts), id: \.self) { notice in
-                                switch notice {
-                                case .stale: StaleNotice(connection: model.connection, lastHeard: model.lastHeard)
-                                case .paused: PausedBar(model: model)
-                                }
-                            }
-                        }
-                    }
+                    MainPage(place: navigation.place, facts: facts, model: model, open: go, namePage: { navigation.name($0, $1) })
                 }
                 .toolbar {
                     // First beside the sidebar, so Pause never moves; a page opened from a list adds its back button after it.
@@ -439,6 +394,63 @@ struct SidebarRow: View {
             Text(trailing)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
+        }
+    }
+}
+
+struct MainPage: View {
+    let place: Place?
+    let facts: MainWindowFacts
+    let model: MainWindowModel
+    let open: (Place) -> Void
+    var namePage: (Place, String) -> Void = { _, _ in }
+
+    var body: some View {
+        Group {
+            switch place {
+            case .activity:
+                ActivityPage(facts: facts, model: model, open: open)
+            case .needsYou:
+                NeedsYouPage(facts: facts, posters: model.posters, open: open)
+            case .spaceSaved:
+                SpaceSavedPage(facts: facts, model: model) { open(.item($0)) }
+                    // Deleting backups changes what the page shows, so it reads its facts again at once.
+                    .id(facts.originalBackups.count)
+            // A new page for each prefix, so none shows the last one's name or facts while its own loads.
+            case .sample(let prefix):
+                SamplePage(prefix: prefix, model: model, openItem: { open(.item($0)) },
+                           namePage: { namePage(.sample(prefix), $0) }).id(prefix)
+            case .item(let prefix):
+                ItemPage(prefix: prefix, model: model, openSample: { open(.sample($0)) }, openItem: { open(.item($0)) },
+                         namePage: { namePage(.item(prefix), $0) })
+                    .id(prefix)
+            case .media: MediaPage(model: model) { open(.item($0)) }
+            case .mediaKind(let kind, let state):
+                MediaPage(model: model, kind: kind, stateGroup: state) { open(.item($0)) }.id(place)
+            case .libraryKind(let kind):
+                LibraryPage(model: model, kind: kind, open: open).id(kind)
+            case .seasonsWithoutKind:
+                MediaPage(model: model, onlySeasons: model.kinds?.leftOut, showEverything: { open(.media) }, kind: .tv) { open(.item($0)) }
+            case .kind(let code):
+                if let kind = model.kinds?.kinds.first(where: { $0.kind == code }) {
+                    KindPage(kind: kind, leftOut: model.kinds?.leftOut.count ?? 0, model: model,
+                             openItem: { open(.item($0)) }, openSample: { open(.sample($0)) },
+                             openLeftOut: { open(.seasonsWithoutKind) })
+                } else {
+                    LibraryPage(model: model, open: open)
+                }
+            default: LibraryPage(model: model, open: open)
+            }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
+                ForEach(TopNotice.shown(connection: model.connection, facts: facts), id: \.self) { notice in
+                    switch notice {
+                    case .stale: StaleNotice(connection: model.connection, lastHeard: model.lastHeard)
+                    case .paused: PausedBar(model: model)
+                    }
+                }
+            }
         }
     }
 }
