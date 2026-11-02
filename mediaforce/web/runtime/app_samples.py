@@ -149,13 +149,33 @@ def kind_sample_candidates(kinds: Iterable[Mapping[str, Any]], cards: Iterable[M
     states = {str(card["prefix"]): object_dict(card.get("page_state")) for card in cards}
     groups: list[list[str]] = []
     for kind in kinds:
-        if kind.get("approval") or kind.get("sample_season"):
+        if kind.get("approval") or kind.get("sample_season") or (kind.get("settings") and not kind.get("one_time")):
             continue
         candidates = [str(show["sample_season"]) for show in object_list(kind.get("shows"))
                       if states.get(str(show["sample_season"]), {}).get("key") in {"needs_test", "waiting_for_kind"}]
         if candidates:
             groups.append(candidates)
     return groups
+
+
+def prepare_waiting_samples(
+        cards: Iterable[Mapping[str, Any]], kinds: Iterable[Mapping[str, Any]], *,
+        load_payloads: Callable[[str], tuple[dict[str, Any], dict[str, Any]] | None],
+        failed_in_a_row: Callable[[str], int],
+        make: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]],
+) -> None:
+    cards = list(cards)
+    for season in samples_to_remake(cards, failed_in_a_row):
+        payloads = load_payloads(season)
+        if payloads is not None and samples_to_remake([{**payloads[1], "prefix": season}], failed_in_a_row):
+            make(*payloads)
+    for candidates in kind_sample_candidates(kinds, cards):
+        for season in candidates:
+            payloads = load_payloads(season)
+            if payloads is None or object_dict(payloads[1].get("page_state")).get("key") not in {"needs_test", "waiting_for_kind"}:
+                continue
+            if make(*payloads).get("ok"):
+                break
 
 
 def samples_to_remake(cards: Iterable[Mapping[str, Any]], failed_in_a_row: Callable[[str], int]) -> list[str]:

@@ -135,7 +135,7 @@ from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status
 from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
-    kind_sample_candidates, samples_to_remake, start_compressing
+    prepare_waiting_samples, samples_to_remake, start_compressing
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
 from mediaforce.web.runtime.decision_evidence import motion_hold_files_payload
@@ -1189,10 +1189,12 @@ def create_app(
 
     def _main_window_payload() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection, kind_snapshot(connection, config, _load_calibration_state):
+            cards = [asdict(card) for card in _list_library_detail_cards(config, connection)]
             return app_window_payload(
                 connection,
                 library_types=config.library_type_map,
-                season_cards=[asdict(card) for card in _list_library_detail_cards(config, connection)],
+                season_cards=cards,
+                remaking_samples=samples_to_remake(cards, lambda prefix: sample_failures_in_a_row(connection, prefix, limit=SAMPLE_REMAKE_LIMIT)),
                 computers=_host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses),
                 controller_storage=controller_storage_recovery_snapshot(config),
                 storage_admits_work=controller_storage_admission_issue(config, None) is None,
@@ -1887,26 +1889,14 @@ def create_app(
     def _remake_waiting_samples() -> None:
         with open_db(config.paths.db_path) as connection:
             cards = [asdict(card) for card in _list_library_detail_cards(config, connection)]
-        for season in samples_to_remake(cards, _sample_failures_in_a_row):
-            # The season is read again just before its sample is made, so one the owner changed meanwhile is left alone.
-            payloads = _season_payloads(season)
-            if payloads is None or not samples_to_remake([{**payloads[1], "prefix": season}], _sample_failures_in_a_row):
-                continue
-            result = make_sample(
-                *payloads, None, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action,
-            )
-            LOGGER.info("Making the sample for %s again: %s", season, result.get("code") or result.get("ok"))
-        for candidates in kind_sample_candidates(_kinds_payload()["kinds"], cards):
-            for season in candidates:
-                payloads = _season_payloads(season)
-                if payloads is None or not any(
-                        season in group for group in kind_sample_candidates(
-                            _kinds_payload()["kinds"], [{**payloads[1], "prefix": season}])):
-                    continue
-                result = make_sample(*payloads, None, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action)
-                LOGGER.info("Making the first sample for %s: %s", season, result.get("code") or result.get("ok"))
-                if result.get("ok"):
-                    break
+
+        def make(folder: Mapping[str, Any], status: Mapping[str, Any]) -> Mapping[str, Any]:
+            result = make_sample(folder, status, None, ai_tune=_folder_ai_tune_action, retry_saved=_folder_ai_tune_confirm_action)
+            LOGGER.info("Making the sample for %s: %s", folder["prefix"], result.get("code") or result.get("ok"))
+            return result
+
+        prepare_waiting_samples(cards, _kinds_payload()["kinds"], load_payloads=_season_payloads,
+                                failed_in_a_row=_sample_failures_in_a_row, make=make)
 
     def _sample_failures_in_a_row(season: str) -> int:
         with open_db(config.paths.db_path) as connection:

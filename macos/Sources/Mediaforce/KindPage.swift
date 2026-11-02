@@ -17,8 +17,8 @@ struct KindPage: View {
 
     var body: some View {
         let setting = kind.settings.first { $0.show == chosen } ?? kind.firstSetting
-        let offering = kind.approval == nil && chosen == nil && (kind.sampleSeason != nil || kind.settings.isEmpty)
-        let offer: ((KindsFacts.Show) -> Void)? = offering && kind.sampleSeason == nil && !asking ? { makeSample($0) } : nil
+        let offering = kind.approval == nil && chosen == nil && kind.showsSampleFirst
+        let offer: ((KindsFacts.Show) -> Void)? = offering && kind.offersSample && !asking ? { makeSample($0) } : nil
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 if kind.shows.isEmpty && kind.settings.isEmpty && kind.approval == nil && kind.sampleSeason == nil {
@@ -201,13 +201,12 @@ struct KindShows: View {
                         VStack(alignment: .leading, spacing: 2) {
                             tile(show.prefix, name: show.name, detail: Words.size(show.waitingBytes), watchable: false) { open(show.prefix) }
                             if let offer {
-                                // The biggest show's link stays hidden, keeping every tile one height in the lazy row.
                                 Button(Words.makeASample) { offer(show) }
                                     .buttonStyle(QuietLinkStyle())
                                     .font(.caption)
                                     .help(Words.makeSampleOf(show.name))
-                                    .opacity(show == kind.shows.first ? 0 : 1)
-                                    .disabled(show == kind.shows.first)
+                                    .opacity(show.sampleSeason == kind.sampleSeason || (kind.sampleSeason == nil && show == kind.shows.first) ? 0 : 1)
+                                    .disabled(show.sampleSeason == kind.sampleSeason || (kind.sampleSeason == nil && show == kind.shows.first))
                             }
                         }
                     }

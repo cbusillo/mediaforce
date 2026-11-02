@@ -52,6 +52,7 @@ struct MainWindowFacts: Decodable, Sendable {
         let sampleStatus: String?
         let sampleReady: Bool?
         let oneTime: Bool?
+        let settingsAvailable: Bool?
     }
 
     struct Library: Decodable, Sendable {

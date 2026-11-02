@@ -284,7 +284,7 @@ def _measurement_reasons(
         if original is not None:
             if original.availability == "unavailable":
                 reasons.add("original_unavailable")
-        elif item["video_codec"] not in HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]:
+        elif item["video_codec"] and item["video_codec"] not in HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]:
             reasons.add("original_format_unidentified")
         if measurement_roots is not None and item["media_root"] not in measurement_roots:
             reasons.add("measurement_library_disabled")

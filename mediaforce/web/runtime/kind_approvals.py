@@ -179,7 +179,9 @@ class KindAwareLoader:
                     boundaries[kind] = object_dict(load(config, settings[0]["from_prefix"])).get("accepted_at")
                 else:
                     representative = contents.samples.get(kind)
-                    boundaries[kind] = object_dict(representative).get("created_at")
+                    prefix = str(object_dict(representative).get("prefix") or "")
+                    boundaries[kind] = (object_dict(representative).get("created_at")
+                                        if _scalable_sample(load(config, prefix)) else None)
             jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in rows])
         waits.update({row["season"]: SampleWait(kind=row["kind"]) for row in rows
                       if row["kind"] in boundaries
@@ -523,9 +525,6 @@ def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibrat
     for job in sorted(samples, key=lambda sample: str(sample.get("created_at") or "")):
         kind = kinds_by_season.get(job["prefix"])
         if kind is None:
-            continue
-        if kind in APPROVABLE_KINDS and job.get("status") in {"pending_review", "completed"} and not _scalable_sample(
-                load_calibration_state(config, str(job["prefix"]))):
             continue
         if kind not in APPROVABLE_KINDS and effective_production_approval(config, str(job["prefix"]), folders_only) is not None:
             continue

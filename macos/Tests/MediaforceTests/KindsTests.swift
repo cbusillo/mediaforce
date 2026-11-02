@@ -37,6 +37,15 @@ final class KindsTests: XCTestCase {
                                      shows: [], settings: [older, latest], approval: nil, sampleSeason: latest.fromPrefix)
         XCTAssertEqual(pending.sampleSetting, latest)
         XCTAssertEqual(pending.firstSetting, latest)
+        XCTAssertTrue(pending.showsSampleFirst)
+        var unrelated = KindsFacts.Kind(kind: "darker_live_action", oneTime: false, seasons: 1, waitingBytes: 1000,
+                                       shows: [], settings: [older], approval: nil, sampleSeason: latest.fromPrefix)
+        XCTAssertFalse(unrelated.showsSampleFirst)
+        unrelated.sampleReady = false
+        unrelated.sampleStatus = "pending_review"
+        XCTAssertTrue(unrelated.offersSample)
+        unrelated.sampleReady = true
+        XCTAssertFalse(unrelated.offersSample)
     }
 
     func testTheApprovedKindCarriesItsOwnSavedSampleClips() throws {

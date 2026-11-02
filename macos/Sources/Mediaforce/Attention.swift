@@ -6,6 +6,7 @@ struct AttentionNotice: Equatable, Sendable {
     let body: String
     // Where clicking the notification takes the Director.
     var opens: Place?
+    var notifies = true
 }
 
 struct AttentionMemory: Codable, Equatable, Sendable {
@@ -32,7 +33,7 @@ struct Attention: Equatable, Sendable {
             return Attention(notices: [], badgeCount: waitingOnYou(facts), memory: memory)
         }
         var notices = finishedNotices(facts, since: remembered)
-        notices += waiting.filter { !remembered.waiting.contains($0.id) }
+        notices += waiting.filter { $0.notifies && !remembered.waiting.contains($0.id) }
         if facts.originalBackups.count > remembered.backupCount {
             notices.append(backupsNotice(facts.originalBackups))
         }
@@ -80,10 +81,11 @@ struct Attention: Equatable, Sendable {
     static func waitingNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {
         let kinds = facts.work.kindsNeedingYou.map { kind in
             AttentionNotice(
-                id: kindNoticeID(kind),
-                title: "\(Words.kindName(kind.kind)) is waiting",
+                id: "kind:\(kind.kind):\(kindNoticeStage(kind))",
+                title: Words.kindName(kind.kind),
                 body: kindWaitingReason(kind),
-                opens: .kind(kind.kind)
+                opens: .kind(kind.kind),
+                notifies: kindNoticeStage(kind) != "preparing"
             )
         }
         let samples = facts.samples.waitingOnYou.map(sampleNotice)
@@ -106,22 +108,30 @@ struct Attention: Equatable, Sendable {
         return kinds + samples + seasons + computers
     }
 
-    private static func kindNoticeID(_ kind: MainWindowFacts.PendingKind) -> String {
+    private static func kindNoticeStage(_ kind: MainWindowFacts.PendingKind) -> String {
         let stage: String
-        if kind.sampleReady ?? true {
+        if kind.settingsAvailable == true {
+            stage = "settings"
+        } else if kind.sampleReady ?? true {
             stage = kind.sampleSeason ?? "ready"
         } else if ["failed", "stopped", "needs_attention"].contains(kind.sampleStatus ?? "") {
             stage = "attention:\(kind.sampleSeason ?? "")"
+        } else if ["pending_review", "completed"].contains(kind.sampleStatus ?? "") {
+            stage = "choice:\(kind.sampleSeason ?? "")"
         } else {
             stage = "preparing"
         }
-        return "kind:\(kind.kind):\(stage)"
+        return stage
     }
 
     private static func kindWaitingReason(_ kind: MainWindowFacts.PendingKind) -> String {
+        if kind.settingsAvailable == true {
+            return "Choose an already approved show's settings for this kind. A new sample isn't needed."
+        }
         if kind.sampleReady ?? true {
+            let name = kind.sampleSeason?.split(separator: "/").dropFirst().joined(separator: " • ") ?? "The sample"
             return kind.oneTime == true
-                ? "Watch the sample and choose how this show should look. Each show of this kind needs its own choice."
+                ? "\(name) is ready to watch. Each show of this kind needs its own choice."
                 : "Watch the sample and choose how this kind of content should look."
         }
         switch kind.sampleStatus {
@@ -129,6 +139,8 @@ struct Attention: Equatable, Sendable {
             return "This kind needs a sample. Mediaforce tries to make one automatically; open it to choose a size if needed."
         case "starting", "running", "stopping", "queued", "retry_backoff":
             return "The sample is being prepared. Open this kind to see its progress and anything holding it up."
+        case "pending_review", "completed":
+            return "This sample cannot approve the kind. Open this kind to choose a different show's sample or approved settings."
         default:
             return "The sample needs attention before you can approve this kind. Open it to see what to do next."
         }

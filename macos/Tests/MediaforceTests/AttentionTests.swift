@@ -95,6 +95,7 @@ final class AttentionTests: XCTestCase {
         let before = try facts(kinds: [("bright_live_action", nil)], kindStatus: "not_started", kindReady: false)
         let waiting = Attention.review(before, remembered: nil)
         XCTAssertEqual(waiting.badgeCount, 1)
+        XCTAssertTrue(Attention.review(before, remembered: Attention.review(try facts(), remembered: nil).memory).notices.isEmpty)
         XCTAssertEqual(Attention.waitingItems(before).map(\.opens), [.kind("bright_live_action")])
         let queued = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "queued", kindReady: false)
         let making = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "running", kindReady: false)

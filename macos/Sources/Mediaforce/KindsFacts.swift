@@ -18,9 +18,16 @@ struct KindsFacts: Decodable, Sendable, Equatable {
         let approval: Approval?
         // The season whose sample is being made or waits to be watched; nil when none is.
         let sampleSeason: String?
+        var sampleReady: Bool? = nil
+        var sampleStatus: String? = nil
         var id: String { kind }
 
         var sampleShow: String? { sampleSeason?.split(separator: "/").prefix(2).joined(separator: "/") }
+        var showsSampleFirst: Bool { oneTime || settings.isEmpty || sampleSetting != nil }
+
+        var offersSample: Bool {
+            sampleSeason == nil || (sampleReady == false && ["pending_review", "completed"].contains(sampleStatus ?? ""))
+        }
 
         var sampleSetting: Setting? {
             guard let sampleSeason else { return nil }

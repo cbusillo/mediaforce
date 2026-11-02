@@ -29,7 +29,7 @@ from mediaforce.library.source_evidence import append_measurement, append_versio
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
-from mediaforce.web.runtime.app_samples import approve_sample, sample_moments
+from mediaforce.web.runtime.app_samples import approve_sample, kind_sample_candidates, sample_moments
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
 from mediaforce.web.routes.app_window import register_app_window_routes
@@ -1354,7 +1354,10 @@ def test_finished_seasons_newer_sample_stays_with_its_kind_and_reaches_attention
 
 
 @pytest.mark.parametrize("missing", [False, True])
-def test_a_completed_sample_that_cannot_cover_a_kind_does_not_offer_kind_approval_or_hide_other_samples(tmp_path: Path, missing: bool) -> None:
+@pytest.mark.parametrize("status", ["pending_review", "completed"])
+def test_a_sample_that_cannot_cover_a_kind_stays_visible_without_starting_a_sample_for_every_show(
+        tmp_path: Path, missing: bool, status: str,
+) -> None:
     config = _config(tmp_path)
     folders = {SEASON: _review_ready()}
     if not missing:
@@ -1365,10 +1368,11 @@ def test_a_completed_sample_that_cannot_cover_a_kind_does_not_offer_kind_approva
     _finished_sample(config, APPROVED_SEASON, "2026-10-29T00:00:00+00:00")
     with open_db(config.paths.db_path) as connection:
         _completed_and_waiting_seasons(connection)
-        connection.execute(calibration_jobs.update().where(calibration_jobs.c.prefix == APPROVED_SEASON).values(status="completed"))
+        connection.execute(calibration_jobs.update().where(calibration_jobs.c.prefix == APPROVED_SEASON).values(status=status))
         connection.commit()
         darker = next(kind for kind in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if kind["kind"] == DARKER)
-    assert darker["sample_season"] is None
+    assert darker["sample_season"] == APPROVED_SEASON
+    assert not kind_sample_candidates([darker], [{"prefix": SEASON, "page_state": {"key": "needs_test"}}])
     assert darker["needs_you"] and not darker["sample_ready"]
     assert SEASON not in load.sample_waits(config)
 
@@ -1426,15 +1430,18 @@ def test_unapproved_kind_is_visible_before_and_after_its_sample(tmp_path: Path, 
 
 @pytest.mark.parametrize("codec,enabled,reason", [("wmv2", True, "original_format_unidentified"),
                                                  ("av1", True, None),
+                                                 (None, True, None),
                                                  ("h264", False, "measurement_library_disabled")])
 def test_measuring_outside_the_pipeline_names_the_reason_and_next_action(
-        tmp_path: Path, codec: str, enabled: bool, reason: str | None,
+        tmp_path: Path, codec: str | None, enabled: bool, reason: str | None,
 ) -> None:
     config = _config(tmp_path)
     if not enabled:
         config.raw["media"]["libraries"][0]["availability"] = "browse_only"
     with open_db(config.paths.db_path) as connection:
-        _content_item(connection, EPISODE, status="discovered", codec=codec, current_dark=0.5)
+        item_id = _content_item(connection, EPISODE, status="discovered", codec=codec or "hevc", current_dark=0.5)
+        if codec is None:
+            connection.execute(library_items.update().where(library_items.c.id == item_id).values(video_codec=None))
         if codec == "av1":
             _content_item(connection, f"{SEASON}/e02.mkv", status="discovered", codec="hevc", current_dark=0.5)
         connection.commit()
@@ -1468,3 +1475,4 @@ def test_one_time_kind_moves_on_from_an_approved_show_sample(tmp_path: Path, kin
     assert after["needs_you"] and not after["sample_ready"]
     assert after["sample_season"] is None
     assert after["shows"][0]["sample_season"] == SEASON
+    assert kind_sample_candidates([after], [{"prefix": SEASON, "page_state": {"key": "needs_test"}}]) == [[SEASON]]

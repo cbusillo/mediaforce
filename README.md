@@ -52,7 +52,10 @@ choice, its newest sample stays available, even after that season finishes.
 Every unapproved kind with waiting shows appears in Needs you, including while
 its sample is being prepared or needs attention. Mediaforce automatically requests
 a first sample using the existing sample queue and size settings. Needs you
-notifies again when the sample is ready to watch. Cartoons and 4K continue to need
+notifies when the sample is ready to watch or needs a decision. An existing
+approved setting comes first. An unsuitable sample stays reachable and stops
+automatic sampling of further shows until that kind's choice is settled.
+Cartoons and 4K continue to need
 a choice for each show. Seasons missing original measurements wait for measuring without a sample decision, even
 when an older sample is saved. After measuring, they follow their kind; measured
 seasons without a reusable kind keep their own sample decisions. A blocked

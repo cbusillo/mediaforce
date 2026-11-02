@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from typing import Any, cast
 
 import pytest
@@ -12,7 +12,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime import folder_actions
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
-    kind_sample_candidates, samples_to_remake, start_compressing
+    kind_sample_candidates, prepare_waiting_samples, samples_to_remake, start_compressing
 
 PREFIX = "tv/Lucifer/Season 2"
 
@@ -347,17 +347,39 @@ def test_first_kind_sample_uses_existing_sample_flow_only_when_it_can_start(stat
               "shows": [{"sample_season": PREFIX}]}]
     cards = [{"prefix": PREFIX, **_status(state, None)}]
     assert kind_sample_candidates(kinds, cards) == ([[PREFIX]] if state in {"needs_test", "waiting_for_kind"} else [])
-    for settled in [{"approval": {"from_prefix": PREFIX}}, {"sample_season": PREFIX}]:
+    for settled in [{"approval": {"from_prefix": PREFIX}}, {"sample_season": PREFIX}, {"settings": [{"from_prefix": PREFIX}]}]:
         assert not kind_sample_candidates([kinds[0] | settled], cards)
 
 
-def test_first_kind_sample_candidates_keep_ranked_fallbacks_and_never_invent_an_approval() -> None:
+def test_first_kind_sample_candidates_keep_ranked_fallbacks() -> None:
     kinds = [{"kind": kind, "approval": None, "sample_season": None,
-              "shows": [{"sample_season": prefix}, {"sample_season": "tv/Other/Season 1"}]}
-             for kind, prefix in [("bright_live_action", PREFIX), ("cartoon", "tv/Cartoon/Season 1")]]
+              "shows": [{"sample_season": prefix}, {"sample_season": other}]}
+             for kind, prefix, other in [("bright_live_action", PREFIX, "tv/Other Live/Season 1"),
+                                         ("cartoon", "tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1")]]
     cards = [{"prefix": prefix, **_status("needs_test", "make_sample")}
-             for prefix in [PREFIX, "tv/Cartoon/Season 1", "tv/Other/Season 1"]]
-    assert kind_sample_candidates(kinds, cards) == [[PREFIX, "tv/Other/Season 1"],
-                                                  ["tv/Cartoon/Season 1", "tv/Other/Season 1"]]
+             for prefix in [PREFIX, "tv/Other Live/Season 1", "tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1"]]
+    assert kind_sample_candidates(kinds, cards) == [[PREFIX, "tv/Other Live/Season 1"],
+                                                  ["tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1"]]
     cards[0]["page_state"]["key"] = "making_test"
-    assert kind_sample_candidates(kinds, cards)[0] == ["tv/Other/Season 1"]
+    assert kind_sample_candidates(kinds, cards)[0] == ["tv/Other Live/Season 1"]
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_sample_sweep_falls_back_stops_after_success_and_keeps_other_kinds_moving(changed: bool) -> None:
+    prefixes = ["tv/A/Season 1", "tv/B/Season 1", "tv/C/Season 1", "tv/Cartoon/Season 1"]
+    cards = [{"prefix": prefix, **_status("needs_test", "make_sample")} for prefix in prefixes]
+    kinds = [{"kind": "bright_live_action", "shows": [{"sample_season": prefix} for prefix in prefixes[:3]]},
+             {"kind": "cartoon", "shows": [{"sample_season": prefixes[3]}]}]
+    attempted: list[str] = []
+
+    def fresh(prefix: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        key = "ready_to_make" if changed and prefix == prefixes[0] else "needs_test"
+        return {"prefix": prefix}, _status(key, "make_sample")
+
+    def make(folder: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
+        prefix = folder["prefix"]
+        attempted.append(prefix)
+        return {"ok": prefix != prefixes[0]}
+
+    prepare_waiting_samples(cards, kinds, load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make)
+    assert attempted == ([prefixes[1], prefixes[3]] if changed else [prefixes[0], prefixes[1], prefixes[3]])

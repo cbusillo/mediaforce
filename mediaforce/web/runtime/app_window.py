@@ -82,19 +82,28 @@ def app_window_payload(
         storage_admits_work: bool,
         observed_at: datetime,
         kinds: Iterable[Mapping[str, Any]] = (),
+        remaking_samples: Collection[str] = (),
 ) -> dict[str, Any]:
     items = _present_items(connection, library_types)
     promotions = _promotions(connection)
     kept = _kept_original_rows(connection)
     seasons = _seasons(items)
     cards = [card for card in season_cards if card.get("prefix")]
+    kinds = list(kinds)
     pending_kinds = [{key: kind[key] for key in ("kind", "sample_season", "sample_status", "sample_ready", "one_time") if key in kind}
                      for kind in kinds if kind.get("needs_you")]
+    settings_by_kind = {kind["kind"]: bool(kind["settings"]) and not kind.get("one_time") for kind in kinds if "settings" in kind}
+    for kind in pending_kinds:
+        if kind["kind"] in settings_by_kind:
+            kind["settings_available"] = settings_by_kind[kind["kind"]]
+        if kind["sample_season"] in remaking_samples:
+            kind["sample_status"] = "retry_backoff"
     kind_samples = {kind["sample_season"] for kind in pending_kinds
                     if kind.get("sample_ready", True) or kind.get("sample_status") in {"failed", "stopped", "needs_attention"}}
     samples = _samples(cards)
     waiting_samples = {sample["prefix"] for sample in samples["waiting_on_you"]}
-    samples["waiting_on_you"] = [sample for sample in samples["waiting_on_you"] if sample["prefix"] not in kind_samples]
+    samples["waiting_on_you"] = [sample for sample in samples["waiting_on_you"]
+                                 if sample["prefix"] not in kind_samples and sample["prefix"] not in remaking_samples]
     finished = _finished_seasons(items, promotions, seasons, kept)
     events = _events(connection)
     computer_states = [_computer(row) for row in computers]
