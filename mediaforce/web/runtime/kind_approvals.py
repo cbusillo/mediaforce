@@ -180,8 +180,9 @@ class KindAwareLoader:
                 else:
                     representative = contents.samples.get(kind)
                     prefix = str(object_dict(representative).get("prefix") or "")
+                    finished = object_dict(representative).get("status") in {"pending_review", "completed"}
                     boundaries[kind] = (object_dict(representative).get("created_at")
-                                        if _sample_covers_kind(config, kind, load(config, prefix), self._kind_of) else None)
+                                        if not finished or _sample_covers_kind(config, kind, load(config, prefix), self._kind_of) else None)
             jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in rows])
         waits.update({row["season"]: SampleWait(kind=row["kind"]) for row in rows
                       if row["kind"] in boundaries

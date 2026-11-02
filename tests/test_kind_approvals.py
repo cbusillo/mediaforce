@@ -1477,3 +1477,18 @@ def test_one_time_kind_moves_on_from_an_approved_show_sample(tmp_path: Path, kin
     assert after["sample_season"] is None
     assert after["shows"][0]["sample_season"] == SEASON
     assert kind_sample_candidates([after], [{"prefix": SEASON, "page_state": {"key": "needs_test"}}]) == {kind: [SEASON]}
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "retry_backoff", "failed", "stopped"])
+def test_a_new_sample_without_a_finished_draft_keeps_older_kind_samples_quiet(tmp_path: Path, status: str) -> None:
+    config = _config(tmp_path)
+    folders = {SEASON: _review_ready(sample_item=_approved_on(config, EPISODE)["sample_item"])}
+    load = _loader(folders, {SEASON: DARKER, APPROVED_SEASON: DARKER})
+    _finished_sample(config, SEASON, "2026-10-28T00:00:00+00:00")
+    _finished_sample(config, APPROVED_SEASON, "2026-10-29T00:00:00+00:00")
+    with open_db(config.paths.db_path) as connection:
+        _completed_and_waiting_seasons(connection)
+        connection.execute(calibration_jobs.update().where(calibration_jobs.c.prefix == APPROVED_SEASON).values(status=status))
+        connection.commit()
+        state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
+    assert state["key"] == "waiting_for_kind" and not state["needs_you"]

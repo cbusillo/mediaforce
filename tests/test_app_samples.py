@@ -410,3 +410,18 @@ def test_first_sample_start_failures_retry_then_ask_and_success_or_settings_clea
     settled = kind | {"settings": [{"from_prefix": PREFIX}]}
     assert not prepare_waiting_samples(cards, [settled], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make, previous=second)
     assert len(attempted) == 3
+
+
+def test_a_first_sample_that_could_not_be_attempted_stays_quiet_across_sweeps() -> None:
+    cards = [{"prefix": PREFIX, **_status("needs_test", "make_sample")}]
+    kinds = [{"kind": "bright_live_action", "shows": [{"sample_season": PREFIX}]}]
+    attempted: list[str] = []
+
+    def make(folder: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
+        attempted.append(folder["prefix"])
+        return {"ok": False}
+
+    first = prepare_waiting_samples(cards, kinds, load_payloads=lambda _prefix: None, failed_in_a_row=lambda _prefix: 0, make=make)
+    second = prepare_waiting_samples(cards, kinds, load_payloads=lambda _prefix: None, failed_in_a_row=lambda _prefix: 0, make=make, previous=first)
+    assert not attempted
+    assert first["bright_live_action"].reason == second["bright_live_action"].reason == "retry_backoff"

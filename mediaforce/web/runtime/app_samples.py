@@ -195,7 +195,7 @@ def prepare_waiting_samples(
             continue
         prior = (previous or {}).get(kind)
         if wait is None:
-            waits[kind] = SampleStartWait(None, "sample_blocked" if prior is not None else "retry_backoff")
+            waits[kind] = SampleStartWait(None, "retry_backoff")
         elif wait.reason in {"choose_size", "choose_balance"}:
             waits[kind] = wait
         else:

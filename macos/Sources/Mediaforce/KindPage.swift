@@ -49,8 +49,8 @@ struct KindPage: View {
                 }
                 if !offering || kind.sampleSetting != nil {
                     KindDecision(kind: kind, setting: setting, model: model, openItem: openItem,
-                                 showSample: (chosen != nil || !kind.showsSampleFirst) && (kind.approval?.sampleMoments?.isEmpty == false || kind.sampleSeason != nil) ? {
-                                     if !kind.showsSampleFirst, let season = kind.sampleSeason { openSample(season) }
+                                 showSample: (chosen != nil || (kind.approval == nil && !kind.showsSampleFirst)) && (kind.approval?.sampleMoments?.isEmpty == false || kind.sampleSeason != nil) ? {
+                                     if kind.approval == nil, !kind.showsSampleFirst, let season = kind.sampleSeason { openSample(season) }
                                      else { chosen = nil }
                                  } : nil)
                 }
