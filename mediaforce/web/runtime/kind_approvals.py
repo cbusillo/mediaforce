@@ -524,8 +524,10 @@ def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibrat
         kind = kinds_by_season.get(job["prefix"])
         if kind is None:
             continue
-        if kind in APPROVABLE_KINDS and job.get("status") == "completed" and not _scalable_sample(
+        if kind in APPROVABLE_KINDS and job.get("status") in {"pending_review", "completed"} and not _scalable_sample(
                 load_calibration_state(config, str(job["prefix"]))):
+            continue
+        if kind not in APPROVABLE_KINDS and effective_production_approval(config, str(job["prefix"]), folders_only) is not None:
             continue
         newest[str(kind)] = job
     return _KindContents(episodes, approvals_by_show, report, newest)

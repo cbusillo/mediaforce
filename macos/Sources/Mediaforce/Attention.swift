@@ -80,7 +80,7 @@ struct Attention: Equatable, Sendable {
     static func waitingNotices(_ facts: MainWindowFacts) -> [AttentionNotice] {
         let kinds = facts.work.kindsNeedingYou.map { kind in
             AttentionNotice(
-                id: "kind:\(kind.kind):\(kind.sampleSeason ?? ""):\(kind.sampleStatus ?? "pending_review"):\(kind.sampleReady ?? true)",
+                id: kindNoticeID(kind),
                 title: "\(Words.kindName(kind.kind)) is waiting",
                 body: kindWaitingReason(kind),
                 opens: .kind(kind.kind)
@@ -106,16 +106,27 @@ struct Attention: Equatable, Sendable {
         return kinds + samples + seasons + computers
     }
 
-    private static func kindWaitingReason(_ kind: MainWindowFacts.PendingKind) -> String {
-        if kind.oneTime == true {
-            return "Each show needs its own choice. Open this kind to review its shows and samples."
-        }
+    private static func kindNoticeID(_ kind: MainWindowFacts.PendingKind) -> String {
+        let stage: String
         if kind.sampleReady ?? true {
-            return "Watch the sample and choose how this kind of content should look."
+            stage = kind.sampleSeason ?? "ready"
+        } else if ["failed", "stopped", "needs_attention"].contains(kind.sampleStatus ?? "") {
+            stage = "attention:\(kind.sampleSeason ?? "")"
+        } else {
+            stage = "preparing"
+        }
+        return "kind:\(kind.kind):\(stage)"
+    }
+
+    private static func kindWaitingReason(_ kind: MainWindowFacts.PendingKind) -> String {
+        if kind.sampleReady ?? true {
+            return kind.oneTime == true
+                ? "Watch the sample and choose how this show should look. Each show of this kind needs its own choice."
+                : "Watch the sample and choose how this kind of content should look."
         }
         switch kind.sampleStatus {
         case "not_started":
-            return "Mediaforce will make a sample automatically. Watch it when it is ready, then approve this kind."
+            return "This kind needs a sample. Mediaforce tries to make one automatically; open it to choose a size if needed."
         case "starting", "running", "stopping", "queued", "retry_backoff":
             return "The sample is being prepared. Open this kind to see its progress and anything holding it up."
         default:

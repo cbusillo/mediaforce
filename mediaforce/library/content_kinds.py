@@ -333,7 +333,7 @@ def season_kind_report(
         totals[grouping.kind]["seasons"] += 1
         totals[grouping.kind]["waiting_bytes"] += waiting_bytes
         rows.append({"season": prefix, **grouping.to_payload(),
-                     "measurement_reasons": _measurement_reasons(seasons[prefix], evidence_by_item, failed, measurement_roots)
+                     "measurement_reasons": _measurement_reasons(waiting, evidence_by_item, failed, measurement_roots)
                      if grouping.reason == "no_measured_original" else [],
                      "waiting_episodes": len(waiting),
                      "waiting_bytes": waiting_bytes})

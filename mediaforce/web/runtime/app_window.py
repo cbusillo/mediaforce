@@ -90,7 +90,8 @@ def app_window_payload(
     cards = [card for card in season_cards if card.get("prefix")]
     pending_kinds = [{key: kind[key] for key in ("kind", "sample_season", "sample_status", "sample_ready", "one_time") if key in kind}
                      for kind in kinds if kind.get("needs_you")]
-    kind_samples = {kind["sample_season"] for kind in pending_kinds if kind.get("sample_ready", True)}
+    kind_samples = {kind["sample_season"] for kind in pending_kinds
+                    if kind.get("sample_ready", True) or kind.get("sample_status") in {"failed", "stopped", "needs_attention"}}
     samples = _samples(cards)
     waiting_samples = {sample["prefix"] for sample in samples["waiting_on_you"]}
     samples["waiting_on_you"] = [sample for sample in samples["waiting_on_you"] if sample["prefix"] not in kind_samples]

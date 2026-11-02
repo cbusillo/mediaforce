@@ -12,7 +12,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime import folder_actions
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
-    kind_samples_to_make, samples_to_remake, start_compressing
+    kind_sample_candidates, samples_to_remake, start_compressing
 
 PREFIX = "tv/Lucifer/Season 2"
 
@@ -346,15 +346,18 @@ def test_first_kind_sample_uses_existing_sample_flow_only_when_it_can_start(stat
     kinds = [{"kind": "bright_live_action", "approval": None, "sample_season": None,
               "shows": [{"sample_season": PREFIX}]}]
     cards = [{"prefix": PREFIX, **_status(state, None)}]
-    assert kind_samples_to_make(kinds, cards) == ([PREFIX] if state in {"needs_test", "waiting_for_kind"} else [])
+    assert kind_sample_candidates(kinds, cards) == ([[PREFIX]] if state in {"needs_test", "waiting_for_kind"} else [])
     for settled in [{"approval": {"from_prefix": PREFIX}}, {"sample_season": PREFIX}]:
-        assert not kind_samples_to_make([kinds[0] | settled], cards)
+        assert not kind_sample_candidates([kinds[0] | settled], cards)
 
 
-def test_first_kind_samples_choose_one_season_per_kind_and_never_invent_an_approval() -> None:
+def test_first_kind_sample_candidates_keep_ranked_fallbacks_and_never_invent_an_approval() -> None:
     kinds = [{"kind": kind, "approval": None, "sample_season": None,
               "shows": [{"sample_season": prefix}, {"sample_season": "tv/Other/Season 1"}]}
              for kind, prefix in [("bright_live_action", PREFIX), ("cartoon", "tv/Cartoon/Season 1")]]
     cards = [{"prefix": prefix, **_status("needs_test", "make_sample")}
              for prefix in [PREFIX, "tv/Cartoon/Season 1", "tv/Other/Season 1"]]
-    assert kind_samples_to_make(kinds, cards) == [PREFIX, "tv/Cartoon/Season 1"]
+    assert kind_sample_candidates(kinds, cards) == [[PREFIX, "tv/Other/Season 1"],
+                                                  ["tv/Cartoon/Season 1", "tv/Other/Season 1"]]
+    cards[0]["page_state"]["key"] = "making_test"
+    assert kind_sample_candidates(kinds, cards)[0] == ["tv/Other/Season 1"]

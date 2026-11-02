@@ -145,12 +145,17 @@ def make_sample(
     return {"ok": True, "code": None} if result.get("ok") else REFUSED
 
 
-def kind_samples_to_make(kinds: Iterable[Mapping[str, Any]], cards: Iterable[Mapping[str, Any]]) -> list[str]:
+def kind_sample_candidates(kinds: Iterable[Mapping[str, Any]], cards: Iterable[Mapping[str, Any]]) -> list[list[str]]:
     states = {str(card["prefix"]): object_dict(card.get("page_state")) for card in cards}
-    return [str(show["sample_season"]) for kind in kinds
-            if not kind.get("approval") and not kind.get("sample_season")
-            for show in object_list(kind.get("shows"))[:1]
-            if states.get(str(show["sample_season"]), {}).get("key") in {"needs_test", "waiting_for_kind"}]
+    groups: list[list[str]] = []
+    for kind in kinds:
+        if kind.get("approval") or kind.get("sample_season"):
+            continue
+        candidates = [str(show["sample_season"]) for show in object_list(kind.get("shows"))
+                      if states.get(str(show["sample_season"]), {}).get("key") in {"needs_test", "waiting_for_kind"}]
+        if candidates:
+            groups.append(candidates)
+    return groups
 
 
 def samples_to_remake(cards: Iterable[Mapping[str, Any]], failed_in_a_row: Callable[[str], int]) -> list[str]:

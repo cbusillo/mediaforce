@@ -543,3 +543,16 @@ def test_waiting_kind_reaches_needs_you_before_its_sample_exists_and_keeps_unrel
     assert pending[0]["sample_ready"] == sample_ready
     assert pending[0]["sample_season"] == kind["sample_season"]
     assert bool(facts["samples"]["waiting_on_you"]) != sample_ready
+
+
+def test_kind_sample_failure_is_one_reachable_decision(connection: DBClient) -> None:
+    prefix = "tv/Drama/Season 1"
+    facts = app_window_payload(
+        connection, library_types=LIBRARY_TYPES,
+        season_cards=[{"prefix": prefix, "page_state": {"key": "needs_help", "recovery_kind": "test", "needs_you": True}}],
+        computers=[], controller_storage=READY_STORAGE, storage_admits_work=True, observed_at=datetime.now(UTC),
+        kinds=[{"kind": "darker_live_action", "sample_season": prefix, "sample_status": "failed",
+                "sample_ready": False, "needs_you": True}],
+    )
+    assert len(facts["work"]["kinds_needing_you"]) == 1
+    assert not facts["samples"]["waiting_on_you"] and not facts["work"]["seasons_needing_you"]

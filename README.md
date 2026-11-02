@@ -57,8 +57,9 @@ a choice for each show. Seasons missing original measurements wait for measuring
 when an older sample is saved. After measuring, they follow their kind; measured
 seasons without a reusable kind keep their own sample decisions. A blocked
 measurement names its reason and next action on the season and sample page:
-enable library processing in Settings when disabled, or keep the original while
-Mediaforce needs support to identify its format safely. It does not ask for approval of the old sample.
+library processing needs enabling when disabled, or files need support to identify
+their format safely. Files already excluded from conversion do not block measuring
+the remaining originals. It does not ask for approval of the old sample.
 Saved sample files are retained. Finished production files are checked and
 published automatically one at a time under their current approval. Manual
 checking and publishing remain explicit overrides. Rollback copies stay until
