@@ -360,7 +360,7 @@ def test_first_kind_sample_candidates_keep_ranked_fallbacks() -> None:
              for prefix in [PREFIX, "tv/Other Live/Season 1", "tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1"]]
     assert kind_sample_candidates(kinds, cards) == [[PREFIX, "tv/Other Live/Season 1"],
                                                   ["tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1"]]
-    cards[0]["page_state"]["key"] = "making_test"
+    cards[0] = {"prefix": PREFIX, **_status("making_test", "make_sample")}
     assert kind_sample_candidates(kinds, cards)[0] == ["tv/Other Live/Season 1"]
 
 
