@@ -82,6 +82,18 @@ struct ItemFacts: Decodable, Sendable {
         }
     }
 
+    func workActions(_ actions: [SampleFacts.Action]) -> [SampleFacts.Action] {
+        actions.filter { $0 != .reviewFiles || !waiting.isEmpty }
+    }
+
+    func selectedFile(_ id: File.ID?) -> File? {
+        files.first { $0.id == id }
+            ?? files.first { $0.needsYou }
+            ?? files.first { $0.originalBackup }
+            ?? files.first { $0.compressed }
+            ?? files.first
+    }
+
     var waiting: [File] { files.filter(\.needsYou) }
     var compressedCount: Int { files.filter(\.compressed).count }
     var keptCount: Int { files.filter { $0.stage == "kept_original" || $0.stage == "held" }.count }

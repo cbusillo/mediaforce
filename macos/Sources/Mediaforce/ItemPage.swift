@@ -49,43 +49,46 @@ struct ItemPage: View {
         Group {
             if let facts {
                 HStack(alignment: .top, spacing: 0) {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 18) {
-                            HStack(alignment: .top) {
-                                ItemHeader(facts: facts, poster: facts.showPrefix.flatMap(model.posters.image(for:)), openShow: openItem)
-                                if let work {
-                                    WorkActions(actions: work.actions, working: working) { action in
-                                        perform(action, facts)
+                    ScrollViewReader { scroll in
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 18) {
+                                HStack(alignment: .top) {
+                                    ItemHeader(facts: facts, poster: facts.showPrefix.flatMap(model.posters.image(for:)), openShow: openItem)
+                                    if let work {
+                                        WorkActions(actions: facts.workActions(work.actions), working: working) { action in
+                                            perform(action, facts, scroll: scroll)
+                                        }
                                     }
                                 }
-                            }
-                            if let file = selectedFile(facts) {
-                                FilePlayer(file: file, model: model) {
-                                    Task { await act(.putOriginalBack, file) }
+                                if let file = facts.selectedFile(selected) {
+                                    FilePlayer(file: file, model: model) {
+                                        Task { await act(.putOriginalBack, file) }
+                                    }
+                                    // A file that is published, put back or loses its backup plays again from the start.
+                                    .id("\(file.id) \(file.stage) \(file.bytes) \(file.originalBackup)")
                                 }
-                                // A file that is published, put back or loses its backup plays again from the start.
-                                .id("\(file.id) \(file.stage) \(file.bytes) \(file.originalBackup)")
-                            }
-                            if !facts.waiting.isEmpty {
-                                WaitingFiles(files: facts.waiting) { file, action in
-                                    Task { await act(action, file) }
+                                if !facts.waiting.isEmpty {
+                                    WaitingFiles(files: facts.waiting) { file, action in
+                                        Task { await act(action, file) }
+                                    }
+                                    .id(SampleFacts.Action.reviewFiles)
+                                }
+                                if facts.sound != nil || facts.stillAiring != nil {
+                                    ShowChoices(facts: facts, openShow: openItem) { change in Task { await save(change) } }
+                                }
+                                if let show {
+                                    ShowSeasons(show: show,
+                                                openSample: openSample, openItem: openItem)
                                 }
                             }
-                            if facts.sound != nil || facts.stillAiring != nil {
-                                ShowChoices(facts: facts, openShow: openItem) { change in Task { await save(change) } }
-                            }
-                            if let show {
-                                ShowSeasons(show: show,
-                                            openSample: openSample, openItem: openItem)
-                            }
+                            .padding(.horizontal, 28)
+                            .padding(.vertical, 20)
                         }
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 20)
                     }
                     .frame(maxWidth: .infinity)
                     Divider()
                     FileList(files: facts.files, selected: Binding(
-                        get: { selectedFile(facts)?.id },
+                        get: { facts.selectedFile(selected)?.id },
                         set: { selected = $0 }
                     ))
                         .frame(width: 330)
@@ -101,7 +104,7 @@ struct ItemPage: View {
         }
     }
 
-    private func perform(_ action: SampleFacts.Action, _ facts: ItemFacts) {
+    private func perform(_ action: SampleFacts.Action, _ facts: ItemFacts, scroll: ScrollViewProxy) {
         switch action {
         case .approve, .makeAgain, .makeSample, .chooseSize, .tryAnotherSize, .openSample: openSample(prefix)
         case .replaceOriginals: confirming = .replaceOriginals
@@ -109,6 +112,9 @@ struct ItemPage: View {
         case .startCompressing: Task { await run(.startCompressing, facts) }
         case .checkFiles: Task { await run(.checkFiles, facts) }
         case .retryUnfinished: Task { await run(.retryUnfinished, facts) }
+        case .reviewFiles:
+            selected = facts.waiting.first?.id
+            scroll.scrollTo(SampleFacts.Action.reviewFiles, anchor: .top)
         }
     }
 
@@ -142,13 +148,6 @@ struct ItemPage: View {
         }
     }
 
-    private func selectedFile(_ facts: ItemFacts) -> ItemFacts.File? {
-        facts.files.first { $0.id == selected }
-            ?? facts.files.first { $0.originalBackup }
-            ?? facts.files.first { $0.compressed }
-            ?? facts.files.first
-    }
-
     private func watch() async {
         while !Task.isCancelled {
             await refresh()
@@ -159,7 +158,7 @@ struct ItemPage: View {
     private func refresh() async {
         do {
             let latest = try await model.client.item(prefix)
-            selected = selectedFile(latest)?.id
+            selected = latest.selectedFile(selected)?.id
             facts = latest
             refreshFailed = false
         } catch {
