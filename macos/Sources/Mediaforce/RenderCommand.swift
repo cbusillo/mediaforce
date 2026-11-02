@@ -25,10 +25,11 @@ struct RenderOptions {
                 server = url
             case "--page": pages.append(value)
             case "--width", "--height":
-                guard let points = Double(value), points.isFinite, (700...4096).contains(points) else {
-                    throw RenderFailure("\(option) must be between 700 and 4096 points")
+                let minimum = option == "--width" ? 1100.0 : 700.0
+                guard let points = Double(value), points.isFinite, (minimum...4096).contains(points) else {
+                    throw RenderFailure("\(option) must be between \(Int(minimum)) and 4096 points")
                 }
-                if option == "--width" { size.width = max(1100, points) } else { size.height = points }
+                if option == "--width" { size.width = points } else { size.height = points }
             default: throw RenderFailure("Unknown option: \(option)")
             }
         }
@@ -43,7 +44,7 @@ struct RenderFailure: Error, CustomStringConvertible {
 actor RenderLoads {
     private var pending = 0
     private var completed: Set<String> = []
-    private var failures: [String] = []
+    private var failures: [String: String] = [:]
     private var changed = ContinuousClock.now
 
     func startPage() {
@@ -60,14 +61,17 @@ actor RenderLoads {
     func finish(_ path: String, failure: String? = nil) {
         pending -= 1
         completed.insert(path)
-        if let failure { failures.append("\(path): \(failure)") }
+        failures[path] = failure
         changed = .now
     }
 
     func wait(for paths: Set<String>) async throws {
         let deadline = ContinuousClock.now + .seconds(45)
         while ContinuousClock.now < deadline {
-            if !failures.isEmpty { throw RenderFailure(failures.joined(separator: "\n")) }
+            let requiredFailures = failures.filter { paths.contains($0.key) }
+            if !requiredFailures.isEmpty {
+                throw RenderFailure(requiredFailures.map { "\($0.key): \($0.value)" }.sorted().joined(separator: "\n"))
+            }
             if pending == 0, paths.isSubset(of: completed), changed.duration(to: .now) >= .milliseconds(500) { return }
             try await Task.sleep(for: .milliseconds(50))
         }
@@ -80,28 +84,37 @@ enum RenderCommand {
     static let mainPages = ["library", "tv", "movies", "other", "needs-you", "activity", "space-saved", "media",
                             "settings:libraries", "settings:compression", "settings:computers", "settings:metadata"]
 
-    static func run(_ options: RenderOptions, session: URLSession = .shared) async throws {
+    @discardableResult
+    static func run(_ options: RenderOptions, session: URLSession = .shared) async throws -> [String: [URL]] {
+        if FileManager.default.fileExists(atPath: options.output.path),
+           !(try FileManager.default.contentsOfDirectory(atPath: options.output.path)).isEmpty {
+            throw RenderFailure("Output directory is not empty. Use a new empty directory for this run: \(options.output.path)")
+        }
         let loads = RenderLoads()
         let client = MediaforceClient(baseURL: options.server, session: session, renderLoads: loads)
         let model = MainWindowModel(client: client)
         await model.refresh()
-        try await loads.wait(for: ["/api/app/main-window", "/api/app/kinds"])
-        guard model.facts != nil, model.kinds != nil else { throw RenderFailure("Main window or kinds did not load") }
+        try await loads.wait(for: ["/api/app/main-window"])
+        guard model.facts != nil else { throw RenderFailure("Main window did not load") }
         let pages = options.pages.isEmpty ? try await defaultPages(model) : options.pages
         try FileManager.default.createDirectory(at: options.output, withIntermediateDirectories: true)
+        var rendered: [String: [URL]] = [:]
         for (index, page) in pages.enumerated() {
             for dark in [false, true] {
                 let name = page.map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "_" }
                 let file = options.output.appendingPathComponent("\(index + 1)-\(String(name))-\(dark ? "dark" : "light").png")
                 try await capture(page, model: model, loads: loads, size: options.size, dark: dark, file: file)
+                rendered[page, default: []].append(file)
                 print(file.path)
             }
         }
+        return rendered
     }
 
     private static func defaultPages(_ model: MainWindowModel) async throws -> [String] {
+        guard let kinds = model.kinds else { throw RenderFailure("Kinds did not load for the default page set") }
         var pages = mainPages
-        pages += (model.kinds?.kinds ?? []).map { "kind:\($0.kind)" }
+        pages += kinds.kinds.map { "kind:\($0.kind)" }
         let shows = try await model.client.tvShows().shows
         if let show = shows.first {
             pages.append("item:\(show.showPrefix)")
@@ -131,7 +144,10 @@ enum RenderCommand {
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         window.contentView = host
-        defer { window.close() }
+        defer {
+            window.contentView = nil
+            window.close()
+        }
         host.layoutSubtreeIfNeeded()
         try await loads.wait(for: paths)
         host.layoutSubtreeIfNeeded()
@@ -164,7 +180,7 @@ enum RenderCommand {
             default: throw RenderFailure("Unknown Settings page: \(value)")
             }
             let endpoint = value == "libraries" ? "library" : value
-            return (AnyView(view.frame(width: 760)), ["/api/app/settings/\(endpoint)"])
+            return (view, ["/api/app/settings/\(endpoint)"])
         }
         let place: Place
         let paths: Set<String>

@@ -52,6 +52,7 @@ struct MediaforceClient: Sendable {
     }
 
     func poster(titlePrefix: String) async -> NSImage? {
+        guard !Task.isCancelled else { return nil }
         let url = baseURL.appending(path: "api/app/posters").appending(path: titlePrefix)
         await renderLoads?.begin(url.path)
         let result = try? await session.data(from: url)
@@ -225,6 +226,7 @@ struct MediaforceClient: Sendable {
     }
 
     func decode<Value: Decodable>(_ type: Value.Type, from request: URLRequest) async throws -> Value {
+        try Task.checkCancellation()
         let path = request.url?.path ?? ""
         await renderLoads?.begin(path)
         do {

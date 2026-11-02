@@ -5,18 +5,19 @@ import XCTest
 @MainActor
 final class RenderTests: XCTestCase {
     func testMainPagesRenderWithFixtureDataInBothAppearances() async throws {
-        guard let directory = ProcessInfo.processInfo.environment["MEDIAFORCE_RENDER_OUTPUT"] else {
-            throw XCTSkip("The render CI step supplies MEDIAFORCE_RENDER_OUTPUT")
-        }
-        let options = try RenderOptions(arguments: [directory])
+        let retained = ProcessInfo.processInfo.environment["MEDIAFORCE_RENDER_OUTPUT"]
+        let directory = retained ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        defer { if retained == nil { try? FileManager.default.removeItem(atPath: directory) } }
+        let options = try RenderOptions(arguments: [directory, "--server", "http://mediaforce.invalid"])
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [RenderFixtureServer.self]
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
-        try await RenderCommand.run(options, session: session)
+        let rendered = try await RenderCommand.run(options, session: session)
         let files = try FileManager.default.contentsOfDirectory(at: options.output, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "png" }
-        XCTAssertEqual(files.count, (RenderCommand.mainPages.count + 6) * 2)
+        XCTAssertEqual(Set(files.map(\.lastPathComponent)), Set(rendered.values.flatMap { $0 }.map(\.lastPathComponent)))
+        XCTAssertTrue(Set(RenderCommand.mainPages).isSubset(of: Set(rendered.keys)))
         for file in files {
             let bitmap = try XCTUnwrap(NSBitmapImageRep(data: Data(contentsOf: file)), file.path)
             if !file.lastPathComponent.contains("settings_") {
@@ -32,9 +33,42 @@ final class RenderTests: XCTestCase {
             XCTAssertGreaterThan(colors.count, 20, "Blank page: \(file.lastPathComponent)")
             if file.lastPathComponent.hasSuffix("light.png") {
                 let dark = file.deletingLastPathComponent().appendingPathComponent(file.lastPathComponent.replacingOccurrences(of: "light.png", with: "dark.png"))
-                XCTAssertNotEqual(try Data(contentsOf: file), try Data(contentsOf: dark))
+                let darkBitmap = try XCTUnwrap(NSBitmapImageRep(data: Data(contentsOf: dark)))
+                XCTAssertGreaterThan(try backgroundBrightness(bitmap), try backgroundBrightness(darkBitmap))
             }
         }
+    }
+
+    private func backgroundBrightness(_ bitmap: NSBitmapImageRep) throws -> CGFloat {
+        let color = try XCTUnwrap(bitmap.colorAt(x: bitmap.pixelsWide - 8, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.sRGB))
+        return color.redComponent + color.greenComponent + color.blueComponent
+    }
+
+    func testOptionalMissingFactsStillRenderTheirPages() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pages = ["item:tv/Lucifer/Season 2", "item:tv/Lucifer", "settings:computers"]
+        let options = try RenderOptions(arguments: [directory.path, "--server", "http://mediaforce.invalid"] + pages.flatMap { ["--page", $0] })
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MissingOptionalRenderServer.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let rendered = try await RenderCommand.run(options, session: session)
+        for page in pages { XCTAssertFalse(try XCTUnwrap(rendered[page]).isEmpty) }
+    }
+
+    func testExistingOutputIsPreservedInsteadOfMixedWithNewCaptures() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let old = directory.appendingPathComponent("old-light.png")
+        let previous = Data("previous capture".utf8)
+        try previous.write(to: old)
+        do {
+            try await RenderCommand.run(RenderOptions(arguments: [directory.path]))
+            XCTFail("Existing evidence was mixed with a new run")
+        } catch is RenderFailure {}
+        XCTAssertEqual(try Data(contentsOf: old), previous)
     }
 
     func testInvalidRenderArgumentsFailBeforeLoading() {
@@ -46,7 +80,7 @@ final class RenderTests: XCTestCase {
     func testAnUnreadablePageCannotBeReportedAsRendered() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let options = try RenderOptions(arguments: [directory.path, "--page", "activity"])
+        let options = try RenderOptions(arguments: [directory.path, "--server", "http://mediaforce.invalid", "--page", "activity"])
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [BrokenRenderServer.self]
         let session = URLSession(configuration: configuration)
@@ -107,13 +141,20 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
         case "/api/app/settings/compression": SettingsTests.compressionFacts
         case let path where path.hasPrefix("/api/app/samples/"): SampleTests.facts()
         case let path where path.hasPrefix("/api/app/items/"):
-            """
-            {"prefix": "\(path.dropFirst("/api/app/items/".count))", "domain": "tv", "kind": "tv_season",
-             "title": "Example", "show": "Lucifer", "show_prefix": "tv/Lucifer", "season": 2,
-             "season_folder": "Season 2", "parent_prefix": "tv/Lucifer", "files": []}
-            """
+            item(String(path.dropFirst("/api/app/items/".count)))
         default: nil
         }
+    }
+
+    private func item(_ prefix: String) -> String {
+        let kind = prefix == "tv/Lucifer" ? "tv_series" : prefix.hasPrefix("movies/") ? "movie" : prefix.hasPrefix("other/") ? "other" : "tv_season"
+        return """
+        {"prefix": "\(prefix)", "domain": "\(prefix.split(separator: "/").first!)", "kind": "\(kind)",
+         "title": "Example", "show": "Lucifer", "show_prefix": "tv/Lucifer", "season": 2,
+         "season_folder": "Season 2", "parent_prefix": "tv/Lucifer",
+         "files": [{"library_item_id": 1, "rel_path": "\(prefix)/Example.mkv", "name": "Example.mkv", "episode": 1,
+                    "stage": "published", "bytes": 1000, "original_bytes": 2000, "original_backup": true}]}
+        """
     }
 
     override func stopLoading() {}
@@ -122,5 +163,12 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
 private final class BrokenRenderServer: RenderFixtureServer, @unchecked Sendable {
     override func payload(_ path: String) -> String? {
         path == "/api/app/activity" ? "unreadable" : super.payload(path)
+    }
+}
+
+private final class MissingOptionalRenderServer: RenderFixtureServer, @unchecked Sendable {
+    override func payload(_ path: String) -> String? {
+        path.hasPrefix("/api/app/samples/") || ["/api/app/kinds", "/api/app/tv-shows", "/api/hosts"].contains(path)
+            ? nil : super.payload(path)
     }
 }
