@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from typing import Any, cast
 
 import pytest
@@ -12,7 +12,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime import folder_actions
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
-    samples_to_remake, start_compressing
+    kind_sample_candidates, prepare_waiting_samples, samples_to_remake, start_compressing
 
 PREFIX = "tv/Lucifer/Season 2"
 
@@ -339,3 +339,89 @@ def test_a_post_save_kind_refusal_reports_the_saved_season_and_real_queue_result
     )
     assert result == {"ok": True, "compressing": False, "reason": "free_space_reserve", "kind_code": kind_code}
     assert calls == ["save", "queue"]
+
+
+@pytest.mark.parametrize("state", ["needs_test", "waiting_for_kind", "making_test", "ready_to_compare", "waiting_for_measurement", "needs_help"])
+def test_first_kind_sample_uses_existing_sample_flow_only_when_it_can_start(state: str) -> None:
+    kinds = [{"kind": "bright_live_action", "approval": None, "sample_season": None,
+              "shows": [{"sample_season": PREFIX}]}]
+    cards = [{"prefix": PREFIX, **_status(state, None)}]
+    assert kind_sample_candidates(kinds, cards)["bright_live_action"] == ([PREFIX] if state in {"needs_test", "waiting_for_kind"} else [])
+    for settled in [{"approval": {"from_prefix": PREFIX}}, {"sample_season": PREFIX}, {"settings": [{"from_prefix": PREFIX}]}]:
+        assert not kind_sample_candidates([kinds[0] | settled], cards)
+
+
+def test_first_kind_sample_candidates_keep_ranked_fallbacks() -> None:
+    kinds = [{"kind": kind, "approval": None, "sample_season": None,
+              "shows": [{"sample_season": prefix}, {"sample_season": other}]}
+             for kind, prefix, other in [("bright_live_action", PREFIX, "tv/Other Live/Season 1"),
+                                         ("cartoon", "tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1")]]
+    cards = [{"prefix": prefix, **_status("needs_test", "make_sample")}
+             for prefix in [PREFIX, "tv/Other Live/Season 1", "tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1"]]
+    assert kind_sample_candidates(kinds, cards) == {"bright_live_action": [PREFIX, "tv/Other Live/Season 1"],
+                                                  "cartoon": ["tv/Cartoon/Season 1", "tv/Other Cartoon/Season 1"]}
+    cards[0] = {"prefix": PREFIX, **_status("making_test", "make_sample")}
+    assert kind_sample_candidates(kinds, cards)["bright_live_action"] == ["tv/Other Live/Season 1"]
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_sample_sweep_falls_back_stops_after_success_and_keeps_other_kinds_moving(changed: bool) -> None:
+    prefixes = ["tv/A/Season 1", "tv/B/Season 1", "tv/C/Season 1", "tv/Cartoon/Season 1"]
+    cards = [{"prefix": prefix, **_status("needs_test", "make_sample")} for prefix in prefixes]
+    kinds = [{"kind": "bright_live_action", "shows": [{"sample_season": prefix} for prefix in prefixes[:3]]},
+             {"kind": "cartoon", "shows": [{"sample_season": prefixes[3]}]}]
+    attempted: list[str] = []
+
+    def fresh(prefix: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        key = "ready_to_make" if changed and prefix == prefixes[0] else "needs_test"
+        return {"prefix": prefix}, _status(key, "make_sample")
+
+    def make(folder: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
+        prefix = folder["prefix"]
+        attempted.append(prefix)
+        return {"ok": prefix != prefixes[0]}
+
+    prepare_waiting_samples(cards, kinds, load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make)
+    assert attempted == ([prefixes[1], prefixes[3]] if changed else [prefixes[0], prefixes[1], prefixes[3]])
+
+
+@pytest.mark.parametrize("code", ["refused", "choose_size", "choose_balance"])
+def test_first_sample_start_failures_retry_then_ask_and_success_or_settings_clear_the_wait(code: str) -> None:
+    cards = [{"prefix": PREFIX, **_status("needs_test", "make_sample")}]
+    kind = {"kind": "bright_live_action", "shows": [{"sample_season": PREFIX}]}
+    successful = False
+    attempted: list[str] = []
+
+    def fresh(prefix: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        return {"prefix": prefix}, _status("needs_test", "make_sample")
+
+    def make(folder: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
+        attempted.append(folder["prefix"])
+        return {"ok": successful, "code": code}
+
+    first = prepare_waiting_samples(cards, [kind], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make)
+    assert first["bright_live_action"].prefix == PREFIX
+    assert first["bright_live_action"].reason == ("retry_backoff" if code == "refused" else code)
+    second = prepare_waiting_samples(cards, [kind], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make, previous=first)
+    assert second["bright_live_action"].reason == ("sample_blocked" if code == "refused" else code)
+    successful = True
+    assert not prepare_waiting_samples(cards, [kind], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make, previous=second)
+    assert len(attempted) == 3
+    settled = kind | {"settings": [{"from_prefix": PREFIX}]}
+    assert not prepare_waiting_samples(cards, [settled], load_payloads=fresh, failed_in_a_row=lambda _prefix: 0, make=make, previous=second)
+    assert len(attempted) == 3
+
+
+def test_a_first_sample_that_could_not_be_attempted_stays_quiet_across_sweeps() -> None:
+    cards = [{"prefix": PREFIX, **_status("needs_test", "make_sample")}]
+    kinds = [{"kind": "bright_live_action", "shows": [{"sample_season": PREFIX}]}]
+    attempted: list[str] = []
+
+    def make(folder: Mapping[str, Any], _status_payload: Mapping[str, Any]) -> dict[str, Any]:
+        attempted.append(folder["prefix"])
+        return {"ok": False}
+
+    first = prepare_waiting_samples(cards, kinds, load_payloads=lambda _prefix: None, failed_in_a_row=lambda _prefix: 0, make=make)
+    second = prepare_waiting_samples(cards, kinds, load_payloads=lambda _prefix: None, failed_in_a_row=lambda _prefix: 0, make=make, previous=first)
+    assert not attempted
+    assert first["bright_live_action"].reason == second["bright_live_action"].reason == "retry_backoff"

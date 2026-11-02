@@ -17,7 +17,11 @@ final class AttentionTests: XCTestCase {
         computers: [(key: String, state: String, needsYou: Bool)] = [],
         computerReason: String? = nil,
         computerSince: String? = nil,
-        kinds: [(kind: String, sampleSeason: String)] = [],
+        kinds: [(kind: String, sampleSeason: String?)] = [],
+        kindStatus: String? = nil,
+        kindReady: Bool? = nil,
+        startPrefix: String? = nil,
+        oneTime: Bool = false,
         backups: Int = 0
     ) throws -> MainWindowFacts {
         let finishedJSON = finished.map { season in
@@ -30,7 +34,11 @@ final class AttentionTests: XCTestCase {
             #"{"prefix": "\#(sample.prefix)", "show_prefix": "tv/Expanse", "show": "The Expanse", "season": 3, "state": "\#(sample.state)", "action": "\#(sample.action)", "failure": null}"#
         }
         let kindsJSON = kinds.map { kind in
-            #"{"kind": "\#(kind.kind)", "sample_season": "\#(kind.sampleSeason)"}"#
+            let season = kind.sampleSeason.map { #""\#($0)""# } ?? "null"
+            let status = kindStatus.map { #""\#($0)""# } ?? "null"
+            let ready = kindReady.map { String($0) } ?? "null"
+            let start = startPrefix.map { #""\#($0)""# } ?? "null"
+            return #"{"kind": "\#(kind.kind)", "sample_season": \#(season), "sample_status": \#(status), "sample_ready": \#(ready), "sample_start_prefix": \#(start), "one_time": \#(oneTime)}"#
         }
         let reason = computerReason.map { #""\#($0)""# } ?? "null"
         let since = computerSince.map { #""\#($0)""# } ?? "null"
@@ -83,6 +91,44 @@ final class AttentionTests: XCTestCase {
         let attention = Attention.review(now, remembered: nil)
         XCTAssertEqual(attention.notices, [])
         XCTAssertEqual(attention.badgeCount, 2)
+    }
+
+    func testAKindWithoutASampleStaysReachableAndNotifiesWhenReady() throws {
+        let before = try facts(kinds: [("bright_live_action", nil)], kindStatus: "not_started", kindReady: false)
+        let waiting = Attention.review(before, remembered: nil)
+        XCTAssertEqual(waiting.badgeCount, 0)
+        XCTAssertTrue(Attention.review(before, remembered: Attention.review(try facts(), remembered: nil).memory).notices.isEmpty)
+        XCTAssertEqual(Attention.waitingItems(before).map(\.opens), [.kind("bright_live_action")])
+        let queued = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "queued", kindReady: false)
+        let making = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "running", kindReady: false)
+        XCTAssertTrue(Attention.review(queued, remembered: waiting.memory).notices.isEmpty)
+        XCTAssertTrue(Attention.review(making, remembered: Attention.review(queued, remembered: waiting.memory).memory).notices.isEmpty)
+        let failed = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "failed", kindReady: false)
+        XCTAssertEqual(Attention.review(failed, remembered: Attention.review(making, remembered: waiting.memory).memory).notices.count, 1)
+        let ready = try facts(kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "pending_review", kindReady: true)
+        let after = Attention.review(ready, remembered: waiting.memory)
+        XCTAssertEqual(after.badgeCount, 1)
+        XCTAssertEqual(after.notices.map(\.opens), [.kind("bright_live_action")])
+        XCTAssertNotEqual(Attention.waitingItems(before).first?.body, after.notices.first?.body)
+        let cartoons = try facts(kinds: [("cartoon", "tv/Futurama/Season 1")], kindStatus: "pending_review", kindReady: true, oneTime: true)
+        XCTAssertEqual(Attention.waitingOnYou(cartoons), 1)
+        XCTAssertNotEqual(Attention.waitingItems(cartoons).first?.body, Attention.waitingItems(before).first?.body)
+    }
+
+    func testAFirstSampleChoiceIsBadgedAndOpensTheSeasonThatNeedsIt() throws {
+        let retrying = try facts(kinds: [("bright_live_action", nil)], kindStatus: "retry_backoff", kindReady: false)
+        let choice = try facts(kinds: [("bright_live_action", nil)], kindStatus: "choose_size", kindReady: false,
+                               startPrefix: "tv/Psych/Season 3")
+        let after = Attention.review(choice, remembered: Attention.review(retrying, remembered: nil).memory)
+        XCTAssertEqual(after.badgeCount, 1)
+        XCTAssertEqual(after.notices.map(\.opens), [.sample("tv/Psych/Season 3")])
+        XCTAssertTrue(Attention.review(choice, remembered: after.memory).notices.isEmpty)
+        let unsuitable = try facts(waitingSamples: [("tv/Psych/Season 3", "ready_to_compare", "review_sample")],
+                                   kinds: [("bright_live_action", "tv/Psych/Season 3")], kindStatus: "pending_review", kindReady: false)
+        XCTAssertEqual(Attention.waitingItems(unsuitable).count, 2)
+        let noticed = Attention.review(unsuitable, remembered: Attention.review(try facts(), remembered: nil).memory)
+        XCTAssertEqual(noticed.badgeCount, 1)
+        XCTAssertEqual(noticed.notices.count, 1)
     }
 
     func testASeasonWithFileDecisionsNotifiesAndCountsOnce() throws {

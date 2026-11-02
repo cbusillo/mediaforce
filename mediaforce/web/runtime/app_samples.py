@@ -1,4 +1,5 @@
 from collections.abc import Callable, Collection, Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 from pathlib import Path
 
@@ -143,6 +144,64 @@ def make_sample(
     except HTTPException:
         return REFUSED
     return {"ok": True, "code": None} if result.get("ok") else REFUSED
+
+
+def kind_sample_candidates(kinds: Iterable[Mapping[str, Any]], cards: Iterable[Mapping[str, Any]]) -> dict[str, list[str]]:
+    states = {str(card["prefix"]): object_dict(card.get("page_state")) for card in cards}
+    groups: dict[str, list[str]] = {}
+    for kind in kinds:
+        if (not kind.get("shows") or kind.get("approval") or kind.get("sample_season")
+                or (kind.get("settings") and not kind.get("one_time"))):
+            continue
+        candidates = [str(show["sample_season"]) for show in object_list(kind.get("shows"))
+                      if states.get(str(show["sample_season"]), {}).get("key") in {"needs_test", "waiting_for_kind"}]
+        groups[str(kind["kind"])] = candidates
+    return groups
+
+
+@dataclass(frozen=True, slots=True)
+class SampleStartWait:
+    prefix: str | None
+    reason: str
+
+
+def prepare_waiting_samples(
+        cards: Iterable[Mapping[str, Any]], kinds: Iterable[Mapping[str, Any]], *,
+        load_payloads: Callable[[str], tuple[dict[str, Any], dict[str, Any]] | None],
+        failed_in_a_row: Callable[[str], int],
+        make: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]],
+        previous: Mapping[str, SampleStartWait] | None = None,
+) -> dict[str, SampleStartWait]:
+    cards = list(cards)
+    for season in samples_to_remake(cards, failed_in_a_row):
+        payloads = load_payloads(season)
+        if payloads is not None and samples_to_remake([{**payloads[1], "prefix": season}], failed_in_a_row):
+            make(*payloads)
+    waits: dict[str, SampleStartWait] = {}
+    for kind, candidates in kind_sample_candidates(kinds, cards).items():
+        wait = None
+        started = False
+        for season in candidates:
+            payloads = load_payloads(season)
+            if payloads is None or object_dict(payloads[1].get("page_state")).get("key") not in {"needs_test", "waiting_for_kind"}:
+                continue
+            result = make(*payloads)
+            if result.get("ok"):
+                started = True
+                break
+            if wait is None:
+                wait = SampleStartWait(season, str(result.get("code") or "refused"))
+        if started:
+            continue
+        prior = (previous or {}).get(kind)
+        if wait is None:
+            waits[kind] = SampleStartWait(None, "retry_backoff")
+        elif wait.reason in {"choose_size", "choose_balance"}:
+            waits[kind] = wait
+        else:
+            repeated = prior is not None and prior.reason in {"retry_backoff", "sample_blocked"}
+            waits[kind] = SampleStartWait(wait.prefix, "sample_blocked" if repeated else "retry_backoff")
+    return waits
 
 
 def samples_to_remake(cards: Iterable[Mapping[str, Any]], failed_in_a_row: Callable[[str], int]) -> list[str]:

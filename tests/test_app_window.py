@@ -14,6 +14,7 @@ from mediaforce.encoding.encode_queue import DEFAULT_QUEUE_NAME, save_queue_stat
 from mediaforce.library.background_work import background_work_is_paused, set_background_work_paused
 from mediaforce.library.evidence_queue import evidence_queue_summary
 from mediaforce.web.runtime import host_status
+from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, samples_to_remake
 from mediaforce.web.runtime.app_window import app_window_payload, tv_shows_payload
 from mediaforce.web.runtime.host_runtime import _running_encode_jobs_for_hosts
 from mediaforce.web.runtime.encode_scheduler import format_eta_seconds
@@ -523,3 +524,57 @@ def test_kind_decision_replaces_its_sample_row_but_keeps_other_season_decisions(
     assert not facts["samples"]["waiting_on_you"]
     expected = [cards[1]["prefix"]] if state == "ready_to_compare" else [prefix, cards[1]["prefix"]]
     assert [season["prefix"] for season in facts["work"]["seasons_needing_you"]] == expected
+
+
+@pytest.mark.parametrize("sample_ready", [False, True])
+def test_waiting_kind_reaches_needs_you_before_its_sample_exists_and_keeps_unrelated_decisions(
+        connection: DBClient, sample_ready: bool,
+) -> None:
+    prefix = "tv/Drama/Season 1"
+    kind = {"kind": "darker_live_action", "sample_season": prefix if sample_ready else None,
+            "sample_status": "pending_review" if sample_ready else "not_started", "sample_ready": sample_ready,
+            "one_time": False, "needs_you": True}
+    facts = app_window_payload(
+        connection, library_types=LIBRARY_TYPES,
+        season_cards=[{"prefix": prefix, "page_state": {"key": "ready_to_compare", "needs_you": True}}],
+        computers=[], controller_storage=READY_STORAGE, storage_admits_work=True, observed_at=datetime.now(UTC), kinds=[kind],
+    )
+    pending = facts["work"]["kinds_needing_you"]
+    assert len(pending) == 1
+    assert pending[0]["sample_ready"] == sample_ready
+    assert pending[0]["sample_season"] == kind["sample_season"]
+    assert bool(facts["samples"]["waiting_on_you"]) != sample_ready
+
+
+def test_kind_sample_failure_is_one_reachable_decision(connection: DBClient) -> None:
+    prefix = "tv/Drama/Season 1"
+    facts = app_window_payload(
+        connection, library_types=LIBRARY_TYPES,
+        season_cards=[{"prefix": prefix, "page_state": {"key": "needs_help", "recovery_kind": "test", "needs_you": True}}],
+        computers=[], controller_storage=READY_STORAGE, storage_admits_work=True, observed_at=datetime.now(UTC),
+        kinds=[{"kind": "darker_live_action", "sample_season": prefix, "sample_status": "failed",
+                "sample_ready": False, "needs_you": True}],
+    )
+    assert len(facts["work"]["kinds_needing_you"]) == 1
+    assert not facts["samples"]["waiting_on_you"] and not facts["work"]["seasons_needing_you"]
+
+
+@pytest.mark.parametrize("exhausted", [False, True])
+@pytest.mark.parametrize("has_kind", [False, True])
+def test_automatic_sample_retries_stay_quiet_until_the_existing_retry_limit(
+        connection: DBClient, exhausted: bool, has_kind: bool,
+) -> None:
+    prefix = "tv/Drama/Season 1"
+    cards = [{"prefix": prefix, "page_state": {"key": "needs_help", "recovery_kind": "test", "primary_action": "retry_sample",
+                                               "failure": "worker_restart", "needs_you": True}}]
+    remaking = samples_to_remake(cards, lambda _prefix: SAMPLE_REMAKE_LIMIT if exhausted else 0)
+    kinds = [{"kind": "darker_live_action", "sample_season": prefix, "sample_status": "failed",
+              "sample_ready": False, "needs_you": True}] if has_kind else []
+    facts = app_window_payload(
+        connection, library_types=LIBRARY_TYPES, season_cards=cards, kinds=kinds, remaking_samples=remaking,
+        computers=[], controller_storage=READY_STORAGE, storage_admits_work=True, observed_at=datetime.now(UTC),
+    )
+    if has_kind:
+        assert facts["work"]["kinds_needing_you"][0]["sample_status"] == ("failed" if exhausted else "retry_backoff")
+    assert bool(facts["samples"]["waiting_on_you"]) == (exhausted and not has_kind)
+    assert not facts["work"]["seasons_needing_you"]

@@ -249,7 +249,7 @@ extension Words {
             sentences.append("Nothing is being compressed. \(count(facts.samples.waitingOnYou.count, "sample")) under Samples need you first.")
         }
         if !work.kindsNeedingYou.isEmpty {
-            sentences.append("\(count(work.kindsNeedingYou.count, "kind")) waiting for your approval in Needs you.")
+            sentences.append("\(count(work.kindsNeedingYou.count, "kind")) waiting in Needs you.")
         }
         if !work.seasonsNeedingYou.isEmpty {
             sentences.append("\(count(work.seasonsNeedingYou.count, "season")) waiting for you in Media.")

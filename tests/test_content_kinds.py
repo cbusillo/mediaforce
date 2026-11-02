@@ -87,7 +87,7 @@ def _item(connection: DBClient, rel_path: str, *, status: str, codec: str, curre
     return int(result.inserted_primary_key[0])
 
 
-def _admit_historical_original(connection: DBClient, item_id: int, *, dark: float) -> None:
+def _admit_historical_original(connection: DBClient, item_id: int, *, dark: float, height: int = 1080) -> None:
     now = timestamp()
     generation = f"generation-{item_id}"
     connection.execute(source_generations.insert().values(generation_id=generation, created_at=now))
@@ -99,7 +99,7 @@ def _admit_historical_original(connection: DBClient, item_id: int, *, dark: floa
     original = append_version(connection, generation_id=generation, role="input", recorded_at=now,
                               identity={"size_bytes": 5000, "sample_fingerprint": f"original-{item_id}",
                                         "unavailability": "removed"},
-                              profile={"video_codec": "h264", "width": 1920, "height": 1080})
+                              profile={"video_codec": "h264", "width": height * 16 // 9, "height": height})
     rule = stable_json_hash(HISTORICAL_OUTPUT_PROFILES)
     plan = {"plan_sha256": f"plan-{item_id}"}
     connection.execute(source_admissions.insert().values(
@@ -247,12 +247,13 @@ def test_a_file_kept_original_no_longer_waits(connection: DBClient) -> None:
     assert report["seasons"] == []
 
 
-@pytest.mark.parametrize("codec,roots", [("wmv2", ["tv"]), ("h264", [])])
+@pytest.mark.parametrize("codec,roots,reason", [("wmv2", ["tv"], "original_format_unidentified"),
+                                              ("h264", [], "measurement_library_disabled")])
 def test_unmeasured_seasons_outside_automatic_intake_name_the_prerequisite(
-        connection: DBClient, codec: str, roots: list[str],
+        connection: DBClient, codec: str, roots: list[str], reason: str,
 ) -> None:
     _item(connection, "tv/Old show/Season 1/e1.mkv", status="discovered", codec=codec, current_dark=0.5)
     row = season_kind_report(connection, library_types={"tv": "tv"}, folder_approved=lambda _prefix: False,
                              measurement_roots=roots)["seasons"][0]
     assert row["kind"] == "unmeasured"
-    assert row["measurement_reasons"] == ["automatic_measurement_unavailable"]
+    assert row["measurement_reasons"] == [reason]

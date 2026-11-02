@@ -284,9 +284,10 @@ def _measurement_reasons(
         if original is not None:
             if original.availability == "unavailable":
                 reasons.add("original_unavailable")
-        elif (item["video_codec"] not in HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]
-              or (measurement_roots is not None and item["media_root"] not in measurement_roots)):
-            reasons.add("automatic_measurement_unavailable")
+        elif item["video_codec"] and item["video_codec"] not in HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]:
+            reasons.add("original_format_unidentified")
+        if measurement_roots is not None and item["media_root"] not in measurement_roots:
+            reasons.add("measurement_library_disabled")
     reasons.update(failed[int(item["id"])] for item in episodes if int(item["id"]) in failed)
     return sorted(reason for reason in reasons if reason)
 
@@ -332,7 +333,7 @@ def season_kind_report(
         totals[grouping.kind]["seasons"] += 1
         totals[grouping.kind]["waiting_bytes"] += waiting_bytes
         rows.append({"season": prefix, **grouping.to_payload(),
-                     "measurement_reasons": _measurement_reasons(seasons[prefix], evidence_by_item, failed, measurement_roots)
+                     "measurement_reasons": _measurement_reasons(waiting, evidence_by_item, failed, measurement_roots)
                      if grouping.reason == "no_measured_original" else [],
                      "waiting_episodes": len(waiting),
                      "waiting_bytes": waiting_bytes})

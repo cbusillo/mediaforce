@@ -48,7 +48,12 @@ struct MainWindowFacts: Decodable, Sendable {
 
     struct PendingKind: Decodable, Sendable {
         let kind: String
-        let sampleSeason: String
+        let sampleSeason: String?
+        let sampleStatus: String?
+        let sampleReady: Bool?
+        let oneTime: Bool?
+        let settingsAvailable: Bool?
+        let sampleStartPrefix: String?
     }
 
     struct Library: Decodable, Sendable {

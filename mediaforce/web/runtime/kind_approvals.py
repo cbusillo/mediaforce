@@ -179,7 +179,10 @@ class KindAwareLoader:
                     boundaries[kind] = object_dict(load(config, settings[0]["from_prefix"])).get("accepted_at")
                 else:
                     representative = contents.samples.get(kind)
-                    boundaries[kind] = object_dict(representative).get("created_at")
+                    prefix = str(object_dict(representative).get("prefix") or "")
+                    finished = object_dict(representative).get("status") in {"pending_review", "completed"}
+                    boundaries[kind] = (object_dict(representative).get("created_at")
+                                        if not finished or _sample_covers_kind(config, kind, load(config, prefix), self._kind_of) else None)
             jobs = load_latest_jobs_for_prefixes(connection, [row["season"] for row in rows])
         waits.update({row["season"]: SampleWait(kind=row["kind"]) for row in rows
                       if row["kind"] in boundaries
@@ -520,15 +523,19 @@ def _kind_contents(connection: DBClient, config: MediaforceConfig, load_calibrat
     )
     kinds_by_season = object_dict(report.get("kinds_by_season"))
     newest: dict[str, dict[str, Any]] = {}
+    fallback: dict[str, dict[str, Any]] = {}
     for job in sorted(samples, key=lambda sample: str(sample.get("created_at") or "")):
         kind = kinds_by_season.get(job["prefix"])
         if kind is None:
             continue
-        if kind in APPROVABLE_KINDS and job.get("status") == "completed" and not _scalable_sample(
-                load_calibration_state(config, str(job["prefix"]))):
+        if kind not in APPROVABLE_KINDS and effective_production_approval(config, str(job["prefix"]), folders_only) is not None:
             continue
-        newest[str(kind)] = job
-    return _KindContents(episodes, approvals_by_show, report, newest)
+        fallback[str(kind)] = job
+        if kind not in APPROVABLE_KINDS or job.get("status") not in {"pending_review", "completed"} or _sample_covers_kind(
+                config, str(kind), load_calibration_state(config, str(job["prefix"])),
+                lambda _config, prefix: kinds_by_season.get(prefix)):
+            newest[str(kind)] = job
+    return _KindContents(episodes, approvals_by_show, report, {**fallback, **newest})
 
 
 def kinds_payload(
@@ -576,8 +583,8 @@ def kinds_payload(
             "settings": _lent_settings(kind, approvals_by_show, episodes, kinds_by_season),
             "approval": approvals[kind],
             "sample_season": _approved_sample_season(config, kind) or object_dict(contents.samples.get(kind)).get("prefix"),
-            "needs_you": kind in APPROVABLE_KINDS and approvals[kind] is None
-                         and object_dict(contents.samples.get(kind)).get("status") in {"pending_review", "completed"},
+            "sample_status": object_dict(contents.samples.get(kind)).get("status") or "not_started",
+            "needs_you": approvals[kind] is None and bool(shows[kind]),
         } for kind in KINDS_IN_ORDER],
         "left_out": [{"season": row["season"], "kind": row["kind"], "waiting_bytes": int(row["waiting_bytes"])}
                      for row in report["seasons"] if row["kind"] in LEFT_OUT_KINDS],
@@ -586,12 +593,13 @@ def kinds_payload(
         "folder_approved_seasons": int(object_dict(totals.get("folder_approved")).get("seasons") or 0),
     }
     for entry in payload["kinds"]:
-        if entry["needs_you"]:
-            season = str(entry["sample_season"])
-            entry["needs_you"] = sample_approval_kind(
-                config, payload, season, load_calibration_state(config, season),
-                kind_of=lambda _config, prefix: kinds_by_season.get(prefix),
-            ) == entry["kind"]
+        season = entry["sample_season"]
+        entry["sample_ready"] = (entry["sample_status"] in {"pending_review", "completed"}
+                                 and (entry["one_time"] or sample_approval_kind(
+                                     config, payload, str(season), load_calibration_state(config, str(season)),
+                                     kind_of=lambda _config, prefix: kinds_by_season.get(prefix),
+                                 ) == entry["kind"]))
+        entry["needs_you"] = entry["needs_you"] or (approvals[entry["kind"]] is None and entry["sample_ready"])
     return payload
 
 
@@ -609,10 +617,11 @@ def sample_approval_kind(
     kind = next((str(entry["kind"]) for entry in kinds.get("kinds", [])
                  if entry["kind"] in APPROVABLE_KINDS and entry.get("sample_season") == prefix
                  and _approved_sample_season(config, str(entry["kind"])) is None), None)
-    payload = object_dict(calibration)
-    if kind is None or not _scalable_sample(payload):
-        return None
-    return kind if _sample_kind_refusal(config, kind, payload, kind_of) is None else None
+    return kind if kind is not None and _sample_covers_kind(config, kind, calibration, kind_of) else None
+
+
+def _sample_covers_kind(config: MediaforceConfig, kind: str, calibration: Mapping[str, Any] | None, kind_of: KindOf) -> bool:
+    return _scalable_sample(calibration) and _sample_kind_refusal(config, kind, object_dict(calibration), kind_of) is None
 
 
 def _scalable_sample(calibration: Mapping[str, Any] | None) -> bool:

@@ -52,7 +52,13 @@ _KNOWN_MESSAGES: tuple[tuple[str, str], ...] = (
 )
 
 _FAILURE_KIND_SUMMARIES = {
-    "automatic_measurement_unavailable": "These files are outside the current automatic measuring pipeline.",
+    "original_format_unidentified": (
+        "Mediaforce cannot safely identify the waiting files' format as original media. Leave those files in place; "
+        "measuring needs support for identifying this format."
+    ),
+    "measurement_library_disabled": (
+        "Processing is turned off for this library. Library processing must be enabled before measuring can continue."
+    ),
     "original_unavailable": "The original is not available for measuring.",
     "original_not_assessed": "The original has not been identified safely.",
     "conflicting_measurements": "The original measurements disagree.",

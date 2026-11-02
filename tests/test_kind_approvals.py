@@ -29,7 +29,7 @@ from mediaforce.library.source_evidence import append_measurement, append_versio
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
 from mediaforce.web.runtime.episode_progress import load_season_episode_progress
-from mediaforce.web.runtime.app_samples import approve_sample, sample_moments
+from mediaforce.web.runtime.app_samples import approve_sample, kind_sample_candidates, sample_moments
 from mediaforce.web.runtime.folder_actions import queue_folder_encode_action
 from mediaforce.web.runtime.folder_state import save_calibration_state
 from mediaforce.web.routes.app_window import register_app_window_routes
@@ -967,7 +967,8 @@ def test_old_samples_follow_a_reusable_kind_while_its_newest_sample_stays_visibl
     config = _config(tmp_path)
     if stale_kind and kind in APPROVABLE_KINDS:
         _approve_stale_kind(config, kind)
-    folders = {SEASON: _review_ready(), OTHER_SEASON: _review_ready()}
+    folders = {season: _review_ready(sample_item=_approved_on(config, f"{season}/e00.mkv")["sample_item"])
+               for season in [SEASON, OTHER_SEASON]}
     load = _loader(folders, {SEASON: kind, OTHER_SEASON: kind})
     sources = PageStateSources(load, lambda *_args: {})
     with open_db(config.paths.db_path) as connection:
@@ -1244,7 +1245,7 @@ def test_kind_sample_approval_covers_other_shows_and_keeps_watched_evidence(tmp_
     watched_source.write_bytes(b"original clip")
     watched_sample.write_bytes(b"sample clip")
     watched_moments = sample_moments(calibration)
-    folders: dict[str, dict[str, Any]] = {}
+    folders = {APPROVED_SEASON: {key: value for key, value in calibration.items() if not key.startswith("accepted_")}}
     kinds = {APPROVED_SEASON: DARKER, SEASON: DARKER, OTHER_SEASON: DARKER}
     load = _loader(folders, kinds)
     _finished_sample(config, APPROVED_SEASON)
@@ -1320,10 +1321,10 @@ def test_kind_extension_never_copies_a_different_approved_draft(tmp_path: Path) 
     assert result == {"ok": False, "code": "sample_changed"}
     assert load_kind_approval(config, DARKER) is None
 
-def _completed_and_waiting_seasons(connection: DBClient) -> None:
+def _completed_and_waiting_seasons(connection: DBClient, *, height: int = 1080) -> None:
     for season in [APPROVED_SEASON, SEASON]:
         published = _content_item(connection, f"{season}/e00.mkv", status="promoted", codec="av1", current_dark=0.0)
-        _admit_historical_original(connection, published, dark=0.5)
+        _admit_historical_original(connection, published, dark=0.5, height=height)
         connection.execute(series_metadata.insert().values(
             series_prefix="/".join(season.split("/")[:2]), tmdb_genres_json='["Drama"]', updated_at="now"))
     _content_item(connection, f"{SEASON}/e01.mkv", status="discovered", codec="h264", current_dark=0.0)
@@ -1348,13 +1349,18 @@ def test_finished_seasons_newer_sample_stays_with_its_kind_and_reaches_attention
         kinds = kinds_payload(connection, config, load_calibration_state=load)["kinds"]
     darker = next(kind for kind in kinds if kind["kind"] == DARKER)
     assert darker["sample_season"] == APPROVED_SEASON
-    assert darker["needs_you"] == (not kind_approved and sample_status in {"pending_review", "completed"})
+    assert darker["needs_you"] == (not kind_approved)
+    assert darker["sample_ready"] == (not kind_approved and sample_status in {"pending_review", "completed"})
 
 
 @pytest.mark.parametrize("missing", [False, True])
-def test_a_completed_sample_that_cannot_cover_a_kind_does_not_ask_or_hide_other_samples(tmp_path: Path, missing: bool) -> None:
+@pytest.mark.parametrize("status", ["pending_review", "completed"])
+@pytest.mark.parametrize("suitable_older", [False, True])
+def test_a_sample_that_cannot_cover_a_kind_stays_visible_without_starting_a_sample_for_every_show(
+        tmp_path: Path, missing: bool, status: str, suitable_older: bool,
+) -> None:
     config = _config(tmp_path)
-    folders = {SEASON: _review_ready()}
+    folders = {SEASON: _review_ready(sample_item=_approved_on(config, EPISODE)["sample_item"]) if suitable_older else _review_ready()}
     if not missing:
         folders[APPROVED_SEASON] = _approved(config, size_mode="absolute")
         folders[APPROVED_SEASON]["sample_item"]["rel_path"] = f"{APPROVED_SEASON}/e00.mkv"
@@ -1363,11 +1369,12 @@ def test_a_completed_sample_that_cannot_cover_a_kind_does_not_ask_or_hide_other_
     _finished_sample(config, APPROVED_SEASON, "2026-10-29T00:00:00+00:00")
     with open_db(config.paths.db_path) as connection:
         _completed_and_waiting_seasons(connection)
-        connection.execute(calibration_jobs.update().where(calibration_jobs.c.prefix == APPROVED_SEASON).values(status="completed"))
+        connection.execute(calibration_jobs.update().where(calibration_jobs.c.prefix == APPROVED_SEASON).values(status=status))
         connection.commit()
         darker = next(kind for kind in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if kind["kind"] == DARKER)
-    assert darker["sample_season"] == SEASON
-    assert not darker["needs_you"]
+    assert darker["sample_season"] == (SEASON if suitable_older else APPROVED_SEASON)
+    assert not kind_sample_candidates([darker], [{"prefix": SEASON, "page_state": {"key": "needs_test"}}])
+    assert darker["needs_you"] and darker["sample_ready"] == suitable_older
     assert SEASON not in load.sample_waits(config)
 
 
@@ -1398,3 +1405,90 @@ def test_activity_names_next_approved_season_while_production_waits_for_current_
         following = next_approved_season(connection, config, load_calibration_state=load, now=0)
         assert following is not None and following.season == SEASON
         assert connection.execute(select(encode_jobs.c.status)).scalar_one() == "running"
+
+
+@pytest.mark.parametrize("sample_status", [None, "running", "pending_review", "failed"])
+def test_unapproved_kind_is_visible_before_and_after_its_sample(tmp_path: Path, sample_status: str | None) -> None:
+    config = _config(tmp_path)
+    folders = {SEASON: _approved_on(config, f"{SEASON}/e00.mkv")}
+    for key in list(folders[SEASON]):
+        if key.startswith("accepted_"):
+            folders[SEASON].pop(key)
+    load = _loader(folders, {SEASON: DARKER})
+    if sample_status:
+        _finished_sample(config, SEASON)
+    with open_db(config.paths.db_path) as connection:
+        _completed_and_waiting_seasons(connection)
+        if sample_status:
+            connection.execute(calibration_jobs.update().values(status=sample_status))
+        connection.commit()
+        kinds = kinds_payload(connection, config, load_calibration_state=load)["kinds"]
+    darker = next(kind for kind in kinds if kind["kind"] == DARKER)
+    assert darker["needs_you"]
+    assert darker["sample_status"] == (sample_status or "not_started")
+    assert not next(kind for kind in kinds if kind["kind"] == "bright_live_action")["needs_you"]
+
+
+@pytest.mark.parametrize("codec,enabled,reason", [("wmv2", True, "original_format_unidentified"),
+                                                 ("av1", True, None),
+                                                 (None, True, None),
+                                                 ("h264", False, "measurement_library_disabled")])
+def test_measuring_outside_the_pipeline_names_the_reason_and_next_action(
+        tmp_path: Path, codec: str | None, enabled: bool, reason: str | None,
+) -> None:
+    config = _config(tmp_path)
+    if not enabled:
+        config.raw["media"]["libraries"][0]["availability"] = "browse_only"
+    with open_db(config.paths.db_path) as connection:
+        item_id = _content_item(connection, EPISODE, status="discovered", codec=codec or "hevc", current_dark=0.5)
+        if codec is None:
+            connection.execute(library_items.update().where(library_items.c.id == item_id).values(video_codec=None))
+        if codec == "av1":
+            _content_item(connection, f"{SEASON}/e02.mkv", status="discovered", codec="hevc", current_dark=0.5)
+        connection.commit()
+        load = KindAwareLoader(lambda *_args: None, SeasonKinds())
+        wait = load.sample_waits(config)[SEASON]
+        state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
+    assert wait.measurement_reasons == ((reason,) if reason else ())
+    assert state["key"] == "waiting_for_measurement" and not state["needs_you"]
+    assert bool(state["wait_detail"]) == bool(reason)
+
+
+@pytest.mark.parametrize("kind", ["cartoon", "4k"])
+@pytest.mark.parametrize("approval_scope", [APPROVED_SEASON, "tv/Drama"])
+def test_one_time_kind_moves_on_from_an_approved_show_sample(tmp_path: Path, kind: str, approval_scope: str) -> None:
+    config = _config(tmp_path)
+    calibration = _approved_on(config, f"{APPROVED_SEASON}/e00.mkv")
+    folders = {APPROVED_SEASON: {key: value for key, value in calibration.items() if not key.startswith("accepted_")}}
+    load = _loader(folders, {APPROVED_SEASON: kind, SEASON: kind})
+    _finished_sample(config, APPROVED_SEASON)
+    with open_db(config.paths.db_path) as connection:
+        _completed_and_waiting_seasons(connection, height=2160 if kind == "4k" else 1080)
+        if kind == "cartoon":
+            connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
+        connection.commit()
+        before = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if row["kind"] == kind)
+        assert before["sample_ready"] and before["sample_season"] == APPROVED_SEASON
+        folders[approval_scope] = calibration
+        connection.execute(calibration_jobs.update().values(status="completed"))
+        connection.commit()
+        after = next(row for row in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if row["kind"] == kind)
+    assert after["needs_you"] and not after["sample_ready"]
+    assert after["sample_season"] is None
+    assert after["shows"][0]["sample_season"] == SEASON
+    assert kind_sample_candidates([after], [{"prefix": SEASON, "page_state": {"key": "needs_test"}}]) == {kind: [SEASON]}
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "retry_backoff", "failed", "stopped"])
+def test_a_new_sample_without_a_finished_draft_keeps_older_kind_samples_quiet(tmp_path: Path, status: str) -> None:
+    config = _config(tmp_path)
+    folders = {SEASON: _review_ready(sample_item=_approved_on(config, EPISODE)["sample_item"])}
+    load = _loader(folders, {SEASON: DARKER, APPROVED_SEASON: DARKER})
+    _finished_sample(config, SEASON, "2026-10-28T00:00:00+00:00")
+    _finished_sample(config, APPROVED_SEASON, "2026-10-29T00:00:00+00:00")
+    with open_db(config.paths.db_path) as connection:
+        _completed_and_waiting_seasons(connection)
+        connection.execute(calibration_jobs.update().where(calibration_jobs.c.prefix == APPROVED_SEASON).values(status=status))
+        connection.commit()
+        state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
+    assert state["key"] == "waiting_for_kind" and not state["needs_you"]
