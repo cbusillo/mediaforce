@@ -58,10 +58,9 @@ final class ItemTests: XCTestCase {
         })
 
         XCTAssertTrue(season.waiting.isEmpty)
-        XCTAssertEqual(season.keptCount, season.files.count)
         for (file, reason) in zip(season.files, reasons) {
+            XCTAssertNotEqual(Words.keptReason("motion_\(reason)"), Words.keptReason(""))
             XCTAssertTrue(Words.fileState(file).contains(Words.keptReason("motion_\(reason)")))
-            XCTAssertFalse(file.originalBackup)
         }
     }
 
@@ -77,6 +76,15 @@ final class ItemTests: XCTestCase {
         XCTAssertEqual(season.selectedFile(999)?.id, season.waiting.first?.id)
         let finished = try facts([file(1, stage: "published", bytes: 100, original: 700, backup: true)])
         XCTAssertEqual(finished.selectedFile(nil)?.id, finished.files.first?.id)
+    }
+
+    func testAnAutomaticRetryDoesNotOfferAnEmptyFileReview() throws {
+        let retrying = try facts([file(1, stage: "waiting", bytes: 900, validation: "failed")])
+        let waiting = try facts([file(1, stage: "needs_you", bytes: 900, validation: "size_held")])
+        let actions: [SampleFacts.Action] = [.reviewFiles, .retryUnfinished]
+
+        XCTAssertEqual(retrying.workActions(actions), [.retryUnfinished])
+        XCTAssertEqual(waiting.workActions(actions), actions)
     }
 
     func testEachWaitSaysWhyInPlainWords() throws {

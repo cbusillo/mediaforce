@@ -82,6 +82,10 @@ struct ItemFacts: Decodable, Sendable {
         }
     }
 
+    func workActions(_ actions: [SampleFacts.Action]) -> [SampleFacts.Action] {
+        actions.filter { $0 != .reviewFiles || !waiting.isEmpty }
+    }
+
     func selectedFile(_ id: File.ID?) -> File? {
         files.first { $0.id == id }
             ?? files.first { $0.needsYou }

@@ -55,7 +55,7 @@ struct ItemPage: View {
                                 HStack(alignment: .top) {
                                     ItemHeader(facts: facts, poster: facts.showPrefix.flatMap(model.posters.image(for:)), openShow: openItem)
                                     if let work {
-                                        WorkActions(actions: work.actions, working: working) { action in
+                                        WorkActions(actions: facts.workActions(work.actions), working: working) { action in
                                             perform(action, facts, scroll: scroll)
                                         }
                                     }

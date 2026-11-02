@@ -812,8 +812,8 @@ never show `0s`. Queue and season estimates cover only work that will run on
 its own and say how many items they leave out because they wait for you or did
 not finish.
 
-The Mac app's Review Files action opens the item page and brings its waiting
-files into view. Files kept original after repeated failed checks or an
+The Mac app's Review Files action opens the item page with a waiting file
+selected. On the item page it brings the waiting files into view. Files kept original after repeated failed checks or an
 oversized copy say why beside the file and no longer ask for a decision,
 even while a failed copy waits for automatic cleanup.
 
