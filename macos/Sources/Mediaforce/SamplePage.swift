@@ -47,6 +47,7 @@ struct SampleWork: View {
     // The sample can't be made until a size is chosen, so the page offers the sizes right there.
     @State private var askingSize = false
     @State private var players = ComparePlayers()
+    @State private var selectedBalance: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -87,6 +88,23 @@ struct SampleWork: View {
                     Text(coverage)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if (facts.canChooseBalance || askingSize) && !facts.balanceChoices.isEmpty {
+                    Picker(Words.sampleBalance, selection: Binding(
+                        get: {
+                            selectedBalance ?? facts.balanceChoices.first(where: \.selected)?.key
+                        },
+                        set: { selectedBalance = $0 }
+                    )) {
+                        ForEach(facts.balanceChoices) { choice in
+                            Text(choice.label)
+                                .help(choice.detail)
+                                .accessibilityHint(choice.detail)
+                                .tag(Optional(choice.key))
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             } else if unreadable {
                 Text(Words.staleNotice(.failing, lastHeard: nil))
@@ -172,12 +190,16 @@ struct SampleWork: View {
         }
     }
 
+
     private func make(size: String?) {
         act {
-            let result = try await $0.makeSample(prefix, size: size)
+            let current = facts?.balanceChoices.first(where: \.selected)?.key
+            let changedBalance = selectedBalance == current ? nil : selectedBalance
+            let result = try await $0.makeSample(prefix, size: size, balance: changedBalance)
+            if result.ok { selectedBalance = nil }
             askingSize = result.code == "choose_size" && facts?.sizeChoices.isEmpty == false
             if result.ok || askingSize { return nil }
-            return result.code == "choose_balance" ? .chooseBalance : .sampleRefused
+            return .sampleRefused
         }
     }
 

@@ -8,7 +8,7 @@ final class RenderTests: XCTestCase {
         let retained = ProcessInfo.processInfo.environment["MEDIAFORCE_RENDER_OUTPUT"]
         let directory = retained ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         defer { if retained == nil { try? FileManager.default.removeItem(atPath: directory) } }
-        let options = try RenderOptions(arguments: [directory, "--server", "http://mediaforce.invalid"])
+        let options = try RenderOptions(arguments: [directory, "--server", "http://mediaforce.invalid", "--height", "1600"])
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [RenderFixtureServer.self]
         let session = URLSession(configuration: configuration)
