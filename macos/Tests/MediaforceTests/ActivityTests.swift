@@ -3,7 +3,7 @@ import XCTest
 @testable import Mediaforce
 
 final class ActivityTests: XCTestCase {
-    private let payload = """
+    static let payload = """
     {"starts_at":"2026-10-31T14:00:00.123456+00:00","ends_at":"2026-11-01T14:00:00.123456+00:00",
      "computers":[{"key":"mini","windows":[{"starts_at":"2026-10-31T14:00:00+00:00","ends_at":"2026-11-01T14:00:00+00:00"}],
                    "running":[],"finish_current_file":true}],
@@ -13,7 +13,7 @@ final class ActivityTests: XCTestCase {
     """
 
     func testUnknownStartsStayVisibleWithoutAnInventedTimeOrComputer() throws {
-        let activity = try JSONDecoder.mediaforce.decode(ActivityFacts.self, from: Data(payload.utf8))
+        let activity = try JSONDecoder.mediaforce.decode(ActivityFacts.self, from: Data(Self.payload.utf8))
         XCTAssertEqual(activity.linedUp.count, 1)
         XCTAssertNil(activity.linedUp[0].startsAt)
         XCTAssertNil(activity.linedUp[0].computerKey)
@@ -22,7 +22,7 @@ final class ActivityTests: XCTestCase {
     }
 
     func testTimelineUsesElapsedTimeAndClipsFilesAtItsEdges() throws {
-        let activity = try JSONDecoder.mediaforce.decode(ActivityFacts.self, from: Data(payload.utf8))
+        let activity = try JSONDecoder.mediaforce.decode(ActivityFacts.self, from: Data(Self.payload.utf8))
         XCTAssertEqual(try XCTUnwrap(activity.fraction("2026-11-01T02:00:00.123456+00:00")), 0.5, accuracy: 0.00001)
         XCTAssertEqual(activity.fraction("2026-10-30T14:00:00+00:00"), 0)
         XCTAssertEqual(activity.fraction("2026-11-02T14:00:00+00:00"), 1)

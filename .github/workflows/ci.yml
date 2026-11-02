@@ -285,7 +285,16 @@ jobs:
           set -euo pipefail
           xcodebuild -version
           test_command="$(jq -er '.qualityGate.test.macApp | select(type == "string" and length > 0)' .github/github.json)"
-          bash -euo pipefail -c "$test_command"
+          TEST_RUNNER_MEDIAFORCE_RENDER_OUTPUT="$PWD/.build/mac-render" \
+            bash -euo pipefail -c "$test_command"
+
+      - name: Keep rendered Mac pages
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: mac-pages
+          path: .build/mac-render/*.png
+          if-no-files-found: error
 
   # The one required check: every lane passed, or skipped on purpose.
   acceptance:
