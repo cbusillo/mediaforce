@@ -51,6 +51,42 @@ final class ItemTests: XCTestCase {
         XCTAssertTrue(Words.waitingReason(season.files[1]).hasPrefix("The compressed copy didn't pass its check"))
     }
 
+    func testAutomaticallyKeptOriginalsSayWhyWithoutAskingForAnotherDecision() throws {
+        let reasons = ["check_failed", "over_size"]
+        let season = try facts(reasons.enumerated().map { index, reason in
+            file(index + 1, stage: "kept_original", bytes: 500, validation: "failed", kept: reason)
+        })
+
+        XCTAssertTrue(season.waiting.isEmpty)
+        for (file, reason) in zip(season.files, reasons) {
+            XCTAssertNotEqual(Words.keptReason("motion_\(reason)"), Words.keptReason(""))
+            XCTAssertTrue(Words.fileState(file).contains(Words.keptReason("motion_\(reason)")))
+        }
+    }
+
+    func testReviewFilesSelectsAWaitingFileWhileKeepingAnExplicitSelection() throws {
+        let season = try facts([
+            file(1, stage: "published", bytes: 100, original: 700, backup: true),
+            file(2, stage: "kept_original", bytes: 500, kept: "check_failed"),
+            file(3, stage: "needs_you", bytes: 900, validation: "size_held"),
+        ])
+
+        XCTAssertEqual(season.selectedFile(nil)?.id, season.waiting.first?.id)
+        XCTAssertEqual(season.selectedFile(1)?.id, 1)
+        XCTAssertEqual(season.selectedFile(999)?.id, season.waiting.first?.id)
+        let finished = try facts([file(1, stage: "published", bytes: 100, original: 700, backup: true)])
+        XCTAssertEqual(finished.selectedFile(nil)?.id, finished.files.first?.id)
+    }
+
+    func testAnAutomaticRetryDoesNotOfferAnEmptyFileReview() throws {
+        let retrying = try facts([file(1, stage: "waiting", bytes: 900, validation: "failed")])
+        let waiting = try facts([file(1, stage: "needs_you", bytes: 900, validation: "size_held")])
+        let actions: [SampleFacts.Action] = [.reviewFiles, .retryUnfinished]
+
+        XCTAssertEqual(retrying.workActions(actions), [.retryUnfinished])
+        XCTAssertEqual(waiting.workActions(actions), actions)
+    }
+
     func testEachWaitSaysWhyInPlainWords() throws {
         let notMadeAgain = { (blockers: String) in #"{"code": "not_made_again", "blockers": [\#(blockers)]}"# }
         let season = try facts([

@@ -39,6 +39,20 @@ final class RenderTests: XCTestCase {
         }
     }
 
+    func testBlockedFilesAndKeptOriginalsRenderOnNativePages() async throws {
+        let retained = ProcessInfo.processInfo.environment["MEDIAFORCE_BLOCKED_RENDER_OUTPUT"]
+        let directory = retained ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        defer { if retained == nil { try? FileManager.default.removeItem(atPath: directory) } }
+        let pages = ["sample:tv/Lucifer/Season 2", "item:tv/Lucifer/Season 2"]
+        let options = try RenderOptions(arguments: [directory, "--server", "http://mediaforce.invalid"] + pages.flatMap { ["--page", $0] })
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [BlockedFilesRenderServer.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let rendered = try await RenderCommand.run(options, session: session)
+        for page in pages { XCTAssertFalse(try XCTUnwrap(rendered[page]).isEmpty) }
+    }
+
     private func backgroundBrightness(_ bitmap: NSBitmapImageRep) throws -> CGFloat {
         let color = try XCTUnwrap(bitmap.colorAt(x: bitmap.pixelsWide - 8, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.sRGB))
         return color.redComponent + color.greenComponent + color.blueComponent
@@ -168,5 +182,24 @@ private final class MissingOptionalRenderServer: RenderFixtureServer, @unchecked
     override func payload(_ path: String) -> String? {
         path.hasPrefix("/api/app/samples/") || ["/api/app/kinds", "/api/app/tv-shows", "/api/hosts"].contains(path)
             ? nil : super.payload(path)
+    }
+}
+
+private final class BlockedFilesRenderServer: RenderFixtureServer, @unchecked Sendable {
+    override func payload(_ path: String) -> String? {
+        if path.hasPrefix("/api/app/samples/") {
+            return SampleTests.facts(state: "needs_help", action: "review_files", choices: "[]")
+        }
+        guard let original = super.payload(path), path.hasPrefix("/api/app/items/"),
+              var item = try? JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any] else {
+            return super.payload(path)
+        }
+        item["files"] = [
+            ["library_item_id": 1, "name": "Lucifer.S02E01.mkv", "rel_path": "tv/Lucifer/Season 2/Lucifer.S02E01.mkv",
+             "episode": 1, "stage": "kept_original", "kept_reason": "check_failed", "bytes": 900000000, "original_backup": false],
+            ["library_item_id": 2, "name": "Lucifer.S02E02.mkv", "rel_path": "tv/Lucifer/Season 2/Lucifer.S02E02.mkv",
+             "episode": 2, "stage": "needs_you", "validation": "size_held", "bytes": 900000000, "original_backup": false],
+        ]
+        return (try? JSONSerialization.data(withJSONObject: item)).map { String(decoding: $0, as: UTF8.self) }
     }
 }

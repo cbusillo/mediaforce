@@ -42,10 +42,10 @@ struct SampleFacts: Decodable, Sendable {
 
     enum Action: Hashable {
         case approve, makeAgain, makeSample, chooseSize, tryAnotherSize, openSample, startCompressing
-        case checkFiles, replaceOriginals, retryUnfinished, decideMotion
+        case checkFiles, replaceOriginals, retryUnfinished, decideMotion, reviewFiles
     }
 
-    static let seasonPageActions: Set<Action> = [.checkFiles, .replaceOriginals, .retryUnfinished, .decideMotion]
+    static let seasonPageActions: Set<Action> = [.checkFiles, .replaceOriginals, .retryUnfinished, .decideMotion, .reviewFiles]
     static let inProgressStates: Set<String> = ["making_test", "sample_waiting", "making_season"]
     // A sample being made, or waiting for a computer, already has its page to follow it on.
     static let sampleMakingStates: Set<String> = ["making_test", "sample_waiting"]
@@ -69,7 +69,7 @@ struct SampleFacts: Decodable, Sendable {
         case "validate_outputs": return [.checkFiles]
         case "promote_outputs": return [.replaceOriginals]
         case "decide_motion": return [.decideMotion]
-        // A blocked file (a failed check or a missing copy) and a state with no native step show no action yet (#1088, #1140).
+        case "review_files": return [.reviewFiles]
         default: return []
         }
     }

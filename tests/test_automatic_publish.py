@@ -1079,6 +1079,7 @@ def test_kept_original_settles_the_file_while_its_failed_copy_cannot_be_removed(
     assert payload is not None
     [episode] = payload["files"]
     assert (episode["stage"], episode["wait_reason"]) == ("kept_original", None)
+    assert episode["kept_reason"] == reason
     assert _remake_reason(config, item_id) is None
     assert not _keep(config, item_id, item)["ok"]
 
