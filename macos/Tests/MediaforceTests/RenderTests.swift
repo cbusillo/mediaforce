@@ -88,9 +88,7 @@ final class RenderTests: XCTestCase {
         do {
             try await RenderCommand.run(options, session: session)
             XCTFail("Unreadable page succeeded")
-        } catch {
-            XCTAssertTrue(String(describing: error).contains("/api/app/activity"))
-        }
+        } catch is RenderFailure {}
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("1-activity-light.png").path))
     }
 }

@@ -199,7 +199,8 @@ enum RenderCommand {
             case "item": place = .item(value); paths = ["/api/app/items/\(value)"]
             case "sample": place = .sample(value); paths = ["/api/app/samples/\(value)"]
             case "kind":
-                guard model.kinds?.kinds.contains(where: { $0.kind == value }) == true else {
+                guard let kinds = model.kinds else { throw RenderFailure("Kinds did not load") }
+                guard kinds.kinds.contains(where: { $0.kind == value }) else {
                     throw RenderFailure("No live kind named \(value)")
                 }
                 place = .kind(value); paths = ["/api/app/kinds"]
