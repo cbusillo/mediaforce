@@ -95,9 +95,7 @@ extension MediaforceClient {
     func kinds() async throws -> KindsFacts {
         var request = URLRequest(url: baseURL.appending(path: "api/app/kinds"))
         request.timeoutInterval = Self.factsTimeout
-        let (data, response) = try await session.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-        return try JSONDecoder.mediaforce.decode(KindsFacts.self, from: data)
+        return try await decode(KindsFacts.self, from: request)
     }
 
     /// Uses a show's own approval for every season of the kind; a refusal answers 409 with a code the app words.

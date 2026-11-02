@@ -1,6 +1,5 @@
 import SwiftUI
 
-@main
 struct MediaforceApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 

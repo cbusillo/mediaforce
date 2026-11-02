@@ -137,6 +137,45 @@ Every production file still passes its own quality and final-output checks.
 - runtime state: stored under `~/Library/Application Support/mediaforce/`
   and `~/Library/Caches/mediaforce/review/`
 
+### Mac page screenshots
+
+Run the app executable directly to render live server data into PNGs in light
+and dark. Rendering draws its own page hierarchy into a window that is never
+shown, with no Computer Use or Screen Recording permission. Run it in a
+logged-in macOS session:
+
+```bash
+/Applications/Mediaforce.app/Contents/MacOS/Mediaforce render /path/to/captures
+```
+
+Use a task build's executable before its source is installed. The default set
+includes Library and each library, Needs you, Activity, Space saved, Media,
+every Settings section and kind, and available examples of a show, season,
+sample, movie and other folder. Missing live states are not manufactured.
+Select specific pages with repeated `--page` options:
+
+```bash
+Mediaforce render /path/to/captures --page needs-you --page 'sample:tv/Show/Season 1'
+```
+
+Other page names are `library`, `tv`, `movies`, `other`, `activity`,
+`space-saved`, `media`, `kind:CODE`, `item:PREFIX`, `settings:libraries`,
+`settings:compression`, `settings:computers` and `settings:metadata`.
+`--server URL` selects another server; the default is the app's local server.
+`--width POINTS` and `--height POINTS` adjust the viewport. Settings retain
+their normal form width. Use a new empty output directory for each run so old
+PNGs cannot be mistaken for current evidence. A page whose required data fails to load makes the command
+fail instead of producing a successful loading-state capture.
+
+Agents post these PNGs on the owning issue or PR for appearance evidence.
+They show the actual shared page content and title bar, without the sidebar
+or Settings tab selector: those native vibrant selections cannot be captured
+faithfully in an unshown window. Screenshots prove appearance, not click
+routing; video frames in the compare player may be blank. The macOS CI render
+job exercises the same renderer in the native test gate, reusing existing fixtures, and
+keeps its PNGs in the `mac-pages` artifact. It fails for unreadable or blank
+pages; it does not compare pixel hashes against a saved design.
+
 ## Commands
 
 On macOS, Mediaforce now prefers Homebrew's `ffmpeg-full` and `ffprobe` from

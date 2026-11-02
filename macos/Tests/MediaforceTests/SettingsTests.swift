@@ -3,7 +3,7 @@ import XCTest
 @testable import Mediaforce
 
 final class SettingsTests: XCTestCase {
-    private let serverFacts = """
+    static let serverFacts = """
     {"libraries": [{"key": "movies", "name": "Movies", "folder": "/Volumes/media/movies", "type": "movie",
                     "plex_path": "/data/movies"},
                    {"key": "tv", "name": "Tv", "folder": "/Volumes/media/tv", "type": "tv", "plex_path": ""}],
@@ -12,7 +12,7 @@ final class SettingsTests: XCTestCase {
     """
 
     private func facts() throws -> LibrarySettingsFacts {
-        try JSONDecoder.mediaforce.decode(LibrarySettingsFacts.self, from: Data(serverFacts.utf8))
+        try JSONDecoder.mediaforce.decode(LibrarySettingsFacts.self, from: Data(Self.serverFacts.utf8))
     }
 
     private func json(_ save: LibrarySettingsSave) throws -> NSDictionary {
@@ -99,7 +99,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(words.contains(Words.librarySaveRefused("invalid_settings")))
     }
 
-    private let computerFacts = """
+    static let computerFacts = """
     {"computers": [{"id": "0", "name": "Studio", "address": "studio.local", "abilities": ["encode_queue"],
                     "schedule": "nights", "libraries": [], "at_once": 2, "wake_address": "00:11:22:33:44:55",
                     "priority": 40, "media_access": "stream", "mediaforce_folder": "/Users/me/mediaforce",
@@ -114,7 +114,7 @@ final class SettingsTests: XCTestCase {
     """
 
     private func computers() throws -> ComputerSettingsFacts {
-        try JSONDecoder.mediaforce.decode(ComputerSettingsFacts.self, from: Data(computerFacts.utf8))
+        try JSONDecoder.mediaforce.decode(ComputerSettingsFacts.self, from: Data(Self.computerFacts.utf8))
     }
 
     private func json(_ save: ComputerSettingsSave) throws -> NSDictionary {
@@ -204,7 +204,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(words.contains(Words.computerSaveRefused("invalid_settings")))
     }
 
-    private let metadataFacts = """
+    static let metadataFacts = """
     {"plex": {"enabled": true, "address": "http://plex.local:32400", "key_name": "MEDIAFORCE_PLEX_TOKEN",
               "key_found": true},
      "tmdb": {"enabled": false, "key_name": "MEDIAFORCE_TMDB_TOKEN", "key_found": false},
@@ -212,7 +212,7 @@ final class SettingsTests: XCTestCase {
     """
 
     func testMetadataSettingsDecodeFromServerShape() throws {
-        let decoded = try JSONDecoder.mediaforce.decode(MetadataSettingsFacts.self, from: Data(metadataFacts.utf8))
+        let decoded = try JSONDecoder.mediaforce.decode(MetadataSettingsFacts.self, from: Data(Self.metadataFacts.utf8))
         XCTAssertEqual(decoded.plex, .init(
             enabled: true, address: "http://plex.local:32400", keyName: "MEDIAFORCE_PLEX_TOKEN", keyFound: true
         ))
@@ -221,7 +221,7 @@ final class SettingsTests: XCTestCase {
     }
 
     func testMetadataSaveBodySendsOnlyWhatTheTabEdits() throws {
-        let decoded = try JSONDecoder.mediaforce.decode(MetadataSettingsFacts.self, from: Data(metadataFacts.utf8))
+        let decoded = try JSONDecoder.mediaforce.decode(MetadataSettingsFacts.self, from: Data(Self.metadataFacts.utf8))
         var draft = MetadataSettingsDraft(decoded)
         draft.plex.address = " https://plex.example.com "
         draft.tmdb.enabled = true
@@ -243,7 +243,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(words.contains(Words.metadataSaveRefused("invalid_settings")))
     }
 
-    private let compressionFacts = """
+    static let compressionFacts = """
     {"aim": "size_first_review", "size_goal_mb": 300.0, "size_goal_minutes": 45.0, "size_limit_percent": 10.0,
      "largest_percent": 80.0, "tallest_picture": 1080, "grain": 8, "measurement": "vmaf",
      "appearance_target": 85.0, "appearance_minimum": 80.0, "detail_target": 41.0, "detail_minimum": 35.0,
@@ -253,7 +253,7 @@ final class SettingsTests: XCTestCase {
     """
 
     private func compression() throws -> CompressionSettingsFacts {
-        try JSONDecoder.mediaforce.decode(CompressionSettingsFacts.self, from: Data(compressionFacts.utf8))
+        try JSONDecoder.mediaforce.decode(CompressionSettingsFacts.self, from: Data(Self.compressionFacts.utf8))
     }
 
     private let compressionRefusalCodes = [
