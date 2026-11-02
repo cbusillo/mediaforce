@@ -49,7 +49,10 @@ struct KindPage: View {
                 }
                 if !offering || kind.sampleSetting != nil {
                     KindDecision(kind: kind, setting: setting, model: model, openItem: openItem,
-                                 showSample: chosen != nil && (kind.approval?.sampleMoments?.isEmpty == false || kind.sampleSeason != nil) ? { chosen = nil } : nil)
+                                 showSample: (chosen != nil || !kind.showsSampleFirst) && (kind.approval?.sampleMoments?.isEmpty == false || kind.sampleSeason != nil) ? {
+                                     if !kind.showsSampleFirst, let season = kind.sampleSeason { openSample(season) }
+                                     else { chosen = nil }
+                                 } : nil)
                 }
                 KindShows(kind: kind, playing: offering ? kind.sampleShow : (kind.approval != nil && chosen == nil ? nil : setting?.show), leftOut: leftOut, posters: model.posters,
                           choose: { chosen = $0 }, open: openItem, openLeftOut: openLeftOut,

@@ -134,7 +134,7 @@ from mediaforce.web.routes.releases import register_release_routes
 from mediaforce.web.routes.posters import register_poster_routes
 from mediaforce.library.metadata_sync import cached_poster, metadata_configuration_status
 from mediaforce.reviewing.clips import review_file_from_url
-from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
+from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, SampleStartWait, approve_sample, make_sample, sample_facts, \
     prepare_waiting_samples, samples_to_remake, start_compressing
 from mediaforce.web.runtime.app_window import app_window_payload, movies_payload, other_media_payload, tv_shows_payload
 from mediaforce.web.runtime.release_work import ReleaseWorkSnapshot, release_work_payload
@@ -1199,7 +1199,7 @@ def create_app(
                 controller_storage=controller_storage_recovery_snapshot(config),
                 storage_admits_work=controller_storage_admission_issue(config, None) is None,
                 observed_at=datetime.now(UTC),
-                kinds=kinds_payload(connection, config, load_calibration_state=_load_calibration_state)["kinds"],
+                kinds=_sample_start_status(kinds_payload(connection, config, load_calibration_state=_load_calibration_state)["kinds"]),
             )
 
     def _activity_payload() -> dict[str, Any]:
@@ -1862,9 +1862,19 @@ def create_app(
         ):
             LOGGER.info("Held files joining production: %s", result.get("message") or result.get("code"))
 
+    sample_start_waits: dict[str, SampleStartWait] = {}
+
     def _kinds_payload() -> dict[str, Any]:
         with open_readonly_db(config.paths.db_path) as connection:
-            return kinds_payload(connection, config, load_calibration_state=_load_calibration_state)
+            payload = kinds_payload(connection, config, load_calibration_state=_load_calibration_state)
+        payload["kinds"] = _sample_start_status(payload["kinds"])
+        return payload
+
+    def _sample_start_status(kinds: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        waits = sample_start_waits
+        return [{**kind, "sample_status": waits[kind["kind"]].reason, "sample_start_prefix": waits[kind["kind"]].prefix}
+                if kind["kind"] in waits and not kind.get("sample_season") and not kind.get("approval")
+                and not (kind.get("settings") and not kind.get("one_time")) else kind for kind in kinds]
 
     def _queue_next_kind_season() -> None:
         # The season is chosen and its connection closed before queueing opens its own write transaction.
@@ -1887,6 +1897,7 @@ def create_app(
         LOGGER.info("Approved season %s: %s", chosen.season, result.get("message") or result.get("code") or result.get("ok"))
 
     def _remake_waiting_samples() -> None:
+        nonlocal sample_start_waits
         with open_db(config.paths.db_path) as connection:
             cards = [asdict(card) for card in _list_library_detail_cards(config, connection)]
 
@@ -1895,8 +1906,8 @@ def create_app(
             LOGGER.info("Making the sample for %s: %s", folder["prefix"], result.get("code") or result.get("ok"))
             return result
 
-        prepare_waiting_samples(cards, _kinds_payload()["kinds"], load_payloads=_season_payloads,
-                                failed_in_a_row=_sample_failures_in_a_row, make=make)
+        sample_start_waits = prepare_waiting_samples(cards, _kinds_payload()["kinds"], load_payloads=_season_payloads,
+                                                     failed_in_a_row=_sample_failures_in_a_row, make=make, previous=sample_start_waits)
 
     def _sample_failures_in_a_row(season: str) -> int:
         with open_db(config.paths.db_path) as connection:

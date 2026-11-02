@@ -1355,11 +1355,12 @@ def test_finished_seasons_newer_sample_stays_with_its_kind_and_reaches_attention
 
 @pytest.mark.parametrize("missing", [False, True])
 @pytest.mark.parametrize("status", ["pending_review", "completed"])
+@pytest.mark.parametrize("suitable_older", [False, True])
 def test_a_sample_that_cannot_cover_a_kind_stays_visible_without_starting_a_sample_for_every_show(
-        tmp_path: Path, missing: bool, status: str,
+        tmp_path: Path, missing: bool, status: str, suitable_older: bool,
 ) -> None:
     config = _config(tmp_path)
-    folders = {SEASON: _review_ready()}
+    folders = {SEASON: _review_ready(sample_item=_approved_on(config, EPISODE)["sample_item"]) if suitable_older else _review_ready()}
     if not missing:
         folders[APPROVED_SEASON] = _approved(config, size_mode="absolute")
         folders[APPROVED_SEASON]["sample_item"]["rel_path"] = f"{APPROVED_SEASON}/e00.mkv"
@@ -1371,9 +1372,9 @@ def test_a_sample_that_cannot_cover_a_kind_stays_visible_without_starting_a_samp
         connection.execute(calibration_jobs.update().where(calibration_jobs.c.prefix == APPROVED_SEASON).values(status=status))
         connection.commit()
         darker = next(kind for kind in kinds_payload(connection, config, load_calibration_state=load)["kinds"] if kind["kind"] == DARKER)
-    assert darker["sample_season"] == APPROVED_SEASON
+    assert darker["sample_season"] == (SEASON if suitable_older else APPROVED_SEASON)
     assert not kind_sample_candidates([darker], [{"prefix": SEASON, "page_state": {"key": "needs_test"}}])
-    assert darker["needs_you"] and not darker["sample_ready"]
+    assert darker["needs_you"] and darker["sample_ready"] == suitable_older
     assert SEASON not in load.sample_waits(config)
 
 
@@ -1475,4 +1476,4 @@ def test_one_time_kind_moves_on_from_an_approved_show_sample(tmp_path: Path, kin
     assert after["needs_you"] and not after["sample_ready"]
     assert after["sample_season"] is None
     assert after["shows"][0]["sample_season"] == SEASON
-    assert kind_sample_candidates([after], [{"prefix": SEASON, "page_state": {"key": "needs_test"}}]) == [[SEASON]]
+    assert kind_sample_candidates([after], [{"prefix": SEASON, "page_state": {"key": "needs_test"}}]) == {kind: [SEASON]}

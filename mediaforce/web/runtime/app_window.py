@@ -90,7 +90,7 @@ def app_window_payload(
     seasons = _seasons(items)
     cards = [card for card in season_cards if card.get("prefix")]
     kinds = list(kinds)
-    pending_kinds = [{key: kind[key] for key in ("kind", "sample_season", "sample_status", "sample_ready", "one_time") if key in kind}
+    pending_kinds = [{key: kind[key] for key in ("kind", "sample_season", "sample_status", "sample_ready", "one_time", "sample_start_prefix") if key in kind}
                      for kind in kinds if kind.get("needs_you")]
     settings_by_kind = {kind["kind"]: bool(kind["settings"]) and not kind.get("one_time") for kind in kinds if "settings" in kind}
     for kind in pending_kinds:

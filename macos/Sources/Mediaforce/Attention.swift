@@ -41,7 +41,7 @@ struct Attention: Equatable, Sendable {
     }
 
     static func waitingOnYou(_ facts: MainWindowFacts) -> Int {
-        waitingItems(facts).count
+        waitingItems(facts).filter(\.notifies).count
     }
 
     static func waitingItems(_ facts: MainWindowFacts) -> [AttentionNotice] {
@@ -84,11 +84,15 @@ struct Attention: Equatable, Sendable {
                 id: "kind:\(kind.kind):\(kindNoticeStage(kind))",
                 title: Words.kindName(kind.kind),
                 body: kindWaitingReason(kind),
-                opens: .kind(kind.kind),
+                opens: kindPlace(kind),
                 notifies: kindNoticeStage(kind) != "preparing"
             )
         }
-        let samples = facts.samples.waitingOnYou.map(sampleNotice)
+        let samples = facts.samples.waitingOnYou.map { sample in
+            var notice = sampleNotice(sample)
+            notice.notifies = !facts.work.kindsNeedingYou.contains { $0.sampleSeason == sample.prefix }
+            return notice
+        }
         let computers = facts.computers.filter(\.needsYou).map { computer in
             AttentionNotice(
                 id: "computer:\(computer.key):\(computer.attentionSince ?? "")",
@@ -116,12 +120,19 @@ struct Attention: Equatable, Sendable {
             stage = kind.sampleSeason ?? "ready"
         } else if ["failed", "stopped", "needs_attention"].contains(kind.sampleStatus ?? "") {
             stage = "attention:\(kind.sampleSeason ?? "")"
-        } else if ["pending_review", "completed"].contains(kind.sampleStatus ?? "") {
-            stage = "choice:\(kind.sampleSeason ?? "")"
+        } else if ["pending_review", "completed", "choose_size", "choose_balance", "sample_blocked"].contains(kind.sampleStatus ?? "") {
+            stage = "choice:\(kind.sampleSeason ?? kind.sampleStartPrefix ?? "")"
         } else {
             stage = "preparing"
         }
         return stage
+    }
+
+    private static func kindPlace(_ kind: MainWindowFacts.PendingKind) -> Place {
+        if let prefix = kind.sampleStartPrefix, ["choose_size", "choose_balance", "sample_blocked"].contains(kind.sampleStatus ?? "") {
+            return .sample(prefix)
+        }
+        return .kind(kind.kind)
     }
 
     private static func kindWaitingReason(_ kind: MainWindowFacts.PendingKind) -> String {
@@ -141,6 +152,12 @@ struct Attention: Equatable, Sendable {
             return "The sample is being prepared. Open this kind to see its progress and anything holding it up."
         case "pending_review", "completed":
             return "This sample cannot approve the kind. Open this kind to choose a different show's sample or approved settings."
+        case "choose_size":
+            return "Choose a size before Mediaforce can make the first sample."
+        case "choose_balance":
+            return "Choose how much detail to keep before Mediaforce can make the first sample."
+        case "sample_blocked":
+            return "The first sample cannot start yet. Open it to see what needs choosing."
         default:
             return "The sample needs attention before you can approve this kind. Open it to see what to do next."
         }

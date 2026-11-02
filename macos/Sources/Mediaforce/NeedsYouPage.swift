@@ -6,7 +6,7 @@ struct NeedsYouPage: View {
     let open: (Place) -> Void
 
     var body: some View {
-        PageFrame(title: Words.needsYou, subtitle: "\(Attention.waitingOnYou(facts)) waiting") {
+        PageFrame(title: Words.needsYou, subtitle: "\(Attention.waitingItems(facts).count) waiting") {
             let items = Attention.waitingItems(facts)
             if items.isEmpty {
                 Text("Nothing needs you right now.")
