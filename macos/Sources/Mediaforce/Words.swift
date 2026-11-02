@@ -1376,6 +1376,7 @@ extension Words {
         case .approve, .makeAgain, .makeSample, .chooseSize, .tryAnotherSize, .openSample: "Watch the Sample"
         case .startCompressing: startCompressing
         case .checkFiles: "Check New Files"
+        case .reviewFiles: "Review Files"
         case .replaceOriginals: "Replace Originals…"
         case .retryUnfinished: "Retry Unfinished Episodes"
         case .decideMotion: "Keep These Originals…"
