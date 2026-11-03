@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.tuning.compression_intent import compression_intent_options
 from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_followup_request, sample_goal_request, \
     with_compression_intent, operator_intent_from_policy
 from mediaforce.web.runtime.app_window import season_identity
@@ -38,9 +39,8 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
     if page_state.get("primary_action") == "retry_sample":
         retry_policy = object_dict(object_dict(status.get("retryable_sample_job")).get("policy"))
         retry_balance = operator_intent_from_policy(object_dict(retry_policy.get("video"))).compression_intent
-        if retry_balance.confirmed:
-            level = "perceptual_floor" if retry_balance.level == "transparent" else retry_balance.level
-            effective_balance = next((option for option in balances if option["key"] == level), effective_balance)
+        selected = {option["key"] for option in compression_intent_options(retry_balance) if option["selected"]}
+        effective_balance = next((option for option in balances if option["key"] in selected), None)
     return {
         **season_identity(str(folder["prefix"])),
         "state": page_state.get("key"),
@@ -239,6 +239,8 @@ def _sample_request(
         folder: Mapping[str, Any], size: str | None, balance: str | None, *, remake: bool,
         retry: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any] | None] | str:
+    if size is None and balance is None and remake:
+        return _measured_request(folder), _current_operator_intent(folder)
     balances = _balance_choices(folder)
     if balance is not None:
         balance_choice = next((option for option in balances if option["key"] == balance), None)
@@ -258,14 +260,13 @@ def _sample_request(
                 subtitle_policy=object_dict(policy.get("subtitle")),
             )
             current = saved.request_payload()
-            resolved = saved.size_goal.resolve(float_value(object_dict(retry.get("sample_item")).get("duration_seconds")) or None)
-            if resolved.requires_confirmation:
+            sample_item = object_dict(folder.get("sample_item")) or object_dict(retry.get("sample_item"))
+            resolved = saved.size_goal.resolve(float_value(sample_item.get("duration_seconds")) or None)
+            if resolved.requires_confirmation or saved.resolution.requires_confirmation:
                 return "choose_size"
             goal_mb = (resolved.target_size_bytes or 0) / DECIMAL_MEGABYTE_BYTES
         if current is None:
             return "choose_size"
-        if balance is None and object_dict(current.get("compression_intent")).get("confirmed") is True:
-            return _measured_request(folder), current
         if balance_choice is None:
             return "choose_balance"
         intent = with_compression_intent(current, object_dict(balance_choice.get("compression_intent")))

@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections.abc import Collection, Mapping
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -154,8 +154,11 @@ def test_the_real_approval_check_refuses_a_changed_draft_and_asks_again_for_an_i
     assert approve({"high_impact"}, "") == {"ok": False, "code": "sample_changed"}
 
 
-@pytest.mark.parametrize("saved_level,shown", [("reference", "reference"), ("transparent", "perceptual_floor")])
-def test_failed_sample_shows_the_balance_its_saved_retry_will_use(saved_level: str, shown: str) -> None:
+@pytest.mark.parametrize("saved_level,confirmed,shown", [
+    ("reference", True, "reference"), ("transparent", True, "perceptual_floor"),
+    ("reference", False, None), ("", False, None),
+])
+def test_failed_sample_shows_the_balance_its_saved_retry_will_use(saved_level: str, confirmed: bool, shown: str | None) -> None:
     folder = _folder()
     if shown == "perceptual_floor":
         folder["compression_intent_options"].append({
@@ -166,11 +169,11 @@ def test_failed_sample_shows_the_balance_its_saved_retry_will_use(saved_level: s
         **_status("needs_help", "retry_sample"),
         "retryable_sample_job": {"policy": {"video": {
             "compression_intent_schema_version": 1, "compression_intent": saved_level,
-            "compression_intent_confirmed": True,
+            "compression_intent_confirmed": confirmed,
         }}},
     }
     choices = sample_facts(folder, failed)["balance_choices"]
-    assert [choice["key"] for choice in choices if choice["selected"]] == [shown]
+    assert [choice["key"] for choice in choices if choice["selected"]] == ([shown] if shown else [])
 
 
 def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_did_not() -> None:
@@ -319,6 +322,21 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert intent["size_goal"]["value_mb"] == failed["retryable_sample_job"]["policy"]["video"]["target_size_mb"]
     assert intent["resolution"]["max_height"] == failed["retryable_sample_job"]["policy"]["video"]["max_height"]
 
+    assert make(_folder(resolved_operator_intent={}), _status(), None)["ok"] is True
+    _kind, _prefix, note, _host, intent, _token = calls.pop()
+    assert "1.4 times" in note
+    assert intent is None
+
+    failed["retryable_sample_job"]["policy"]["video"]["resolution_intent_mode"] = "ambiguous"
+    assert make(_folder(), failed, None, "reference") == {"ok": False, "code": "choose_size"}
+    assert calls == []
+    failed["retryable_sample_job"]["policy"]["video"].update({
+        "resolution_intent_mode": "source", "size_goal_mode": "normalized", "target_runtime_minutes": 45,
+    })
+    assert make(_folder(sample_item={"duration_seconds": 3600}), failed, None, "reference")["ok"] is True
+    _kind, _prefix, note, _host, intent, _token = calls.pop()
+    assert "300 MB for this episode" in note
+
     def computer_gone(*_args: Any) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="That computer is gone.")
 
@@ -332,41 +350,18 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert calls == []
 
 
-@pytest.mark.parametrize("reason", ["confirm_legacy_size", "confirm_compression_goal"])
-def test_native_size_confirmation_routes_make_a_fresh_sample_with_the_chosen_goal(
-        reason: Literal["confirm_legacy_size", "confirm_compression_goal"],
-) -> None:
-    requested: list[dict[str, Any] | None] = []
-    folder = _folder()
-
-    def queue(*_args: Any) -> dict[str, Any]:
-        raise folder_actions.QueueNeedsChoice(reason, "Choose a size.")
-
-    def make(prefix: str, size: str | None, balance: str | None) -> dict[str, Any]:
-        assert prefix == PREFIX
-        return make_sample(
-            folder, _status("ready_to_make", "queue_encode"), size, balance,
-            ai_tune=lambda _prefix, _note, _host, requested_intent, _token: requested.append(requested_intent) or {"ok": True},
-            retry_saved=lambda *_args: pytest.fail("A size confirmation must make a fresh sample"),
-        )
-
+def test_native_make_route_forwards_the_chosen_size_and_balance() -> None:
+    calls: list[tuple[str, str | None, str | None]] = []
     app = FastAPI()
     register_app_window_routes(
         app, main_window_payload=dict, tv_shows_payload=dict, movies_payload=dict, other_media_payload=dict,
-        sample_payload=lambda _prefix: None, make_sample_action=make,
-        approve_sample_action=lambda *_args: {},
-        compress_season_action=lambda prefix: start_compressing(prefix, queue_encode=queue),
+        sample_payload=lambda _prefix: None,
+        make_sample_action=lambda prefix, size, balance: calls.append((prefix, size, balance)) or {"ok": True},
+        approve_sample_action=lambda *_args: {}, compress_season_action=lambda _prefix: {},
     )
-    compress = _route(app, "/api/app/samples/{prefix:path}/compress", "POST")
-    response = asyncio.run(compress(PREFIX))
-    assert json.loads(response.body)["reason"] == reason
-    make_route = _route(app, "/api/app/samples/{prefix:path}/make", "POST")
-    assert _post(make_route, {"size": "smaller", "balance": "reference"}) == (200, {"ok": True, "code": None})
-    intent = requested.pop()
-    assert intent is not None
-    assert intent["size_goal"] == folder["size_goal_options"][1]["operator_intent"]["size_goal"]
-    assert intent["compression_intent"] == folder["compression_intent_options"][0]["compression_intent"]
-    assert not requested
+    endpoint = _route(app, "/api/app/samples/{prefix:path}/make", "POST")
+    assert _post(endpoint, {"size": "smaller", "balance": "reference"}) == (200, {"ok": True})
+    assert calls == [(PREFIX, "smaller", "reference")]
 
 
 def test_a_running_sample_says_when_it_should_be_ready_only_when_comparable_samples_tell() -> None:

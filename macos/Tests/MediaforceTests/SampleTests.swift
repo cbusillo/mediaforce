@@ -223,7 +223,7 @@ final class SampleClientTests: XCTestCase {
         XCTAssertEqual(sent["balance"] as? String, "reference")
     }
 
-    func testSizeConfirmationsMakeFreshSamplesAndUnchangedFailedRetriesKeepTheirRequest() async throws {
+    func testSizeConfirmationsOpenChoicesAndUnchangedFailedRetriesKeepTheirRequest() async throws {
         let facts = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: Data(SampleTests.facts().utf8))
         for reason in SampleActionResult.choiceReasons {
             let response = "{\"ok\": true, \"compressing\": false, \"reason\": \"\(reason)\"}"
@@ -243,6 +243,9 @@ final class SampleClientTests: XCTestCase {
             XCTAssertFalse(choices.askingSize)
             XCTAssertNil(choices.selectedBalance)
         }
+        let unselected = try JSONDecoder.mediaforce.decode(SampleFacts.self, from: Data(SampleTests.facts()
+            .replacingOccurrences(of: #""selected": true"#, with: #""selected": false"#).utf8))
+        XCTAssertEqual(SampleChoices(selectedBalance: "balanced").balance(in: unselected), "balanced")
         var choices = SampleChoices(selectedBalance: facts.balanceChoices.first(where: \.selected)?.key)
         _ = try await client(status: 200, body: #"{"ok": true}"#)
             .makeSample(facts.prefix, size: nil, balance: choices.balance(in: facts))

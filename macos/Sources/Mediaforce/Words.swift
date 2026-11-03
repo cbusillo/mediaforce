@@ -632,7 +632,7 @@ extension ActionNotice {
 
     static let compressNeedsChoice = ActionNotice(
         title: "Compressing needs a choice first",
-        message: "The season is approved, but compression did not start. Make a fresh sample at a chosen size to continue."
+        message: "The season is approved, but compression did not start. Choose a size for a fresh sample on the sample page."
     )
 
 }

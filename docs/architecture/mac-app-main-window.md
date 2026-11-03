@@ -121,8 +121,9 @@ remakes a reviewed sample at its measured goal, or asks for a new sample at
 the chosen or recommended size. An explicit balance starts a fresh sample at
 that size instead of replaying a saved request. Without an explicit balance,
 the current choice or automatic balanced default remains in effect. A failed
-sample displays its saved retry's balance, matching what an unchanged retry
-will make. An older saved request that cannot be reused asks for a fresh size
+sample displays its saved retry's confirmed balance, matching what an unchanged retry
+will make. A legacy unconfirmed balance leaves the picker unselected so an explicit
+choice starts a fresh sample. An older saved request that cannot be reused asks for a fresh size
 selection rather than silently replacing its goal. It answers
 `409` with `choose_size` when a size must be chosen, `choose_balance` for an
 unavailable balance choice, or `refused`.
