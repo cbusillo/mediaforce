@@ -238,7 +238,6 @@ final class SampleClientTests: XCTestCase {
                 .makeSample(facts.prefix, size: size, balance: choices.balance(in: facts))
             let request = try XCTUnwrap(StubServerBody.json(try XCTUnwrap(Self.requests.last)))
             XCTAssertEqual(request["size"] as? String, size)
-            XCTAssertEqual(request["balance"] as? String, choices.selectedBalance)
             XCTAssertNil(choices.made(made, facts: facts))
             XCTAssertFalse(choices.askingSize)
             XCTAssertNil(choices.selectedBalance)

@@ -9,6 +9,8 @@ from starlette.requests import Request
 from starlette.routing import Route
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.tuning.compression_intent import compression_intent_options, compression_intent_from_payload
+from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_followup_request, operator_intent_from_policy, sample_goal_request
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime import folder_actions
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
@@ -335,7 +337,22 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     })
     assert make(_folder(sample_item={"duration_seconds": 3600}), failed, None, "reference")["ok"] is True
     _kind, _prefix, note, _host, intent, _token = calls.pop()
-    assert "300 MB for this episode" in note
+    saved_policy = failed["retryable_sample_job"]["policy"]["video"]
+    resolved = operator_intent_from_policy(saved_policy).size_goal.resolve(3600)
+    assert note == sample_goal_request({"operator_intent": intent, "resolved_size_goal": {
+        "target_size_mb": (resolved.target_size_bytes or 0) / DECIMAL_MEGABYTE_BYTES,
+    }})
+
+    failed["retryable_sample_job"]["policy"]["video"].update({
+        "compression_intent_schema_version": 1, "compression_intent": "reference", "compression_intent_confirmed": True,
+    })
+    refused_saved = make_sample(
+        _folder(sample_item={"duration_seconds": 3600}), failed, None,
+        ai_tune=lambda *args: calls.append(("new", *args)) or {"ok": True}, retry_saved=lambda *_args: {"ok": False},
+    )
+    assert refused_saved["ok"]
+    assert calls.pop()[4] == operator_intent_from_policy(saved_policy).request_payload()
+    assert calls == []
 
     def computer_gone(*_args: Any) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="That computer is gone.")
@@ -348,6 +365,25 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     calls.clear()
     assert make(_folder(), _status(), "a size that is not offered") == {"ok": False, "code": "choose_size"}
     assert calls == []
+
+
+@pytest.mark.parametrize("under_target", [False, True])
+def test_changing_a_reviewed_samples_balance_keeps_measured_direction_for_the_new_balance(under_target: bool) -> None:
+    folder = _folder()
+    folder["compression_intent_options"] = compression_intent_options(compression_intent_from_payload({
+        "schema_version": 1, "level": "reference", "confirmed": True,
+    }))
+    analysis = folder["size_target_analysis"]
+    if under_target:
+        analysis.update({"status": "under_target", "predicted_total_size_bytes": 100_000_000})
+    calls: list[tuple[Any, ...]] = []
+    chosen = next(choice for choice in folder["compression_intent_options"] if choice["key"] == "perceptual_floor")
+    assert make_sample(
+        folder, _status(), None, chosen["key"],
+        ai_tune=lambda *args: calls.append(args) or {"ok": True}, retry_saved=lambda *_args: {"ok": True},
+    )["ok"]
+    assert calls[-1][1] == measured_followup_request(analysis, accepts_under_target=chosen["accepts_under_target_result"])
+    assert calls[-1][3]["compression_intent"] == chosen["compression_intent"]
 
 
 def test_native_make_route_forwards_the_chosen_size_and_balance() -> None:
