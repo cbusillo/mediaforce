@@ -103,7 +103,7 @@ available for the rollback procedure below.
 
 Before changing the plist, deploy records both old and new runtime paths in
 `runtime/protected-roots.json` beside the configured database. Registration is cumulative: active and rollback
-roots remain protected across later deploys. The hourly cleanup refuses an
+roots remain protected from hourly cleanup across later deploys. The hourly cleanup refuses an
 entire sweep when any configured cleanup tree overlaps the runtime install
 root, a registered runtime/rollback path, or the executing source tree. An
 unreadable registry also refuses cleanup. It never prunes `runtime/` releases.
@@ -133,9 +133,30 @@ The hourly cleanup keeps the newest `state.cleanup.kept_deploy_backups` stage
 folders (two by default), plus the running release's rollback stage named in
 `runtime/rollback-stage.txt`. Failed preparation does not consume a retention
 slot. Retain a stage outside that cleanup tree when its backup is needed after
-a later successful release replaces that pointer. Removing old releases or
-releasing legacy protection requires a separate, verified retirement after no
-service, job or rollback depends on them.
+a later successful release replaces that pointer.
+
+After app installation and queue resume succeed, the deploy trims independent
+clones under `runtime/releases/` to three. It keeps the installed running
+release and the rollback named by the retained stage's saved launch item,
+then fills the remaining slots with the newest directories by modification
+time. The recorded rollback takes precedence over age. A legacy rollback
+outside `runtime/releases/` stays untouched and does not consume a slot.
+Missing or inconsistent running/rollback evidence, symlinks or non-clone
+directories refuse the trim before deletion. Plain files such as Finder's
+`.DS_Store` are left alone. A trim failure leaves the healthy release running
+and reports that deployment succeeded but trimming failed. Failed deploys do
+not trim. A spare slot can contain an unsuccessful preparation attempt; only
+the currently recorded rollback is guaranteed to retain its release code.
+The deployment stage, database backup, protection registry, legacy worktrees
+and media originals are outside this trim. Releasing legacy protection still
+requires a separate, verified retirement.
+
+If trimming refuses, leave the healthy controller running. Compare the named
+entry with the installed launch item and retained stage's saved launch item.
+Move only material confirmed unrelated to the running release or rollback out
+of `runtime/releases/` before the next authorized deploy; preserve ambiguous
+material and reconcile its ownership first. Do not replay the deploy just to
+retry cleanup.
 
 ### Mac app
 
