@@ -142,8 +142,11 @@ then fills the remaining slots with the newest directories by modification
 time. The recorded rollback takes precedence over age. A legacy rollback
 outside `runtime/releases/` stays untouched and does not consume a slot.
 Missing or inconsistent running/rollback evidence, symlinks or non-clone
-entries refuse the trim before deletion. A trim failure leaves the healthy
-release running and reports the error. Failed deploys do not trim.
+directories refuse the trim before deletion. Plain files such as Finder's
+`.DS_Store` are left alone. A trim failure leaves the healthy release running
+and reports that deployment succeeded but trimming failed. Failed deploys do
+not trim. A spare slot can contain an unsuccessful preparation attempt; only
+the currently recorded rollback is guaranteed to retain its release code.
 The deployment stage, database backup, protection registry, legacy worktrees
 and media originals are outside this trim. Releasing legacy protection still
 requires a separate, verified retirement.

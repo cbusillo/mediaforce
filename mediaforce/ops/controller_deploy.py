@@ -133,7 +133,7 @@ def trim_releases(home: Path, support_dir: Path) -> None:
         or previous.absolute() != previous.resolve() or not previous.is_dir()
     ):
         raise RuntimeError("cannot verify running and rollback releases; releases retained")
-    releases = list(running.parent.iterdir())
+    releases = [path for path in running.parent.iterdir() if not path.is_file() or path.is_symlink()]
     for release in releases:
         require_release_directory(release, home)
     releases.sort(key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True)
@@ -306,7 +306,10 @@ def _deploy(
         # A lost resume response is uncertain; leave the healthy candidate running.
         if resume_queue:
             _api(base_url, "/api/encode-queue/resume", post=True)
-    trim_releases(home, database.parent)
+    try:
+        trim_releases(home, database.parent)
+    except Exception as exc:
+        raise RuntimeError(f"controller deployed successfully; release trim failed: {exc}") from exc
 
 
 def main() -> None:

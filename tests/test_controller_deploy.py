@@ -127,7 +127,7 @@ def test_deploy_refuses_unpaused_or_running_work(paused: bool, encodes: int, sam
 
 
 @pytest.mark.parametrize(
-    "outcome", ["healthy", "unhealthy", "slow", "resume-lost", "backup-failed", "prepare-failed", "app-install-failed"],
+    "outcome", ["healthy", "unhealthy", "slow", "resume-lost", "backup-failed", "prepare-failed", "app-install-failed", "trim-failed"],
 )
 @pytest.mark.parametrize("stopped,initially_paused", [(False, True), (True, False), (True, True)])
 @pytest.mark.parametrize("legacy_rollback", [False, True])
@@ -147,6 +147,8 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(
     for index, release in enumerate(older):
         _independent_clone(release)
         os.utime(release, (index + 1, index + 1))
+    if outcome == "trim-failed":
+        (candidate.parent / "unknown-directory").mkdir()
     database = tmp_path / "configured-state/library.sqlite3"
     stage = database.parent / "deployments/fixture-stage"
     _independent_clone(old)
@@ -249,7 +251,7 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(
             with pytest.raises((RuntimeError, OSError)):
                 controller_deploy._deploy(tmp_path / "source", "main", stage, home, "http://fixture", database=database, startup_timeout=90, stopped_config=config if stopped else None)
     assert service_running is (outcome != "unhealthy" and (not stopped or outcome not in {"backup-failed", "prepare-failed"}))
-    healthy_candidate = outcome in {"healthy", "slow", "resume-lost", "app-install-failed"}
+    healthy_candidate = outcome in {"healthy", "slow", "resume-lost", "app-install-failed", "trim-failed"}
     assert resume_requests == ([True] if healthy_candidate and resume_queue else [])
     assert installed_apps == ([candidate] if healthy_candidate else [])
     assert (old / "retained-output").read_text() == "keep"
@@ -290,6 +292,8 @@ def test_trim_requires_known_running_and_rollback_before_removing_clones(
     for index, release in enumerate([running, previous, *extras]):
         _independent_clone(release)
         os.utime(release, (index, index))
+    finder_file = running.parent / ".DS_Store"
+    finder_file.write_bytes(b"Finder metadata")
     stage = support / "deployments/active"
     stage.mkdir(parents=True)
     paths = login_item.LoginItemPaths(running, home)
@@ -319,6 +323,7 @@ def test_trim_requires_known_running_and_rollback_before_removing_clones(
         controller_deploy.trim_releases(home, support)
         assert [release.exists() for release in extras] == [False] * max(0, extra_count - 1) + [True] * min(1, extra_count)
     assert running.is_dir() and previous.is_dir()
+    assert finder_file.read_bytes() == b"Finder metadata"
     assert (stage / "launch-item.before.plist").is_file()
 
 
