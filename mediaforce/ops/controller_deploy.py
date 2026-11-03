@@ -132,7 +132,10 @@ def trim_releases(home: Path, support_dir: Path) -> None:
         candidate != running or previous == running or not previous.is_absolute()
         or previous.absolute() != previous.resolve() or not previous.is_dir()
     ):
-        raise RuntimeError("cannot verify running and rollback releases; releases retained")
+        raise RuntimeError(
+            f"cannot verify running and rollback releases; releases retained: "
+            f"stage={stage}, candidate={candidate}, running={running}, rollback={previous}"
+        )
     releases = [path for path in running.parent.iterdir() if not path.is_file() or path.is_symlink()]
     for release in releases:
         require_release_directory(release, home)
@@ -309,7 +312,7 @@ def _deploy(
     try:
         trim_releases(home, database.parent)
     except Exception as exc:
-        raise RuntimeError(f"controller deployed successfully; release trim failed: {exc}") from exc
+        raise RuntimeError(f"controller deployed successfully; release trim failed for stage {stage}: {exc}") from exc
 
 
 def main() -> None:

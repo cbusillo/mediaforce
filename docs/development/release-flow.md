@@ -103,7 +103,7 @@ available for the rollback procedure below.
 
 Before changing the plist, deploy records both old and new runtime paths in
 `runtime/protected-roots.json` beside the configured database. Registration is cumulative: active and rollback
-roots remain protected across later deploys. The hourly cleanup refuses an
+roots remain protected from hourly cleanup across later deploys. The hourly cleanup refuses an
 entire sweep when any configured cleanup tree overlaps the runtime install
 root, a registered runtime/rollback path, or the executing source tree. An
 unreadable registry also refuses cleanup. It never prunes `runtime/` releases.
@@ -150,6 +150,13 @@ the currently recorded rollback is guaranteed to retain its release code.
 The deployment stage, database backup, protection registry, legacy worktrees
 and media originals are outside this trim. Releasing legacy protection still
 requires a separate, verified retirement.
+
+If trimming refuses, leave the healthy controller running. Compare the named
+entry with the installed launch item and retained stage's saved launch item.
+Move only material confirmed unrelated to the running release or rollback out
+of `runtime/releases/` before the next authorized deploy; preserve ambiguous
+material and reconcile its ownership first. Do not replay the deploy just to
+retry cleanup.
 
 ### Mac app
 

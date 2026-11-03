@@ -21,14 +21,14 @@ def require_release_directory(project_root: Path, home: Path) -> None:
     releases = runtime_directory(home) / "releases"
     root = project_root.absolute()
     if root.parent != releases.absolute() or root.resolve() != root:
-        raise RuntimeProtectionError(f"controller runtime must be a real directory directly under {releases}")
+        raise RuntimeProtectionError(f"controller runtime {root} must be a real directory directly under {releases}")
     if (
         (root / ".git").is_symlink()
         or not (root / ".git").is_dir()
         or (root / ".git/commondir").exists()
         or (root / ".git/objects/info/alternates").exists()
     ):
-        raise RuntimeProtectionError("controller runtime must be an independent clone, not a development worktree")
+        raise RuntimeProtectionError(f"controller runtime {root} must be an independent clone, not a development worktree")
 
 
 def protected_runtime_roots(support_dir: Path) -> tuple[Path, ...]:

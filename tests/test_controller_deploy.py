@@ -280,7 +280,7 @@ def _built_app(release: Path, marker: str) -> None:
 
 
 @pytest.mark.parametrize("extra_count", [0, 4])
-@pytest.mark.parametrize("invalid", [None, "missing-stage", "missing-rollback", "same-release", "redirected-release", "worktree"])
+@pytest.mark.parametrize("invalid", [None, "missing-stage", "missing-rollback", "same-release", "redirected-release", "worktree", "candidate-mismatch"])
 def test_trim_requires_known_running_and_rollback_before_removing_clones(
     tmp_path: Path, extra_count: int, invalid: str | None,
 ) -> None:
@@ -312,7 +312,7 @@ def test_trim_requires_known_running_and_rollback_before_removing_clones(
     (stage / "launch-item.before.plist").write_bytes(
         login_item.render_login_item_plist(login_item.LoginItemPaths(rollback, home))
     )
-    (stage / "candidate.txt").write_text(str(running))
+    (stage / "candidate.txt").write_text(str(previous if invalid == "candidate-mismatch" else running))
     if invalid != "missing-stage":
         runtime_install.retain_deploy_stage(support, stage)
     if invalid:
