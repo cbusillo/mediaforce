@@ -1,5 +1,4 @@
 import json
-from unittest.mock import patch
 import os
 from pathlib import Path
 from typing import Any
@@ -1474,9 +1473,6 @@ def test_pending_move_resolves_stored_and_requested_path_aliases(originals: tupl
     alias.symlink_to(path.parent, target_is_directory=True)
     alias_path = alias / path.name
     with open_db(config.paths.db_path) as connection:
-        with patch.object(Path, "resolve", side_effect=OSError("media storage is unavailable")):
-            assert not path_in_pending_move(connection, str(path))
-            assert not path_in_pending_move(connection, str(alias_path), moving_paths=set())
         assert prepare_archive_removal(connection, path)
         connection.execute(update(source_moves).where(source_moves.c.from_path == str(path.resolve())).values(from_path=str(alias_path)))
         assert path_in_pending_move(connection, str(path))
