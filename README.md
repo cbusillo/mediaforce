@@ -130,6 +130,55 @@ chosen balance is applied together with a chosen size whenever a fresh sample
 is made; requests without an explicit choice keep the current choice or the
 automatic balanced default.
 
+## Confirming independently acquired originals
+
+To prepare an exact list for the Mac app, name each library item explicitly:
+
+```bash
+uv run mediaforce evidence register-original 123 124 --assertion "Independently acquired before Mediaforce compressed them"
+```
+
+This prepares a saved preview, including each file's full content check. It
+never confirms an original. Open **Needs you** in the Mac app, review every
+file and any separate format exception, then confirm with macOS
+LocalAuthentication. The app saves that exact approval in its own store and
+the existing background evidence worker rechecks files and source revisions
+before recording each file independently. One changed file needs an updated list
+while the others continue. The confirmation sheet closes after saving the approval;
+the existing background discovery queues it even when the controller was idle.
+Activity shows why file checks are waiting. Cancelled
+or unsuccessful authentication records no approval. Retrying a saved approval
+returns each file's existing result. Changed bytes or approval checks appear in
+**Needs you** and require an updated list for that file. Temporary missing files
+wait without discarding the approval. Once a library scan confirms a file is
+gone, its check finishes and resumes if the file returns. An unknown error retries before asking;
+after diagnosing exhausted checks, an agent can retry through the existing
+`mediaforce evidence start tv/source.mkv --kind media_fingerprint` and
+`mediaforce evidence resume` commands, naming the affected file and check kind.
+This reuses the saved approval without another authentication. Dismissing a request
+changes no file or approval.
+Dismissing a problem acknowledges only the member problems shown. Different
+problems still appear. Dismissing a missing-approval problem also stops
+that file's waiting checks. If the
+approval is restored later, an agent can start those exact file checks again
+with the same commands.
+
+A format exception must name its item, for example `--codec-override '123=Independently acquired AV1 download'`.
+It never permits a Mediaforce stamp, a known compressed output or unavailable
+checks. Approving an original does not upgrade old measurements: SMB and
+remote measurements still have only observed strength.
+
+The Mac app's approval files live under its Application Support directory at
+`mediaforce/mac-app/original-approvals`. This is the in-app boundary chosen by
+the Director: agents do not write confirmations or invoke original deletion.
+It is not an isolated service or protection against direct writes by the same
+macOS account. Keep these approval files with the database when backing up;
+a missing approval leaves its original unconfirmed. Original registration neither deletes nor restores media.
+When a replacement is identified by the background checks, only a full content
+match to one retained version for that library item reconnects its history.
+Missing files, ambiguous matches and unreadable content checks do not transfer
+an original's approval to another file or a reused catalog ID.
+
 ## Layout
 
 - CLI entry points: `mediaforce`, `mediaforce-web`

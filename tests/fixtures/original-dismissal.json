@@ -1,0 +1,11 @@
+{
+  "manifest_hash": "6fd0c3f7660a4ebd5b6e7c9af80eaf04b70bb3807aa066b44b3c7473bfa2ef2d",
+  "request_dismissed": false,
+  "problems": [
+    {
+      "item_id": 42,
+      "rel_path": "tv/Fixture/source.mkv",
+      "reason": "The saved Mac approval is unavailable."
+    }
+  ]
+}

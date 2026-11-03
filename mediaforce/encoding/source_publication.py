@@ -184,12 +184,8 @@ def pending_archive_paths(connection: DBClient) -> set[Path]:
     return {Path(path).resolve() for row in rows for path in (row["from_path"], row["to_path"]) if path}
 
 
-def path_in_pending_move(connection: DBClient, path: str) -> bool:
-    """Whether unfinished publishing or a put-back is moving a file to or from this path."""
-    return connection.execute(select(source_moves.c.ordinal).join(source_transitions).where(
-        source_transitions.c.outcome.in_(("prepared", "unresolved")),
-        (source_moves.c.from_path == path) | (source_moves.c.to_path == path),
-    ).limit(1)).first() is not None
+def path_in_pending_move(connection: DBClient, path: str, *, moving_paths: set[Path] | None = None) -> bool:
+    return Path(path).resolve() in (pending_archive_paths(connection) if moving_paths is None else moving_paths)
 
 
 def prepare_archive_removal(connection: DBClient, path: Path) -> list[str]:
