@@ -1,0 +1,317 @@
+# Bundled server and Sparkle delivery proposal
+
+Draft for the review requested on [the packaging issue](https://github.com/cbusillo/mediaforce/issues/1044).
+Landing this document records a proposal; it does not approve its unsettled
+choices, authorize a release, or change the installed controller.
+
+## Settled direction and present implementation
+
+The [Director's packaging decision](https://github.com/cbusillo/mediaforce/issues/1044#issuecomment-6401490426)
+settles notarized GitHub releases, Sparkle updates and the server inside the
+Mac app. One update replaces both. The Mac App Store is not pursued.
+The [interim trim](https://github.com/cbusillo/mediaforce/pull/1301) is landed
+and stays until bundled delivery replaces clone-based deployment.
+
+At the start of this draft, `scripts/build-mac-app.sh` builds and Developer ID
+signs the SwiftUI app; `macos/project.yml` has no Sparkle dependency. The app's
+`BackgroundService` controls an existing `com.mediaforce.web` LaunchAgent.
+`controller_deploy.py` builds an independent clone and environment, saves a
+checked database backup, switches that LaunchAgent and installs the app.
+There is no notarized Mediaforce release workflow or bundled Python engine.
+[Release flow](release-flow.md) remains the operating procedure until cutover.
+
+## Recommendation for review
+
+Keep the existing per-user background service and API, but launch its server
+from the installed app. Extend the current deploy transaction into one local
+update transaction around Sparkle's standard installer. Keep a complete old
+app together with the matching database backup, saved launch configuration
+and settings evidence. Do not introduce a privileged daemon, second server
+installer, release-clone manager, channel hierarchy or custom Sparkle installer.
+
+The proposed service lifecycle, Python packaging, update consent, feed hosting
+and rollback retention below need the Director's review before implementation.
+They are recommendations, not additional decisions inferred from Sparkle.
+
+Considered `SMAppService.agent(plistName:)` with a bundled LaunchAgent and
+bundle-relative `BundleProgram`, which could remove our absolute-path plist
+rendering and move repair. Recommend retaining the existing service for this
+transition: it already carries custom config and has a tested rollback path.
+Native registration would also require a persistent custom-config carrier and
+may require Login Items approval. This is a choice for this review, not a
+reason to silently register a new agent. The existing `mainApp.register()`
+in `AttentionCenter.swift` starts the UI at login; it does not register the
+Python server. If native server registration is preferred, revise this plan
+before implementation and account for what is actually removed.
+
+## Bundle and mutable data
+
+Proposed logical layout, resolved relative to the installed bundle:
+
+```text
+Mediaforce.app/Contents/
+  MacOS/Mediaforce                    native UI
+  MacOS/mediaforce-server             launcher for the embedded interpreter
+  Frameworks/Python.framework/        relocatable CPython and native libraries
+  Frameworks/Sparkle.framework/       Sparkle, including its signed helpers
+  Resources/server/                   wheel, dependencies, defaults, migrations
+  Resources/                          assets, licenses and build identity
+```
+
+Use the existing BD_to_AVP embedded-Python staging approach as the starting
+recipe, adapted to Mediaforce's wheel and locked dependencies. Build for the
+current Mac target without reducing its supported CPU/OS range. BD_to_AVP's
+recipe is arm64-only and its product targets macOS 26, whereas this app targets
+macOS 15 and has no architecture override. Reuse the approach, not that
+manifest: qualify the runtime and native wheels for each existing Release
+architecture and macOS 15. A narrower target needs a separate Director choice,
+not an incidental packaging change. Set feed minimum-system metadata from the
+built app. Prove relocation and signing before choosing final subpaths.
+Python must not depend on a developer checkout, venv symlink, `uv`, Homebrew
+Python, Xcode or a package download at launch. Disable bytecode writes inside
+the bundle. Include migrations and package defaults explicitly; installed
+startup must not find `alembic.ini` or resources through the build checkout.
+
+Preserve the current config, database, settings, credential permissions, logs,
+review clips and original-media rollback locations outside the app. Carry
+forward custom `--config` and its database identity, rather than silently
+opening the default database. No library roots, private config, credentials,
+databases or review media enter the archive. Extend the existing package
+contents verifier to the app artifact instead of creating another privacy gate.
+
+The current credential location needs an explicit transition: login_item.py
+carries `<release>/.env` between clones and web/app.py derives its lookup from
+the default config's package location. Recommend a private credential source
+beside the configured database, explicitly resolved by the installed loader.
+Remove clone-relative credential lookup/carry-forward for bundled operation;
+adapt `require_release_directory` callers to validate the signed bundle and
+saved support paths instead. For first cutover, record the existing credential
+file's exact path from the saved old service configuration and have the bundled
+loader read that source directly. Keep its containing legacy release protected
+as long as it is used. This is the supported transition when no persistent
+source has been provisioned; missing/unreadable credentials prevent cutover
+before the old service stops. Consolidating that file beside the database is
+a later Director-controlled provisioning step, not a hidden dependency on a
+new grant. This plan grants no permission to copy/export credential files.
+Do not put secret contents into update-stage evidence or backup the credential
+file just to record its location. Record only its private path and permissions.
+
+Keep ffmpeg/ffprobe, remote hosts, SSH and shared-storage setup as currently
+configured external capabilities. This proposal bundles the server, not those
+systems. Preflight them and show the existing actionable failures; do not
+install packages or change system settings during an update. Redistributing
+encoder binaries, if later wanted, is a separate choice.
+
+The per-user LaunchAgent keeps the existing label and log paths, with an
+absolute executable inside the installed app, a persistent working directory
+and the saved config option. Window closure must leave background work and
+notifications working. A second app copy must not seize the same listener or
+database. App moves, missing bundles and stale launch paths need a visible
+repair through the same service path, with no second concurrent server.
+
+## One update transaction
+
+Sparkle owns download, archive verification, replacement and relaunch. The app
+and bundled service own safe admission and database recovery. Start with
+standard Sparkle update UI and automatic checks; recommend presenting an
+installable update only after safe preparation, then installing on user
+acceptance. Disable `SUAllowsAutomaticUpdates` for this proposed consent model.
+Automatic installation after preparation would remove that recurring act, and
+remains the Director's choice in this review. The consent model costs downtime
+for download and waiting for acceptance after the server stops.
+
+1. Discover the candidate's appcast identity while current work continues, but
+   refuse `shouldProceedWithUpdate` until safe preparation is complete: a thrown
+   error prevents the offer, download and installation. Schedule preparation
+   outside that synchronous delegate, then recheck the same candidate when
+   ready. Serialize each phase with the existing deploy/cleanup locks. Add one durable
+   update-intent record under the configured runtime support directory, naming
+   the exact old/new build, stage and prior pause state. The initiating app
+   writes it before fencing; each resumed phase acquires the same lock and
+   reconciles that record before acting. App/server startup and hourly cleanup
+   must consult it too. An unfinished intent prevents a second update, cleanup
+   of either pair and ordinary work admissions across app quit/replacement or
+   reboot; a process lock alone cannot span them. No new daemon is required.
+   Fence new
+   encodes, samples, scans, measurements and publishing admissions; let active
+   files finish, including remote workers, validation and publication.
+   Preserve the previous queue pause state and the M4 night window.
+2. Recheck authoritative job state, remote-process custody and publishing locks.
+   `/api/release/work` counts alone are insufficient, as release-flow explains.
+   Unknown custody leaves the old app running and the update waiting. Surface
+   every reason in the app. Canceling preparation restores prior admissions.
+3. Save the complete old signed app and launch configuration in a fresh stage
+   beside the configured database's existing `deployments/`. The update intent
+   protects both it and the previous complete rollback stage from cleanup;
+   copy and verify before replacement. Do not
+   rely on Sparkle's temporary files or Trash as the rollback copy.
+4. Stop the server and verify the listener and exclusive database custody.
+   Reuse the SQLite online backup and `quick_check` helpers to save
+   `before.sqlite` before candidate startup can migrate. Save settings and
+   configuration evidence without logging secrets. Failure before replacement
+   restores the unchanged old service and its previous pause state. Only after
+   both app and database copies are verified may `retain_deploy_stage` move
+   the existing protected-stage pointer. Partial attempts never displace the
+   previous usable pair, including after repeated failed attempts.
+5. Only now let `shouldProceedWithUpdate` accept the exact prepared build;
+   refuse a different build and any recorded failed build on both manual and
+   automatic checks. Sparkle may download, verify and install it through its
+   standard UI. Once it proceeds, keep the server stopped and admissions fenced
+   even if installation is postponed until quit. Prevent launchd KeepAlive from restarting
+   the old executable during replacement. A crash/reboot must encounter the
+   saved stage before either server can open the database or resume work.
+6. Start the candidate through the saved service path. Verify the exact bundled
+   UI/server build identity, database migration, API health, queued work and
+   external capability availability. The verified candidate clears the update intent under
+   the lock only after post-checks and recording the complete rollback pair;
+   then restore admissions and resume only a previously running queue.
+   Failed/unknown phases retain the intent for recovery. A lost response is reconciled
+   from durable state, never retried as a new install.
+
+The Sparkle reference states that installation can proceed on quit despite
+relaunch deferral; safety must be established before allowing the update item,
+not after acceptance. Prove manual/background checks, dismissal, quit/logout
+while busy and prepared-install interruption using two installed signed builds.
+Before preparation, quitting must not install anything. After preparation,
+do not reopen admissions merely because the UI was dismissed: reconcile
+Sparkle's pending-install state first. Canceling with proof that no install is
+pending can restore the unchanged server and clear the intent under the lock.
+
+## Rollback and retention
+
+Before migration, a failed update may restart the unchanged old app only when
+its database is proven untouched. After migrations or uncertain startup,
+leave the service stopped and use the [existing database and launch-item
+rollback procedure](release-flow.md#rollback-and-cleanup-ownership), adding
+restoration of the stage's matching old app. Retain the failed database for
+diagnosis first. Never run old code on a possibly migrated database.
+No originals or encoded outputs are deleted.
+
+Recommend rollback only before releasing new work admissions. Once the new
+version has encoded or published files, restoring its pre-update database can
+lose those records; stop and reconcile those effects before choosing recovery.
+A forward fix may be safer. Sparkle is not the database rollback engine, and
+removing an appcast item does not downgrade installed apps.
+
+After rollback, retain the exact failed build identity outside the app and
+exclude that build from subsequent Sparkle offers until a corrected newer
+build is available or the failure has been explicitly reconciled. Otherwise
+automatic checks could keep reinstalling the same failed update. This is
+recovery evidence, not a new release channel or a global feed downgrade.
+Use the same `shouldProceedWithUpdate` gate, not Sparkle's user Skip preference,
+which manual checks can bypass. Ship this gate in the first Sparkle-capable
+app so a restored older bundle already understands failed-build evidence.
+
+Reuse the existing deployment-stage retention count and protected-stage
+pointer for bundled backups. Keep the prior healthy app/database pair until
+a later verified update creates another usable pair. Never overwrite or delete
+the last rollback copy. During first cutover, keep the legacy runtime, its
+recorded rollback and protection registry; retire old clones only after their
+service/job/rollback dependencies are disproved through verified retirement.
+Do not delete a last copy without the Director's approval. Delete the interim
+clone trim with the clone-creation path when neither is used, not beforehand.
+
+## Notarized GitHub delivery and agent publishing
+
+Adapt the proven BD_to_AVP release sequence, not its channel system, PyPI
+publication, product identity or private credentials. Proposed stable delivery:
+GitHub Release assets and one HTTPS appcast on this repository's GitHub Pages.
+Use Sparkle's standard framework and appcast tools. Keep one committed source
+for app version/build identity: recommend `project.version` and one build
+counter in pyproject.toml. Generate the Xcode version/build settings rather
+than maintaining their current independent literals; derive server, tag and
+appcast metadata from those values. Build numbers increase across attempts;
+never overwrite published
+bytes under an existing version. Source builds do not contact the live feed.
+
+1. A Director release request starts preparation. An agent lands version and
+   release-note changes through the merge train and selects the exact green,
+   reviewed main commit. A merge by itself never publishes a release.
+2. A main-only workflow, dispatched by the existing automation identity,
+   builds from that exact commit and lockfile on macOS. It runs the required
+   repo gates and installed-artifact smokes in isolated support directories.
+   Build UI and server together, stage their dependencies and license notices,
+   and verify artifact contents and relocation.
+3. Sign nested native libraries, interpreter, Sparkle helpers and executables
+   inside out, then the outer app, with Developer ID and hardened runtime.
+   Verify the whole app; do not use blanket deep signing as the signing recipe.
+   Enumerate every nested Mach-O, including native wheels under Resources.
+   Keep library validation enabled and sign the embedded native dependencies
+   with the same team; do not add JIT/unsigned-memory or library-validation
+   exceptions without a demonstrated runtime need and Director review. Disable
+   runtime bytecode writes as well as build-time writes. Missing entitlement
+   or native-dependency evidence blocks the artifact; read notarization logs.
+   Submit with `notarytool`, require acceptance, staple and validate the ticket,
+   then create the final distribution archive. Verify Gatekeeper assessment.
+4. Sign the final archive with Mediaforce's Sparkle EdDSA key. Create a draft
+   GitHub Release containing that archive, checksums and release notes; build
+   its appcast item against those immutable asset URLs and exact build/OS data.
+   Download and verify the uploaded bytes and signature before publication.
+5. Publish the release, then publish the validated feed last, serializing feed
+   updates so a stale workflow cannot replace newer history. Verify served
+   feed and download. Resume an interrupted draft only after reading its exact
+   tag, asset digests and publication state. Never replay an uncertain publish.
+   A feed failure after release publication leaves a downloadable release;
+   reconcile the feed without rebuilding or replacing the published archive.
+
+Keep signing/notarization credentials and the EdDSA private key in their
+purpose-specific existing protected CI custody. Only the public Sparkle key
+ships in the app. Never copy keys from BD_to_AVP. Mediaforce currently has no
+release workflow; availability of its CI signing inputs, EdDSA key, Pages
+setup and automation permissions has not been established by this source
+review. Before any release request, walk the full publishing path read-only
+and report missing setup together, including anonymous access to feed and
+release downloads. The repository was public when checked for this draft;
+verify that again before publication. Any new access grant goes to the Director;
+no secrets or policy changes are authorized by approval of this document.
+
+## Delivery order after approval
+
+Open the implementation issue required by the packaging decision only after
+the review is resolved, linked to the source decision and this plan. Deliver
+in this order, without a second lasting deployment system:
+
+1. Embedded-server artifact and installed-bundle lifecycle, proved offline in
+   an isolated user/support directory, including custom config and migrations.
+2. Safe update/rollback integration and Sparkle; prove two signed versions
+   through the real installer, busy/deferred installs, quit/reboot interruption,
+   backup failure, migration failure, rollback and retained work. Use existing
+   deployment, custody and package fixtures; do not assert workflow text.
+3. Notarized release workflow, feed and agent publishing procedure. Prove the
+   downloaded artifact and installed older-to-newer update in isolation before
+   requesting the first real release. The Director's macOS permission prompts
+   remain theirs. No production-library test is implied by a packaging smoke.
+4. First requested release performs one safe transition from the existing
+   LaunchAgent/runtime. The old app has no Sparkle: the agent must bootstrap
+   the downloaded, verified notarized bundle through the existing single-process
+   staged transaction, adapted to consume that artifact instead of rebuilding
+   it. Keep the old service disabled during the switch; do not assume legacy
+   startup understands the new update-intent record. Restore its exact saved
+   plist on a pre-migration failure. Thereafter bundled startup owns recovery.
+   Verify app/server identity and saved rollback; remove
+   the replaced clone-deploy code, interim trim and obsolete docs in the same
+   cutover change once its replacement is usable. Retain legacy copies until
+   verified retirement is safe. Update release-flow.md to the delivered path
+   and delete this proposal and its index entry; the issue retains its reviewed
+   historical revision rather than a second maintained procedure.
+
+Removed when delivered: per-deploy Git clone and venv, local build on the
+controller, separate server/app deployment and its interim clone trim.
+Added upkeep: embedded runtime assembly, signing/notarization and Sparkle
+integration. No new service, channel matrix, retention setting or registry.
+The implementation's net lines are unknown until it exists; report measured
+adds/deletes per change. This proposal adds documentation only.
+
+## Reference behavior checked for this draft
+
+- [Sparkle standard setup](https://sparkle-project.org/documentation/) and
+  [updater delegate hooks](https://sparkle-project.org/documentation/api-reference/Protocols/SPUUpdaterDelegate.html).
+  Installation deferral is distinct from relaunch deferral; it needs the
+  installed two-version proof above.
+- [Apple distribution signing](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac/)
+  and [notarization](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
+- [Apple service registration](https://developer.apple.com/documentation/servicemanagement/smappservice)
+  and [bundled agent placement](https://developer.apple.com/documentation/servicemanagement/smappservice/agent(plistname:)).
+- [BD_to_AVP release procedure](https://github.com/cbusillo/BD_to_AVP/blob/main/docs/release-process.md)
+  and [embedded Python staging](https://github.com/cbusillo/BD_to_AVP/blob/main/scripts/embedded_python.py).
+  These are reference implementations, not Mediaforce release authority.
