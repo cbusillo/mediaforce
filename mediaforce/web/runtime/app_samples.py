@@ -268,7 +268,7 @@ def _sample_request(
             goal_mb = (resolved.target_size_bytes or 0) / DECIMAL_MEGABYTE_BYTES
         if current is None:
             return "choose_size"
-        if retry is not None and balance is None and saved.compression_intent.confirmed:
+        if balance is None and object_dict(current.get("compression_intent")).get("confirmed") is True:
             intent = current
         else:
             if balance_choice is None:
