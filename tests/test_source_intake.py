@@ -533,14 +533,14 @@ def test_window_wait_releases_new_source_qualification_but_keeps_a_stale_cache(t
 
 
 def test_loop_discovery_marks_original_window_waits_before_returning(tmp_path: Path) -> None:
-    from mediaforce.library.evidence_worker import _discover_originals
+    from mediaforce.library.evidence_worker import discover_originals
 
     config = _config(tmp_path)
     item_id, _path = _source(config)
     config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"}]
     deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
         evidence_host_rows=lambda _config: [{"key": "localhost", "schedule_open": False}])
-    assert _discover_originals(config, deps) == 1
+    assert discover_originals(config, deps) == 1
     with open_db(config.paths.db_path) as database:
         _assert_unadmitted_window_wait(database, item_id)
         assert runnable_evidence_work_count(database) == 0
@@ -1729,30 +1729,6 @@ def test_background_followup_preserves_failed_or_waiting_safety_request(tmp_path
         row = database.execute(select(library_item_evidence_state)).mappings().one()
         assert row["work_status"] == status
         assert row["work_reason"] == "sample_safety" and row["work_priority"] == 0
-
-
-def test_cancelled_kind_with_ineligible_original_does_not_enqueue_another_kind(tmp_path: Path) -> None:
-    from dataclasses import replace
-
-    config = _config(tmp_path)
-    item_id, _path = _source(config)
-    _discover(config)
-    _work(config)
-    _work(config)
-    with open_db(config.paths.db_path) as database:
-        evidence = load_source_evidence(database, item_id)
-        database.execute(
-            update(library_item_evidence_state)
-            .where(library_item_evidence_state.c.evidence_kind == "cadence_analysis")
-            .values(work_status="cancelled", retry_not_before="2000-01-01T00:00:00+00:00")
-        )
-    with patch("mediaforce.library.source_intake.load_source_evidence", return_value=replace(evidence, availability="unavailable")):
-        assert _discover(config) == 0
-    with open_db(config.paths.db_path) as database:
-        statuses = dict(
-            database.execute(select(library_item_evidence_state.c.evidence_kind, library_item_evidence_state.c.work_status)).all()
-        )
-        assert statuses == {"cadence_analysis": "failed", "media_fingerprint": "completed"}
 
 
 def test_paired_original_records_two_observed_receipts_from_one_probe(tmp_path: Path) -> None:

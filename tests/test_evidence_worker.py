@@ -141,7 +141,7 @@ class EvidenceWorkerTests(unittest.TestCase):
         deps = replace(self._deps(analyze), lease_seconds=EVIDENCE_JOB_LEASE_SECONDS,
                        heartbeat_seconds=EVIDENCE_JOB_HEARTBEAT_SECONDS)
         runner = BoundedEvidenceRunner(self.config.paths.config_path, deps=deps)
-        with patch("mediaforce.library.evidence_worker._discover_originals", return_value=0):
+        with patch("mediaforce.library.evidence_worker.discover_originals", return_value=0):
             runner.start(max_work_items=None)
             try:
                 self.assertTrue(started.wait(5), "Every file should start before any analyzer is released")
@@ -311,7 +311,7 @@ class EvidenceWorkerTests(unittest.TestCase):
                        heartbeat_seconds=EVIDENCE_JOB_HEARTBEAT_SECONDS)
         runner = BoundedEvidenceRunner(self.config.paths.config_path, deps=deps)
         with patch("mediaforce.library.evidence_worker.process_evidence_queue_once", side_effect=process), patch(
-            "mediaforce.library.evidence_worker._discover_originals", return_value=0
+            "mediaforce.library.evidence_worker.discover_originals", return_value=0
         ):
             runner.start(max_work_items=None)
             try:
@@ -448,7 +448,7 @@ class EvidenceWorkerTests(unittest.TestCase):
                        heartbeat_seconds=EVIDENCE_JOB_HEARTBEAT_SECONDS)
         runner = BoundedEvidenceRunner(self.config.paths.config_path, deps=deps)
         with patch("mediaforce.library.evidence_worker.process_evidence_queue_once", side_effect=process), patch(
-            "mediaforce.library.evidence_worker._discover_originals", return_value=0
+            "mediaforce.library.evidence_worker.discover_originals", return_value=0
         ):
             runner.start(max_work_items=None)
             try:

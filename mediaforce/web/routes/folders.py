@@ -1,9 +1,13 @@
+import asyncio
+
 from collections.abc import Callable, Collection
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
+
+from mediaforce.core.process_control import ManagedProcessController
 
 
 def _request_flag(body: object, key: str) -> bool:
@@ -42,7 +46,7 @@ def register_folder_routes(
     accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
     keep_motion_held_originals_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
     undo_motion_keep_action: Callable[[str, list[int]], dict[str, Any]] | None = None,
-    put_original_back_action: Callable[[str, int], dict[str, Any]] | None = None,
+    put_original_back_action: Callable[[str, int, Callable[[], None]], dict[str, Any]] | None = None,
     decide_size_held_action: Callable[[str, int | Collection[int], bool], dict[str, Any]] | None = None,
 ) -> None:
 
@@ -117,7 +121,17 @@ def register_folder_routes(
             item_ids = _request_item_ids(await request_body(request))
             if len(item_ids) != 1:
                 raise HTTPException(status_code=400, detail="Name one file with library_item_ids.")
-            result = await run_in_threadpool(put_back, prefix.strip("/"), item_ids[0])
+            controller = ManagedProcessController()
+            operation = asyncio.create_task(run_in_threadpool(put_back, prefix.strip("/"), item_ids[0], controller.throw_if_cancelled))
+            try:
+                while not operation.done():
+                    await asyncio.wait((operation,), timeout=0.1)
+                    if await request.is_disconnected():
+                        controller.cancel()
+                result = await operation
+            finally:
+                controller.cancel()
+                await asyncio.shield(operation)
             return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/validate-outputs")

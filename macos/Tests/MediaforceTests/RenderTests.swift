@@ -4,6 +4,20 @@ import XCTest
 
 @MainActor
 final class RenderTests: XCTestCase {
+    func testOriginalReviewAndItsWaitingNoticeRender() async throws {
+        let retained = ProcessInfo.processInfo.environment["MEDIAFORCE_ORIGINAL_RENDER_OUTPUT"]
+        let directory = retained ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        defer { if retained == nil { try? FileManager.default.removeItem(atPath: directory) } }
+        let options = try RenderOptions(arguments: [directory, "--server", "http://mediaforce.invalid", "--page", "needs-you", "--page", "originals"])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OriginalReviewRenderServer.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let rendered = try await RenderCommand.run(options, session: session)
+        XCTAssertFalse(try XCTUnwrap(rendered["originals"]).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(rendered["needs-you"]).isEmpty)
+    }
+
     func testMainPagesRenderWithFixtureDataInBothAppearances() async throws {
         let retained = ProcessInfo.processInfo.environment["MEDIAFORCE_RENDER_OUTPUT"]
         let directory = retained ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
@@ -170,6 +184,17 @@ private class RenderFixtureServer: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() {}
+}
+
+private final class OriginalReviewRenderServer: RenderFixtureServer, @unchecked Sendable {
+    override func payload(_ path: String) -> String? {
+        guard path == "/api/app/main-window", let original = super.payload(path),
+              var facts = try? JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any],
+              let preview = try? originalApprovalFixture() else { return super.payload(path) }
+        facts["original_previews"] = [["preview_id": preview.previewId, "manifest_hash": preview.manifestHash,
+                                       "canonical_json": preview.canonicalJson, "challenge": preview.challenge]]
+        return (try? JSONSerialization.data(withJSONObject: facts)).map { String(decoding: $0, as: UTF8.self) }
+    }
 }
 
 private final class BrokenRenderServer: RenderFixtureServer, @unchecked Sendable {

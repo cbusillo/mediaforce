@@ -120,6 +120,11 @@ def build_parser() -> argparse.ArgumentParser:
         "restore-source", help="Recover advisory original traits from historical run plans (dry-run by default)",
     )
     evidence_restore_parser.add_argument("--apply", action="store_true", help="Append qualifying historical-probable evidence")
+    original_parser = evidence_actions.add_parser("register-original", help="Prepare an exact file list for approval in the Mac app")
+    original_parser.add_argument("items", type=int, nargs="+", help="Library item IDs, each named explicitly")
+    original_parser.add_argument("--assertion", required=True, help="Why these are independently acquired originals")
+    original_parser.add_argument("--codec-override", action="append", default=[], metavar="ITEM=REASON",
+                                 help="A separate named exception for one item's codec or encoder match")
     evidence_run_parser.add_argument(
         "--max-items",
         type=int,
@@ -637,7 +642,18 @@ def _schedule_aware_evidence_host_rows(config: MediaforceConfig) -> list[dict[st
 def _run_evidence_command(config: MediaforceConfig, args: argparse.Namespace) -> int:
     action = str(args.evidence_action)
     try:
-        if action == "restore-source":
+        if action == "register-original":
+            from mediaforce.library.original_registration import build_original_preview
+
+            overrides = {}
+            for value in args.codec_override:
+                item, reason = value.split("=", 1)
+                if int(item) in overrides:
+                    raise ValueError("Name each item's exception once")
+                overrides[int(item)] = reason
+            summary = build_original_preview(config, args.items, assertion=args.assertion,
+                overrides=overrides)
+        elif action == "restore-source":
             with open_db(config.paths.db_path) as connection:
                 stats = restore_published_source_evidence(connection, apply=True)
             summary = {"applied": True, **stats.to_payload()}

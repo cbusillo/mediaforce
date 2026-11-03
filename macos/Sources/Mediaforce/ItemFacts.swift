@@ -203,6 +203,7 @@ extension MediaforceClient {
     private func folderAction(_ prefix: String, _ action: String, body: [String: Any]) async throws -> ItemActionResult {
         var request = URLRequest(url: baseURL.appending(path: "api/folders").appending(path: prefix).appending(path: action))
         request.httpMethod = "POST"
+        if action == "put-original-back" { request.timeoutInterval = 3600 }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let (data, response) = try await session.data(for: request)

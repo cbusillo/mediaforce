@@ -66,6 +66,23 @@ final class AttentionTests: XCTestCase {
     private let older = Finished(prefix: "tv/F/Season 2", at: "2026-10-20T00:00:00+00:00")
     private let newer = Finished(prefix: "tv/F/Season 3", at: "2026-10-22T00:00:00+00:00")
 
+    func testCancelledOriginalWaitIsVisibleAndNotifiesOnlyWhenAProblemNeedsAttention() throws {
+        let remembered = Attention.review(try facts(), remembered: nil).memory
+        var preview = try originalApprovalFixture()
+        preview.waiting = "Waiting for checks to be started again"
+        var current = try facts()
+        current.originalPreviews = [preview]
+        let waiting = Attention.review(current, remembered: remembered)
+        XCTAssertEqual(waiting.badgeCount, 0)
+        XCTAssertTrue(waiting.notices.isEmpty)
+        XCTAssertEqual(Attention.waitingItems(current).map(\.body), [try XCTUnwrap(preview.waiting)])
+        preview.problems = [OriginalProblem(itemId: nil, relPath: nil, reason: "The original-file checks need attention")]
+        current.originalPreviews = [preview]
+        let problem = Attention.review(current, remembered: waiting.memory)
+        XCTAssertEqual(problem.badgeCount, 1)
+        XCTAssertEqual(problem.notices.map(\.opens), [.needsYou])
+    }
+
     func testAKindDecisionNotifiesOnceCountsTheBadgeAndOpensTheKind() throws {
         let before = Attention.review(try facts(), remembered: nil).memory
         let pending = try facts(kinds: [("darker_live_action", "tv/The Blacklist/Season 10")])
