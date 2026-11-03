@@ -8,7 +8,13 @@ struct OriginalPreview: Decodable, Identifiable, Sendable {
     let manifestHash: String
     let canonicalJson: String
     let challenge: String
-    var problem: String? = nil
+    var problems: [OriginalProblem]? = nil
+    var problem: String? {
+        guard let problems, !problems.isEmpty else { return nil }
+        return problems.map { problem in
+            problem.relPath.map { "\($0): \(problem.reason)" } ?? problem.reason
+        }.joined(separator: " ")
+    }
     var waiting: String? = nil
     var id: String { previewId }
     var validIdentifier: Bool { previewId.count == 32 && previewId.allSatisfy { $0.isHexDigit && !$0.isUppercase } }
@@ -25,6 +31,18 @@ struct OriginalPreview: Decodable, Identifiable, Sendable {
         }
         return list
     }
+}
+
+struct OriginalProblem: Codable, Hashable, Sendable {
+    let itemId: Int?
+    let relPath: String?
+    let reason: String
+}
+
+struct OriginalDismissal: Codable {
+    let manifestHash: String
+    let requestDismissed: Bool
+    let problems: [OriginalProblem]
 }
 
 struct OriginalFileList: Decodable, Sendable {
@@ -86,7 +104,13 @@ struct OriginalApprovalStore {
     func dismiss(_ preview: OriginalPreview) throws {
         guard preview.validIdentifier else { throw OriginalApprovalError("This request cannot be dismissed.") }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try Data(preview.manifestHash.utf8).write(to: directory.appending(path: "\(preview.previewId).dismissed"), options: .atomic)
+        let file = directory.appending(path: "\(preview.previewId).dismissed")
+        let saved = try? JSONDecoder.mediaforce.decode(OriginalDismissal.self, from: Data(contentsOf: file))
+        let previous = saved?.manifestHash == preview.manifestHash ? saved : nil
+        let dismissal = OriginalDismissal(manifestHash: preview.manifestHash,
+            requestDismissed: previous?.requestDismissed == true || (preview.problems ?? []).isEmpty,
+            problems: Array(Set((previous?.problems ?? []) + (preview.problems ?? []))))
+        try JSONEncoder.mediaforce.encode(dismissal).write(to: file, options: .atomic)
     }
 
     func confirm(_ preview: OriginalPreview) async throws {

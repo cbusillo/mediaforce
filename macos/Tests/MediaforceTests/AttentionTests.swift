@@ -76,7 +76,7 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(waiting.badgeCount, 0)
         XCTAssertTrue(waiting.notices.isEmpty)
         XCTAssertEqual(Attention.waitingItems(current).map(\.body), [try XCTUnwrap(preview.waiting)])
-        preview.problem = "The original-file checks need attention"
+        preview.problems = [OriginalProblem(itemId: nil, relPath: nil, reason: "The original-file checks need attention")]
         current.originalPreviews = [preview]
         let problem = Attention.review(current, remembered: waiting.memory)
         XCTAssertEqual(problem.badgeCount, 1)

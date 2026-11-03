@@ -17,7 +17,7 @@ from mediaforce.encoding.put_back import PutBackRefused
 from mediaforce.encoding.staging import promote_one_item
 from mediaforce.library import original_registration as registration
 from mediaforce.library.evidence_queue import EVIDENCE_WORK_TERMINAL_STATUSES, original_check_wait_reasons
-from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
+from mediaforce.library.evidence_state import load_library_item_evidence_states, rebuild_library_item_evidence_states
 from mediaforce.library.source_evidence import append_version, ensure_active_source_version, load_source_evidence, observe_file, reconcile_source_replacement
 from mediaforce.library.source_intake import assess_source_input, queue_original_intake
 from test_source_evidence import _config, _probe as _media_probe, _put_back
@@ -42,6 +42,25 @@ def _confirm(preview: dict[str, Any]) -> None:
         "canonical_json": preview["canonical_json"], "challenge": preview["challenge"],
         "owner_uid": os.getuid(), "authentication": "deviceOwnerAuthentication", "confirmed_at": "2026-11-03T12:00:00Z",
     }))
+
+
+def _dismiss_preview(preview: dict[str, Any]) -> None:
+    path = registration.confirmation_directory() / f"{preview['preview_id']}.dismissed"
+    previous = json.loads(path.read_text()) if path.exists() else {}
+    path.write_text(json.dumps({"manifest_hash": preview["manifest_hash"],
+                               "request_dismissed": previous.get("request_dismissed", False) or not preview.get("problems"),
+                               "problems": previous.get("problems", []) + preview.get("problems", [])}))
+
+
+def _run_unspent_approval_wait(config: MediaforceConfig, item: int) -> None:
+    from mediaforce.core.db_tables import library_item_evidence_state
+    from test_source_intake import _work
+
+    assert _work(config) > 0
+    with open_db(config.paths.db_path) as connection:
+        waiting = load_library_item_evidence_states(connection, item)["media_fingerprint"]
+        assert waiting["work_status"] not in EVIDENCE_WORK_TERMINAL_STATUSES and waiting["attempt_count"] == 0
+        connection.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item).values(retry_not_before=None))
 
 
 def _confirm_modified_preview(config: MediaforceConfig, preview: dict[str, Any], body: dict[str, Any]) -> None:
@@ -379,7 +398,7 @@ def test_dismissed_or_unreadable_preview_does_not_break_other_requests(originals
     second = registration.build_original_preview(config, [item], assertion="Updated acquisition details")
     directory = registration.confirmation_directory()
     directory.mkdir(parents=True)
-    (directory / f"{first['preview_id']}.dismissed").write_text(first["manifest_hash"])
+    _dismiss_preview(first)
     assert [preview["preview_id"] for preview in registration.list_original_previews(config)] == [second["preview_id"]]
     if corruption == "json":
         damaged = "{"
@@ -685,7 +704,7 @@ def test_one_stale_member_fails_once_while_other_files_continue(originals: tuple
         assert len(failures) == 1
         assert failures[0]["library_item_id"] == first
     waiting = registration.list_original_previews(config)
-    assert len(waiting) == 1 and waiting[0]["problem"]
+    assert len(waiting) == 1 and waiting[0]["problems"]
     corrected = registration.build_original_preview(config, [first], assertion="Confirmed this replacement independently")
     _confirm(corrected)
     _apply_preview(config, corrected["preview_id"], corrected["manifest_hash"])
@@ -721,7 +740,7 @@ def test_owner_rule_problem_clears_when_rules_recover(originals: tuple[Mediaforc
         changed.setitem(HISTORICAL_OUTPUT_PROFILES, "version", "fixture changed rule")
         with open_db(config.paths.db_path) as connection:
             assert queue_original_intake(connection, config) == 0
-        assert registration.list_original_previews(config)[0]["problem"]
+        assert registration.list_original_previews(config)[0]["problems"]
     assert registration.list_original_previews(config) == []
 
 
@@ -738,7 +757,7 @@ def test_missing_receipt_then_restore_never_supersedes_the_owner(originals: tupl
     with open_db(config.paths.db_path) as connection:
         assert len(_owners(connection)) == 1
         assert load_source_evidence(connection, item).availability == "unknown"
-    assert registration.list_original_previews(config)[0]["problem"]
+    assert registration.list_original_previews(config)[0]["problems"]
     receipt.write_bytes(saved)
     assert registration.list_original_previews(config) == []
     with open_db(config.paths.db_path) as connection:
@@ -941,7 +960,7 @@ def test_published_approval_never_asks_for_a_new_original_list_after_cleanup(ori
         connection.execute(update(library_items).where(library_items.c.id == item).values(
             source_revision=library_items.c.source_revision + 1))
     assert not registration.queue_original_approval(config, stale["preview_id"], stale["manifest_hash"])
-    assert registration.list_original_previews(config)[0]["problem"]
+    assert registration.list_original_previews(config)[0]["problems"]
     _confirmed_publish(originals)
     assert registration.list_original_previews(config) == []
     with open_db(config.paths.db_path) as connection:
@@ -983,7 +1002,7 @@ def test_overlapping_confirmations_apply_in_time_order_and_show_the_later_confli
     registration.apply_confirmed_originals(config, item, ManagedProcessController(), lambda: None, nullcontext)
     waiting = registration.list_original_previews(config)
     assert len(waiting) == 1
-    assert waiting[0]["preview_id"] == second["preview_id"] and waiting[0]["problem"]
+    assert waiting[0]["preview_id"] == second["preview_id"] and waiting[0]["problems"]
     with open_db(config.paths.db_path) as connection:
         owner, = _owners(connection)
         assert owner["confirmation_ref"] == f"mac-app:{first['preview_id']}"
@@ -1052,9 +1071,7 @@ def test_unavailable_source_waits_and_recovers_with_the_same_approval(originals:
                 source_admissions.c.version_id == library_items.c.active_source_version_id,
                 library_items.c.id == sibling)).first()
     with open_db(config.paths.db_path) as connection:
-        work = connection.execute(select(library_item_evidence_state).where(
-            library_item_evidence_state.c.library_item_id == item,
-            library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
+        work = load_library_item_evidence_states(connection, item)["media_fingerprint"]
         assert work["work_status"] not in EVIDENCE_WORK_TERMINAL_STATUSES and work["attempt_count"] == 0
         assert work["last_error"] in original_check_wait_reasons(connection)
         assert not connection.execute(select(item_events).where(item_events.c.event_type == "original_confirmation_failed")).first()
@@ -1076,7 +1093,7 @@ def test_recovered_same_revision_correction_clears_the_old_failure(originals: tu
     with monkeypatch.context() as rules:
         rules.setitem(HISTORICAL_OUTPUT_PROFILES, "version", "fixture changed rule")
         registration.apply_confirmed_originals(config, item, ManagedProcessController(), lambda: None, nullcontext)
-    assert registration.list_original_previews(config)[0]["problem"]
+    assert registration.list_original_previews(config)[0]["problems"]
     second = registration.build_original_preview(config, [item], assertion="Recovered original-file checks")
     assert json.loads(second["canonical_json"])["items"][0]["source_revision"] == json.loads(first["canonical_json"])["items"][0]["source_revision"]
     _confirm(second)
@@ -1101,7 +1118,7 @@ def test_conflicting_result_blocks_only_its_member_before_any_hash(originals: tu
         connection.execute(source_admissions.insert().values(
             admission_id=stable_json_hash({"preview": preview["preview_id"], "item": first}), generation_id=generation,
             version_id=unrelated, basis="owner", tier="proven", checks_json="{}", confirmation_ref=f"mac-app:{preview['preview_id']}", recorded_at=timestamp()))
-    assert registration.list_original_previews(config)[0]["problem"]
+    assert registration.list_original_previews(config)[0]["problems"]
     assert registration.queue_original_approval(config, preview["preview_id"], preview["manifest_hash"])
     with monkeypatch.context() as no_hash:
         def forbidden(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
@@ -1134,7 +1151,7 @@ def test_bad_receipt_date_does_not_stop_another_files_confirmation(originals: tu
     with open_db(config.paths.db_path) as connection:
         assert len(_owners(connection)) == 1
         assert load_source_evidence(connection, second).availability == "available"
-    assert registration.list_original_previews(config)[0]["problem"]
+    assert registration.list_original_previews(config)[0]["problems"]
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
@@ -1206,15 +1223,9 @@ def test_restored_approval_resumes_checks_after_wait_or_dismissal(originals: tup
     receipt = registration.confirmation_directory() / f"{preview['preview_id']}.json"
     saved = receipt.read_bytes()
     receipt.unlink()
-    assert _work(config) > 0
-    with open_db(config.paths.db_path) as connection:
-        work = connection.execute(select(library_item_evidence_state).where(
-            library_item_evidence_state.c.library_item_id == item,
-            library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
-        assert work["work_status"] not in EVIDENCE_WORK_TERMINAL_STATUSES and work["attempt_count"] == 0
-        connection.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item).values(retry_not_before=None))
+    _run_unspent_approval_wait(config, item)
     if dismissed:
-        (receipt.parent / f"{preview['preview_id']}.dismissed").write_text(preview["manifest_hash"])
+        _dismiss_preview(registration.list_original_previews(config)[0])
         assert _work(config) > 0
         with open_db(config.paths.db_path) as connection:
             work = connection.execute(select(library_item_evidence_state)).mappings().one()
@@ -1329,9 +1340,7 @@ def test_scan_confirmed_absence_finishes_and_same_bytes_resume(originals: tuple[
             patch_final.setattr(evidence_worker, "_source_fingerprint", disappear_at_final_check)
         assert _work(config, analyze) > 0
     with open_db(config.paths.db_path) as connection:
-        work = connection.execute(select(library_item_evidence_state).where(
-            library_item_evidence_state.c.library_item_id == item,
-            library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
+        work = load_library_item_evidence_states(connection, item)["media_fingerprint"]
         assert work["work_status"] == "completed" and work["last_error"] and work["attempt_count"] == 0
         assert queue_original_intake(connection, config) == 0
     _work(config)
@@ -1407,8 +1416,8 @@ def test_owner_rule_change_settles_without_requeue_or_retry_instruction(original
         assert queue_original_intake(connection, config) == 0
         assert not connection.execute(select(library_item_evidence_state).where(library_item_evidence_state.c.last_error.is_not(None))).first()
     problems = registration.list_original_previews(config)
-    assert len(problems) == 1 and problems[0]["problem"]
-    assert "retry" not in problems[0]["problem"].lower()
+    assert len(problems) == 1 and problems[0]["problems"]
+    assert all("retry" not in problem["reason"].lower() for problem in problems[0]["problems"])
 
 
 @pytest.mark.parametrize("changed", [False, True])
@@ -1429,7 +1438,7 @@ def test_unavailable_preview_member_stays_visible(originals: tuple[MediaforceCon
             **({"source_revision": library_items.c.source_revision + 1} if changed else {"missing_since": timestamp()})))
     listed = registration.list_original_previews(config)
     assert len(listed) == 1 and listed[0]["canonical_json"] == preview["canonical_json"]
-    assert listed[0]["problem" if changed else "waiting"]
+    assert listed[0]["problems" if changed else "waiting"]
 
 
 @pytest.mark.parametrize("stage", ["preview", "commit"])
@@ -1470,3 +1479,98 @@ def test_pending_move_resolves_stored_and_requested_path_aliases(originals: tupl
         assert path_in_pending_move(connection, str(alias_path))
         evidence = load_source_evidence(connection, item)
         assert evidence.availability != "available" and evidence.waiting_reason
+
+
+@pytest.mark.parametrize("unchecked_request", [False, True])
+def test_dismissal_never_hides_another_members_later_problem(originals: tuple[MediaforceConfig, int, Path], unchecked_request: bool,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    from mediaforce.library.evidence_queue import start_evidence_work, resume_evidence_queue
+    from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES
+    from test_source_intake import _work
+
+    config, item, _path = originals
+    sibling, _other = _source(config, "sibling")
+    preview = registration.build_original_preview(config, [item, sibling], assertion="Independent acquisitions")
+    if unchecked_request:
+        registration.confirmation_directory().mkdir(parents=True)
+        _dismiss_preview(preview)
+    _confirm(preview)
+    assert registration.queue_original_approval(config, preview["preview_id"], preview["manifest_hash"])
+    registration.apply_original_preview(config, preview["preview_id"], preview["manifest_hash"], item_id=item)
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(update(library_items).where(library_items.c.id == sibling).values(source_revision=library_items.c.source_revision + 1))
+    registration.queue_original_approval(config, preview["preview_id"], preview["manifest_hash"])
+    shown = registration.list_original_previews(config)
+    assert len(shown) == 1 and {problem["item_id"] for problem in shown[0]["problems"]} == {sibling}
+    _dismiss_preview(shown[0])
+    assert registration.list_original_previews(config) == []
+    receipt = registration.confirmation_directory() / f"{preview['preview_id']}.json"
+    saved = receipt.read_bytes()
+    receipt.unlink()
+    shown = registration.list_original_previews(config)
+    assert len(shown) == 1 and {problem["item_id"] for problem in shown[0]["problems"]} == {item}
+    _run_unspent_approval_wait(config, item)
+    _dismiss_preview(shown[0])
+    for _ in range(4):
+        _work(config)
+    with open_db(config.paths.db_path) as connection:
+        completed = load_library_item_evidence_states(connection, item)["media_fingerprint"]
+        assert completed["work_status"] == "completed" and completed["last_error"] is None
+    assert registration.list_original_previews(config) == []
+    receipt.write_bytes(saved)
+    with open_db(config.paths.db_path) as connection:
+        rebuild_library_item_evidence_states(connection)
+        start_evidence_work(connection, config, "tv/source.mkv")
+        resume_evidence_queue(connection)
+    assert _work(config) > 0
+    assert _work(config) > 0
+    with open_db(config.paths.db_path) as connection:
+        assert all(trait.tier == "probable" for trait in load_source_evidence(connection, item).traits.values())
+        assert len(_owners(connection)) == 1
+    monkeypatch.setitem(HISTORICAL_OUTPUT_PROFILES, "version", "changed test rules")
+    changed = registration.list_original_previews(config)
+    assert len(changed) == 1 and {problem["item_id"] for problem in changed[0]["problems"]} == {item}
+
+
+def test_dismissal_matches_member_and_reason_independently_of_path_metadata(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    config, item, _path = originals
+    preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    registration.confirmation_directory().mkdir(parents=True)
+    preview["problems"] = [{"item_id": item, "rel_path": "old/name", "reason": "The saved approval needs restoring"}]
+    _dismiss_preview(preview)
+    assert registration.original_request_dismissed(preview["preview_id"], preview["manifest_hash"],
+                                                  [{**preview["problems"][0], "rel_path": "new/name"}])
+    assert not registration.original_request_dismissed(preview["preview_id"], preview["manifest_hash"],
+                                                      [{"item_id": item, "reason": "A different problem"}])
+
+
+def test_native_dismissal_fixture_uses_the_backend_marker_schema(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    config, item, _path = originals
+    preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "original-dismissal.json").read_text())
+    directory = registration.confirmation_directory()
+    directory.mkdir(parents=True)
+    (directory / f"{preview['preview_id']}.dismissed").write_text(json.dumps(fixture))
+    assert registration.original_request_dismissed(preview["preview_id"], fixture["manifest_hash"], fixture["problems"])
+    assert not registration.original_request_dismissed(preview["preview_id"], preview["manifest_hash"], fixture["problems"])
+
+
+def test_unchecked_request_dismissal_preserves_prior_problem_acknowledgements(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    config, item, _path = originals
+    sibling, _other = _source(config, "sibling")
+    preview = registration.build_original_preview(config, [item, sibling], assertion="Independent acquisitions")
+    _confirm(preview)
+    registration.apply_original_preview(config, preview["preview_id"], preview["manifest_hash"], item_id=item)
+    (registration.confirmation_directory() / f"{preview['preview_id']}.json").unlink()
+    shown = registration.list_original_previews(config)
+    assert len(shown) == 1 and {problem["item_id"] for problem in shown[0]["problems"]} == {item}
+    _dismiss_preview(shown[0])
+    unchecked = registration.list_original_previews(config)
+    assert len(unchecked) == 1 and not unchecked[0].get("problems")
+    _dismiss_preview(unchecked[0])
+    assert registration.list_original_previews(config) == []
+    with open_db(config.paths.db_path) as connection:
+        assert load_source_evidence(connection, item).waiting_reason is None
+        connection.execute(update(library_items).where(library_items.c.id == sibling).values(source_revision=library_items.c.source_revision + 1))
+    changed = registration.list_original_previews(config)
+    assert len(changed) == 1 and {problem["item_id"] for problem in changed[0]["problems"]} == {sibling}

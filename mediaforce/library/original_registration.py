@@ -26,14 +26,22 @@ class OriginalApprovalWaiting(OSError):
     pass
 
 
+MISSING_APPROVAL_REASON = "The saved Mac approval is unavailable. Restore it or prepare an updated file list."
+
+
 def confirmation_directory() -> Path:
     return runtime_directory(Path.home()).parent / "mac-app" / "original-approvals"
 
 
-def original_request_dismissed(preview_id: str, manifest_hash: str) -> bool:
+def original_request_dismissed(preview_id: str, manifest_hash: str, problems: Sequence[Mapping[str, Any]] = ()) -> bool:
     try:
-        return (confirmation_directory() / f"{_identifier(preview_id)}.dismissed").read_text() == manifest_hash
-    except (OSError, ValueError):
+        saved = json.loads((confirmation_directory() / f"{_identifier(preview_id)}.dismissed").read_text())
+        acknowledged = saved["problems"]
+        return (saved["manifest_hash"] == manifest_hash and isinstance(acknowledged, list)
+                and ((not problems and saved.get("request_dismissed") is True)
+                     or (bool(problems) and all(any(isinstance(prior, dict) and prior.get("item_id") == problem.get("item_id")
+                                                   and prior.get("reason") == problem["reason"] for prior in acknowledged) for problem in problems))))
+    except (OSError, ValueError, TypeError, KeyError):
         return False
 
 
@@ -261,11 +269,19 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
             waits = []
             settled = 0
             unapplied = []
+
+            def visible_problems(member: Mapping[str, Any], member_reasons: Sequence[str]) -> list[dict[str, Any]]:
+                entries = [{"item_id": member["item_id"], "rel_path": member["rel_path"], "reason": reason} for reason in member_reasons]
+                return [entry for entry in entries if not original_request_dismissed(preview["preview_id"], preview["manifest_hash"], [entry])]
+
             for item in items:
                 try:
                     applied = _member_applied(connection, preview, item)
                 except ValueError as error:
-                    problems.append(f"{item['rel_path']}: {error}")
+                    visible = visible_problems(item, [str(error)])
+                    problems.extend(visible)
+                    if not visible:
+                        settled += 1
                     continue
                 failure = _member_failure(connection, preview["preview_id"], item)
                 failure_details = json.loads(failure["details_json"]) if failure else {}
@@ -274,21 +290,22 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
                 if failure and owner is not None and owner_valid and failure_details.get("owner_admission_id") != owner["admission_id"]:
                     settled += 1
                     continue
+                reasons = []
                 if not applied:
                     unapplied.append(item)
-                    try:
-                        _check_preview_catalog(connection, [item])
-                    except OriginalApprovalWaiting as error:
-                        waits.append(f"{item['rel_path']}: {error}")
-                    except ValueError as error:
-                        problems.append(f"{item['rel_path']}: {error}")
-                reasons = []
+                    if not failure:
+                        try:
+                            _check_preview_catalog(connection, [item])
+                        except OriginalApprovalWaiting as error:
+                            waits.append(f"{item['rel_path']}: {error}")
+                        except ValueError as error:
+                            reasons.append(str(error))
                 if failure:
                     reasons.append(f"{failure_details['reason']} Prepare an updated file list.")
                 historical = _history_present(connection, item["item_id"])
                 if applied and owner and owner["confirmation_ref"] == f"mac-app:{preview['preview_id']}" and not historical:
                     if not owner_valid:
-                        reasons.append("The saved Mac approval is unavailable. Restore it or prepare an updated file list.")
+                        reasons.append(MISSING_APPROVAL_REASON)
                     elif any(trait.reason == "original_rule_changed" for trait in evidence[item["item_id"]].traits.values()):
                         reasons.append("The original-file rules changed. Prepare an updated file list.")
                 if confirmed and not historical and not failure:
@@ -296,16 +313,16 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
                         if (work["work_source_fingerprint"] == item["identity"]["sample_fingerprint"]
                                 and (not applied or evidence[item["item_id"]].traits[work["evidence_kind"]].tier != "probable")):
                             reasons.append(f"File checks stopped: {work['last_error'] or 'The check could not finish.'} Your Mac approval is still saved; retry the existing file checks after fixing the problem.")
-                if reasons:
-                    problems.append(f"{item['rel_path']}: {' '.join(reasons)}")
-                elif applied:
+                visible = visible_problems(item, reasons)
+                problems.extend(visible)
+                if not visible and (reasons or applied):
                     settled += 1
             if confirmed and unapplied and (queue_state["cancel_requested"] or queue_state["status"] in {"cancelled", "cancel_requested"}):
                 waits.append("Waiting for an agent to restart checks for these exact files")
             if waits:
                 preview["waiting"] = " ".join(waits)
             if problems:
-                preview["problem"] = " ".join(problems)
+                preview["problems"] = problems
             elif settled == len(items):
                 continue
             else:
@@ -313,8 +330,11 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
                     if "waiting" not in preview:
                         continue
                 elif (confirmation_directory() / f"{preview['preview_id']}.json").exists():
-                    preview["problem"] = "The saved Mac approval is invalid. Restore it or prepare an updated file list."
-            if original_request_dismissed(preview["preview_id"], preview["manifest_hash"]):
+                    problems = [{"item_id": None, "rel_path": None, "reason": "The saved Mac approval is invalid. Restore it or prepare an updated file list."}]
+                    if original_request_dismissed(preview["preview_id"], preview["manifest_hash"], problems):
+                        continue
+                    preview["problems"] = problems
+            if not problems and original_request_dismissed(preview["preview_id"], preview["manifest_hash"]):
                 continue
             pending.append(preview)
     return pending

@@ -42,6 +42,8 @@ targets:
       - path: Tests/MediaforceTests
       - path: ../tests/fixtures/original-confirmation.json
         buildPhase: resources
+      - path: ../tests/fixtures/original-dismissal.json
+        buildPhase: resources
     dependencies:
       - target: Mediaforce
     settings:

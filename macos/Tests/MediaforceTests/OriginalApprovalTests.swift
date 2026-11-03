@@ -107,4 +107,42 @@ final class OriginalApprovalTests: XCTestCase {
         XCTAssertEqual(actual as NSDictionary, expected as NSDictionary)
     }
 
+    func testDismissalKeepsTheDisplayedMemberProblemsAndMatchesTheBackendFixture() throws {
+        let resource = try XCTUnwrap(Bundle(for: OriginalApprovalTests.self).url(forResource: "original-dismissal", withExtension: "json"))
+        let fixture = try Data(contentsOf: resource)
+        let problemList = try JSONDecoder.mediaforce.decode(OriginalDismissal.self, from: fixture)
+        var preview = try originalApprovalFixture()
+        var response = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
+        response["preview_id"] = preview.previewId
+        response["manifest_hash"] = preview.manifestHash
+        response["canonical_json"] = preview.canonicalJson
+        response["challenge"] = preview.challenge
+        preview = try JSONDecoder.mediaforce.decode(OriginalPreview.self, from: JSONSerialization.data(withJSONObject: response))
+        XCTAssertFalse(try preview.fileList().items.isEmpty)
+        XCTAssertTrue(try XCTUnwrap(preview.problem).contains(try XCTUnwrap(problemList.problems.first).reason))
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = OriginalApprovalStore(directory: directory, authenticate: { _ in
+            XCTFail("Dismissing a problem must not confirm an original")
+            return true
+        })
+        try store.dismiss(preview)
+        let file = directory.appending(path: "\(preview.previewId).dismissed")
+        let actual = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        var expected = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
+        expected["manifest_hash"] = preview.manifestHash
+        XCTAssertEqual(actual as NSDictionary, expected as NSDictionary)
+        let next = OriginalProblem(itemId: 99, relPath: "tv/Fixture/other.mkv", reason: "A different file needs attention")
+        preview.problems = [next]
+        try store.dismiss(preview)
+        let saved = try JSONDecoder.mediaforce.decode(OriginalDismissal.self, from: Data(contentsOf: file))
+        XCTAssertEqual(Set(saved.problems), Set(problemList.problems + [next]))
+        preview.problems = []
+        try store.dismiss(preview)
+        let request = try JSONDecoder.mediaforce.decode(OriginalDismissal.self, from: Data(contentsOf: file))
+        XCTAssertTrue(request.requestDismissed)
+        XCTAssertEqual(Set(request.problems), Set(saved.problems))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appending(path: "\(preview.previewId).json").path))
+    }
+
 }
