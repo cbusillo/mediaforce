@@ -15,6 +15,10 @@ the window. Seasons outside that report use the normal evidence lookup. The
 next request builds a fresh report, so changed measurements and genres apply
 without waiting for a cache to expire.
 
+Source-evidence reads select only the catalog identity fields they use and
+reuse versions already loaded in the same bulk read. When no file moves are
+pending, their move checks do not resolve media paths.
+
 ## Sections
 
 - `work`: `state` is `running`, `idle`, `paused` (the owner paused the queue)

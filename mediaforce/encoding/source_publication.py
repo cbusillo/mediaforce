@@ -185,7 +185,8 @@ def pending_archive_paths(connection: DBClient) -> set[Path]:
 
 
 def path_in_pending_move(connection: DBClient, path: str, *, moving_paths: set[Path] | None = None) -> bool:
-    return Path(path).resolve() in (pending_archive_paths(connection) if moving_paths is None else moving_paths)
+    paths = pending_archive_paths(connection) if moving_paths is None else moving_paths
+    return bool(paths) and Path(path).resolve() in paths
 
 
 def prepare_archive_removal(connection: DBClient, path: Path) -> list[str]:
