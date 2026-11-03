@@ -14,8 +14,11 @@ def register_original_routes(app: FastAPI, config: MediaforceConfig) -> None:
     @app.post("/api/app/originals/apply")
     async def apply_originals(request: Request) -> JSONResponse:
         try:
-            if (request.client is None or not ip_address(request.client.host).is_loopback
-                    or request.headers.get("origin") is not None or request.headers.get("sec-fetch-site") is not None):
+            peer = request.client
+            if peer is None:
+                raise ValueError("Confirm original files in the Mac app")
+            if (not ip_address(peer.host).is_loopback or request.headers.get("origin") is not None
+                    or request.headers.get("sec-fetch-site") is not None):
                 raise ValueError("Confirm original files in the Mac app")
             body = await request_body(request)
             if set(body) != {"preview_id", "manifest_hash"}:

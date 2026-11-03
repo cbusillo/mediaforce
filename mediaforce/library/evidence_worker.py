@@ -372,6 +372,7 @@ def _run_evidence_claim(
     try:
         if original_work:
             from mediaforce.library.source_intake import assess_source_input
+            from mediaforce.library.original_registration import apply_confirmed_originals
             from mediaforce.library.evidence_queue import EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, queue_decision_evidence_work
 
             with open_db(config.paths.db_path) as connection:
@@ -404,6 +405,8 @@ def _run_evidence_claim(
                     raise EvidenceWorkDeferred("Waiting for a file that needs a check sooner")
 
             with process_controller.activity_guard(guard_intake):
+                apply_confirmed_originals(config, claim.library_item_id, process_controller, process_controller.throw_if_cancelled,
+                    digest_guard=lambda: controller_digest_window(config, deps.evidence_host_rows).guard(process_controller))
                 assess_source_input(config, claim.library_item_id, process_controller, process_controller.throw_if_cancelled,
                     digest_guard=lambda: controller_digest_window(config, deps.evidence_host_rows).guard(process_controller))
             with open_db(config.paths.db_path) as connection:
@@ -417,6 +420,16 @@ def _run_evidence_claim(
                         queue_decision_evidence_work(connection, config, item["rel_path"], library_item_ids=[claim.library_item_id],
                             evidence_kind=kind, work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, require_measurement=True,
                             priority=EVIDENCE_WORK_PRIORITY_REPRESENTATIVE, start_new_batch=True, manage_transaction=False)
+            with open_db(config.paths.db_path) as connection:
+                from mediaforce.core.db_tables import source_admissions
+
+                owner = connection.execute(select(source_admissions.c.admission_id).where(
+                    source_admissions.c.version_id == item["active_source_version_id"], source_admissions.c.basis == "owner",
+                    source_admissions.c.admission_id.not_in(select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))),
+                )).first()
+            if owner and evidence.availability != "available":
+                _finish_claim(config, claim, work_status="failed", last_error="The original-file approval needs an updated file list or its saved Mac approval record.")
+                return 1
             if evidence.availability != "available" or (evidence.traits[claim.evidence_kind].tier == "probable" and claim.evidence_state == EVIDENCE_STATE_CURRENT):
                 _finish_claim(config, claim, work_status="completed", reset_attempt_state=True)
                 return 1
@@ -937,7 +950,7 @@ def _finish_claim(
         reset_attempt_state: bool = False,
 ) -> None:
     with open_db(config.paths.db_path) as connection:
-        transition_evidence_work(
+        finished = transition_evidence_work(
             connection,
             claim,
             work_status=work_status,
@@ -946,6 +959,10 @@ def _finish_claim(
             restore_attempt=restore_attempt,
             reset_attempt_state=reset_attempt_state,
         )
+        if finished and work_status == "failed" and claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE:
+            from mediaforce.library.original_registration import fail_confirmed_originals
+
+            fail_confirmed_originals(connection, config, claim.library_item_id, last_error or "The original-file check could not finish.")
 
 
 def _reload_owned_claim(connection: Any, claim: EvidenceWorkClaim) -> EvidenceWorkClaim | None:

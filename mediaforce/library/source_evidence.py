@@ -156,20 +156,22 @@ def ensure_active_source_version(connection: DBClient, item: Mapping[str, Any] |
 
 
 def retained_source_query(item_id: Any, size: Any, sample: Any) -> Select:
+    current = library_items.alias("retained_current")
     return select(source_versions).where(
         source_versions.c.role.in_(("input", "output")), source_versions.c.sha256.is_not(None),
         source_versions.c.size_bytes == size, source_versions.c.sample_fingerprint == sample,
-        exists().where(source_transitions.c.library_item_id == item_id,
+        exists().where(current.c.id == item_id, current.c.active_source_version_id == source_versions.c.version_id).correlate(library_items, source_versions)
+        | exists().where(source_transitions.c.library_item_id == item_id,
             (source_transitions.c.before_version_id == source_versions.c.version_id)
             | (source_transitions.c.after_version_id == source_versions.c.version_id)).correlate(library_items, source_versions),
     ).correlate(library_items)
 
 
-def retained_source_candidates(connection: DBClient, item: Mapping[str, Any]) -> list[DBRow]:
+def retained_source_candidates(connection: DBClient, item: Mapping[str, Any] | DBRow) -> list[DBRow]:
     return list(connection.execute(retained_source_query(item["id"], item["size_bytes"], item["content_version_fingerprint"])).mappings())
 
 
-def reconcile_source_replacement(connection: DBClient, item: Mapping[str, Any], identity: Mapping[str, Any]) -> str:
+def reconcile_source_replacement(connection: DBClient, item: Mapping[str, Any] | DBRow, identity: Mapping[str, Any]) -> str:
     if not identity.get("sha256"):
         raise ValueError("A full content digest is required to identify a replacement")
     current = connection.execute(select(library_items).where(library_items.c.id == item["id"])).mappings().one()
@@ -208,11 +210,6 @@ def reconcile_source_replacement(connection: DBClient, item: Mapping[str, Any], 
         expected_revision=current["source_revision"], kind="reattach" if len(matches) == 1 else "replacement",
         outcome="committed", evidence_json=json_text(identity), recorded_at=now,
     ))
-    if len(matches) == 1:
-        connection.execute(source_moves.insert().values(
-            operation_id=operation, ordinal=0, version_id=version, from_path=identity["path"], to_path=identity["path"],
-            phase="observed", checks_json=json_text(identity),
-        ))
     return version
 
 
@@ -471,6 +468,33 @@ def load_source_evidence_bulk(
     measurement_rows.sort(key=lambda row: int(row["_rowid"]), reverse=True)
     measurements = _MeasurementRows(measurement_rows)
     locations = version_locations(connection, list(originals.values()))
+    reattachments = _evidence_rows(
+        connection, select(source_transitions).where(
+            source_transitions.c.kind.in_(("publish", "put-back", "replacement", "reattach")),
+            source_transitions.c.outcome == "committed",
+        ).order_by(source_transitions.c.expected_revision.desc(), source_transitions.c.recorded_at.desc()),
+        source_transitions.c.library_item_id, requested,
+    )
+    current_locations: dict[int, str | None] = {}
+    seen_items = set()
+    for transition in reattachments:
+        item_id = int(transition["library_item_id"])
+        if item_id in seen_items:
+            continue
+        seen_items.add(item_id)
+        version_id = str(transition["after_version_id"])
+        original = originals.get(version_id)
+        if transition["kind"] != "reattach" or original is None or items[item_id]["active_source_version_id"] != version_id:
+            continue
+        identity = json.loads(transition["evidence_json"])
+        if identity.get("sha256") == original["sha256"] and identity.get("size_bytes") == original["size_bytes"]:
+            current_locations[item_id] = identity["path"]
+    if current_locations:
+        from mediaforce.encoding.source_publication import pending_archive_paths
+
+        moving_paths = pending_archive_paths(connection)
+        current_locations = {item_id: path if Path(path) not in moving_paths else None
+                             for item_id, path in current_locations.items() if path is not None}
 
     def load_context() -> SourceEvidenceContext:
         nonlocal context
@@ -478,10 +502,11 @@ def load_source_evidence_bulk(
             context = load_source_evidence_context(connection)
         return context
 
+    confirmations: dict[str, Any] = {}
     return {
         item_id: _classify_source_evidence(
             connection, item_id, items.get(item_id), current_versions, admissions_by_generation,
-            originals, measurements, pending_items, locations, load_context,
+            originals, measurements, pending_items, locations, current_locations, load_context, confirmations,
         )
         for item_id in requested
     }
@@ -514,7 +539,9 @@ def _classify_source_evidence(
         measurements: _MeasurementRows,
         pending_items: set[int],
         locations: Mapping[str, str | None],
+        current_locations: Mapping[int, str | None],
         load_context: Callable[[], SourceEvidenceContext],
+        confirmations: dict[str, Any],
 ) -> SourceEvidence:
     active = str((item or {}).get("active_source_version_id") or "") or None
     traits: dict[EvidenceKind, SourceTrait] = {kind: SourceTrait(kind) for kind in EVIDENCE_KINDS}
@@ -544,7 +571,7 @@ def _classify_source_evidence(
     from mediaforce.library.original_registration import owner_confirmation_matches
 
     owner = (admission["tier"] == "proven" and admission["basis"] == "owner" and original["role"] == "input"
-             and owner_confirmation_matches(admission, original))
+             and owner_confirmation_matches(admission, original, confirmations=confirmations))
     if owner:
         checks = {**checks["source_checks"], "measurement_ids": checks.get("measurement_ids", [])}
     if readable or owner:
@@ -578,7 +605,7 @@ def _classify_source_evidence(
                                            tuple(row["measurement_id"] for row in eligible), summary, None)
                 continue
         traits[kind] = SourceTrait(kind, reason=reason or ("conflicting_measurements" if eligible else "missing_source_measurement"))
-    location = locations[original["version_id"]]
+    location = current_locations.get(item_id, locations[original["version_id"]])
     availability = "available" if (readable or owner) and not reason and location else "unavailable" if checks.get("unavailability") or not location else "unknown"
     return SourceEvidence(generation, active, original["version_id"], availability, location,
                           {**json.loads(original["profile_json"]), "source_size_bytes": original["size_bytes"],

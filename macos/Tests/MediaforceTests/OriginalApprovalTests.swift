@@ -10,7 +10,7 @@ func originalApprovalFixture() throws -> OriginalPreview {
             "preview_id": id, "challenge": challenge, "owner_uid": getuid(), "assertion": "Independent acquisition",
             "items": [["item_id": 42, "rel_path": "tv/Show/episode.mkv", "attached": true,
                        "identity": ["path": "/fixture/episode.mkv", "sha256": "sha256:source", "size_bytes": 400000000],
-                       "checks": [:]]],
+                       "checks": ["exception_matches": ["codec:av1"], "exception_reason": "Independently acquired AV1 download"]]],
         ]
         let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
         let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -87,16 +87,35 @@ final class OriginalApprovalTests: XCTestCase {
         XCTAssertEqual(count, 1)
         XCTAssertEqual(try Data(contentsOf: path), bytes)
     }
-    func testNativeReceiptEncodingMatchesTheBackendFixture() throws {
+    func testNativeReceiptEncodingMatchesTheBackendFixture() async throws {
         let resource = try XCTUnwrap(Bundle(for: OriginalApprovalTests.self).url(forResource: "original-confirmation", withExtension: "json"))
         let bytes = try Data(contentsOf: resource)
-        let saved = try JSONDecoder.mediaforce.decode(OriginalConfirmation.self, from: bytes)
-        let emitted = OriginalConfirmation(previewId: saved.previewId, manifestHash: saved.manifestHash,
-            canonicalJson: saved.canonicalJson, challenge: saved.challenge, ownerUid: saved.ownerUid,
-            authentication: saved.authentication, confirmedAt: saved.confirmedAt)
-        let encoded = try JSONEncoder.mediaforce.encode(emitted)
-        XCTAssertEqual(try JSONSerialization.jsonObject(with: encoded) as? NSDictionary,
-                       try JSONSerialization.jsonObject(with: bytes) as? NSDictionary)
+        var expected = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        let original = try originalApprovalFixture()
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try await OriginalApprovalStore(directory: directory, authenticate: { _ in true }).confirm(original)
+        let emitted = try Data(contentsOf: directory.appending(path: "\(original.previewId).json"))
+        let actual = try XCTUnwrap(JSONSerialization.jsonObject(with: emitted) as? [String: Any])
+        expected["preview_id"] = original.previewId
+        expected["manifest_hash"] = original.manifestHash
+        expected["canonical_json"] = original.canonicalJson
+        expected["challenge"] = original.challenge
+        expected["owner_uid"] = getuid()
+        expected["confirmed_at"] = actual["confirmed_at"]
+        XCTAssertNotNil(ISO8601DateFormatter().date(from: try XCTUnwrap(actual["confirmed_at"] as? String)))
+        XCTAssertEqual(actual as NSDictionary, expected as NSDictionary)
+    }
+
+    func testFailedRequestKeepsItsProblemWithoutChangingTheReviewedList() throws {
+        let original = try originalApprovalFixture()
+        let problem = "This file changed during its original-file check."
+        let bytes = try JSONSerialization.data(withJSONObject: ["preview_id": original.previewId,
+            "manifest_hash": original.manifestHash, "canonical_json": original.canonicalJson,
+            "challenge": original.challenge, "problem": problem])
+        let failed = try JSONDecoder.mediaforce.decode(OriginalPreview.self, from: bytes)
+        XCTAssertEqual(failed.problem, problem)
+        XCTAssertEqual(try failed.fileList().items.map(\.itemId), try original.fileList().items.map(\.itemId))
     }
 
     func testApplyReturnsWhenBackgroundChecksAreQueuedAndKeepsTheExactReference() async throws {

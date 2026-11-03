@@ -139,11 +139,14 @@ never confirms an original. Open **Needs you** in the Mac app, review every
 file and any separate format exception, then confirm with macOS
 LocalAuthentication. The app saves that exact approval in its own store and
 the existing background evidence worker rechecks files and source revisions
-before recording it. The confirmation sheet closes when that work is queued;
+before recording each file independently. One changed file needs an updated list
+while the others continue. The confirmation sheet closes when that work is queued;
 Activity shows its ordinary progress and work-window waits. The saved approval
 is retried by background discovery if the app loses its response. Cancelled
 or unsuccessful authentication records no approval. Retrying a saved approval
-returns its existing result. Dismissing a request changes no file or approval.
+returns each file's existing result. A failed check appears in **Needs you**;
+prepare an updated list for that file with the same command. Dismissing a request
+changes no file or approval.
 
 A format exception must name its item, for example `--codec-override '123=Independently acquired AV1 download'`.
 It never permits a Mediaforce stamp, a known compressed output or unavailable

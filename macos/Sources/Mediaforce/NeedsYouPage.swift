@@ -18,7 +18,9 @@ struct NeedsYouPage: View {
             WaitingItems(items: items, posters: posters, open: open)
             ForEach(previews) { preview in
                 DecisionLine {
-                    if let list = try? preview.fileList() {
+                    if let problem = preview.problem {
+                        Text(problem)
+                    } else if let list = try? preview.fileList() {
                         Text("\(list.items.count) original files need your confirmation")
                     } else {
                         Text("An original-file request needs preparing again")

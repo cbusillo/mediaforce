@@ -110,8 +110,8 @@ struct Attention: Equatable, Sendable {
             )
         }
         let originals = (facts.originalPreviews ?? []).map { preview in
-            AttentionNotice(id: "original:\(preview.id)", title: "Original files need your confirmation",
-                            body: "Review the exact file list and confirm it in Mediaforce.", opens: .needsYou)
+            AttentionNotice(id: "original:\(preview.id)", title: preview.problem == nil ? "Original files need your confirmation" : "An original-file list needs updating",
+                            body: preview.problem ?? "Review the exact file list and confirm it in Mediaforce.", opens: .needsYou)
         }
         return kinds + samples + seasons + computers + originals
     }

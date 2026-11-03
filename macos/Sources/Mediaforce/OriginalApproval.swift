@@ -8,6 +8,7 @@ struct OriginalPreview: Decodable, Identifiable, Sendable {
     let manifestHash: String
     let canonicalJson: String
     let challenge: String
+    var problem: String? = nil
     var id: String { previewId }
     var validIdentifier: Bool { previewId.count == 32 && previewId.allSatisfy { $0.isHexDigit && !$0.isUppercase } }
 
@@ -121,7 +122,11 @@ struct OriginalApprovalView: View {
 
     var body: some View {
         PageFrame(title: "Confirm original files") {
-            if let list = try? preview.fileList() {
+            if let problem = preview.problem {
+                Text(problem)
+                Button("Close") { dismiss() }
+                Button("Dismiss request") { Task { await dismissRequest() } }
+            } else if let list = try? preview.fileList() {
                 Text(list.assertion)
                 Text("Confirm that \(Words.count(list.items.count, "file")) \(list.items.count == 1 ? "was" : "were") acquired independently, before Mediaforce compressed \(list.items.count == 1 ? "it" : "them").")
                     .foregroundStyle(.secondary)
@@ -131,7 +136,13 @@ struct OriginalApprovalView: View {
                         Text(file.identity.path).textSelection(.enabled)
                         Text(Words.size(file.identity.sizeBytes)).foregroundStyle(.secondary)
                         if let reason = file.checks.exceptionReason {
-                            Text("Separate exception: this file has a format or encoding-software name that Mediaforce also uses.")
+                            Text("Separate format exception").font(.headline)
+                            ForEach(file.checks.exceptionMatches ?? [], id: \.self) { match in
+                                let parts = match.split(separator: ":", maxSplits: 1)
+                                if parts.count == 2 {
+                                    Text(parts[0] == "codec" ? "Video format: \(parts[1].uppercased())" : "Encoding software: \(parts[1])")
+                                }
+                            }
                             Text(reason)
                         }
                         if file.supersedesId != nil { Text("Replaces the earlier original-file decision.") }
