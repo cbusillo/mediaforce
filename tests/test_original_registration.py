@@ -16,7 +16,7 @@ from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.encoding.put_back import PutBackRefused
 from mediaforce.encoding.staging import promote_one_item
 from mediaforce.library import original_registration as registration
-from mediaforce.library.evidence_queue import EVIDENCE_WORK_TERMINAL_STATUSES
+from mediaforce.library.evidence_queue import EVIDENCE_WORK_TERMINAL_STATUSES, original_check_wait_reasons
 from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
 from mediaforce.library.source_evidence import append_version, ensure_active_source_version, load_source_evidence, observe_file, reconcile_source_replacement
 from mediaforce.library.source_intake import assess_source_input, queue_original_intake
@@ -1056,6 +1056,7 @@ def test_unavailable_source_waits_and_recovers_with_the_same_approval(originals:
             library_item_evidence_state.c.library_item_id == item,
             library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
         assert work["work_status"] not in EVIDENCE_WORK_TERMINAL_STATUSES and work["attempt_count"] == 0
+        assert work["last_error"] in original_check_wait_reasons(connection)
         assert not connection.execute(select(item_events).where(item_events.c.event_type == "original_confirmation_failed")).first()
         connection.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item).values(retry_not_before=None))
     assert _work(config) > 0
@@ -1191,8 +1192,10 @@ def test_transient_catalog_absence_does_not_invalidate_the_saved_approval(origin
         assert len(_owners(connection)) == 1
 
 
-def test_restoring_a_receipt_resumes_pending_measurements_without_reconfirmation(originals: tuple[MediaforceConfig, int, Path]) -> None:
+@pytest.mark.parametrize("dismissed", [False, True])
+def test_restored_approval_resumes_checks_after_wait_or_dismissal(originals: tuple[MediaforceConfig, int, Path], dismissed: bool) -> None:
     from mediaforce.core.db_tables import library_item_evidence_state
+    from mediaforce.library.evidence_queue import start_evidence_work, resume_evidence_queue
     from test_source_intake import _work
 
     config, item, _path = originals
@@ -1210,11 +1213,26 @@ def test_restoring_a_receipt_resumes_pending_measurements_without_reconfirmation
             library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
         assert work["work_status"] not in EVIDENCE_WORK_TERMINAL_STATUSES and work["attempt_count"] == 0
         connection.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item).values(retry_not_before=None))
+    if dismissed:
+        (receipt.parent / f"{preview['preview_id']}.dismissed").write_text(preview["manifest_hash"])
+        assert _work(config) > 0
+        with open_db(config.paths.db_path) as connection:
+            work = connection.execute(select(library_item_evidence_state)).mappings().one()
+            assert work["work_status"] == "completed" and work["last_error"] is None
+            assert queue_original_intake(connection, config) == 0
+        assert _work(config) == 0
+        assert registration.list_original_previews(config) == []
     receipt.write_bytes(saved)
+    if dismissed:
+        with open_db(config.paths.db_path) as connection:
+            rebuild_library_item_evidence_states(connection)
+            start_evidence_work(connection, config, "tv/source.mkv")
+            resume_evidence_queue(connection)
+    assert _work(config) > 0
     assert _work(config) > 0
     with open_db(config.paths.db_path) as connection:
         evidence = load_source_evidence(connection, item)
-        assert evidence.availability == "available" and evidence.traits["media_fingerprint"].tier == "probable"
+        assert evidence.availability == "available" and all(trait.tier == "probable" for trait in evidence.traits.values())
         assert len(_owners(connection)) == 1
     assert registration.list_original_previews(config) == []
 
@@ -1249,7 +1267,7 @@ def test_pending_physical_path_blocks_approval_and_reads_across_version_aliases(
                 checks_json=json_text({"source_checks": member["checks"], "preview_hash": preview["manifest_hash"], "measurement_ids": member["measurement_ids"]})))
             connection.execute(update(library_items).where(library_items.c.id == item).values(active_source_version_id=member["version_id"]))
     if not persisted:
-        with pytest.raises(OSError):
+        with pytest.raises(registration.OriginalApprovalWaiting):
             registration.apply_original_preview(config, preview["preview_id"], preview["manifest_hash"], item_id=item)
     with open_db(config.paths.db_path) as connection:
         evidence = load_source_evidence(connection, item)

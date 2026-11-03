@@ -30,6 +30,13 @@ def confirmation_directory() -> Path:
     return runtime_directory(Path.home()).parent / "mac-app" / "original-approvals"
 
 
+def original_request_dismissed(preview_id: str, manifest_hash: str) -> bool:
+    try:
+        return (confirmation_directory() / f"{_identifier(preview_id)}.dismissed").read_text() == manifest_hash
+    except (OSError, ValueError):
+        return False
+
+
 def _identifier(value: str) -> str:
     if UUID(value).hex != value:
         raise ValueError("Invalid original approval identifier")
@@ -307,11 +314,8 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
                         continue
                 elif (confirmation_directory() / f"{preview['preview_id']}.json").exists():
                     preview["problem"] = "The saved Mac approval is invalid. Restore it or prepare an updated file list."
-            try:
-                if (confirmation_directory() / f"{preview['preview_id']}.dismissed").read_text() == preview["manifest_hash"]:
-                    continue
-            except OSError:
-                pass
+            if original_request_dismissed(preview["preview_id"], preview["manifest_hash"]):
+                continue
             pending.append(preview)
     return pending
 

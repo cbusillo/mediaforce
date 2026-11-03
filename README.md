@@ -153,6 +153,9 @@ after diagnosing exhausted checks, an agent can retry through the existing
 `mediaforce evidence resume` commands, naming the affected file and check kind.
 This reuses the saved approval without another authentication. Dismissing a request
 changes no file or approval.
+Dismissing a missing-approval request also stops its waiting checks. If the
+approval is restored later, an agent can start those exact file checks again
+with the same commands.
 
 A format exception must name its item, for example `--codec-override '123=Independently acquired AV1 download'`.
 It never permits a Mediaforce stamp, a known compressed output or unavailable

@@ -920,10 +920,10 @@ def _finish_or_wait_for_original(config: MediaforceConfig, claim: EvidenceWorkCl
     with open_db(config.paths.db_path) as connection:
         missing_since = connection.execute(select(library_items.c.missing_since).where(library_items.c.id == claim.library_item_id)).scalar_one_or_none()
     if missing_since:
-        _finish_claim(config, claim, work_status="completed", last_error=f"The library scan no longer finds {claim.source_path}; checks will resume if it returns.",
+        _finish_claim(config, claim, work_status="completed", last_error="The library scan no longer finds this file; checks will resume if it returns.",
                       restore_attempt=restore_attempt)
         return
-    _defer_claim(config, claim, deps, work_status="retry_wait", reason=f"Waiting for {claim.source_path} to become available", restore_attempt=restore_attempt)
+    _defer_claim(config, claim, deps, work_status="retry_wait", reason="Waiting for this file to become available", restore_attempt=restore_attempt)
 
 
 def _defer_claim(

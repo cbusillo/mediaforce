@@ -603,7 +603,7 @@ def _classify_source_evidence(
                   and checks.get("encode_link") and checks.get("unavailability"))
     reason = str(checks.get("reason") or "original_not_assessed")
     readable = admission["tier"] == "probable" and admission["basis"] == "readable-source" and original["role"] == "input"
-    from mediaforce.library.original_registration import owner_confirmation_matches
+    from mediaforce.library.original_registration import owner_confirmation_matches, original_request_dismissed
 
     owner = (admission["tier"] == "proven" and admission["basis"] == "owner" and original["role"] == "input"
              and owner_confirmation_matches(admission, original, confirmations=confirmations))
@@ -643,7 +643,8 @@ def _classify_source_evidence(
     location = current_locations.get(item_id, locations[original["version_id"]])
     availability = "available" if (readable or owner) and not reason and location.path else "unavailable" if checks.get("unavailability") or not location.path else "unknown"
     waiting_reason = location.waiting_reason
-    if admission["tier"] == "proven" and admission["basis"] == "owner" and not owner:
+    if (admission["tier"] == "proven" and admission["basis"] == "owner" and not owner
+            and not original_request_dismissed(str(admission["confirmation_ref"]).removeprefix("mac-app:"), str(checks.get("preview_hash") or ""))):
         waiting_reason = "Waiting for the saved Mac approval to become available"
     return SourceEvidence(generation, active, original["version_id"], availability, location.path,
                           {**json.loads(original["profile_json"]), "source_size_bytes": original["size_bytes"],
