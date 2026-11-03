@@ -44,8 +44,7 @@ struct SampleWork: View {
     @State private var refreshes = 0
     @State private var approval: SampleApproval?
     @State private var confirming: String?
-    // The sample can't be made until a size is chosen, so the page offers the sizes right there.
-    @State private var askingSize = false
+    @State private var choices = SampleChoices()
     @State private var players = ComparePlayers()
 
     var body: some View {
@@ -79,7 +78,7 @@ struct SampleWork: View {
                     Text(failure)
                         .foregroundStyle(.secondary)
                 }
-                if facts.actions.contains(.chooseSize) || (askingSize && !facts.sizeChoices.isEmpty) {
+                if facts.actions.contains(.chooseSize) || (choices.askingSize && !facts.sizeChoices.isEmpty) {
                     SizeChoices(facts: facts, working: working) { make(size: $0) }
                 }
                 SampleFactsGrid(facts: facts)
@@ -87,6 +86,24 @@ struct SampleWork: View {
                     Text(coverage)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if (facts.canChooseBalance || choices.askingSize) && !facts.balanceChoices.isEmpty {
+                    Picker(Words.sampleBalance, selection: Binding(
+                        get: {
+                            choices.selectedBalance ?? facts.balanceChoices.first(where: \.selected)?.key
+                        },
+                        set: { choices.selectedBalance = $0 }
+                    )) {
+                        ForEach(facts.balanceChoices) { choice in
+                            Text(choice.label)
+                                .help(choice.detail)
+                                .accessibilityHint(choice.detail)
+                                .tag(Optional(choice.key))
+                        }
+                    }
+                    .pickerStyle(.radioGroup)
+                    .disabled(working)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             } else if unreadable {
                 Text(Words.staleNotice(.failing, lastHeard: nil))
@@ -161,23 +178,21 @@ struct SampleWork: View {
                 self.approval = nil
                 return .sampleChanged
             }
-            return result.ok ? Words.sampleResult(result) : .sampleRefused
+            return choices.compressed(result, facts: facts)
         }
     }
 
     private func compress() {
         act {
             let result = try await $0.compressSeason(prefix)
-            return result.ok ? Words.sampleResult(result) : .sampleRefused
+            return choices.compressed(result, facts: facts)
         }
     }
 
     private func make(size: String?) {
         act {
-            let result = try await $0.makeSample(prefix, size: size)
-            askingSize = result.code == "choose_size" && facts?.sizeChoices.isEmpty == false
-            if result.ok || askingSize { return nil }
-            return result.code == "choose_balance" ? .chooseBalance : .sampleRefused
+            let result = try await $0.makeSample(prefix, size: size, balance: choices.balance(in: facts))
+            return choices.made(result, facts: facts)
         }
     }
 

@@ -7,8 +7,9 @@ from fastapi import HTTPException
 
 from mediaforce.reviewing.clips import review_file_from_url
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
+from mediaforce.tuning.compression_intent import compression_intent_from_payload, compression_intent_options
 from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_followup_request, sample_goal_request, \
-    with_compression_intent
+    with_compression_intent, operator_intent_from_policy
 from mediaforce.web.runtime.app_window import season_identity
 from mediaforce.web.runtime.folder_actions import APPROVED_SAMPLE_NOTES, ApprovalNeedsConfirmation, QueueNeedsChoice, \
     ReviewedDraftChanged
@@ -33,6 +34,13 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
     page_state = object_dict(status.get("page_state"))
     lifecycle = object_dict(folder.get("lifecycle"))
     sample_item = object_dict(calibration.get("sample_item")) or object_dict(folder.get("sample_item"))
+    balances = _balance_choices(folder)
+    effective_balance = _effective_balance(balances)
+    if page_state.get("primary_action") == "retry_sample":
+        retry_policy = object_dict(object_dict(status.get("retryable_sample_job")).get("policy"))
+        retry_balance = operator_intent_from_policy(object_dict(retry_policy.get("video"))).compression_intent
+        selected = {option["key"] for option in compression_intent_options(retry_balance) if option["selected"]}
+        effective_balance = next((option for option in balances if option["key"] in selected), None)
     return {
         **season_identity(str(folder["prefix"])),
         "state": page_state.get("key"),
@@ -60,6 +68,11 @@ def sample_facts(folder: Mapping[str, Any], status: Mapping[str, Any]) -> dict[s
         "size_choices": [
             {"key": choice["key"], "target_bytes": int_value(object_dict(choice["resolved_size_goal"]).get("target_size_bytes"))}
             for choice in _size_choices(folder)
+        ],
+        "balance_choices": [
+            {"key": choice["key"], "label": choice["title"], "detail": str(choice.get("detail") or ""),
+             "selected": choice == effective_balance}
+            for choice in balances
         ],
     }
 
@@ -117,6 +130,7 @@ def make_sample(
         folder: Mapping[str, Any],
         status: Mapping[str, Any],
         size: str | None,
+        balance: str | None = None,
         *,
         ai_tune: AiTuneFn,
         retry_saved: RetrySampleFn,
@@ -127,7 +141,8 @@ def make_sample(
     if size is None and action == "choose_size":
         return {"ok": False, "code": "choose_size"}
     result: Mapping[str, Any] = {}
-    if size is None and action == "retry_sample":
+    retry = object_dict(status.get("retryable_sample_job"))
+    if size is None and balance is None and action == "retry_sample":
         try:
             result = retry_saved(prefix, "", "")
         except HTTPException:
@@ -136,7 +151,10 @@ def make_sample(
         # A saved request that can't run again, such as one under older settings or on a computer gone since, is asked
         # for anew.
         if not result.get("ok"):
-            request = _sample_request(folder, size, remake=action == "review_sample")
+            request = _sample_request(
+                folder, size, balance, remake=action == "review_sample",
+                retry=retry if action == "retry_sample" and (balance is not None or retry.get("policy")) else None,
+            )
             if isinstance(request, str):
                 return {"ok": False, "code": request}
             note, operator_intent = request
@@ -219,10 +237,46 @@ def samples_to_remake(cards: Iterable[Mapping[str, Any]], failed_in_a_row: Calla
 
 
 def _sample_request(
-        folder: Mapping[str, Any], size: str | None, *, remake: bool,
+        folder: Mapping[str, Any], size: str | None, balance: str | None, *, remake: bool,
+        retry: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any] | None] | str:
-    if size is None and remake:
+    if size is None and balance is None and remake:
         return _measured_request(folder), _current_operator_intent(folder)
+    balances = _balance_choices(folder)
+    if balance is not None:
+        balance_choice = next((option for option in balances if option["key"] == balance), None)
+        if balance_choice is None:
+            return "choose_balance"
+    else:
+        balance_choice = _effective_balance(balances)
+    if size is None and (remake or retry is not None):
+        current = _current_operator_intent(folder)
+        goal_mb = _goal_bytes(folder) / DECIMAL_MEGABYTE_BYTES
+        if retry is not None:
+            policy = object_dict(retry.get("policy"))
+            if not policy:
+                return "choose_size"
+            saved = operator_intent_from_policy(
+                object_dict(policy.get("video")), audio_policy=object_dict(policy.get("audio")),
+                subtitle_policy=object_dict(policy.get("subtitle")),
+            )
+            current = saved.request_payload()
+            sample_item = object_dict(folder.get("sample_item")) or object_dict(retry.get("sample_item"))
+            resolved = saved.size_goal.resolve(float_value(sample_item.get("duration_seconds")) or None)
+            if resolved.requires_confirmation or saved.resolution.requires_confirmation:
+                return "choose_size"
+            goal_mb = (resolved.target_size_bytes or 0) / DECIMAL_MEGABYTE_BYTES
+        if current is None:
+            return "choose_size"
+        if balance is None and object_dict(current.get("compression_intent")).get("confirmed") is True:
+            intent = current
+        else:
+            if balance_choice is None:
+                return "choose_balance"
+            intent = with_compression_intent(current, object_dict(balance_choice.get("compression_intent")))
+        if remake:
+            return _measured_request(folder, compression_intent=object_dict(intent.get("compression_intent"))), intent
+        return sample_goal_request({"operator_intent": intent, "resolved_size_goal": {"target_size_mb": goal_mb}}), intent
     choices = _size_choices(folder)
     if size:
         choice = next((option for option in choices if option["key"] == size), None)
@@ -230,13 +284,11 @@ def _sample_request(
         choice = next((option for option in choices if not option.get("requires_explicit_selection")), None)
     if choice is None:
         return "choose_size"
-    balances = object_list(folder.get("compression_intent_options"))
-    balance = next((option for option in balances if option.get("selected")), None) or next(
-        (option for option in balances if option.get("key") == DEFAULT_BALANCE), None
-    )
-    if balance is None:
+    if balance_choice is None:
         return "choose_balance"
-    intent = with_compression_intent(object_dict(choice["operator_intent"]), object_dict(balance.get("compression_intent")))
+    intent = with_compression_intent(
+        object_dict(choice["operator_intent"]), object_dict(balance_choice.get("compression_intent"))
+    )
     resolution = None if size else _current_resolution(folder)
     if resolution is not None:
         # A sample made at the season's own size keeps its resolution; a size the owner picks brings its own.
@@ -245,15 +297,11 @@ def _sample_request(
     return sample_goal_request(choice), intent
 
 
-def _measured_request(folder: Mapping[str, Any]) -> str:
+def _measured_request(folder: Mapping[str, Any], *, compression_intent: dict[str, Any] | None = None) -> str:
     analysis = object_dict(folder.get("size_target_analysis"))
-    compression_intent = object_dict(object_dict(object_dict(folder.get("calibration")).get("sample_item")).get("compression_intent"))
-    accepts_under_target = (
-            analysis.get("status") == "under_target"
-            and compression_intent.get("schema_version") == 1
-            and compression_intent.get("confirmed") is True
-            and compression_intent.get("accepts_under_target_result") is True
-    )
+    if compression_intent is None:
+        compression_intent = object_dict(object_dict(object_dict(folder.get("calibration")).get("sample_item")).get("compression_intent"))
+    accepts_under_target = compression_intent_from_payload(compression_intent).accepts_under_target_result
     request = measured_followup_request(analysis, accepts_under_target=accepts_under_target)
     if request:
         return request
@@ -290,6 +338,20 @@ def _size_choices(folder: Mapping[str, Any]) -> list[dict[str, Any]]:
                 and mode in ("normalized", "absolute")):
             choices.append(option)
     return choices
+
+
+def _effective_balance(balances: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((option for option in balances if option.get("selected")), None) or next(
+        (option for option in balances if option.get("key") == DEFAULT_BALANCE), None,
+    )
+
+
+def _balance_choices(folder: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        option for option in object_list(folder.get("compression_intent_options"))
+        if isinstance(option.get("key"), str) and isinstance(option.get("title"), str)
+        and object_dict(option.get("compression_intent"))
+    ]
 
 
 def _goal_bytes(folder: Mapping[str, Any]) -> int:

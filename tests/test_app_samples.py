@@ -9,6 +9,8 @@ from starlette.requests import Request
 from starlette.routing import Route
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.tuning.compression_intent import compression_intent_options, compression_intent_from_payload
+from mediaforce.tuning.size_goals import DECIMAL_MEGABYTE_BYTES, measured_followup_request, operator_intent_from_policy, sample_goal_request
 from mediaforce.web.routes.app_window import register_app_window_routes
 from mediaforce.web.runtime import folder_actions
 from mediaforce.web.runtime.app_samples import SAMPLE_REMAKE_LIMIT, approve_sample, make_sample, sample_facts, \
@@ -56,12 +58,12 @@ def _folder(**fields: Any) -> dict[str, Any]:
                                  "predicted_total_size_bytes": 400_000_000, "predicted_to_budget_ratio": 1.36},
         "resolved_operator_intent": {
             "size_goal": {"target_size_bytes": 293_736_333},
-            "request": {"schema_version": 2, "size_goal": {"mode": "normalized", "value_mb": 300.0}},
+            "request": _option("current", 293.736)["operator_intent"],
         },
         "size_goal_options": [_option("recommended", 293.736), _option("smaller", 220.3), _option("legacy", 100, mode="ambiguous")],
         "compression_intent_options": [
-            {"key": "reference", "selected": False, "compression_intent": {"schema_version": 1, "level": "reference", "confirmed": True}},
-            {"key": "balanced", "selected": True, "compression_intent": {"schema_version": 1, "level": "balanced", "confirmed": False}},
+            {"key": "reference", "title": "Preserve the reference", "selected": False, "compression_intent": {"schema_version": 1, "level": "reference", "confirmed": True}},
+            {"key": "balanced", "title": "Balance size and detail", "selected": True, "compression_intent": {"schema_version": 1, "level": "balanced", "confirmed": True}},
         ],
         **fields,
     }
@@ -101,6 +103,10 @@ def test_facts_offer_only_playable_moments_and_the_sizes_that_can_be_chosen() ->
     assert (facts["episode_bytes"], facts["estimated_episode_bytes"]) == (3_853_264_012, 296_440_462)
     assert (facts["season_bytes"], facts["season_episode_count"], facts["goal_bytes"]) == (60_000_000_000, 16, 293_736_333)
     assert [choice["key"] for choice in facts["size_choices"]] == ["recommended", "smaller"]
+    assert facts["balance_choices"] == [
+        {"key": "reference", "label": "Preserve the reference", "detail": "", "selected": False},
+        {"key": "balanced", "label": "Balance size and detail", "detail": "", "selected": True},
+    ]
 
     not_playable = _folder(calibration={**_folder()["calibration"], "browser_review_ready": False})
     assert sample_facts(not_playable, _status())["moments"] == []
@@ -148,6 +154,28 @@ def test_the_real_approval_check_refuses_a_changed_draft_and_asks_again_for_an_i
     assert approve(set(), "draft-1") == {"ok": False, "code": "confirm_high_impact"}
     assert approve({"high_impact"}, "a draft replaced since") == {"ok": False, "code": "sample_changed"}
     assert approve({"high_impact"}, "") == {"ok": False, "code": "sample_changed"}
+
+
+@pytest.mark.parametrize("saved_level,confirmed,shown", [
+    ("reference", True, "reference"), ("transparent", True, "perceptual_floor"),
+    ("reference", False, None), ("", False, None),
+])
+def test_failed_sample_shows_the_balance_its_saved_retry_will_use(saved_level: str, confirmed: bool, shown: str | None) -> None:
+    folder = _folder()
+    if shown == "perceptual_floor":
+        folder["compression_intent_options"].append({
+            "key": "perceptual_floor", "title": "Smallest that still looks good", "selected": False,
+            "compression_intent": {"schema_version": 1, "level": "perceptual_floor", "confirmed": True},
+        })
+    failed = {
+        **_status("needs_help", "retry_sample"),
+        "retryable_sample_job": {"policy": {"video": {
+            "compression_intent_schema_version": 1, "compression_intent": saved_level,
+            "compression_intent_confirmed": confirmed,
+        }}},
+    }
+    choices = sample_facts(folder, failed)["balance_choices"]
+    assert [choice["key"] for choice in choices if choice["selected"]] == ([shown] if shown else [])
 
 
 def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_did_not() -> None:
@@ -213,9 +241,9 @@ def test_approving_or_starting_compressing_queues_the_season_and_says_when_it_di
 def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() -> None:
     calls: list[tuple[Any, ...]] = []
 
-    def make(folder: dict[str, Any], status: dict[str, Any], size: str | None) -> dict[str, Any]:
+    def make(folder: dict[str, Any], status: dict[str, Any], size: str | None, balance: str | None = None) -> dict[str, Any]:
         return make_sample(
-            folder, status, size,
+            folder, status, size, balance,
             ai_tune=lambda *args: calls.append(("new", *args)) or {"ok": True},
             retry_saved=lambda *args: calls.append(("retry", *args)) or {"ok": True},
         )
@@ -230,6 +258,21 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert "220 MB" in note and "300.0" not in note
     assert intent["compression_intent"] == {"schema_version": 1, "level": "balanced", "confirmed": True}
 
+    assert make(_folder(), _status(), "smaller", "reference")["ok"] is True
+    assert calls.pop()[4]["compression_intent"] == {
+        "schema_version": 1, "level": "reference", "confirmed": True,
+    }
+    assert make(_folder(), _status(), None, "reference")["ok"] is True
+    _kind, _prefix, note, _host, intent, _token = calls.pop()
+    assert intent["compression_intent"]["level"] == "reference"
+    assert intent["size_goal"] == _folder()["resolved_operator_intent"]["request"]["size_goal"]
+    assert make(_folder(resolved_operator_intent={}), _status(), None, "reference") == {
+        "ok": False, "code": "choose_size",
+    }
+
+    assert make(_folder(), _status(), "smaller", "not-offered") == {"ok": False, "code": "choose_balance"}
+    assert calls == []
+
     assert make(_folder(), _status(), None)["ok"] is True
     _kind, _prefix, note, _host, intent, _token = calls.pop()
     assert "294 MB" in note and "1.4 times" in note
@@ -241,8 +284,8 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
 
     # A season that never chose its balance is made as close to its size goal as still looks right.
     unchosen = _folder(compression_intent_options=[
-        {"key": "reference", "selected": False, "compression_intent": {"level": "reference"}},
-        {"key": "balanced", "selected": False, "compression_intent": {"level": "balanced"}},
+        {"key": "reference", "title": "Preserve the reference", "selected": False, "compression_intent": {"level": "reference"}},
+        {"key": "balanced", "title": "Balance size and detail", "selected": False, "compression_intent": {"level": "balanced"}},
     ])
     assert make(unchosen, _status("needs_help", "make_sample", "missing_clips"), None)["ok"] is True
     assert calls.pop()[4]["compression_intent"]["level"] == "balanced"
@@ -268,6 +311,49 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     assert [call[0] for call in calls] == ["retry", "new"]
     calls.clear()
 
+    failed = {
+        **_status("needs_help", "retry_sample"),
+        "retryable_sample_job": {"policy": {"video": {
+            "size_goal_schema_version": 1, "size_goal_mode": "absolute", "size_goal_source": "operator",
+            "target_size_mb": 225, "resolution_intent_mode": "max_height", "max_height": 720,
+        }}, "sample_item": {"duration_seconds": 1800}},
+    }
+    assert make(_folder(), failed, None, "reference")["ok"] is True
+    intent = calls.pop()[4]
+    assert intent["compression_intent"]["level"] == "reference"
+    assert intent["size_goal"]["value_mb"] == failed["retryable_sample_job"]["policy"]["video"]["target_size_mb"]
+    assert intent["resolution"]["max_height"] == failed["retryable_sample_job"]["policy"]["video"]["max_height"]
+
+    assert make(_folder(resolved_operator_intent={}), _status(), None)["ok"] is True
+    _kind, _prefix, note, _host, intent, _token = calls.pop()
+    assert "1.4 times" in note
+    assert intent is None
+
+    failed["retryable_sample_job"]["policy"]["video"]["resolution_intent_mode"] = "ambiguous"
+    assert make(_folder(), failed, None, "reference") == {"ok": False, "code": "choose_size"}
+    assert calls == []
+    failed["retryable_sample_job"]["policy"]["video"].update({
+        "resolution_intent_mode": "source", "size_goal_mode": "normalized", "target_runtime_minutes": 45,
+    })
+    assert make(_folder(sample_item={"duration_seconds": 3600}), failed, None, "reference")["ok"] is True
+    _kind, _prefix, note, _host, intent, _token = calls.pop()
+    saved_policy = failed["retryable_sample_job"]["policy"]["video"]
+    resolved = operator_intent_from_policy(saved_policy).size_goal.resolve(3600)
+    assert note == sample_goal_request({"operator_intent": intent, "resolved_size_goal": {
+        "target_size_mb": (resolved.target_size_bytes or 0) / DECIMAL_MEGABYTE_BYTES,
+    }})
+
+    failed["retryable_sample_job"]["policy"]["video"].update({
+        "compression_intent_schema_version": 1, "compression_intent": "reference", "compression_intent_confirmed": True,
+    })
+    refused_saved = make_sample(
+        _folder(sample_item={"duration_seconds": 3600}), failed, None,
+        ai_tune=lambda *args: calls.append(("new", *args)) or {"ok": True}, retry_saved=lambda *_args: {"ok": False},
+    )
+    assert refused_saved["ok"]
+    assert calls.pop()[4] == operator_intent_from_policy(saved_policy).request_payload()
+    assert calls == []
+
     def computer_gone(*_args: Any) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="That computer is gone.")
 
@@ -279,6 +365,39 @@ def test_making_a_sample_retries_the_saved_request_or_asks_at_the_chosen_size() 
     calls.clear()
     assert make(_folder(), _status(), "a size that is not offered") == {"ok": False, "code": "choose_size"}
     assert calls == []
+
+
+@pytest.mark.parametrize("under_target", [False, True])
+def test_changing_a_reviewed_samples_balance_keeps_measured_direction_for_the_new_balance(under_target: bool) -> None:
+    folder = _folder()
+    folder["compression_intent_options"] = compression_intent_options(compression_intent_from_payload({
+        "schema_version": 1, "level": "reference", "confirmed": True,
+    }))
+    analysis = folder["size_target_analysis"]
+    if under_target:
+        analysis.update({"status": "under_target", "predicted_total_size_bytes": 100_000_000})
+    calls: list[tuple[Any, ...]] = []
+    chosen = next(choice for choice in folder["compression_intent_options"] if choice["key"] == "perceptual_floor")
+    assert make_sample(
+        folder, _status(), None, chosen["key"],
+        ai_tune=lambda *args: calls.append(args) or {"ok": True}, retry_saved=lambda *_args: {"ok": True},
+    )["ok"]
+    assert calls[-1][1] == measured_followup_request(analysis, accepts_under_target=chosen["accepts_under_target_result"])
+    assert calls[-1][3]["compression_intent"] == chosen["compression_intent"]
+
+
+def test_native_make_route_forwards_the_chosen_size_and_balance() -> None:
+    calls: list[tuple[str, str | None, str | None]] = []
+    app = FastAPI()
+    register_app_window_routes(
+        app, main_window_payload=dict, tv_shows_payload=dict, movies_payload=dict, other_media_payload=dict,
+        sample_payload=lambda _prefix: None,
+        make_sample_action=lambda prefix, size, balance: calls.append((prefix, size, balance)) or {"ok": True},
+        approve_sample_action=lambda *_args: {}, compress_season_action=lambda _prefix: {},
+    )
+    endpoint = _route(app, "/api/app/samples/{prefix:path}/make", "POST")
+    assert _post(endpoint, {"size": "smaller", "balance": "reference"}) == (200, {"ok": True})
+    assert calls == [(PREFIX, "smaller", "reference")]
 
 
 def test_a_running_sample_says_when_it_should_be_ready_only_when_comparable_samples_tell() -> None:
