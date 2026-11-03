@@ -146,10 +146,10 @@ automatic installation is an unsettled product choice and is not enabled here.
    saved stage before either server can open the database or resume work.
 6. Start the candidate through the saved service path. Verify the exact bundled
    UI/server build identity, database migration, API health, queued work and
-   external capability availability. Resume only a queue that was running
-   before the update. The verified candidate clears the update intent under
+   external capability availability. The verified candidate clears the update intent under
    the lock only after post-checks and recording the complete rollback pair;
-   failed/unknown phases retain it for recovery. A lost response is reconciled
+   then restore admissions and resume only a previously running queue.
+   Failed/unknown phases retain the intent for recovery. A lost response is reconciled
    from durable state, never retried as a new install.
 
 Qualification must demonstrate the Sparkle delegates can enforce step 5 on
@@ -161,11 +161,11 @@ The app can quit normally without installing while work is active.
 
 Before migration, a failed update may restart the unchanged old app only when
 its database is proven untouched. After migrations or uncertain startup,
-leave the service stopped and use the existing stopped rollback procedure:
-verify custody, retain the failed database for diagnosis, restore the stage's
-checked database copy and its matching old app and launch configuration,
-then verify identity, health and work before resuming. Never run old code on a
-possibly migrated database. No originals or encoded outputs are deleted.
+leave the service stopped and use the [existing database and launch-item
+rollback procedure](release-flow.md#rollback-and-cleanup-ownership), adding
+restoration of the stage's matching old app. Retain the failed database for
+diagnosis first. Never run old code on a possibly migrated database.
+No originals or encoded outputs are deleted.
 
 Recommend rollback only before releasing new work admissions. Once the new
 version has encoded or published files, restoring its pre-update database can
@@ -283,6 +283,8 @@ adds/deletes per change. This proposal adds documentation only.
   installed two-version proof above.
 - [Apple distribution signing](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac/)
   and [notarization](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
+- [Apple service registration](https://developer.apple.com/documentation/servicemanagement/smappservice)
+  and [bundled agent placement](https://developer.apple.com/documentation/servicemanagement/smappservice/agent(plistname:)).
 - [BD_to_AVP release procedure](https://github.com/cbusillo/BD_to_AVP/blob/main/docs/release-process.md)
   and [embedded Python staging](https://github.com/cbusillo/BD_to_AVP/blob/main/scripts/embedded_python.py).
   These are reference implementations, not Mediaforce release authority.
