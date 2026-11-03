@@ -34,7 +34,7 @@ from mediaforce.library.evidence_state import EVIDENCE_KINDS, EVIDENCE_STATE_ANA
     EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, parse_evidence_summary, \
     sync_library_item_evidence_state
 from mediaforce.library.probe import probe_evidence, probe_evidence_source
-from mediaforce.library.source_evidence import current_admission_filter, load_source_evidence, observe_file, pending_source_operation, record_current_measurement
+from mediaforce.library.source_evidence import current_owner_admissions_query, load_source_evidence, observe_file, pending_source_operation, record_current_measurement
 from mediaforce.library.source_prefetch import SourceAdmissionPrefetcher, StopSignal
 
 EVIDENCE_JOB_LEASE_SECONDS = 45
@@ -48,6 +48,7 @@ REMOTE_SOURCE_MISMATCH_ERROR = (
     "The encode computer does not see the same copy of this file; run a scan before retrying evidence work."
 )
 EVIDENCE_INTERRUPTED_REASON = "This check was interrupted; it will retry when work resumes"
+SOURCE_FILE_WAIT_REASON = "The source file is unavailable; checks will resume when it returns."
 
 
 class EvidenceQueueProgress:
@@ -259,7 +260,7 @@ def _run_evidence_queue_unit(
                 empty_generation = claim_generation
                 if max_work_items is None and progress_since_discovery and not stop_requested():
                     progress_since_discovery = 0
-                    if _discover_originals(current_config, runtime_deps):
+                    if discover_originals(current_config, runtime_deps):
                         if progress is not None:
                             progress.wake()
                         continue
@@ -268,7 +269,7 @@ def _run_evidence_queue_unit(
             processed += completed
             progress_since_discovery += completed
             if max_work_items is None and progress_since_discovery >= DEFAULT_EVIDENCE_BATCH_LIMIT and not stop_requested():
-                _discover_originals(current_config, runtime_deps)
+                discover_originals(current_config, runtime_deps)
                 progress_since_discovery = 0
             if progress is not None:
                 progress.wake()
@@ -291,7 +292,7 @@ def _unmeasurable_roots(config: MediaforceConfig, deps: EvidenceWorkerDeps) -> f
         return roots | waiting_evidence_host_roots(connection)
 
 
-def _discover_originals(config: MediaforceConfig, deps: EvidenceWorkerDeps) -> int:
+def discover_originals(config: MediaforceConfig, deps: EvidenceWorkerDeps) -> int:
     from mediaforce.library.source_intake import queue_original_intake
     from mediaforce.library.original_registration import queue_confirmed_originals
 
@@ -343,6 +344,9 @@ def _run_evidence_claim(
         _defer_unavailable_source(config, claim, deps, restore_attempt=False)
         return 1
     if source_availability == "source_unavailable":
+        if original_work:
+            _defer_unavailable_source(config, claim, deps, restore_attempt=False, reason=SOURCE_FILE_WAIT_REASON)
+            return 1
         _finish_claim(
             config,
             claim,
@@ -423,9 +427,9 @@ def _run_evidence_claim(
             with open_db(config.paths.db_path) as connection:
                 from mediaforce.core.db_tables import source_admissions
 
-                owner = connection.execute(select(source_admissions.c.admission_id).where(
-                    source_admissions.c.version_id == item["active_source_version_id"], source_admissions.c.basis == "owner",
-                    current_admission_filter(),
+                owner = connection.execute(current_owner_admissions_query().where(
+                    library_items.c.id == claim.library_item_id,
+                    source_admissions.c.version_id == item["active_source_version_id"],
                 )).first()
             if owner and evidence.availability != "available":
                 _finish_claim(config, claim, work_status="failed", last_error="The original-file approval needs an updated file list or its saved Mac approval record.")
@@ -555,9 +559,12 @@ def _run_evidence_claim(
             if source_availability == "root_unavailable":
                 _defer_unavailable_source(config, owned, deps, restore_attempt=owned.evidence_kind in started)
             elif source_availability == "source_unavailable":
-                _finish_claim(config, owned, work_status="failed",
-                    last_error="Source file became unavailable during evidence analysis; the result was discarded.",
-                    restore_attempt=owned.evidence_kind in started)
+                if original_work:
+                    _defer_unavailable_source(config, owned, deps, restore_attempt=owned.evidence_kind in started, reason=SOURCE_FILE_WAIT_REASON)
+                else:
+                    _finish_claim(config, owned, work_status="failed",
+                        last_error="Source file became unavailable during evidence analysis; the result was discarded.",
+                        restore_attempt=owned.evidence_kind in started)
             else:
                 if owned.evidence_kind not in started and not shared_probe_started:
                     _defer_claim(config, owned, deps, work_status="retry_wait", reason=str(exc), restore_attempt=False)
@@ -578,6 +585,8 @@ def _run_evidence_claim(
     for owned in claims:
         if final_availability == "root_unavailable":
             _defer_unavailable_source(config, owned, deps, restore_attempt=True)
+        elif original_work and final_availability == "source_unavailable":
+            _defer_unavailable_source(config, owned, deps, restore_attempt=True, reason=SOURCE_FILE_WAIT_REASON)
         elif final_availability == "source_unavailable" or final_fingerprint != actual_fingerprint or remote_before != remote_after:
             _finish_claim(config, owned, work_status="failed",
                 last_error="Source changed during evidence analysis; the result was discarded.", restore_attempt=True)
@@ -887,13 +896,14 @@ def _defer_unavailable_source(
         deps: EvidenceWorkerDeps,
         *,
         restore_attempt: bool,
+        reason: str = SOURCE_ROOT_WAIT_REASON,
 ) -> None:
     _defer_claim(
         config,
         claim,
         deps,
         work_status="waiting_source",
-        reason=SOURCE_ROOT_WAIT_REASON,
+        reason=reason,
         restore_attempt=restore_attempt,
     )
 
@@ -950,7 +960,7 @@ def _finish_claim(
         reset_attempt_state: bool = False,
 ) -> None:
     with open_db(config.paths.db_path) as connection:
-        finished = transition_evidence_work(
+        transition_evidence_work(
             connection,
             claim,
             work_status=work_status,
@@ -959,10 +969,6 @@ def _finish_claim(
             restore_attempt=restore_attempt,
             reset_attempt_state=reset_attempt_state,
         )
-        if finished and work_status == "failed" and claim.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE:
-            from mediaforce.library.original_registration import fail_confirmed_originals
-
-            fail_confirmed_originals(connection, config, claim.library_item_id, last_error or "The original-file check could not finish.")
 
 
 def _reload_owned_claim(connection: Any, claim: EvidenceWorkClaim) -> EvidenceWorkClaim | None:

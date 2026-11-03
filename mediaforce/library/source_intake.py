@@ -31,6 +31,8 @@ from mediaforce.library.media_scopes import MediaScopeConflict
 from mediaforce.library.probe import probe_evidence_source
 from mediaforce.library.source_evidence import (
     current_admission_filter,
+    reuse_source_generation,
+    reuse_source_version,
     HISTORICAL_OUTPUT_PROFILES,
     SourceEvidenceContext,
     append_version,
@@ -208,13 +210,13 @@ def commit_readable_source(
     ):
         return active
     generation = previous["generation_id"]
-    if previous["sha256"] and not same_bytes:
+    if not reuse_source_generation(previous, identity):
         generation = uuid4().hex
         connection.execute(source_generations.insert().values(generation_id=generation, created_at=timestamp()))
         prior = None
     version = (
         active
-        if previous["role"] == "input" and same_bytes and json.loads(previous["identity_json"]) == identity
+        if reuse_source_version(previous, identity)
         else append_version(
             connection,
             generation_id=generation,

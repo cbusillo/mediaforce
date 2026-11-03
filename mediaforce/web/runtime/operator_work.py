@@ -6,9 +6,8 @@ from pathlib import Path
 from mediaforce.core.config import load_config
 from mediaforce.core.db import open_db
 from mediaforce.library.evidence_queue import MAX_CONCURRENT_EVIDENCE_FILES, \
-    recover_evidence_queue, refresh_controller_digest_waits, runnable_evidence_work_count
-from mediaforce.library.evidence_hosts import collect_evidence_host_rows, controller_digest_window
-from mediaforce.library.evidence_worker import EvidenceQueueProgress, EvidenceWorkerDeps, run_evidence_queue_until_blocked
+    recover_evidence_queue, runnable_evidence_work_count
+from mediaforce.library.evidence_worker import EvidenceQueueProgress, EvidenceWorkerDeps, default_evidence_worker_deps, discover_originals, run_evidence_queue_until_blocked
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,14 +25,8 @@ class BoundedEvidenceRunner:
         self._progress = EvidenceQueueProgress()
 
     def prepare_background_work(self) -> int:
-        from mediaforce.library.source_intake import queue_original_intake
-
         config = self._deps.load_config(self._config_path) if self._deps else load_config(self._config_path)
-        window = controller_digest_window(config, self._deps.evidence_host_rows if self._deps else collect_evidence_host_rows)
-        with open_db(config.paths.db_path) as connection:
-            discovered = queue_original_intake(connection, config)
-            refresh_controller_digest_waits(connection, window)
-            return discovered
+        return discover_originals(config, self._deps or default_evidence_worker_deps())
 
     @property
     def active(self) -> bool:

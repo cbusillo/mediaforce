@@ -193,7 +193,6 @@ struct OriginalApprovalView: View {
         do {
             try await OriginalApprovalStore().confirm(preview)
             try Task.checkCancellation()
-            try await model.client.applyOriginalPreview(preview)
             await model.refresh()
             dismiss()
         } catch {

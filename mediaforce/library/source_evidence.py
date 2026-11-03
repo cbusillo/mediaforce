@@ -112,6 +112,22 @@ def current_admission_filter() -> ColumnElement[bool]:
     )
 
 
+def current_owner_admissions_query() -> Select[Any]:
+    return select(library_items.c.id.label("item_id"), source_admissions).join(
+        source_versions, source_versions.c.version_id == library_items.c.active_source_version_id,
+    ).join(source_admissions, source_admissions.c.generation_id == source_versions.c.generation_id).where(
+        source_admissions.c.basis == "owner", current_admission_filter(),
+    )
+
+
+def reuse_source_generation(active: Mapping[str, Any] | DBRow, identity: Mapping[str, Any]) -> bool:
+    return active["role"] != "output" and active["sha256"] in (None, identity["sha256"])
+
+
+def reuse_source_version(active: Mapping[str, Any] | DBRow, identity: Mapping[str, Any]) -> bool:
+    return active["role"] == "input" and json.loads(active["identity_json"]) == identity
+
+
 def append_version(connection: DBClient, *, generation_id: str, role: str, identity: Mapping[str, Any],
                    profile: Mapping[str, Any], recorded_at: str, version_id: str | None = None) -> str:
     version = version_id or uuid4().hex

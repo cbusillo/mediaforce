@@ -110,19 +110,6 @@ struct MediaforceClient: Sendable {
         _ = try await post("api/catalog/refresh")
     }
 
-    func applyOriginalPreview(_ preview: OriginalPreview) async throws {
-        var request = URLRequest(url: baseURL.appending(path: "api/app/originals/apply"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "preview_id": preview.previewId, "manifest_hash": preview.manifestHash,
-        ])
-        let (data, response) = try await session.data(for: request)
-        if [200, 202].contains((response as? HTTPURLResponse)?.statusCode) { return }
-        let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        throw OriginalApprovalError(result?["reason"] as? String ?? "The approval could not be queued. Try again.")
-    }
-
     func pause() async throws {
         _ = try await post("api/encode-queue/pause")
     }

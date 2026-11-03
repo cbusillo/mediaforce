@@ -1187,10 +1187,7 @@ def create_app(
 
     register_release_routes(app, work_snapshot=_release_work_snapshot)
 
-    from mediaforce.web.routes.originals import register_original_routes
     from mediaforce.library.original_registration import list_original_previews
-
-    register_original_routes(app, config)
 
     def _main_window_payload() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection, kind_snapshot(connection, config, _load_calibration_state):

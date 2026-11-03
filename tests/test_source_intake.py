@@ -533,14 +533,14 @@ def test_window_wait_releases_new_source_qualification_but_keeps_a_stale_cache(t
 
 
 def test_loop_discovery_marks_original_window_waits_before_returning(tmp_path: Path) -> None:
-    from mediaforce.library.evidence_worker import _discover_originals
+    from mediaforce.library.evidence_worker import discover_originals
 
     config = _config(tmp_path)
     item_id, _path = _source(config)
     config.raw["remote_hosts"] = [{"host": "localhost", "mode": "local"}]
     deps = EvidenceWorkerDeps(load_config=lambda _path: config, analyze_evidence=Mock(), logger=Mock(),
         evidence_host_rows=lambda _config: [{"key": "localhost", "schedule_open": False}])
-    assert _discover_originals(config, deps) == 1
+    assert discover_originals(config, deps) == 1
     with open_db(config.paths.db_path) as database:
         _assert_unadmitted_window_wait(database, item_id)
         assert runnable_evidence_work_count(database) == 0

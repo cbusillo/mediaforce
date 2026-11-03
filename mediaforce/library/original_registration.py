@@ -17,9 +17,13 @@ from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.core.type_defs import float_value
 from mediaforce.core.utils import file_stat_signature, timestamp
 from mediaforce.library import probe, source_evidence
-from mediaforce.library.source_evidence import current_admission_filter, append_version, ensure_active_source_version, json_text, load_source_evidence_bulk, load_source_evidence_context, pending_source_operation
+from mediaforce.library.source_evidence import current_admission_filter, current_owner_admissions_query, reuse_source_generation, reuse_source_version, append_version, ensure_active_source_version, json_text, load_source_evidence_bulk, load_source_evidence_context, pending_source_operation
 from mediaforce.library.source_intake import assess_readable_source, commit_readable_source, frozen_observed_measurements, _history_present, _matches_scanned_identity
 from mediaforce.ops.runtime_install import runtime_directory
+
+
+class OriginalApprovalWaiting(OSError):
+    pass
 
 
 def confirmation_directory() -> Path:
@@ -48,14 +52,6 @@ def _checks(connection: DBClient, identity: Mapping[str, Any], override: str | N
     if override and not checks.get("exception_matches"):
         raise ValueError("This file has no codec or encoder match needing an exception")
     return checks
-
-
-def _reuse_generation(active: Mapping[str, Any] | DBRow, identity: Mapping[str, Any]) -> bool:
-    return active["role"] != "output" and active["sha256"] in (None, identity["sha256"])
-
-
-def _reuse_version(active: Mapping[str, Any] | DBRow, identity: Mapping[str, Any]) -> bool:
-    return active["role"] == "input" and json.loads(active["identity_json"]) == identity
 
 
 def _current_admissions(connection: DBClient, generation: str) -> list[DBRow]:
@@ -87,7 +83,7 @@ def _preview_item(connection: DBClient, item_id: int, override: str | None) -> d
         connection.commit()
         item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
         active = connection.execute(select(source_versions).where(source_versions.c.version_id == item["active_source_version_id"])).mappings().one()
-    generation = active["generation_id"] if _reuse_generation(active, identity) else uuid4().hex
+    generation = active["generation_id"] if reuse_source_generation(active, identity) else uuid4().hex
     prior = _current_admissions(connection, generation)
     if len(prior) > 1:
         raise ValueError("This original has conflicting approvals")
@@ -95,7 +91,7 @@ def _preview_item(connection: DBClient, item_id: int, override: str | None) -> d
     return {"item_id": item_id, "rel_path": item["rel_path"], "source_revision": item["source_revision"],
             "active_version_id": item["active_source_version_id"], "source_path": item["source_path"],
             "generation_id": generation,
-            "version_id": active["version_id"] if _reuse_version(active, identity) else uuid4().hex,
+            "version_id": active["version_id"] if reuse_source_version(active, identity) else uuid4().hex,
             "identity": identity, "checks": checks, "measurement_ids": measurements, "supersedes_id": prior[0]["admission_id"] if prior else None}
 
 
@@ -157,6 +153,8 @@ def _confirmation(preview_id: str) -> dict[str, Any]:
         if (receipt["preview_id"] != preview_id or receipt["owner_uid"] != os.getuid()
                 or receipt["authentication"] != "deviceOwnerAuthentication" or not receipt["confirmed_at"]):
             raise ValueError("Confirm this exact file list in the Mac app")
+        if datetime.fromisoformat(receipt["confirmed_at"]).tzinfo is None:
+            raise ValueError("The saved Mac approval has no authentication time zone")
         body = json.loads(receipt["canonical_json"])
         if (stable_json_hash(body) != receipt["manifest_hash"] or json_text(body) != receipt["canonical_json"]
                 or body["preview_id"] != preview_id or body["challenge"] != receipt["challenge"]
@@ -203,77 +201,95 @@ def _stored_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
     return previews
 
 
-def _member_failure(connection: DBClient, preview_id: str, item: Mapping[str, Any]) -> str | None:
-    return connection.execute(select(func.json_extract(item_events.c.details_json, "$.reason")).where(
+def _member_failure(connection: DBClient, preview_id: str, item: Mapping[str, Any]) -> DBRow | None:
+    return connection.execute(select(item_events).where(
         item_events.c.library_item_id == item["item_id"], item_events.c.event_type == "original_confirmation_failed",
         func.json_extract(item_events.c.details_json, "$.preview_id") == preview_id,
         func.json_extract(item_events.c.details_json, "$.version_id") == item["version_id"],
         func.json_extract(item_events.c.details_json, "$.source_revision") == item["source_revision"],
-    ).order_by(item_events.c.id.desc())).scalars().first()
+    ).order_by(item_events.c.id.desc())).mappings().first()
 
 
 def _record_member_failure(connection: DBClient, preview: Mapping[str, Any], item: Mapping[str, Any], reason: str) -> None:
     if _member_failure(connection, preview["preview_id"], item) or not connection.execute(
             select(library_items.c.id).where(library_items.c.id == item["item_id"])).first():
         return
+    owner = connection.execute(current_owner_admissions_query().where(library_items.c.id == item["item_id"])).mappings().first()
     connection.execute(item_events.insert().values(
         library_item_id=item["item_id"], created_at=timestamp(), event_type="original_confirmation_failed",
         details_json=json_text({"preview_id": preview["preview_id"], "version_id": item["version_id"],
-            "source_revision": item["source_revision"], "reason": reason}),
+            "source_revision": item["source_revision"], "reason": reason,
+            "owner_admission_id": owner["admission_id"] if owner else None}),
     ))
 
 
 def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
     pending = []
     previews = _stored_previews(config)
+    item_ids = [item["item_id"] for preview in previews for item in json.loads(preview["canonical_json"])["items"]]
     with open_db(config.paths.db_path) as connection:
         confirmations: dict[str, Any] = {}
-        evidence = load_source_evidence_bulk(connection, [item["item_id"] for preview in previews
-                                                        for item in json.loads(preview["canonical_json"])["items"]])
+        evidence = load_source_evidence_bulk(connection, item_ids)
+        owners = {row["item_id"]: row for row in connection.execute(
+            current_owner_admissions_query().where(library_items.c.id.in_(item_ids))).mappings()}
+        failed_work: dict[int, list[DBRow]] = {}
+        for row in connection.execute(select(library_item_evidence_state).where(
+                library_item_evidence_state.c.library_item_id.in_(item_ids),
+                library_item_evidence_state.c.work_status == "failed")).mappings():
+            failed_work.setdefault(row["library_item_id"], []).append(row)
         for preview in previews:
             items = json.loads(preview["canonical_json"])["items"]
-            owners = {row["item_id"]: row for row in connection.execute(select(library_items.c.id.label("item_id"), source_admissions).join(
-                source_versions, source_versions.c.version_id == library_items.c.active_source_version_id,
-            ).join(source_admissions, source_admissions.c.generation_id == source_versions.c.generation_id).where(
-                library_items.c.id.in_([item["item_id"] for item in items]), source_admissions.c.basis == "owner",
-                current_admission_filter(),
-            )).mappings()}
+            try:
+                _confirmed_preview(config, preview["preview_id"], preview["manifest_hash"])
+                confirmed = True
+            except ValueError:
+                confirmed = False
             problems = []
+            settled = 0
             for item in items:
-                current = evidence[item["item_id"]]
+                try:
+                    applied = _member_applied(connection, preview, item)
+                except ValueError as error:
+                    problems.append(f"{item['rel_path']}: {error}")
+                    continue
+                failure = _member_failure(connection, preview["preview_id"], item)
+                failure_details = json.loads(failure["details_json"]) if failure else {}
                 owner = owners.get(item["item_id"])
-                reference = f"mac-app:{preview['preview_id']}"
-                if owner and owner["confirmation_ref"] != reference and owner_confirmation_matches(owner, confirmations=confirmations):
-                    try:
-                        newer = _confirmation(str(owner["confirmation_ref"]).removeprefix("mac-app:"))
-                        replacement = _preview_member(json.loads(newer["canonical_json"]), item["item_id"])
-                        if replacement["source_revision"] > item["source_revision"]:
-                            continue
-                    except ValueError:
-                        pass
-                reason = _member_failure(connection, preview["preview_id"], item)
-                if (not reason and owner and owner["confirmation_ref"] == reference
-                        and not _history_present(connection, item["item_id"])):
-                    if not owner_confirmation_matches(owner, confirmations=confirmations):
-                        reason = "The saved Mac approval is unavailable. Restore the saved approval or prepare an updated file list."
-                    elif any(trait.reason == "original_rule_changed" for trait in current.traits.values()):
-                        reason = "The original-file rules changed. Prepare an updated file list."
-                if reason:
-                    problems.append(f"{item['rel_path']}: {reason}")
+                owner_valid = owner is not None and owner_confirmation_matches(owner, confirmations=confirmations)
+                if failure and owner is not None and owner_valid and failure_details.get("owner_admission_id") != owner["admission_id"]:
+                    settled += 1
+                    continue
+                reasons = []
+                if failure:
+                    reasons.append(f"{failure_details['reason']} Prepare an updated file list.")
+                historical = _history_present(connection, item["item_id"])
+                if applied and owner and owner["confirmation_ref"] == f"mac-app:{preview['preview_id']}" and not historical:
+                    if not owner_valid:
+                        reasons.append("The saved Mac approval is unavailable. Restore it or prepare an updated file list.")
+                    elif any(trait.reason == "original_rule_changed" for trait in evidence[item["item_id"]].traits.values()):
+                        reasons.append("The original-file rules changed. Prepare an updated file list.")
+                if confirmed and not historical and not failure:
+                    for work in failed_work.get(item["item_id"], []):
+                        if (work["work_source_fingerprint"] == item["identity"]["sample_fingerprint"]
+                                and (not applied or evidence[item["item_id"]].traits[work["evidence_kind"]].tier != "probable")):
+                            reasons.append(f"File checks stopped after retries: {work['last_error'] or 'The check could not finish.'} Your Mac approval is still saved; retry the existing file checks after fixing the problem.")
+                if reasons:
+                    problems.append(f"{item['rel_path']}: {' '.join(reasons)}")
+                elif applied:
+                    settled += 1
             if problems:
-                preview["problem"] = "This file list needs preparing again. " + " ".join(problems)
-            elif all(_member_applied(connection, preview, item) for item in items):
+                preview["problem"] = " ".join(problems)
+            elif settled == len(items):
                 continue
             else:
                 try:
                     _check_preview_catalog(connection, items)
-                except ValueError:
+                except (OSError, ValueError):
                     continue
-                try:
-                    _confirmed_preview(config, preview["preview_id"], preview["manifest_hash"])
+                if confirmed:
                     continue
-                except ValueError:
-                    pass
+                if (confirmation_directory() / f"{preview['preview_id']}.json").exists():
+                    preview["problem"] = "The saved Mac approval is invalid. Restore it or prepare an updated file list."
             try:
                 if (confirmation_directory() / f"{preview['preview_id']}.dismissed").read_text() == preview["manifest_hash"]:
                     continue
@@ -286,51 +302,59 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
 def _check_preview_catalog(connection: DBClient, items: Sequence[Mapping[str, Any]]) -> None:
     for item in items:
         current = connection.execute(select(library_items).where(library_items.c.id == item["item_id"])).mappings().one_or_none()
-        if (current is None or current["missing_since"] or current["source_revision"] != item["source_revision"]
+        if (current is None or current["source_revision"] != item["source_revision"]
                 or current["active_source_version_id"] != item["active_version_id"] or current["source_path"] != item["source_path"]
-                or current["rel_path"] != item["rel_path"] or not _matches_scanned_identity(current, item["identity"])
-                or pending_source_operation(connection, item["item_id"])):
+                or current["rel_path"] != item["rel_path"] or not _matches_scanned_identity(current, item["identity"])):
             raise ValueError("This file changed. Prepare an updated file list.")
+        if current["missing_since"] or pending_source_operation(connection, item["item_id"]):
+            raise OriginalApprovalWaiting("Waiting for this file or its unfinished move to become available")
 
 
-def request_original_apply(config: MediaforceConfig, preview_id: str, manifest_hash: str) -> dict[str, Any]:
+def queue_original_approval(config: MediaforceConfig, preview_id: str, manifest_hash: str) -> bool:
     from mediaforce.library.evidence_queue import (EvidenceQueueConflict, EVIDENCE_WORK_ACTIVE_STATUSES, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
-        queue_decision_evidence_work)
+        load_evidence_queue_state, queue_decision_evidence_work)
     from mediaforce.library.evidence_state import sync_library_item_evidence_state
 
     preview, body = _confirmed_preview(config, preview_id, manifest_hash)
     pending = False
     with open_db(config.paths.db_path) as connection:
         for item in body["items"]:
-            if _member_applied(connection, preview, item) or _member_failure(connection, preview_id, item):
-                continue
             connection.commit()
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
-            if _member_applied(connection, preview, item) or _member_failure(connection, preview_id, item):
-                continue
             try:
+                if _member_applied(connection, preview, item) or _member_failure(connection, preview_id, item):
+                    continue
+                connection.commit()
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                state = load_evidence_queue_state(connection)
+                if state["is_paused"] or state["cancel_requested"] or state["status"] in {"cancelled", "cancel_requested"}:
+                    continue
+                if _member_applied(connection, preview, item) or _member_failure(connection, preview_id, item):
+                    continue
                 _check_preview_catalog(connection, [item])
+            except OSError:
+                continue
             except ValueError as error:
                 _record_member_failure(connection, preview, item, str(error))
                 continue
             current = cast(dict[str, Any], dict(connection.execute(select(library_items).where(library_items.c.id == item["item_id"])).mappings().one()))
             if current["media_root"] not in config.source_root_map:
-                _record_member_failure(connection, preview, item, "This file's library is no longer enabled for original-file checks.")
                 continue
             sync_library_item_evidence_state(connection, current, "media_fingerprint")
             work = connection.execute(select(library_item_evidence_state).where(
                 library_item_evidence_state.c.library_item_id == item["item_id"],
                 library_item_evidence_state.c.evidence_kind == "media_fingerprint",
             )).mappings().one_or_none()
+            if work and work["work_status"] == "failed" and work["work_source_fingerprint"] == item["identity"]["sample_fingerprint"]:
+                continue
             pending = True
             if not work or work["work_status"] not in EVIDENCE_WORK_ACTIVE_STATUSES:
                 try:
                     queue_decision_evidence_work(connection, config, item["rel_path"], library_item_ids=[item["item_id"]],
                         evidence_kind="media_fingerprint", work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
-                        require_measurement=True, start_new_batch=True, restart_terminal=True, manage_transaction=False)
+                        require_measurement=True, start_new_batch=True, manage_transaction=False)
                 except EvidenceQueueConflict:
                     continue
-    return {"ok": True, "pending": pending}
+    return pending
 
 
 def queue_confirmed_originals(config: MediaforceConfig) -> None:
@@ -338,53 +362,45 @@ def queue_confirmed_originals(config: MediaforceConfig) -> None:
 
     for preview in _stored_previews(config):
         try:
-            request_original_apply(config, preview["preview_id"], preview["manifest_hash"])
+            queue_original_approval(config, preview["preview_id"], preview["manifest_hash"])
         except (ValueError, EvidenceQueueConflict):
             continue
-
-
-def fail_confirmed_originals(connection: DBClient, config: MediaforceConfig, item_id: int, reason: str) -> None:
-    for preview in _stored_previews(config):
-        for item in json.loads(preview["canonical_json"])["items"]:
-            if item["item_id"] != item_id:
-                continue
-            if _member_applied(connection, preview, item):
-                continue
-            try:
-                _confirmed_preview(config, preview["preview_id"], preview["manifest_hash"])
-            except ValueError:
-                continue
-            _record_member_failure(connection, preview, item, reason)
 
 
 def apply_confirmed_originals(config: MediaforceConfig, item_id: int, controller: ManagedProcessController,
                              check_cancelled: Callable[[], None], digest_guard: Callable[[], AbstractContextManager[None]]) -> None:
     confirmed = []
-    for preview in _stored_previews(config):
-        try:
-            receipt = _confirmation(preview["preview_id"])
-            confirmed.append((datetime.fromisoformat(receipt["confirmed_at"]), preview))
-        except ValueError:
-            continue
-    for _confirmed_at, preview in sorted(confirmed, key=lambda row: row[0]):
-        items = [item for item in json.loads(preview["canonical_json"])["items"] if item["item_id"] == item_id]
-        if not items:
-            continue
-        try:
-            _confirmed_preview(config, preview["preview_id"], preview["manifest_hash"])
-        except ValueError:
-            continue
-        with open_db(config.paths.db_path) as connection:
-            if _member_applied(connection, preview, items[0]) or _member_failure(connection, preview["preview_id"], items[0]):
+    with open_db(config.paths.db_path) as connection:
+        for preview in _stored_previews(config):
+            try:
+                item = _preview_member(json.loads(preview["canonical_json"]), item_id)
+            except ValueError:
                 continue
+            try:
+                if _member_applied(connection, preview, item) or _member_failure(connection, preview["preview_id"], item):
+                    continue
+            except ValueError as error:
+                _record_member_failure(connection, preview, item, str(error))
+                continue
+            try:
+                _confirmed_preview(config, preview["preview_id"], preview["manifest_hash"])
+                receipt = _confirmation(preview["preview_id"])
+                confirmed.append((datetime.fromisoformat(receipt["confirmed_at"]), preview, item))
+            except ValueError:
+                continue
+    for _confirmed_at, preview, item in sorted(confirmed, key=lambda row: row[0]):
         try:
             with digest_guard():
                 apply_original_preview(config, preview["preview_id"], preview["manifest_hash"], item_id=item_id,
                                        controller=controller, check_cancelled=check_cancelled)
+        except OriginalApprovalWaiting as error:
+            from mediaforce.library.evidence_worker import EvidenceWorkDeferred
+
+            raise EvidenceWorkDeferred(str(error)) from error
         except ValueError as error:
             with open_db(config.paths.db_path) as connection:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
-                _record_member_failure(connection, preview, items[0], str(error))
+                _record_member_failure(connection, preview, item, str(error))
 
 
 def _apply_item(connection: DBClient, item: Mapping[str, Any], preview: Mapping[str, Any], now: str,
@@ -441,12 +457,12 @@ def _check_member_ancestry(connection: DBClient, item: Mapping[str, Any]) -> Non
     active = connection.execute(select(source_versions).where(source_versions.c.version_id == item["active_version_id"])).mappings().one_or_none()
     if active is None:
         raise ValueError("This file's history changed. Prepare an updated file list.")
-    if _reuse_generation(active, item["identity"]):
+    if reuse_source_generation(active, item["identity"]):
         if item["generation_id"] != active["generation_id"]:
             raise ValueError("This file list refers to another original's history")
     elif connection.execute(select(source_generations.c.generation_id).where(source_generations.c.generation_id == item["generation_id"])).first():
         raise ValueError("This new original must have its own history")
-    if _reuse_version(active, item["identity"]):
+    if reuse_source_version(active, item["identity"]):
         if item["version_id"] != active["version_id"]:
             raise ValueError("This file list refers to a different original")
     elif connection.execute(select(source_versions.c.version_id).where(source_versions.c.version_id == item["version_id"])).first():
