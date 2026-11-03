@@ -301,7 +301,7 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
                         except ValueError as error:
                             reasons.append(str(error))
                 if failure:
-                    reasons.append(f"{failure_details['reason']} Prepare an updated file list.")
+                    reasons.append(failure_details["reason"])
                 historical = _history_present(connection, item["item_id"])
                 if applied and owner and owner["confirmation_ref"] == f"mac-app:{preview['preview_id']}" and not historical:
                     if not owner_valid:

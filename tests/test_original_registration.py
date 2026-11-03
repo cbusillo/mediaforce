@@ -1502,6 +1502,11 @@ def test_dismissal_never_hides_another_members_later_problem(originals: tuple[Me
     registration.queue_original_approval(config, preview["preview_id"], preview["manifest_hash"])
     shown = registration.list_original_previews(config)
     assert len(shown) == 1 and {problem["item_id"] for problem in shown[0]["problems"]} == {sibling}
+    with open_db(config.paths.db_path) as connection:
+        from mediaforce.core.db_tables import item_events
+        recorded = connection.execute(select(item_events.c.details_json).where(
+            item_events.c.library_item_id == sibling, item_events.c.event_type == "original_confirmation_failed")).scalar_one()
+        assert shown[0]["problems"][0]["reason"] == json.loads(recorded)["reason"]
     _dismiss_preview(shown[0])
     assert registration.list_original_previews(config) == []
     receipt = registration.confirmation_directory() / f"{preview['preview_id']}.json"

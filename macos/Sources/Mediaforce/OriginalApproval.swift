@@ -151,7 +151,7 @@ struct OriginalApprovalView: View {
                 Text(problem)
                 if let waiting = preview.waiting { Text(waiting).foregroundStyle(.secondary) }
                 Button("Close") { dismiss() }
-                Button("Dismiss request") { Task { await dismissRequest() } }
+                Button("Dismiss these problems") { Task { await dismissRequest() } }
             } else if let waiting = preview.waiting {
                 Text(waiting)
                 Button("Close") { dismiss() }
