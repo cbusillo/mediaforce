@@ -133,9 +133,20 @@ The hourly cleanup keeps the newest `state.cleanup.kept_deploy_backups` stage
 folders (two by default), plus the running release's rollback stage named in
 `runtime/rollback-stage.txt`. Failed preparation does not consume a retention
 slot. Retain a stage outside that cleanup tree when its backup is needed after
-a later successful release replaces that pointer. Removing old releases or
-releasing legacy protection requires a separate, verified retirement after no
-service, job or rollback depends on them.
+a later successful release replaces that pointer.
+
+After app installation and queue resume succeed, the deploy trims independent
+clones under `runtime/releases/` to three. It keeps the installed running
+release and the rollback named by the retained stage's saved launch item,
+then fills the remaining slots with the newest directories by modification
+time. The recorded rollback takes precedence over age. A legacy rollback
+outside `runtime/releases/` stays untouched and does not consume a slot.
+Missing or inconsistent running/rollback evidence, symlinks or non-clone
+entries refuse the trim before deletion. A trim failure leaves the healthy
+release running and reports the error. Failed deploys do not trim.
+The deployment stage, database backup, protection registry, legacy worktrees
+and media originals are outside this trim. Releasing legacy protection still
+requires a separate, verified retirement.
 
 ### Mac app
 

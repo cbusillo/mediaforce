@@ -7,6 +7,7 @@ from contextlib import ExitStack
 import json
 from http.client import HTTPException
 import os
+import plistlib
 import shutil
 import sqlite3
 import subprocess
@@ -24,7 +25,7 @@ from mediaforce.ops.login_item import (
     _require_success, _run_command, disable_login_item, enable_login_item,
 )
 from mediaforce.ops.runtime_install import (
-    register_runtime_roots, require_release_directory, retain_deploy_stage, runtime_activity, runtime_directory,
+    register_runtime_roots, require_release_directory, retain_deploy_stage, retained_deploy_stage, runtime_activity, runtime_directory,
 )
 from mediaforce.web.runtime_lock import exclusive_mediaforce_runtime_lock, reserve_mediaforce_database_identity
 
@@ -33,6 +34,7 @@ DEFAULT_STARTUP_TIMEOUT = 180
 DEPLOY_LOCK_WAIT_SECONDS = 600
 MAC_APP_NAME = "Mediaforce.app"
 APPLICATIONS = Path("/Applications")
+KEPT_RELEASES = 3
 
 
 def _run(command: list[str], *, cwd: Path | None = None) -> str:
@@ -115,6 +117,33 @@ def _restore_interrupted_replacement(installed: Path, replaced: Path) -> None:
 
 def _is_present(path: Path) -> bool:
     return path.exists() or path.is_symlink()
+
+
+def trim_releases(home: Path, support_dir: Path) -> None:
+    stage = retained_deploy_stage(support_dir)
+    if stage is None or stage.absolute() != stage.resolve():
+        raise RuntimeError("cannot verify the recorded rollback stage; releases retained")
+    previous = Path(plistlib.loads((stage / "launch-item.before.plist").read_bytes())["WorkingDirectory"])
+    candidate = Path((stage / "candidate.txt").read_text())
+    plist = LoginItemPaths(project_root=candidate, home=home).plist
+    running = Path(plistlib.loads(plist.read_bytes())["WorkingDirectory"])
+    require_release_directory(running, home)
+    if (
+        candidate != running or previous == running or not previous.is_absolute()
+        or previous.absolute() != previous.resolve() or not previous.is_dir()
+    ):
+        raise RuntimeError("cannot verify running and rollback releases; releases retained")
+    releases = list(running.parent.iterdir())
+    for release in releases:
+        require_release_directory(release, home)
+    releases.sort(key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True)
+    kept = {running, previous} & set(releases)
+    for release in releases:
+        if len(kept) < KEPT_RELEASES:
+            kept.add(release)
+    for release in releases:
+        if release not in kept:
+            shutil.rmtree(release)
 
 
 def backup_database(database: Path, destination: Path, *, pause_queue: bool = False) -> None:
@@ -200,8 +229,6 @@ def _deploy(
     *, database: Path, config_path: Path | None = None, startup_timeout: int = DEFAULT_STARTUP_TIMEOUT,
     stopped_config: MediaforceConfig | None = None, release_stopped_runtime: Callable[[], None] | None = None,
 ) -> None:
-    import plistlib
-
     resume_queue = stopped_config is None
     if stopped_config is None:
         require_paused_idle_dashboard(_api(base_url, "/api/dashboard?preview_limit=0"))
@@ -279,6 +306,7 @@ def _deploy(
         # A lost resume response is uncertain; leave the healthy candidate running.
         if resume_queue:
             _api(base_url, "/api/encode-queue/resume", post=True)
+    trim_releases(home, database.parent)
 
 
 def main() -> None:

@@ -130,8 +130,9 @@ def test_deploy_refuses_unpaused_or_running_work(paused: bool, encodes: int, sam
     "outcome", ["healthy", "unhealthy", "slow", "resume-lost", "backup-failed", "prepare-failed", "app-install-failed"],
 )
 @pytest.mark.parametrize("stopped,initially_paused", [(False, True), (True, False), (True, True)])
+@pytest.mark.parametrize("legacy_rollback", [False, True])
 def test_deploy_switch_preserves_previous_runtime_and_backup(
-    tmp_path: Path, outcome: str, stopped: bool, initially_paused: bool,
+    tmp_path: Path, outcome: str, stopped: bool, initially_paused: bool, legacy_rollback: bool,
 ) -> None:
     from http.client import RemoteDisconnected
     from urllib.error import URLError
@@ -140,10 +141,17 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(
 
     home, old = tmp_path / "home", tmp_path / "worktrees/legacy"
     candidate = runtime_install.runtime_directory(home) / "releases/candidate"
+    if not legacy_rollback:
+        old = candidate.parent / "previous"
+    older = [candidate.parent / f"older-{index}" for index in range(4)]
+    for index, release in enumerate(older):
+        _independent_clone(release)
+        os.utime(release, (index + 1, index + 1))
     database = tmp_path / "configured-state/library.sqlite3"
     stage = database.parent / "deployments/fixture-stage"
-    old.mkdir(parents=True)
+    _independent_clone(old)
     (old / "retained-output").write_text("keep")
+    os.utime(old, (0, 0))
     _independent_clone(candidate)
     paths = login_item.LoginItemPaths(old, home)
     paths.plist.parent.mkdir(parents=True)
@@ -245,6 +253,10 @@ def test_deploy_switch_preserves_previous_runtime_and_backup(
     assert resume_requests == ([True] if healthy_candidate and resume_queue else [])
     assert installed_apps == ([candidate] if healthy_candidate else [])
     assert (old / "retained-output").read_text() == "keep"
+    trimmed = outcome in {"healthy", "slow"} or (outcome == "resume-lost" and not resume_queue)
+    assert [release.exists() for release in older] == (
+        [False, False, legacy_rollback, True] if trimmed else [True] * len(older)
+    )
     if outcome == "prepare-failed":
         assert not stage.exists()
         return
@@ -263,6 +275,51 @@ def _built_app(release: Path, marker: str) -> None:
     contents = controller_deploy.built_mac_app(release) / "Contents"
     contents.mkdir(parents=True)
     (contents / "Info.plist").write_text(marker)
+
+
+@pytest.mark.parametrize("extra_count", [0, 4])
+@pytest.mark.parametrize("invalid", [None, "missing-stage", "missing-rollback", "same-release", "redirected-release", "worktree"])
+def test_trim_requires_known_running_and_rollback_before_removing_clones(
+    tmp_path: Path, extra_count: int, invalid: str | None,
+) -> None:
+    home = tmp_path / "home"
+    support = tmp_path / "custom-support"
+    running = runtime_install.runtime_directory(home) / "releases/running"
+    previous = running.parent / "previous"
+    extras = [running.parent / f"extra-{index}" for index in range(extra_count)]
+    for index, release in enumerate([running, previous, *extras]):
+        _independent_clone(release)
+        os.utime(release, (index, index))
+    stage = support / "deployments/active"
+    stage.mkdir(parents=True)
+    paths = login_item.LoginItemPaths(running, home)
+    paths.plist.parent.mkdir(parents=True)
+    paths.plist.write_bytes(login_item.render_login_item_plist(paths))
+    rollback = previous
+    if invalid == "missing-rollback":
+        rollback = running.parent / "missing"
+    elif invalid == "same-release":
+        rollback = running
+    elif invalid == "redirected-release":
+        (running.parent / "alias").symlink_to(previous, target_is_directory=True)
+    elif invalid == "worktree":
+        (previous / ".git").rmdir()
+        (previous / ".git").write_text("gitdir: elsewhere")
+    (stage / "launch-item.before.plist").write_bytes(
+        login_item.render_login_item_plist(login_item.LoginItemPaths(rollback, home))
+    )
+    (stage / "candidate.txt").write_text(str(running))
+    if invalid != "missing-stage":
+        runtime_install.retain_deploy_stage(support, stage)
+    if invalid:
+        with pytest.raises(RuntimeError):
+            controller_deploy.trim_releases(home, support)
+        assert all(release.exists() for release in extras)
+    else:
+        controller_deploy.trim_releases(home, support)
+        assert [release.exists() for release in extras] == [False] * max(0, extra_count - 1) + [True] * min(1, extra_count)
+    assert running.is_dir() and previous.is_dir()
+    assert (stage / "launch-item.before.plist").is_file()
 
 
 def _app_at(path: Path, marker: str) -> None:
