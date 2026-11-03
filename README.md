@@ -142,11 +142,12 @@ the existing background evidence worker rechecks files and source revisions
 before recording each file independently. One changed file needs an updated list
 while the others continue. The confirmation sheet closes after saving the approval;
 the existing background discovery queues it even when the controller was idle.
-Activity shows the existing work-window waits. Cancelled
+Activity shows why file checks are waiting. Cancelled
 or unsuccessful authentication records no approval. Retrying a saved approval
 returns each file's existing result. Changed bytes or approval checks appear in
 **Needs you** and require an updated list for that file. Temporary missing files
-wait without discarding the approval. An unknown error retries before asking;
+wait without discarding the approval. Once a library scan confirms a file is
+gone, its check finishes and resumes if the file returns. An unknown error retries before asking;
 after diagnosing exhausted checks, an agent can retry through the existing
 `mediaforce evidence start tv/source.mkv --kind media_fingerprint` and
 `mediaforce evidence resume` commands, naming the affected file and check kind.

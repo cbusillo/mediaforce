@@ -58,6 +58,7 @@ class SourceEvidence:
     source_path: str | None
     profile: dict[str, Any]
     traits: dict[EvidenceKind, SourceTrait]
+    waiting_reason: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -290,10 +291,20 @@ def version_location(connection: DBClient, version: Mapping[str, Any] | DBRow) -
 
 
 def version_locations(connection: DBClient, versions: Sequence[Mapping[str, Any] | DBRow]) -> dict[str, str | None]:
+    return {version_id: location.path for version_id, location in _version_location_states(connection, versions).items()}
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceLocation:
+    path: str | None
+    waiting_reason: str | None = None
+
+
+def _version_location_states(connection: DBClient, versions: Sequence[Mapping[str, Any] | DBRow]) -> dict[str, _SourceLocation]:
     locations = {}
     for version in versions:
         identity = json.loads(version["identity_json"])
-        locations[version["version_id"]] = None if identity.get("unavailability") else identity.get("path")
+        locations[version["version_id"]] = _SourceLocation(None if identity.get("unavailability") else identity.get("path"))
     if not locations:
         return locations
     moves = _evidence_rows(
@@ -307,9 +318,9 @@ def version_locations(connection: DBClient, versions: Sequence[Mapping[str, Any]
         if version_id in resolved:
             continue
         if move["outcome"] in {"prepared", "unresolved"}:
-            locations[version_id] = None
+            locations[version_id] = _SourceLocation(None, "Waiting for this file's unfinished move")
         elif move["outcome"] == "committed":
-            locations[version_id] = str(move["to_path"]) or None
+            locations[version_id] = _SourceLocation(str(move["to_path"]) or None)
         else:
             continue
         resolved.add(version_id)
@@ -488,7 +499,7 @@ def load_source_evidence_bulk(
                                         readable_measurement_ids - {str(row["measurement_id"]) for row in measurement_rows})
     measurement_rows.sort(key=lambda row: int(row["_rowid"]), reverse=True)
     measurements = _MeasurementRows(measurement_rows)
-    locations = version_locations(connection, list(originals.values()))
+    locations = _version_location_states(connection, list(originals.values()))
     reattachments = _evidence_rows(
         connection, select(source_transitions).where(
             source_transitions.c.kind.in_(("publish", "put-back", "replacement", "reattach")),
@@ -496,7 +507,7 @@ def load_source_evidence_bulk(
         ).order_by(source_transitions.c.expected_revision.desc(), source_transitions.c.recorded_at.desc()),
         source_transitions.c.library_item_id, requested,
     )
-    current_locations: dict[int, str | None] = {}
+    current_locations: dict[int, _SourceLocation] = {}
     seen_items = set()
     for transition in reattachments:
         item_id = int(transition["library_item_id"])
@@ -509,14 +520,15 @@ def load_source_evidence_bulk(
             continue
         identity = json.loads(transition["evidence_json"])
         if identity.get("sha256") == original["sha256"] and identity.get("size_bytes") == original["size_bytes"]:
-            current_locations[item_id] = identity["path"]
+            current_locations[item_id] = _SourceLocation(identity["path"])
     if locations:
-        from mediaforce.encoding.source_publication import pending_archive_paths
+        from mediaforce.encoding.source_publication import path_in_pending_move, pending_archive_paths
 
         moving_paths = pending_archive_paths(connection)
-        locations = {version_id: None if path and Path(path) in moving_paths else path for version_id, path in locations.items()}
-        current_locations = {item_id: path if Path(path) not in moving_paths else None
-                             for item_id, path in current_locations.items() if path is not None}
+        for location_map in (locations, current_locations):
+            for key, location in location_map.items():
+                if location.path and path_in_pending_move(connection, location.path, moving_paths=moving_paths):
+                    location_map[key] = _SourceLocation(None, "Waiting for this file's unfinished move")
 
     def load_context() -> SourceEvidenceContext:
         nonlocal context
@@ -560,8 +572,8 @@ def _classify_source_evidence(
         originals: Mapping[str, DBRow],
         measurements: _MeasurementRows,
         pending_items: set[int],
-        locations: Mapping[str, str | None],
-        current_locations: Mapping[int, str | None],
+        locations: Mapping[str, _SourceLocation],
+        current_locations: Mapping[int, _SourceLocation],
         load_context: Callable[[], SourceEvidenceContext],
         confirmations: dict[str, Any],
 ) -> SourceEvidence:
@@ -576,7 +588,8 @@ def _classify_source_evidence(
     if (item_id in pending_items or current["size_bytes"] != item["size_bytes"]
             or (current["sample_fingerprint"] and current["sample_fingerprint"] != item["content_version_fingerprint"])):
         return SourceEvidence(generation, active, None, "unknown", None, {},
-                              {kind: SourceTrait(kind, reason="source_attachment_unresolved") for kind in EVIDENCE_KINDS})
+                              {kind: SourceTrait(kind, reason="source_attachment_unresolved") for kind in EVIDENCE_KINDS},
+                              "Waiting for this file's unfinished change" if item_id in pending_items else None)
     admissions = admissions_by_generation.get(generation, ())
     if len(admissions) != 1:
         return empty
@@ -628,10 +641,13 @@ def _classify_source_evidence(
                 continue
         traits[kind] = SourceTrait(kind, reason=reason or ("conflicting_measurements" if eligible else "missing_source_measurement"))
     location = current_locations.get(item_id, locations[original["version_id"]])
-    availability = "available" if (readable or owner) and not reason and location else "unavailable" if checks.get("unavailability") or not location else "unknown"
-    return SourceEvidence(generation, active, original["version_id"], availability, location,
+    availability = "available" if (readable or owner) and not reason and location.path else "unavailable" if checks.get("unavailability") or not location.path else "unknown"
+    waiting_reason = location.waiting_reason
+    if admission["tier"] == "proven" and admission["basis"] == "owner" and not owner:
+        waiting_reason = "Waiting for the saved Mac approval to become available"
+    return SourceEvidence(generation, active, original["version_id"], availability, location.path,
                           {**json.loads(original["profile_json"]), "source_size_bytes": original["size_bytes"],
-                           "content_version_fingerprint": original["sample_fingerprint"]}, traits)
+                           "content_version_fingerprint": original["sample_fingerprint"]}, traits, waiting_reason)
 
 
 def observed_measurement_matches(row: DBRow, identity: Mapping[str, Any], *, require_stat: bool = False) -> bool:

@@ -1731,30 +1731,6 @@ def test_background_followup_preserves_failed_or_waiting_safety_request(tmp_path
         assert row["work_reason"] == "sample_safety" and row["work_priority"] == 0
 
 
-def test_cancelled_kind_with_ineligible_original_does_not_enqueue_another_kind(tmp_path: Path) -> None:
-    from dataclasses import replace
-
-    config = _config(tmp_path)
-    item_id, _path = _source(config)
-    _discover(config)
-    _work(config)
-    _work(config)
-    with open_db(config.paths.db_path) as database:
-        evidence = load_source_evidence(database, item_id)
-        database.execute(
-            update(library_item_evidence_state)
-            .where(library_item_evidence_state.c.evidence_kind == "cadence_analysis")
-            .values(work_status="cancelled", retry_not_before="2000-01-01T00:00:00+00:00")
-        )
-    with patch("mediaforce.library.source_intake.load_source_evidence", return_value=replace(evidence, availability="unavailable")):
-        assert _discover(config) == 0
-    with open_db(config.paths.db_path) as database:
-        statuses = dict(
-            database.execute(select(library_item_evidence_state.c.evidence_kind, library_item_evidence_state.c.work_status)).all()
-        )
-        assert statuses == {"cadence_analysis": "failed", "media_fingerprint": "completed"}
-
-
 def test_paired_original_records_two_observed_receipts_from_one_probe(tmp_path: Path) -> None:
     config = _config(tmp_path)
     item_id, _path = _source(config)

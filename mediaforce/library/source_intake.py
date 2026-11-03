@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
-from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy import ColumnElement, and_, exists, func, or_, select, update
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow, open_db
@@ -351,6 +351,14 @@ def assess_source_input(
         commit_readable_source(connection, item, before, probe, before_commit=before_commit)
 
 
+def _original_recheck_due() -> ColumnElement[bool]:
+    return or_(
+        (library_item_evidence_state.c.work_status == "cancelled")
+        & (library_item_evidence_state.c.retry_not_before <= timestamp()),
+        (library_item_evidence_state.c.work_status == "completed") & library_item_evidence_state.c.last_error.is_not(None),
+    )
+
+
 def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, limit: int = 25) -> int:
     from mediaforce.library.evidence_queue import (
         EVIDENCE_WORK_PRIORITY_REPRESENTATIVE,
@@ -369,16 +377,17 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
     assessed = exists().where(
         source_admissions.c.version_id == library_items.c.active_source_version_id,
         current_admission_filter(),
-        func.coalesce(func.json_extract(source_admissions.c.checks_json, "$.codec_rule_hash"),
-                      func.json_extract(source_admissions.c.checks_json, "$.source_checks.codec_rule_hash")) == stable_json_hash(HISTORICAL_OUTPUT_PROFILES),
-        func.coalesce(func.json_extract(source_admissions.c.checks_json, "$.encoder_rule_hash"),
-                      func.json_extract(source_admissions.c.checks_json, "$.source_checks.encoder_rule_hash")) == encoder_rule_hash(),
+        or_(source_admissions.c.basis == "owner", and_(
+            func.coalesce(func.json_extract(source_admissions.c.checks_json, "$.codec_rule_hash"),
+                          func.json_extract(source_admissions.c.checks_json, "$.source_checks.codec_rule_hash")) == stable_json_hash(HISTORICAL_OUTPUT_PROFILES),
+            func.coalesce(func.json_extract(source_admissions.c.checks_json, "$.encoder_rule_hash"),
+                          func.json_extract(source_admissions.c.checks_json, "$.source_checks.encoder_rule_hash")) == encoder_rule_hash(),
+        )),
     )
     due_terminal = exists().where(
         library_item_evidence_state.c.library_item_id == library_items.c.id,
         library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
-        library_item_evidence_state.c.work_status == "cancelled",
-        library_item_evidence_state.c.retry_not_before <= timestamp(),
+        _original_recheck_due(),
     )
     already_queued = exists().where(
         library_item_evidence_state.c.library_item_id == library_items.c.id,
@@ -428,33 +437,10 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
                         select(library_item_evidence_state.c.evidence_kind).where(
                             library_item_evidence_state.c.library_item_id == item["id"],
                             library_item_evidence_state.c.work_reason == EVIDENCE_WORK_REASON_ORIGINAL_SOURCE,
-                            library_item_evidence_state.c.work_status == "cancelled",
-                            library_item_evidence_state.c.retry_not_before <= timestamp(),
+                            _original_recheck_due(),
                         )
                     ).scalars()
                 )
-                if (
-                    due_kinds
-                    and evidence.availability != "available"
-                    and connection.execute(
-                        select(source_admissions.c.admission_id).where(
-                            source_admissions.c.version_id == item["active_source_version_id"]
-                        )
-                    ).first()
-                ):
-                    connection.execute(
-                        update(library_item_evidence_state)
-                        .where(
-                            library_item_evidence_state.c.library_item_id == item["id"],
-                            library_item_evidence_state.c.evidence_kind.in_(due_kinds),
-                        )
-                        .values(
-                            work_status="failed",
-                            retry_not_before=None,
-                            last_error="An eligible original could not be confirmed; refresh the library before preparing another check",
-                        )
-                    )
-                    continue
                 kinds = due_kinds or (
                     [kind for kind in EVIDENCE_KINDS if evidence.traits[kind].tier == "unknown"]
                     if evidence.availability == "available"

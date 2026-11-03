@@ -251,6 +251,7 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
             except ValueError:
                 confirmed = False
             problems = []
+            waits = []
             settled = 0
             unapplied = []
             for item in items:
@@ -268,6 +269,12 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
                     continue
                 if not applied:
                     unapplied.append(item)
+                    try:
+                        _check_preview_catalog(connection, [item])
+                    except OriginalApprovalWaiting as error:
+                        waits.append(f"{item['rel_path']}: {error}")
+                    except ValueError as error:
+                        problems.append(f"{item['rel_path']}: {error}")
                 reasons = []
                 if failure:
                     reasons.append(f"{failure_details['reason']} Prepare an updated file list.")
@@ -281,22 +288,20 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
                     for work in failed_work.get(item["item_id"], []):
                         if (work["work_source_fingerprint"] == item["identity"]["sample_fingerprint"]
                                 and (not applied or evidence[item["item_id"]].traits[work["evidence_kind"]].tier != "probable")):
-                            reasons.append(f"File checks stopped after retries: {work['last_error'] or 'The check could not finish.'} Your Mac approval is still saved; retry the existing file checks after fixing the problem.")
+                            reasons.append(f"File checks stopped: {work['last_error'] or 'The check could not finish.'} Your Mac approval is still saved; retry the existing file checks after fixing the problem.")
                 if reasons:
                     problems.append(f"{item['rel_path']}: {' '.join(reasons)}")
                 elif applied:
                     settled += 1
             if confirmed and unapplied and (queue_state["cancel_requested"] or queue_state["status"] in {"cancelled", "cancel_requested"}):
-                preview["waiting"] = "Waiting until file checks are started again"
+                waits.append("Waiting for an agent to restart checks for these exact files")
+            if waits:
+                preview["waiting"] = " ".join(waits)
             if problems:
                 preview["problem"] = " ".join(problems)
             elif settled == len(items):
                 continue
             else:
-                try:
-                    _check_preview_catalog(connection, unapplied)
-                except (OSError, ValueError):
-                    continue
                 if confirmed:
                     if "waiting" not in preview:
                         continue

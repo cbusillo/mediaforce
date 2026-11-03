@@ -16,6 +16,8 @@ from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.encoding.put_back import PutBackRefused
 from mediaforce.encoding.staging import promote_one_item
 from mediaforce.library import original_registration as registration
+from mediaforce.library.evidence_queue import EVIDENCE_WORK_TERMINAL_STATUSES
+from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
 from mediaforce.library.source_evidence import append_version, ensure_active_source_version, load_source_evidence, observe_file, reconcile_source_replacement
 from mediaforce.library.source_intake import assess_source_input, queue_original_intake
 from test_source_evidence import _config, _probe as _media_probe, _put_back
@@ -460,14 +462,6 @@ def test_owner_confirmation_and_correction_keep_existing_observed_measurements(o
             assert all(trait.tier == "probable" for trait in after.traits.values())
 
 
-def test_stale_preview_no_longer_requests_owner_attention(originals: tuple[MediaforceConfig, int, Path]) -> None:
-    config, item, _path = originals
-    registration.build_original_preview(config, [item], assertion="Independent acquisition")
-    with open_db(config.paths.db_path) as connection:
-        connection.execute(update(library_items).where(library_items.c.id == item).values(source_revision=50))
-    assert registration.list_original_previews(config) == []
-
-
 def test_cancelled_background_recheck_never_commits_an_admission(originals: tuple[MediaforceConfig, int, Path]) -> None:
     from mediaforce.core.process_control import ProcessCancelledError
 
@@ -715,10 +709,8 @@ def test_assessed_owner_rows_do_not_starve_later_automatic_intake(originals: tup
             library_item_evidence_state.c.library_item_id == later)).scalar_one() == "queued"
 
 
-def test_changed_owner_rules_fail_once_and_live_problem_clears_when_rules_recover(originals: tuple[MediaforceConfig, int, Path], monkeypatch: pytest.MonkeyPatch) -> None:
-    from mediaforce.core.db_tables import library_item_evidence_state
+def test_owner_rule_problem_clears_when_rules_recover(originals: tuple[MediaforceConfig, int, Path], monkeypatch: pytest.MonkeyPatch) -> None:
     from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES
-    from test_source_intake import _work
 
     config, item, path = originals
     preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
@@ -728,13 +720,6 @@ def test_changed_owner_rules_fail_once_and_live_problem_clears_when_rules_recove
     with monkeypatch.context() as changed:
         changed.setitem(HISTORICAL_OUTPUT_PROFILES, "version", "fixture changed rule")
         with open_db(config.paths.db_path) as connection:
-            assert queue_original_intake(connection, config) > 0
-        assert _work(config) > 0
-        with open_db(config.paths.db_path) as connection:
-            assert connection.execute(select(library_item_evidence_state.c.work_status).where(
-                library_item_evidence_state.c.library_item_id == item,
-                library_item_evidence_state.c.evidence_kind == "media_fingerprint")).scalar_one() == "failed"
-            assert queue_original_intake(connection, config) == 0
             assert queue_original_intake(connection, config) == 0
         assert registration.list_original_previews(config)[0]["problem"]
     assert registration.list_original_previews(config) == []
@@ -1070,7 +1055,7 @@ def test_unavailable_source_waits_and_recovers_with_the_same_approval(originals:
         work = connection.execute(select(library_item_evidence_state).where(
             library_item_evidence_state.c.library_item_id == item,
             library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
-        assert work["work_status"] == "retry_wait" and work["attempt_count"] == 0
+        assert work["work_status"] not in EVIDENCE_WORK_TERMINAL_STATUSES and work["attempt_count"] == 0
         assert not connection.execute(select(item_events).where(item_events.c.event_type == "original_confirmation_failed")).first()
         connection.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item).values(retry_not_before=None))
     assert _work(config) > 0
@@ -1223,7 +1208,7 @@ def test_restoring_a_receipt_resumes_pending_measurements_without_reconfirmation
         work = connection.execute(select(library_item_evidence_state).where(
             library_item_evidence_state.c.library_item_id == item,
             library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
-        assert work["work_status"] == "retry_wait" and work["attempt_count"] == 0
+        assert work["work_status"] not in EVIDENCE_WORK_TERMINAL_STATUSES and work["attempt_count"] == 0
         connection.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item).values(retry_not_before=None))
     receipt.write_bytes(saved)
     assert _work(config) > 0
@@ -1269,3 +1254,201 @@ def test_pending_physical_path_blocks_approval_and_reads_across_version_aliases(
     with open_db(config.paths.db_path) as connection:
         evidence = load_source_evidence(connection, item)
         assert evidence.source_path is None and evidence.availability != "available"
+
+
+@pytest.mark.parametrize("admission", ["unassessed", "readable", "owner"])
+@pytest.mark.parametrize("stage", ["before", "during", "final"])
+def test_scan_confirmed_absence_finishes_and_same_bytes_resume(originals: tuple[MediaforceConfig, int, Path], monkeypatch: pytest.MonkeyPatch,
+                                                             admission: str, stage: str) -> None:
+    from mediaforce.core.db_tables import library_item_evidence_state
+    from mediaforce.library import evidence_worker
+    from test_source_intake import _work, _summary
+
+    config, item, path = originals
+    if admission == "readable":
+        assess_source_input(config, item, ManagedProcessController(), lambda: None)
+    elif admission == "owner":
+        preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+        _confirm(preview)
+        _apply_preview(config, preview["preview_id"], preview["manifest_hash"])
+    with open_db(config.paths.db_path) as connection:
+        version = connection.execute(select(library_items.c.active_source_version_id)).scalar_one()
+        owner_ids = [row["admission_id"] for row in _owners(connection)]
+    old_inode = path.stat().st_ino
+    removed = path.with_suffix(".absent")
+
+    def scan_absence() -> None:
+        path.rename(removed)
+        with open_db(config.paths.db_path) as database:
+            database.execute(update(library_items).where(library_items.c.id == item).values(missing_since=timestamp()))
+
+    def analyze(_path: Path, kind: str, **_kwargs: Any) -> dict[str, Any]:
+        if stage == "during":
+            scan_absence()
+            raise OSError("The source disappeared during analysis")
+        return _summary(kind)
+
+    with open_db(config.paths.db_path) as connection:
+        from mediaforce.library.evidence_queue import start_evidence_work, resume_evidence_queue, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
+        rebuild_library_item_evidence_states(connection)
+        start_evidence_work(connection, config, "tv/source.mkv", evidence_kinds=["media_fingerprint"])
+        resume_evidence_queue(connection)
+        connection.execute(update(library_item_evidence_state).values(work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE))
+    if stage == "before":
+        scan_absence()
+    fingerprint = evidence_worker._source_fingerprint
+    calls = 0
+
+    def disappear_at_final_check(*args: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            scan_absence()
+        return fingerprint(*args)
+
+    with monkeypatch.context() as patch_final:
+        if stage == "final":
+            patch_final.setattr(evidence_worker, "_source_fingerprint", disappear_at_final_check)
+        assert _work(config, analyze) > 0
+    with open_db(config.paths.db_path) as connection:
+        work = connection.execute(select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == item,
+            library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
+        assert work["work_status"] == "completed" and work["last_error"] and work["attempt_count"] == 0
+        assert queue_original_intake(connection, config) == 0
+    _work(config)
+    assert _work(config) == 0
+    path.write_bytes(removed.read_bytes())
+    assert path.stat().st_ino != old_inode
+    with open_db(config.paths.db_path) as connection:
+        connection.execute(update(library_items).where(library_items.c.id == item).values(missing_since=None))
+    _rescan(config, item, path)
+    with open_db(config.paths.db_path) as connection:
+        assert queue_original_intake(connection, config) > 0
+    assert _work(config) > 0
+    assert _work(config) > 0
+    with open_db(config.paths.db_path) as connection:
+        evidence = load_source_evidence(connection, item)
+        assert all(trait.tier == "probable" for trait in evidence.traits.values())
+        if admission != "unassessed":
+            assert evidence.original_version_id == version
+        assert [row["admission_id"] for row in _owners(connection)] == owner_ids
+        assert not connection.execute(select(library_item_evidence_state.c.last_error).where(
+            library_item_evidence_state.c.last_error.is_not(None))).first()
+        assert queue_original_intake(connection, config) == 0
+
+
+def test_waiting_owner_restoration_does_not_starve_next_discovery(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    from mediaforce.core.db_tables import library_item_evidence_state
+    from mediaforce.library.evidence_queue import start_evidence_work, resume_evidence_queue, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
+    from test_source_intake import _work
+
+    config, item, _path = originals
+    preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    _confirm(preview)
+    _apply_preview(config, preview["preview_id"], preview["manifest_hash"])
+    (registration.confirmation_directory() / f"{preview['preview_id']}.json").unlink()
+    sibling, _other = _source(config, "sibling")
+    with open_db(config.paths.db_path) as connection:
+        rebuild_library_item_evidence_states(connection)
+        start_evidence_work(connection, config, "tv/source.mkv")
+        resume_evidence_queue(connection)
+        connection.execute(update(library_item_evidence_state).values(
+            work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE, work_status="completed", last_error="File was missing"))
+        assert queue_original_intake(connection, config, limit=1) > 0
+    assert _work(config) > 0
+    assert _work(config) > 0
+    with open_db(config.paths.db_path) as connection:
+        assert queue_original_intake(connection, config, limit=1) > 0
+        assert connection.execute(select(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == sibling)).first()
+        for work in connection.execute(select(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item)).mappings():
+            assert work["work_status"] not in EVIDENCE_WORK_TERMINAL_STATUSES and work["attempt_count"] == 0
+
+
+def test_owner_rule_change_settles_without_requeue_or_retry_instruction(originals: tuple[MediaforceConfig, int, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    from mediaforce.core.db_tables import library_item_evidence_state
+    from mediaforce.library.evidence_queue import start_evidence_work, resume_evidence_queue, EVIDENCE_WORK_REASON_ORIGINAL_SOURCE
+    from mediaforce.library.source_evidence import HISTORICAL_OUTPUT_PROFILES
+    from test_source_intake import _work
+
+    config, item, _path = originals
+    preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    _confirm(preview)
+    _apply_preview(config, preview["preview_id"], preview["manifest_hash"])
+    with open_db(config.paths.db_path) as connection:
+        rebuild_library_item_evidence_states(connection)
+        start_evidence_work(connection, config, "tv/source.mkv")
+        resume_evidence_queue(connection)
+        connection.execute(update(library_item_evidence_state).values(work_reason=EVIDENCE_WORK_REASON_ORIGINAL_SOURCE))
+    monkeypatch.setitem(HISTORICAL_OUTPUT_PROFILES, "version", "changed test rule")
+    assert _work(config) > 0
+    assert _work(config) > 0
+    assert _work(config) == 0
+    with open_db(config.paths.db_path) as connection:
+        assert {trait.reason for trait in load_source_evidence(connection, item).traits.values()} == {"original_rule_changed"}
+        assert queue_original_intake(connection, config) == 0
+        assert not connection.execute(select(library_item_evidence_state).where(library_item_evidence_state.c.last_error.is_not(None))).first()
+    problems = registration.list_original_previews(config)
+    assert len(problems) == 1 and problems[0]["problem"]
+    assert "retry" not in problems[0]["problem"].lower()
+
+
+@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_unavailable_preview_member_stays_visible(originals: tuple[MediaforceConfig, int, Path], changed: bool, cancelled: bool) -> None:
+    from mediaforce.library.evidence_queue import cancel_evidence_queue
+
+    config, item, _path = originals
+    sibling, _other = _source(config, "sibling")
+    preview = registration.build_original_preview(config, [item, sibling], assertion="Independent acquisitions")
+    if cancelled:
+        _confirm(preview)
+        assert registration.queue_original_approval(config, preview["preview_id"], preview["manifest_hash"])
+    with open_db(config.paths.db_path) as connection:
+        if cancelled:
+            cancel_evidence_queue(connection)
+        connection.execute(update(library_items).where(library_items.c.id == item).values(
+            **({"source_revision": library_items.c.source_revision + 1} if changed else {"missing_since": timestamp()})))
+    listed = registration.list_original_previews(config)
+    assert len(listed) == 1 and listed[0]["canonical_json"] == preview["canonical_json"]
+    assert listed[0]["problem" if changed else "waiting"]
+
+
+@pytest.mark.parametrize("stage", ["preview", "commit"])
+def test_pending_move_is_checked_before_preview_and_under_commit_lock(originals: tuple[MediaforceConfig, int, Path], stage: str) -> None:
+    from mediaforce.encoding.source_publication import prepare_archive_removal
+
+    config, item, path = originals
+    assess_source_input(config, item, ManagedProcessController(), lambda: None)
+    if stage == "preview":
+        with open_db(config.paths.db_path) as connection:
+            assert prepare_archive_removal(connection, path)
+        with pytest.raises(ValueError):
+            registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    else:
+        preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+        _confirm(preview)
+        def start_move(database: DBClient) -> None:
+            assert prepare_archive_removal(database, path)
+        with pytest.raises(registration.OriginalApprovalWaiting):
+            _apply_preview(config, preview["preview_id"], preview["manifest_hash"], before_commit=start_move)
+    with open_db(config.paths.db_path) as connection:
+        assert not _owners(connection)
+
+
+def test_pending_move_resolves_stored_and_requested_path_aliases(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    from mediaforce.core.db_tables import source_moves
+    from mediaforce.encoding.source_publication import path_in_pending_move, prepare_archive_removal
+
+    config, item, path = originals
+    assess_source_input(config, item, ManagedProcessController(), lambda: None)
+    alias = path.parent.with_name("source-alias")
+    alias.symlink_to(path.parent, target_is_directory=True)
+    alias_path = alias / path.name
+    with open_db(config.paths.db_path) as connection:
+        assert prepare_archive_removal(connection, path)
+        connection.execute(update(source_moves).where(source_moves.c.from_path == str(path.resolve())).values(from_path=str(alias_path)))
+        assert path_in_pending_move(connection, str(path))
+        assert path_in_pending_move(connection, str(alias_path))
+        evidence = load_source_evidence(connection, item)
+        assert evidence.availability != "available" and evidence.waiting_reason
