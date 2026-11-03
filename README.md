@@ -126,6 +126,39 @@ picture formats were not. It uses that sample's record, even when today's
 remaining files differ. Older samples without recorded coverage say so.
 Every production file still passes its own quality and final-output checks.
 
+## Confirming independently acquired originals
+
+To prepare an exact list for the Mac app, name each library item explicitly:
+
+```bash
+uv run mediaforce evidence register-original 123 124 --assertion "Independently acquired before Mediaforce compressed them"
+```
+
+This prepares a saved preview, including each file's full content check. It
+never confirms an original. Open **Needs you** in the Mac app, review every
+file and any separate format exception, then confirm with macOS
+LocalAuthentication. The app saves that exact approval in its own store and
+the server rechecks files and source revisions before recording it. Cancelled
+or unsuccessful authentication records no approval. Retrying a saved approval
+returns its existing result. Dismissing a request changes no file or approval.
+
+For one item, `--from /path/to/original.mkv` supplies another original copy.
+An unverified connection to the library leaves it saved separately. A format
+exception must name its item, for example `--codec-override '123=Independently acquired AV1 download'`.
+It never permits a Mediaforce stamp, a known compressed output or unavailable
+checks. Approving an original does not upgrade old measurements: SMB and
+remote measurements still have only observed strength.
+
+The Mac app's approval files live under its Application Support directory at
+`mediaforce/mac-app/original-approvals`. This is the in-app boundary chosen by
+the Director: agents do not write confirmations or invoke original deletion.
+It is not an isolated service or protection against direct writes by the same
+macOS account. Original registration neither deletes nor restores media.
+When a replacement is identified by the background checks, only a full content
+match to one retained version for that library item reconnects its history.
+Missing files, ambiguous matches and unreadable content checks do not transfer
+an original's approval to another file or a reused catalog ID.
+
 ## Layout
 
 - CLI entry points: `mediaforce`, `mediaforce-web`

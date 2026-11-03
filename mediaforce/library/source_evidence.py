@@ -4,6 +4,7 @@ import os
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from itertools import batched
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -145,7 +146,71 @@ def ensure_active_source_version(connection: DBClient, item: Mapping[str, Any] |
     ).values(active_source_version_id=version_id, source_revision=library_items.c.source_revision + 1))
     if result.rowcount != 1:
         raise RuntimeError("Source revision changed")
+    if active:
+        connection.execute(source_transitions.insert().values(
+            operation_id=uuid4().hex, library_item_id=item_id, before_version_id=active, after_version_id=version_id,
+            expected_revision=int(item.get("source_revision") or 0), kind="replacement", outcome="committed",
+            evidence_json=json_text({"strength": "catalog-observed"}), recorded_at=now,
+        ))
     return version_id
+
+
+def retained_source_candidates(connection: DBClient, item: Mapping[str, Any]) -> list[DBRow]:
+    versions = select(source_transitions.c.before_version_id).where(source_transitions.c.library_item_id == item["id"]).union(
+        select(source_transitions.c.after_version_id).where(source_transitions.c.library_item_id == item["id"]),
+    )
+    return list(connection.execute(select(source_versions).where(
+        source_versions.c.version_id.in_(versions), source_versions.c.role.in_(("input", "output")),
+        source_versions.c.sha256.is_not(None), source_versions.c.size_bytes == item["size_bytes"],
+        source_versions.c.sample_fingerprint == item["content_version_fingerprint"],
+    )).mappings())
+
+
+def reconcile_source_replacement(connection: DBClient, item: Mapping[str, Any], identity: Mapping[str, Any]) -> str:
+    if not identity.get("sha256"):
+        raise ValueError("A full content digest is required to identify a replacement")
+    current = connection.execute(select(library_items).where(library_items.c.id == item["id"])).mappings().one()
+    if (current["source_revision"] != item["source_revision"] or current["missing_since"]
+            or current["size_bytes"] != identity["size_bytes"]
+            or current["content_version_fingerprint"] != identity["sample_fingerprint"]
+            or pending_source_operation(connection, int(item["id"]))):
+        raise RuntimeError("The file changed before its replacement could be identified")
+    active = ensure_active_source_version(connection, current)
+    current = connection.execute(select(library_items).where(library_items.c.id == item["id"])).mappings().one()
+    matches = [row for row in retained_source_candidates(connection, current) if row["sha256"] == identity["sha256"]]
+    latest = set(connection.execute(select(source_admissions.c.version_id).where(
+        source_admissions.c.version_id.in_([row["version_id"] for row in matches]),
+        source_admissions.c.admission_id.not_in(select(source_admissions.c.supersedes_id).where(source_admissions.c.supersedes_id.is_not(None))),
+    )).scalars())
+    admitted = [row for row in matches if row["version_id"] in latest]
+    if len(admitted) == 1 and all(row["generation_id"] == admitted[0]["generation_id"]
+                                 and row["role"] == admitted[0]["role"] for row in matches):
+        matches = admitted
+    now = datetime.now(UTC).isoformat()
+    if len(matches) == 1:
+        version = str(matches[0]["version_id"])
+    else:
+        generation = uuid4().hex
+        connection.execute(source_generations.insert().values(generation_id=generation, created_at=now))
+        version = append_version(connection, generation_id=generation, role="unknown", identity=identity,
+                                 profile={"video_codec": current["video_codec"]}, recorded_at=now)
+    changed = connection.execute(update(library_items).where(
+        library_items.c.id == item["id"], library_items.c.source_revision == current["source_revision"],
+    ).values(active_source_version_id=version, source_revision=library_items.c.source_revision + 1))
+    if changed.rowcount != 1:
+        raise RuntimeError("The file changed before its replacement could be attached")
+    operation = uuid4().hex
+    connection.execute(source_transitions.insert().values(
+        operation_id=operation, library_item_id=item["id"], before_version_id=active, after_version_id=version,
+        expected_revision=current["source_revision"], kind="reattach" if len(matches) == 1 else "replacement",
+        outcome="committed", evidence_json=json_text(identity), recorded_at=now,
+    ))
+    if len(matches) == 1:
+        connection.execute(source_moves.insert().values(
+            operation_id=operation, ordinal=0, version_id=version, from_path=identity["path"], to_path=identity["path"],
+            phase="observed", checks_json=json_text(identity),
+        ))
+    return version
 
 
 def append_measurement(connection: DBClient, *, version_id: str | None, kind: EvidenceKind, binding: str,
@@ -473,10 +538,17 @@ def _classify_source_evidence(
                   and checks.get("encode_link") and checks.get("unavailability"))
     reason = str(checks.get("reason") or "original_not_assessed")
     readable = admission["tier"] == "probable" and admission["basis"] == "readable-source" and original["role"] == "input"
-    if readable:
+    from mediaforce.library.original_registration import owner_confirmation_matches
+
+    owner = (admission["tier"] == "proven" and admission["basis"] == "owner" and original["role"] == "input"
+             and owner_confirmation_matches(admission, original))
+    if owner:
+        checks = checks["source_checks"]
+    if readable or owner:
         from mediaforce.library.source_intake import assess_readable_source
 
-        refreshed = assess_readable_source(connection, cast(dict[str, Any], dict(original)), checks.get("raw_probe", {}), load_context=load_context)
+        refreshed = assess_readable_source(connection, cast(dict[str, Any], dict(original)), checks.get("raw_probe", {}),
+                                          load_context=load_context, codec_override=checks.get("exception_reason") if owner else None)
         reason = refreshed.get("reason") or ""
         if (checks.get("codec_rule_hash") != refreshed.get("codec_rule_hash")
                 or checks.get("encoder_rule_hash") != refreshed.get("encoder_rule_hash")):
@@ -487,13 +559,12 @@ def _classify_source_evidence(
         output_check = context.output_check(original)
         if output_check in {"match", "unresolved"}:
             reason = "known_output_match" if output_check == "match" else "possible_output_match"
-    # Protected owner confirmation and strict binding are owned by #999. Application-DB rows alone confer no authority.
     for kind in EVIDENCE_KINDS:
         allowed_ids = set(checks.get("measurement_ids", []) if readable else [])
         rows = measurements.for_original(str(original["version_id"]), kind, allowed_ids)
         eligible = [row for row in rows if not reason and row["binding"] == "historical-plan-sampled"
                     and _historical_measurement_matches(row, checks)]
-        if readable and not reason:
+        if (readable or owner) and not reason:
             eligible = [row for row in rows if observed_measurement_matches(row, cast(dict[str, Any], dict(original)))][:1]
         summaries = {row["summary_json"] for row in eligible}
         if len(summaries) == 1:
@@ -505,7 +576,7 @@ def _classify_source_evidence(
                 continue
         traits[kind] = SourceTrait(kind, reason=reason or ("conflicting_measurements" if eligible else "missing_source_measurement"))
     location = locations[original["version_id"]]
-    availability = "available" if readable and not reason and location else "unavailable" if checks.get("unavailability") or not location else "unknown"
+    availability = "available" if (readable or owner) and not reason and location else "unavailable" if checks.get("unavailability") or not location else "unknown"
     return SourceEvidence(generation, active, original["version_id"], availability, location,
                           {**json.loads(original["profile_json"]), "source_size_bytes": original["size_bytes"],
                            "content_version_fingerprint": original["sample_fingerprint"]}, traits)

@@ -109,7 +109,11 @@ struct Attention: Equatable, Sendable {
                 opens: .item(season.prefix)
             )
         }
-        return kinds + samples + seasons + computers
+        let originals = (facts.originalPreviews ?? []).map { preview in
+            AttentionNotice(id: "original:\(preview.id)", title: "Original files need your confirmation",
+                            body: "Review the exact file list and confirm it in Mediaforce.", opens: .needsYou)
+        }
+        return kinds + samples + seasons + computers + originals
     }
 
     private static func kindNoticeStage(_ kind: MainWindowFacts.PendingKind) -> String {

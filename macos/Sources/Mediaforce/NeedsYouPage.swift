@@ -3,17 +3,32 @@ import SwiftUI
 struct NeedsYouPage: View {
     let facts: MainWindowFacts
     let posters: PosterStore
+    let model: MainWindowModel
     let open: (Place) -> Void
+    @State private var originalPreview: OriginalPreview?
 
     var body: some View {
         PageFrame(title: Words.needsYou, subtitle: "\(Attention.waitingItems(facts).count) waiting") {
-            let items = Attention.waitingItems(facts)
-            if items.isEmpty {
+            let items = Attention.waitingItems(facts).filter { !$0.id.hasPrefix("original:") }
+            let previews = facts.originalPreviews ?? []
+            if items.isEmpty && previews.isEmpty {
                 Text("Nothing needs you right now.")
                     .foregroundStyle(.secondary)
             }
             WaitingItems(items: items, posters: posters, open: open)
+            ForEach(previews) { preview in
+                DecisionLine {
+                    if let list = try? preview.fileList() {
+                        Text("\(list.items.count) original files need your confirmation")
+                    } else {
+                        Text("An original-file request needs preparing again")
+                    }
+                } buttons: {
+                    Button("Review file list") { originalPreview = preview }
+                }
+            }
         }
+        .sheet(item: $originalPreview) { OriginalApprovalView(preview: $0, model: model) }
     }
 }
 

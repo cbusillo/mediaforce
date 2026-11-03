@@ -1187,10 +1187,15 @@ def create_app(
 
     register_release_routes(app, work_snapshot=_release_work_snapshot)
 
+    from mediaforce.web.routes.originals import register_original_routes
+    from mediaforce.library.original_registration import list_original_previews
+
+    register_original_routes(app, config)
+
     def _main_window_payload() -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection, kind_snapshot(connection, config, _load_calibration_state):
             cards = [asdict(card) for card in _list_library_detail_cards(config, connection)]
-            return app_window_payload(
+            payload = app_window_payload(
                 connection,
                 library_types=config.library_type_map,
                 season_cards=cards,
@@ -1201,6 +1206,8 @@ def create_app(
                 observed_at=datetime.now(UTC),
                 kinds=_sample_start_status(kinds_payload(connection, config, load_calibration_state=_load_calibration_state)["kinds"]),
             )
+            payload["original_previews"] = list_original_previews(config)
+            return payload
 
     def _activity_payload() -> dict[str, Any]:
         from mediaforce.web.runtime.app_activity import activity_payload

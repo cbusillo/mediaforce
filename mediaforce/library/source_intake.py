@@ -41,6 +41,8 @@ from mediaforce.library.source_evidence import (
     observe_file,
     observed_measurement_matches,
     pending_source_operation,
+    reconcile_source_replacement,
+    retained_source_candidates,
 )
 
 
@@ -79,6 +81,7 @@ def _history_present(connection: DBClient, item_id: int) -> bool:
 def assess_readable_source(
     connection: DBClient, identity: Mapping[str, Any], probe: Mapping[str, Any], *, context: SourceEvidenceContext | None = None,
     load_context: Callable[[], SourceEvidenceContext] | None = None,
+    codec_override: str | None = None,
 ) -> dict[str, Any]:
     streams = probe.get("streams")
     format_info = probe.get("format")
@@ -100,10 +103,15 @@ def assess_readable_source(
         return {**checks, "reason": "mediaforce_stamp"}
     codec = next((normalize_codec(stream.get("codec_name")) for stream in streams if stream.get("codec_type") == "video"), "")
     checks.update(video_codec=codec, stamp="absent", raw_probe=probe)
-    if codec not in HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]:
+    if codec not in {*HISTORICAL_OUTPUT_PROFILES["known_input_codecs"], *HISTORICAL_OUTPUT_PROFILES["codecs"]}:
         return {**checks, "reason": "historical_output_codec_or_unknown"}
-    if any(matches_historical_encoder(value) for key, value in tags if "encoder" in key):
-        return {**checks, "reason": "historical_output_encoder"}
+    matches = ([f"codec:{codec}"] if codec in HISTORICAL_OUTPUT_PROFILES["codecs"] else [])
+    matches += [f"encoder:{value}" for key, value in tags if "encoder" in key and matches_historical_encoder(value)]
+    if matches and not codec_override:
+        return {**checks, "reason": "historical_output_encoder" if any(value.startswith("encoder:") for value in matches)
+                else "historical_output_codec_or_unknown"}
+    if codec_override:
+        checks.update(exception_matches=matches, exception_reason=codec_override)
     if not identity.get("sha256"):
         return {**checks, "reason": "digest_unavailable"}
     context = context or (load_context() if load_context is not None else load_source_evidence_context(connection))
@@ -234,7 +242,9 @@ def assess_source_input(
         item = cast(
             dict[str, Any], dict(connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one())
         )
-        if _history_present(connection, item_id):
+        history = _history_present(connection, item_id)
+        replacement = bool(retained_source_candidates(connection, item))
+        if history and not replacement:
             return
         active = (
             connection.execute(select(source_versions).where(source_versions.c.version_id == item["active_source_version_id"]))
@@ -261,6 +271,11 @@ def assess_source_input(
     if not _matches_scanned_identity(item, before):
         raise RuntimeError("The file changed since its library scan; scan it again before checking the original")
     saved = json.loads(active["identity_json"]) if active else {}
+    if admission and admission["basis"] == "owner":
+        from mediaforce.library.original_registration import owner_confirmation_matches
+
+        if owner_confirmation_matches(admission) and all(saved.get(key) == before[key] for key in ("path", "stat", "size_bytes", "sample_fingerprint")):
+            return
     if (
         admission
         and all(saved.get(key) == before[key] for key in ("path", "stat", "size_bytes", "sample_fingerprint"))
@@ -283,6 +298,9 @@ def assess_source_input(
             if (current["source_revision"] != item["source_revision"] or pending_source_operation(connection, item_id)
                     or not _matches_scanned_identity(current, before)):
                 raise RuntimeError("The file changed before its content check could be recorded")
+            if history:
+                reconcile_source_replacement(connection, current, before)
+                return
             active_id = ensure_active_source_version(connection, current)
             version = connection.execute(select(source_versions).where(source_versions.c.version_id == active_id)).mappings().one()
             if version["role"] == "output":
@@ -360,9 +378,21 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
             .where(
                 LIBRARY_ITEM_PRESENT,
                 library_items.c.media_root.in_(tuple(config.source_root_map)),
-                library_items.c.video_codec.in_(HISTORICAL_OUTPUT_PROFILES["known_input_codecs"]),
+                or_(
+                    library_items.c.video_codec.in_(HISTORICAL_OUTPUT_PROFILES["known_input_codecs"])
+                    & ~or_(*(exists().where(condition) for condition in _history_conditions(library_items.c.id))),
+                    library_items.c.active_source_version_id.in_(select(source_versions.c.version_id).where(
+                        source_versions.c.role == "unknown", source_versions.c.sha256.is_(None),
+                    )) & exists().where(
+                        source_versions.c.sha256.is_not(None), source_versions.c.role.in_(("input", "output")),
+                        source_versions.c.size_bytes == library_items.c.size_bytes,
+                        source_versions.c.sample_fingerprint == library_items.c.content_version_fingerprint,
+                        exists().where(source_transitions.c.library_item_id == library_items.c.id,
+                            or_(source_transitions.c.before_version_id == source_versions.c.version_id,
+                                source_transitions.c.after_version_id == source_versions.c.version_id)).correlate(library_items, source_versions),
+                    ).correlate(library_items),
+                ),
                 or_((~assessed) & (~already_queued), due_terminal),
-                ~or_(*(exists().where(condition) for condition in _history_conditions(library_items.c.id))),
             )
             .order_by(library_items.c.id)
             .limit(limit)
@@ -374,9 +404,15 @@ def queue_original_intake(connection: DBClient, config: MediaforceConfig, *, lim
     context = load_source_evidence_context(connection)
     for raw_item in rows:
         item = cast(dict[str, Any], dict(raw_item))
+        if _history_present(connection, int(item["id"])):
+            active = connection.execute(select(source_versions).where(source_versions.c.version_id == item["active_source_version_id"])).mappings().one_or_none()
+            if not active or active["role"] != "unknown" or active["sha256"] or not retained_source_candidates(connection, item):
+                continue
         try:
             with connection.begin_nested():
                 evidence = load_source_evidence(connection, int(item["id"]), context=context)
+                if evidence.availability == "available" and all(trait.tier == "probable" for trait in evidence.traits.values()):
+                    continue
                 due_kinds = list(
                     connection.execute(
                         select(library_item_evidence_state.c.evidence_kind).where(

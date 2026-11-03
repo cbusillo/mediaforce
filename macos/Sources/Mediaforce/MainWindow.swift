@@ -411,7 +411,7 @@ struct MainPage: View {
             case .activity:
                 ActivityPage(facts: facts, model: model, open: open)
             case .needsYou:
-                NeedsYouPage(facts: facts, posters: model.posters, open: open)
+                NeedsYouPage(facts: facts, posters: model.posters, model: model, open: open)
             case .spaceSaved:
                 SpaceSavedPage(facts: facts, model: model) { open(.item($0)) }
                     // Deleting backups changes what the page shows, so it reads its facts again at once.

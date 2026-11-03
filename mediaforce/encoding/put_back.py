@@ -68,7 +68,8 @@ def _original_version(connection: DBClient, item_id: int, active: str, archive_i
     if replaced:
         version = connection.execute(select(source_versions).where(source_versions.c.version_id == replaced)).mappings().one()
         if (version["size_bytes"] != archive_identity["size_bytes"]
-                or version["sample_fingerprint"] != archive_identity["sample_fingerprint"]):
+                or version["sample_fingerprint"] != archive_identity["sample_fingerprint"]
+                or (version["sha256"] and version["sha256"] != archive_identity["sha256"])):
             raise PutBackRefused("backup_changed", "Its original backup changed since it was made, so it was not put back.")
         return str(replaced)
     generation = connection.execute(select(source_versions.c.generation_id).where(
@@ -90,7 +91,7 @@ def _prepare(connection: DBClient, item: Mapping[str, Any] | RowMapping, *, libr
             or (item["content_version_fingerprint"]
                 and library_identity["sample_fingerprint"] != item["content_version_fingerprint"])):
         raise PutBackRefused("file_changed", "The file in the library changed since Mediaforce last looked at it.")
-    archive_identity = observe_file(archive_path)
+    archive_identity = observe_file(archive_path, full_digest=True)
     active = ensure_active_source_version(connection, item)
     current = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
     original = _original_version(connection, item_id, active, {**archive_identity, "observed_at": now})

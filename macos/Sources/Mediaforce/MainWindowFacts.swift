@@ -13,6 +13,7 @@ struct MainWindowFacts: Decodable, Sendable {
     let lastChange: Event?
     let originalBackups: OriginalBackups
     let keptOriginal: KeptOriginal
+    var originalPreviews: [OriginalPreview]?
 
     struct Work: Decodable, Sendable {
         let state: String
