@@ -60,9 +60,13 @@ Mediaforce.app/Contents/
 
 Use the existing BD_to_AVP embedded-Python staging approach as the starting
 recipe, adapted to Mediaforce's wheel and locked dependencies. Build for the
-current Mac target without silently reducing its supported CPU/OS range;
-check all native dependencies and set the feed's minimum-system metadata from
-the built app. Prove relocation and signing before choosing final subpaths.
+current Mac target without reducing its supported CPU/OS range. BD_to_AVP's
+recipe is arm64-only and its product targets macOS 26, whereas this app targets
+macOS 15 and has no architecture override. Reuse the approach, not that
+manifest: qualify the runtime and native wheels for each existing Release
+architecture and macOS 15. A narrower target needs a separate Director choice,
+not an incidental packaging change. Set feed minimum-system metadata from the
+built app. Prove relocation and signing before choosing final subpaths.
 Python must not depend on a developer checkout, venv symlink, `uv`, Homebrew
 Python, Xcode or a package download at launch. Disable bytecode writes inside
 the bundle. Include migrations and package defaults explicitly; installed
@@ -81,10 +85,14 @@ the default config's package location. Recommend a private credential source
 beside the configured database, explicitly resolved by the installed loader.
 Remove clone-relative credential lookup/carry-forward for bundled operation;
 adapt `require_release_directory` callers to validate the signed bundle and
-saved support paths instead. If credentials exist only in the old clone,
-retain that source until the Director provisions the persistent source through
-an approved route. This plan grants no permission to copy/export credential
-files; provisioning and its access boundary must be resolved before cutover.
+saved support paths instead. For first cutover, record the existing credential
+file's exact path from the saved old service configuration and have the bundled
+loader read that source directly. Keep its containing legacy release protected
+as long as it is used. This is the supported transition when no persistent
+source has been provisioned; missing/unreadable credentials prevent cutover
+before the old service stops. Consolidating that file beside the database is
+a later Director-controlled provisioning step, not a hidden dependency on a
+new grant. This plan grants no permission to copy/export credential files.
 Do not put secret contents into update-stage evidence or backup the credential
 file just to record its location. Record only its private path and permissions.
 
@@ -105,12 +113,18 @@ repair through the same service path, with no second concurrent server.
 
 Sparkle owns download, archive verification, replacement and relaunch. The app
 and bundled service own safe admission and database recovery. Start with
-standard Sparkle update UI and automatic checks; recommend installation only
-after the user accepts it, then defer until all work is safely idle. Silent
-automatic installation is an unsettled product choice and is not enabled here.
+standard Sparkle update UI and automatic checks; recommend presenting an
+installable update only after safe preparation, then installing on user
+acceptance. Disable `SUAllowsAutomaticUpdates` for this proposed consent model.
+Automatic installation after preparation would remove that recurring act, and
+remains the Director's choice in this review. The consent model costs downtime
+for download and waiting for acceptance after the server stops.
 
-1. Download and verify the exact candidate without stopping current work.
-   Serialize each phase with the existing deploy/cleanup locks. Add one durable
+1. Discover the candidate's appcast identity while current work continues, but
+   refuse `shouldProceedWithUpdate` until safe preparation is complete: a thrown
+   error prevents the offer, download and installation. Schedule preparation
+   outside that synchronous delegate, then recheck the same candidate when
+   ready. Serialize each phase with the existing deploy/cleanup locks. Add one durable
    update-intent record under the configured runtime support directory, naming
    the exact old/new build, stage and prior pause state. The initiating app
    writes it before fencing; each resumed phase acquires the same lock and
@@ -139,9 +153,11 @@ automatic installation is an unsettled product choice and is not enabled here.
    both app and database copies are verified may `retain_deploy_stage` move
    the existing protected-stage pointer. Partial attempts never displace the
    previous usable pair, including after repeated failed attempts.
-5. Permit Sparkle installation only after those proofs. Cover its quit,
-   install-on-quit, background-install and relaunch paths; postponing relaunch
-   alone is not a replacement gate. Prevent launchd KeepAlive from restarting
+5. Only now let `shouldProceedWithUpdate` accept the exact prepared build;
+   refuse a different build and any recorded failed build on both manual and
+   automatic checks. Sparkle may download, verify and install it through its
+   standard UI. Once it proceeds, keep the server stopped and admissions fenced
+   even if installation is postponed until quit. Prevent launchd KeepAlive from restarting
    the old executable during replacement. A crash/reboot must encounter the
    saved stage before either server can open the database or resume work.
 6. Start the candidate through the saved service path. Verify the exact bundled
@@ -152,10 +168,14 @@ automatic installation is an unsettled product choice and is not enabled here.
    Failed/unknown phases retain the intent for recovery. A lost response is reconciled
    from durable state, never retried as a new install.
 
-Qualification must demonstrate the Sparkle delegates can enforce step 5 on
-all installation paths. If standard integration cannot, bring that evidence
-back to the Director before substituting an installer or weakening the gate.
-The app can quit normally without installing while work is active.
+The Sparkle reference states that installation can proceed on quit despite
+relaunch deferral; safety must be established before allowing the update item,
+not after acceptance. Prove manual/background checks, dismissal, quit/logout
+while busy and prepared-install interruption using two installed signed builds.
+Before preparation, quitting must not install anything. After preparation,
+do not reopen admissions merely because the UI was dismissed: reconcile
+Sparkle's pending-install state first. Canceling with proof that no install is
+pending can restore the unchanged server and clear the intent under the lock.
 
 ## Rollback and retention
 
@@ -178,6 +198,9 @@ exclude that build from subsequent Sparkle offers until a corrected newer
 build is available or the failure has been explicitly reconciled. Otherwise
 automatic checks could keep reinstalling the same failed update. This is
 recovery evidence, not a new release channel or a global feed downgrade.
+Use the same `shouldProceedWithUpdate` gate, not Sparkle's user Skip preference,
+which manual checks can bypass. Ship this gate in the first Sparkle-capable
+app so a restored older bundle already understands failed-build evidence.
 
 Reuse the existing deployment-stage retention count and protected-stage
 pointer for bundled backups. Keep the prior healthy app/database pair until
@@ -237,7 +260,9 @@ ships in the app. Never copy keys from BD_to_AVP. Mediaforce currently has no
 release workflow; availability of its CI signing inputs, EdDSA key, Pages
 setup and automation permissions has not been established by this source
 review. Before any release request, walk the full publishing path read-only
-and report missing setup together. Any new access grant goes to the Director;
+and report missing setup together, including anonymous access to feed and
+release downloads. The repository was public when checked for this draft;
+verify that again before publication. Any new access grant goes to the Director;
 no secrets or policy changes are authorized by approval of this document.
 
 ## Delivery order after approval
@@ -266,7 +291,9 @@ in this order, without a second lasting deployment system:
    Verify app/server identity and saved rollback; remove
    the replaced clone-deploy code, interim trim and obsolete docs in the same
    cutover change once its replacement is usable. Retain legacy copies until
-   verified retirement is safe. Update release-flow.md to the delivered path.
+   verified retirement is safe. Update release-flow.md to the delivered path
+   and delete this proposal and its index entry; the issue retains its reviewed
+   historical revision rather than a second maintained procedure.
 
 Removed when delivered: per-deploy Git clone and venv, local build on the
 controller, separate server/app deployment and its interim clone trim.
