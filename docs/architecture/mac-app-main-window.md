@@ -10,6 +10,11 @@ controller storage record and the saved sample state the library cards already
 read from the local review cache. It reads no shared media storage, so it
 still answers when that storage is gone, and it starts no work.
 
+Within one read, season approval checks reuse the kinds already measured for
+the window. Seasons outside that report use the normal evidence lookup. The
+next request builds a fresh report, so changed measurements and genres apply
+without waiting for a cache to expire.
+
 ## Sections
 
 - `work`: `state` is `running`, `idle`, `paused` (the owner paused the queue)

@@ -1492,3 +1492,29 @@ def test_a_new_sample_without_a_finished_draft_keeps_older_kind_samples_quiet(tm
         connection.commit()
         state = card_page_states(connection, config, [(SEASON, None, None)], PageStateSources(load, lambda *_args: {}))[SEASON]
     assert state["key"] == "waiting_for_kind" and not state["needs_you"]
+
+
+@pytest.mark.parametrize("status", ["discovered", "promoted"])
+def test_window_kind_snapshot_reuses_measurements_and_refreshes_genre_changes(tmp_path: Path, status: str) -> None:
+    config = _config(tmp_path)
+    kinds = SeasonKinds()
+    load = KindAwareLoader(lambda *_args: None, kinds)
+    assert approve_kind(config, DARKER, APPROVED_SEASON, _approved(config), approved_at="now")["ok"]
+    with open_db(config.paths.db_path) as connection:
+        item_id = _content_item(connection, EPISODE, status=status, codec="h264", current_dark=0.5)
+        _admit_historical_original(connection, item_id, dark=0.5)
+        connection.execute(series_metadata.insert().values(
+            series_prefix="tv/Thriller", tmdb_genres_json='["Drama"]', updated_at="now"))
+        connection.commit()
+        with kind_snapshot(connection, config, load), patch(
+                "mediaforce.web.runtime.kind_approvals.season_grouping", wraps=season_grouping) as grouping:
+            assert kinds(config, SEASON) == DARKER
+            approval = effective_production_approval(config, EPISODE, load)
+            assert approval is not None and approval.kind == DARKER
+            assert grouping.call_count == (1 if status == "promoted" else 0)
+        connection.execute(series_metadata.update().values(tmdb_genres_json='["Animation"]'))
+        connection.commit()
+        with kind_snapshot(connection, config, load):
+            assert kinds(config, SEASON) == "cartoon"
+            assert effective_production_approval(config, EPISODE, load) is None
+        assert kinds(config, SEASON) == "cartoon"
