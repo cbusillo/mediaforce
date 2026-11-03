@@ -20,6 +20,8 @@ struct NeedsYouPage: View {
                 DecisionLine {
                     if let problem = preview.problem {
                         Text(problem)
+                    } else if let waiting = preview.waiting {
+                        Text(waiting)
                     } else if let list = try? preview.fileList() {
                         Text("\(list.items.count) original files need your confirmation")
                     } else {

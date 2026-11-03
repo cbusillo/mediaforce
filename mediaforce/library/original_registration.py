@@ -62,14 +62,17 @@ def _current_admissions(connection: DBClient, generation: str) -> list[DBRow]:
 
 
 def _preview_item(connection: DBClient, item_id: int, override: str | None) -> dict[str, Any]:
+    from mediaforce.encoding.source_publication import path_in_pending_move
+
     item = connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one_or_none()
     if item is None:
         raise ValueError("The named library item is unavailable")
     if not item["active_source_version_id"]:
         raise ValueError("This file changed while preparing its list. Prepare it again.")
-    if item["missing_since"] or pending_source_operation(connection, item_id):
+    path = Path(item["source_path"]).expanduser().resolve()
+    if item["missing_since"] or pending_source_operation(connection, item_id) or path_in_pending_move(connection, str(path)):
         raise ValueError("This file is missing or has an unfinished change")
-    identity = source_evidence.observe_file(Path(item["source_path"]).expanduser().resolve(), full_digest=True)
+    identity = source_evidence.observe_file(path, full_digest=True)
     checks = _checks(connection, identity, override)
     active = connection.execute(select(source_versions).where(
         source_versions.c.version_id == item["active_source_version_id"],
@@ -224,11 +227,14 @@ def _record_member_failure(connection: DBClient, preview: Mapping[str, Any], ite
 
 
 def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
+    from mediaforce.library.evidence_queue import load_evidence_queue_state
+
     pending = []
     previews = _stored_previews(config)
     item_ids = [item["item_id"] for preview in previews for item in json.loads(preview["canonical_json"])["items"]]
     with open_db(config.paths.db_path) as connection:
         confirmations: dict[str, Any] = {}
+        queue_state = load_evidence_queue_state(connection)
         evidence = load_source_evidence_bulk(connection, item_ids)
         owners = {row["item_id"]: row for row in connection.execute(
             current_owner_admissions_query().where(library_items.c.id.in_(item_ids))).mappings()}
@@ -246,6 +252,7 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
                 confirmed = False
             problems = []
             settled = 0
+            unapplied = []
             for item in items:
                 try:
                     applied = _member_applied(connection, preview, item)
@@ -259,6 +266,8 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
                 if failure and owner is not None and owner_valid and failure_details.get("owner_admission_id") != owner["admission_id"]:
                     settled += 1
                     continue
+                if not applied:
+                    unapplied.append(item)
                 reasons = []
                 if failure:
                     reasons.append(f"{failure_details['reason']} Prepare an updated file list.")
@@ -277,18 +286,21 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
                     problems.append(f"{item['rel_path']}: {' '.join(reasons)}")
                 elif applied:
                     settled += 1
+            if confirmed and unapplied and (queue_state["cancel_requested"] or queue_state["status"] in {"cancelled", "cancel_requested"}):
+                preview["waiting"] = "Waiting until file checks are started again"
             if problems:
                 preview["problem"] = " ".join(problems)
             elif settled == len(items):
                 continue
             else:
                 try:
-                    _check_preview_catalog(connection, items)
+                    _check_preview_catalog(connection, unapplied)
                 except (OSError, ValueError):
                     continue
                 if confirmed:
-                    continue
-                if (confirmation_directory() / f"{preview['preview_id']}.json").exists():
+                    if "waiting" not in preview:
+                        continue
+                elif (confirmation_directory() / f"{preview['preview_id']}.json").exists():
                     preview["problem"] = "The saved Mac approval is invalid. Restore it or prepare an updated file list."
             try:
                 if (confirmation_directory() / f"{preview['preview_id']}.dismissed").read_text() == preview["manifest_hash"]:
@@ -300,13 +312,16 @@ def list_original_previews(config: MediaforceConfig) -> list[dict[str, Any]]:
 
 
 def _check_preview_catalog(connection: DBClient, items: Sequence[Mapping[str, Any]]) -> None:
+    from mediaforce.encoding.source_publication import path_in_pending_move
+
     for item in items:
         current = connection.execute(select(library_items).where(library_items.c.id == item["item_id"])).mappings().one_or_none()
         if (current is None or current["source_revision"] != item["source_revision"]
                 or current["active_source_version_id"] != item["active_version_id"] or current["source_path"] != item["source_path"]
                 or current["rel_path"] != item["rel_path"] or not _matches_scanned_identity(current, item["identity"])):
             raise ValueError("This file changed. Prepare an updated file list.")
-        if current["missing_since"] or pending_source_operation(connection, item["item_id"]):
+        if (current["missing_since"] or pending_source_operation(connection, item["item_id"])
+                or path_in_pending_move(connection, item["identity"]["path"])):
             raise OriginalApprovalWaiting("Waiting for this file or its unfinished move to become available")
 
 

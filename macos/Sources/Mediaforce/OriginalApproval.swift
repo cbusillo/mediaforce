@@ -9,6 +9,7 @@ struct OriginalPreview: Decodable, Identifiable, Sendable {
     let canonicalJson: String
     let challenge: String
     var problem: String? = nil
+    var waiting: String? = nil
     var id: String { previewId }
     var validIdentifier: Bool { previewId.count == 32 && previewId.allSatisfy { $0.isHexDigit && !$0.isUppercase } }
 
@@ -124,8 +125,12 @@ struct OriginalApprovalView: View {
         PageFrame(title: "Confirm original files") {
             if let problem = preview.problem {
                 Text(problem)
+                if let waiting = preview.waiting { Text(waiting).foregroundStyle(.secondary) }
                 Button("Close") { dismiss() }
                 Button("Dismiss request") { Task { await dismissRequest() } }
+            } else if let waiting = preview.waiting {
+                Text(waiting)
+                Button("Close") { dismiss() }
             } else if let list = try? preview.fileList() {
                 Text(list.assertion)
                 Text("Confirm that \(Words.count(list.items.count, "file")) \(list.items.count == 1 ? "was" : "were") acquired independently, before Mediaforce compressed \(list.items.count == 1 ? "it" : "them").")

@@ -142,7 +142,7 @@ the existing background evidence worker rechecks files and source revisions
 before recording each file independently. One changed file needs an updated list
 while the others continue. The confirmation sheet closes after saving the approval;
 the existing background discovery queues it even when the controller was idle.
-Activity shows its ordinary progress and work-window waits. Cancelled
+Activity shows the existing work-window waits. Cancelled
 or unsuccessful authentication records no approval. Retrying a saved approval
 returns each file's existing result. Changed bytes or approval checks appear in
 **Needs you** and require an updated list for that file. Temporary missing files

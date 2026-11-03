@@ -510,10 +510,11 @@ def load_source_evidence_bulk(
         identity = json.loads(transition["evidence_json"])
         if identity.get("sha256") == original["sha256"] and identity.get("size_bytes") == original["size_bytes"]:
             current_locations[item_id] = identity["path"]
-    if current_locations:
+    if locations:
         from mediaforce.encoding.source_publication import pending_archive_paths
 
         moving_paths = pending_archive_paths(connection)
+        locations = {version_id: None if path and Path(path) in moving_paths else path for version_id, path in locations.items()}
         current_locations = {item_id: path if Path(path) not in moving_paths else None
                              for item_id, path in current_locations.items() if path is not None}
 

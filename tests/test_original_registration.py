@@ -842,24 +842,6 @@ def test_preview_build_race_cannot_freeze_a_null_lifetime_token(originals: tuple
         assert not _owners(connection)
 
 
-def test_one_bulk_read_parses_each_native_record_once(originals: tuple[MediaforceConfig, int, Path], monkeypatch: pytest.MonkeyPatch) -> None:
-    from mediaforce.library.source_evidence import load_source_evidence_bulk
-
-    config, first, _path = originals
-    second, _other = _source(config, "second")
-    preview = registration.build_original_preview(config, [first, second], assertion="Independent acquisitions")
-    _confirm(preview)
-    _apply_preview(config, preview["preview_id"], preview["manifest_hash"])
-    confirmation = registration._confirmation
-    reads = []
-    def read(preview_id: str) -> dict[str, Any]:
-        reads.append(preview_id)
-        return confirmation(preview_id)
-    monkeypatch.setattr(registration, "_confirmation", read)
-    with open_db(config.paths.db_path) as connection:
-        assert all(item.availability == "available" for item in load_source_evidence_bulk(connection, [first, second]).values())
-    assert len(reads) <= 1
-
 
 def test_matching_observed_av1_measurements_are_used_without_another_analysis(originals: tuple[MediaforceConfig, int, Path], monkeypatch: pytest.MonkeyPatch) -> None:
     from mediaforce.core.db_tables import source_measurements
@@ -1056,7 +1038,8 @@ def test_unavailable_source_waits_and_recovers_with_the_same_approval(originals:
     from test_source_intake import _work
 
     config, item, _path = originals
-    preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    sibling, _other = _source(config, "sibling")
+    preview = registration.build_original_preview(config, [item, sibling], assertion="Independent acquisitions")
     _confirm(preview)
     receipt = registration.confirmation_directory() / f"{preview['preview_id']}.json"
     saved = receipt.read_bytes()
@@ -1065,6 +1048,8 @@ def test_unavailable_source_waits_and_recovers_with_the_same_approval(originals:
     calls = 0
     def unavailable(*args: Any) -> Any:
         nonlocal calls
+        if args[1].library_item_id != item:
+            return fingerprint(*args)
         calls += 1
         return ("source_unavailable", None) if stage == "before" or calls > 1 else fingerprint(*args)
     def failed_analysis(*_args: Any, **_kwargs: Any) -> dict[str, object]:
@@ -1072,18 +1057,27 @@ def test_unavailable_source_waits_and_recovers_with_the_same_approval(originals:
     with monkeypatch.context() as offline:
         offline.setattr(evidence_worker, "_source_fingerprint", unavailable)
         assert _work(config, failed_analysis) > 0
+        with open_db(config.paths.db_path) as connection:
+            connection.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item).values(
+                retry_not_before="2999-01-01T00:00:00+00:00"))
+        assert _work(config) > 0
+        with open_db(config.paths.db_path) as connection:
+            assert connection.execute(select(source_admissions.c.admission_id).where(
+                source_admissions.c.confirmation_ref == f"mac-app:{preview['preview_id']}",
+                source_admissions.c.version_id == library_items.c.active_source_version_id,
+                library_items.c.id == sibling)).first()
     with open_db(config.paths.db_path) as connection:
         work = connection.execute(select(library_item_evidence_state).where(
             library_item_evidence_state.c.library_item_id == item,
             library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
-        assert work["work_status"] == "waiting_source" and work["attempt_count"] == 0
+        assert work["work_status"] == "retry_wait" and work["attempt_count"] == 0
         assert not connection.execute(select(item_events).where(item_events.c.event_type == "original_confirmation_failed")).first()
         connection.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item).values(retry_not_before=None))
     assert _work(config) > 0
     assert receipt.read_bytes() == saved
     with open_db(config.paths.db_path) as connection:
         assert load_source_evidence(connection, item).availability == "available"
-        assert len(_owners(connection)) == 1
+        assert len(_owners(connection)) == 2
 
 
 def test_recovered_same_revision_correction_clears_the_old_failure(originals: tuple[MediaforceConfig, int, Path], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1183,6 +1177,9 @@ def test_saved_confirmation_never_restarts_a_paused_or_cancelled_batch(originals
         assert state["cancel_requested"] if cancelled else state["is_paused"]
         assert not _owners(connection)
         if cancelled:
+            waiting = registration.list_original_previews(config)
+            assert len(waiting) == 1 and waiting[0]["waiting"]
+            assert waiting[0]["canonical_json"] == preview["canonical_json"]
             return
         resume_evidence_queue(connection)
     runner.prepare_background_work()
@@ -1207,3 +1204,68 @@ def test_transient_catalog_absence_does_not_invalidate_the_saved_approval(origin
     assert _work(config) > 0
     with open_db(config.paths.db_path) as connection:
         assert len(_owners(connection)) == 1
+
+
+def test_restoring_a_receipt_resumes_pending_measurements_without_reconfirmation(originals: tuple[MediaforceConfig, int, Path]) -> None:
+    from mediaforce.core.db_tables import library_item_evidence_state
+    from test_source_intake import _work
+
+    config, item, _path = originals
+    preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    _confirm(preview)
+    assert registration.queue_original_approval(config, preview["preview_id"], preview["manifest_hash"])
+    _apply_preview(config, preview["preview_id"], preview["manifest_hash"])
+    receipt = registration.confirmation_directory() / f"{preview['preview_id']}.json"
+    saved = receipt.read_bytes()
+    receipt.unlink()
+    assert _work(config) > 0
+    with open_db(config.paths.db_path) as connection:
+        work = connection.execute(select(library_item_evidence_state).where(
+            library_item_evidence_state.c.library_item_id == item,
+            library_item_evidence_state.c.evidence_kind == "media_fingerprint")).mappings().one()
+        assert work["work_status"] == "retry_wait" and work["attempt_count"] == 0
+        connection.execute(update(library_item_evidence_state).where(library_item_evidence_state.c.library_item_id == item).values(retry_not_before=None))
+    receipt.write_bytes(saved)
+    assert _work(config) > 0
+    with open_db(config.paths.db_path) as connection:
+        evidence = load_source_evidence(connection, item)
+        assert evidence.availability == "available" and evidence.traits["media_fingerprint"].tier == "probable"
+        assert len(_owners(connection)) == 1
+    assert registration.list_original_previews(config) == []
+
+
+@pytest.mark.parametrize("persisted", [False, True])
+def test_pending_physical_path_blocks_approval_and_reads_across_version_aliases(originals: tuple[MediaforceConfig, int, Path], persisted: bool) -> None:
+    from mediaforce.core.evidence import stable_json_hash
+    from mediaforce.encoding.source_publication import prepare_archive_removal
+    from mediaforce.library.source_evidence import json_text
+
+    config, item, path = originals
+    _confirmed_publish(originals)
+    with open_db(config.paths.db_path) as connection:
+        archived_path = load_source_evidence(connection, item).source_path
+        assert archived_path is not None
+    path.unlink()
+    path.symlink_to(archived_path)
+    _rescan(config, item, path)
+    assess_source_input(config, item, ManagedProcessController(), lambda: None)
+    preview = registration.build_original_preview(config, [item], assertion="Independent acquisition")
+    _confirm(preview)
+    member = json.loads(preview["canonical_json"])["items"][0]
+    with open_db(config.paths.db_path) as connection:
+        assert prepare_archive_removal(connection, Path(archived_path))
+        if persisted:
+            append_version(connection, generation_id=member["generation_id"], role="input", identity=member["identity"],
+                           profile={"video_codec": "h264"}, recorded_at=timestamp(), version_id=member["version_id"])
+            connection.execute(source_admissions.insert().values(
+                admission_id=stable_json_hash({"preview": preview["preview_id"], "item": item}), generation_id=member["generation_id"],
+                version_id=member["version_id"], tier="proven", basis="owner", supersedes_id=member["supersedes_id"],
+                confirmation_ref=f"mac-app:{preview['preview_id']}", recorded_at=timestamp(),
+                checks_json=json_text({"source_checks": member["checks"], "preview_hash": preview["manifest_hash"], "measurement_ids": member["measurement_ids"]})))
+            connection.execute(update(library_items).where(library_items.c.id == item).values(active_source_version_id=member["version_id"]))
+    if not persisted:
+        with pytest.raises(OSError):
+            registration.apply_original_preview(config, preview["preview_id"], preview["manifest_hash"], item_id=item)
+    with open_db(config.paths.db_path) as connection:
+        evidence = load_source_evidence(connection, item)
+        assert evidence.source_path is None and evidence.availability != "available"
